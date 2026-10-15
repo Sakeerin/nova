@@ -184,8 +184,13 @@ pub fn build_program_wasm(program: Program, out_dir: &Path) -> Result<Outcome<Pa
         Outcome::Ok(mir) => mir,
         Outcome::Failed { errors } => return Ok(Outcome::Failed { errors }),
     };
-    let output = nova_codegen_wasm::compile_module(&mir)
-        .context("internal WASM codegen error (this is a compiler bug)")?;
+    let output = nova_codegen_wasm::compile_module(&mir).map_err(|e| {
+        if e.is::<nova_codegen_wasm::Limit>() {
+            e
+        } else {
+            e.context("internal WASM codegen error (this is a compiler bug)")
+        }
+    })?;
     let app_js = nova_codegen_wasm::shim(&output.imports)
         .context("internal WASM codegen error (this is a compiler bug)")?;
     std::fs::create_dir_all(out_dir)
@@ -194,6 +199,7 @@ pub fn build_program_wasm(program: Program, out_dir: &Path) -> Result<Outcome<Pa
         ("index.html", nova_codegen_wasm::INDEX_HTML.as_bytes()),
         ("app.js", app_js.as_bytes()),
         ("app.wasm", output.wasm.as_slice()),
+        ("package.json", nova_codegen_wasm::PACKAGE_JSON.as_bytes()),
     ] {
         let path = out_dir.join(name);
         std::fs::write(&path, bytes)

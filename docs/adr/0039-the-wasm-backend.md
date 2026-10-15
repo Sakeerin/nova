@@ -80,18 +80,26 @@ program:
 6. **Function values** are indices into one `funcref` table, called with
    `call_indirect`.
 7. **`nova build --target wasm`,** and its alias `nova bundle`, write
-   `dist/`: `index.html`, `app.js` and `app.wasm`.
-8. **Under Node,** a panic exits with 134 and a trap with 132, the native
-   abort's and trap's statuses. Tests run WASM builds under Node, which CI
-   installs on all three systems; with `NOVA_REQUIRE_NODE=1` a test fails
-   without it.
+   `dist/`: `index.html`, `app.js` and `app.wasm`, and a `package.json`
+   of `{"type":"module"}`. Without it, a `package.json` above `dist/` that
+   says `commonjs` makes Node refuse `app.js`. `app.js` runs itself when
+   Node's main module is it, through symbolic links too.
+8. **Under Node,** a panic exits with 134, the native abort's status, and
+   a trap with 132, the status of a native trap such as a division by
+   zero. (Natively, `i64::MIN / -1` can end otherwise: by `SIGFPE` on
+   x86-64.) Tests run WASM builds under Node, which CI installs on all
+   three systems; with `NOVA_REQUIRE_NODE=1` a test fails without it.
+9. **WebAssembly's limits are the program's to meet:** a function needing
+   more than 50,000 locals, one per value temporary, is refused when it is
+   built, naming the function. Structuring recurses once per nested join
+   or loop, so the backend compiles on a thread with a 256 MB stack.
 
 ## Consequences
 
 - **`nova-codegen-wasm` is published** from the next release: 20 crates.
 - **Two copies of each runtime function exist,** Rust's and Nova's. The
-  differential programs, and the golden suite run both ways, are what keep
-  them equal.
+  differential programs, and the gate's programs run both ways, are what
+  keep them equal.
 - **A WASM build's recursion is bounded by V8's stack,** about 1 MB under
   Node's default. A program that recurses that deep stops with `nova:
   stack overflow`.

@@ -6,7 +6,8 @@
 const isNode =
   typeof process === "object" && process.versions != null && process.versions.node != null;
 let wasm;
-const decoder = new TextDecoder();
+// `ignoreBOM`: a leading U+FEFF is part of a Nova string, as natively.
+const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
 const encoder = new TextEncoder();
 
 // A Nova string's text: its header holds the length at 0 and the address of

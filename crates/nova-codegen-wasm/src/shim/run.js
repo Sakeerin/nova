@@ -37,8 +37,10 @@ export default async function init(options = {}) {
   }
 }
 
+// Node resolves symbolic links in this module's URL, so the path it was run
+// by is resolved the same way before the two are compared.
 if (isNode && process.argv[1]) {
   const { pathToFileURL } = await import("node:url");
-  const { resolve } = await import("node:path");
-  if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) await init();
+  const { realpathSync } = await import("node:fs");
+  if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) await init();
 }

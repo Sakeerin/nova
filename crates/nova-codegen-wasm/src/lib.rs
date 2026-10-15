@@ -12,7 +12,7 @@
 mod shim;
 mod structure;
 
-pub use shim::{shim, INDEX_HTML};
+pub use shim::{shim, INDEX_HTML, PACKAGE_JSON};
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -37,6 +37,27 @@ pub const MEMORY_MAX_PAGES: u64 = 16384;
 /// Where the data segment starts (spec §4.1): `0..8` is never an object,
 /// and `8..64` holds `std/rt`'s state words.
 pub const DATA_BASE: u32 = 64;
+
+/// The most locals a function may have, its parameters included: V8 and
+/// `wasmparser` refuse a function with more.
+pub const MAX_LOCALS: usize = 50_000;
+
+/// A limit of WebAssembly's that the program exceeds: the program's to
+/// change, not a fault of the compiler.
+#[derive(Debug)]
+pub struct Limit(String);
+
+impl std::fmt::Display for Limit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Limit {}
+
+/// The compiling thread's stack: structuring recurses once per nested join
+/// or loop, so a long function needs more than a default thread's.
+const STACK: usize = 256 << 20;
 
 /// What [`compile_module`] makes.
 #[derive(Debug)]
@@ -154,8 +175,21 @@ fn literal_data(mir: &Module) -> (Vec<u8>, HashMap<String, u32>) {
     (data, at)
 }
 
-/// Lower `mir` to a WASM module. `main` is exported, with the memory.
+/// Lower `mir` to a WASM module. `main` is exported, with the memory. A
+/// function over a limit of WebAssembly's is a [`Limit`] error.
 pub fn compile_module(mir: &Module) -> Result<Output> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("nova-codegen-wasm".to_string())
+            .stack_size(STACK)
+            .spawn_scoped(scope, || compile(mir))
+            .map_err(|e| anyhow!("starting the compiling thread: {e}"))?
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+fn compile(mir: &Module) -> Result<Output> {
     let mut types = Types::default();
     let mut imports = ImportSection::new();
     let mut layout = Layout {
@@ -261,9 +295,13 @@ pub fn compile_module(mir: &Module) -> Result<Output> {
     for f in &mir.functions {
         let ty = types.of(vals(abi_params(f)), val(f.ret).into_iter().collect());
         functions.function(ty);
-        let body = FnLower::new(f, &layout)
-            .lower()
-            .map_err(|e| anyhow!("compiling `{}`: {e}", f.name))?;
+        let body = FnLower::new(f, &layout).lower().map_err(|e| {
+            if e.is::<Limit>() {
+                e
+            } else {
+                anyhow!("compiling `{}`: {e}", f.name)
+            }
+        })?;
         code.function(&body);
     }
 
@@ -397,6 +435,15 @@ impl<'a> FnLower<'a> {
     fn lower(mut self) -> Result<Function> {
         if self.f.blocks.is_empty() {
             bail!("a function with no blocks");
+        }
+        // Each value temp's local, and the two scratch `i32`s.
+        let count = self.locals.iter().flatten().count() + 2;
+        if count > MAX_LOCALS {
+            return Err(Limit(format!(
+                "function `{}` needs {count} locals, but WebAssembly allows {MAX_LOCALS}",
+                self.f.name
+            ))
+            .into());
         }
         if self.cfg.reducible {
             self.tree(0)?;
@@ -1078,6 +1125,29 @@ fn bin(op: BinOp, class: OperandClass) -> Result<I<'static>> {
     })
 }
 
+/// `node`, for the tests that run what they build, or `None` when it is
+/// not on `PATH`, in which case the test passes without running; under
+/// `NOVA_REQUIRE_NODE=1`, as in CI, a missing `node` fails it instead (spec
+/// §9.1).
+#[cfg(test)]
+pub(crate) fn test_node() -> Option<std::process::Command> {
+    let found = std::process::Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if found {
+        return Some(std::process::Command::new("node"));
+    }
+    assert_ne!(
+        std::env::var("NOVA_REQUIRE_NODE").as_deref(),
+        Ok("1"),
+        "NOVA_REQUIRE_NODE=1, but `node` is not on PATH"
+    );
+    eprintln!("skipped: `node` is not on PATH");
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,6 +1450,146 @@ mod tests {
                 _ => false,
             });
         assert!(has_br_table, "the fallback dispatches through a br_table");
+    }
+
+    /// The dispatch loop computes, not only validates: an irreducible graph
+    /// that counts to five runs under Node and stores 5 (spec §4.2).
+    #[test]
+    fn an_irreducible_graph_runs_under_node() {
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
+        let add = |dst, op, lhs, rhs| Stmt::Bin {
+            dst: Temp(dst),
+            op,
+            class: OperandClass::Int,
+            lhs: Temp(lhs),
+            rhs: Temp(rhs),
+        };
+        let blocks = vec![
+            block(
+                vec![
+                    Stmt::ConstInt(Temp(0), 0),
+                    Stmt::ConstInt(Temp(1), 1),
+                    Stmt::ConstInt(Temp(2), 5),
+                    Stmt::ConstInt(Temp(3), i64::from(DATA_BASE)),
+                    Stmt::ConstBool(Temp(4), true),
+                ],
+                Terminator::Branch {
+                    cond: Temp(4),
+                    then_: BlockId(1),
+                    else_: BlockId(2),
+                },
+            ),
+            block(vec![add(0, BinOp::Add, 0, 1)], Terminator::Goto(BlockId(2))),
+            block(
+                vec![add(5, BinOp::Lt, 0, 2)],
+                Terminator::Branch {
+                    cond: Temp(5),
+                    then_: BlockId(1),
+                    else_: BlockId(3),
+                },
+            ),
+            block(
+                vec![Stmt::Mem {
+                    dst: None,
+                    op: MemOp::Store64,
+                    args: vec![Temp(3), Temp(0)],
+                }],
+                ret_unit(),
+            ),
+        ];
+        let temps = vec![
+            MirTy::I64,
+            MirTy::I64,
+            MirTy::I64,
+            MirTy::I64,
+            MirTy::I8,
+            MirTy::I8,
+        ];
+        let f = func("main", 0, temps, MirTy::Unit, blocks);
+        assert!(!structure::analyze(&f.blocks).reducible);
+        let out = valid(&module(vec![f]));
+        let dir = std::env::temp_dir().join("nova-codegen-wasm-dispatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::write(dir.join("app.wasm"), &out.wasm).expect("the module");
+        let script = format!(
+            "const fs = require(\"fs\");\n\
+             WebAssembly.instantiate(fs.readFileSync(process.argv[2]), {{ env: {{}} }}).then(({{ instance }}) => {{\n  \
+             instance.exports.main();\n  \
+             console.log(new DataView(instance.exports.memory.buffer).getBigInt64({DATA_BASE}, true).toString());\n\
+             }});\n"
+        );
+        std::fs::write(dir.join("run.cjs"), script).expect("the script");
+        let out = node
+            .arg(dir.join("run.cjs"))
+            .arg(dir.join("app.wasm"))
+            .output()
+            .expect("node runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "5\n");
+    }
+
+    /// More locals than WebAssembly allows is a [`Limit`], naming the
+    /// function; at the limit, the module is valid.
+    #[test]
+    fn a_function_over_the_local_limit_is_refused() {
+        let over = func(
+            "main",
+            0,
+            vec![MirTy::I64; MAX_LOCALS - 1],
+            MirTy::Unit,
+            vec![block(vec![], ret_unit())],
+        );
+        let e = compile_module(&module(vec![over])).expect_err("refused");
+        assert!(e.is::<Limit>(), "{e:#}");
+        assert_eq!(
+            e.to_string(),
+            "function `main` needs 50001 locals, but WebAssembly allows 50000"
+        );
+        let at = func(
+            "main",
+            0,
+            vec![MirTy::I64; MAX_LOCALS - 2],
+            MirTy::Unit,
+            vec![block(vec![], ret_unit())],
+        );
+        valid(&module(vec![at]));
+    }
+
+    /// A long run of joins: the structuring recurses once per join, which
+    /// must not overflow the stack of the thread that compiles.
+    #[test]
+    fn a_long_chain_of_joins_compiles() {
+        const JOINS: u32 = 20_000;
+        let mut blocks = Vec::new();
+        for i in 0..JOINS {
+            let b = 3 * i;
+            blocks.push(block(
+                vec![],
+                Terminator::Branch {
+                    cond: Temp(0),
+                    then_: BlockId(b + 1),
+                    else_: BlockId(b + 2),
+                },
+            ));
+            blocks.push(block(vec![], Terminator::Goto(BlockId(b + 3))));
+            blocks.push(block(vec![], Terminator::Goto(BlockId(b + 3))));
+        }
+        blocks.push(block(vec![], ret_unit()));
+        blocks[0].stmts.push(Stmt::ConstBool(Temp(0), true));
+        valid(&module(vec![func(
+            "main",
+            0,
+            vec![MirTy::I8],
+            MirTy::Unit,
+            blocks,
+        )]));
     }
 
     /// Every memory builtin, in line.
