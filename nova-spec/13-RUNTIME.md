@@ -626,9 +626,9 @@ conservative, non-moving mark-sweep on `gc/pages.rs`'s page design, run only
 at the end of a turn, when the WASM stack holds nothing: its roots are the
 executor's tables and each unreleased task's state. The executor is a port of
 `task.rs`, with its order and its deadlock report; `async fn main` returns to
-JS, and each timer calls the exported `nova_turn`. `block_on` works, waiting
-for a deadline by reading the clock, so a page that sleeps in it does not
-respond
+JS, and each timer calls the exported `nova_turn`, which starts no poll after
+about 10 ms. `block_on` works, waiting for a deadline by reading the clock, so
+a page that sleeps in it does not respond
 (`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
 §4 to §6; ADR 0040).
 

@@ -69,6 +69,15 @@ allocator that only grew, and no async: `async fn main` was E0091.
    due, runs the queue, collects if due, and returns the milliseconds to
    the next deadline, or -1 when no task waits; JS sets a timer for it. A
    module exports `nova_turn` only when it has an `async fn main`.
+   - **A turn polls for about 10 ms at most,** which the spec's §5 did not
+     have: it said a turn runs the queue until it is empty. A task that
+     waits for a `Mutex` or a channel yields in a loop, so while the task
+     it waits for sleeps, the queue never empties, and one turn would hold
+     the page, without a collection, until the sleeper woke. Past its
+     budget a turn returns 0 with tasks still queued, the collector runs
+     at its end, and JS calls the next turn on a 0 ms timer. The queue keeps its
+     order, so tasks run in the same order. The review of 2026-10-15 found
+     the hold; the user chose the budget.
 5. **`block_on` works on WASM,** unlike the phase plan's decision 4, by
    the user's decision: it runs the executor within the call, and waits for
    a deadline by reading the clock in a loop. A page that sleeps inside
@@ -82,8 +91,11 @@ allocator that only grew, and no async: `async fn main` was E0091.
 ## Consequences
 
 - **Two executors and two collectors exist,** Rust's and Nova's. The
-  gate's 94 programs, run both ways and under stress, keep their order and
-  their results equal.
+  gate's 94 programs, run both ways, print the same. 32 of them run under
+  `NOVA_GC_STRESS` too, but only the 19 with an `async fn main` collect:
+  a program without one has no turn after `main`. Six of the seven
+  collector programs in `tests/wasm/` run under it as well; the seventh
+  tests the threshold.
 - **WASM's std gains task, sync, time and log.** A name from a module it
   lacks is E0092, naming the module; E0091 is unreachable through WASM's
   std.

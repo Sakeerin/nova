@@ -9,11 +9,13 @@
 //!
 //! Tasks take turns on one thread. A task runs until it awaits something that
 //! is not ready, and then the next ready task runs, in the order they became
-//! ready. No task runs except while `block_on` is running, and `block_on`
-//! returns only once every task has finished. An `async fn main` runs under
-//! `block_on`; built for WASM, it runs on the event loop instead, and returns
-//! to JS while its tasks wait on timers. A task that panics ends the whole
-//! program.
+//! ready. Natively, no task runs except while `block_on` is running,
+//! `block_on` returns only once every task has finished, and an `async fn
+//! main` runs under `block_on`. Built for WASM, an `async fn main` runs on
+//! the event loop instead: its tasks run in turns, each of which returns to
+//! JS while they wait on timers, or after about 10 ms of work, and the
+//! program ends once every task has finished. A task that panics ends the
+//! whole program.
 //!
 //! Two tasks started with `spawn` and joined, run from code that is not
 //! `async` by `block_on`:
@@ -152,17 +154,18 @@ impl<T> JoinHandle<T> {
 //
 // Nothing runs yet. The task is queued, and the queue is drained by `block_on`
 // (or by a `yield_now` inside a task the current `block_on` is already
-// draining) — so a `spawn` with no `block_on` anywhere above it never runs at
-// all.
+// draining), or, built for WASM, by the turns of an `async fn main` — so a
+// `spawn` with neither anywhere above it never runs at all.
 //
 // `task_spawn`'s returned id is discarded: the handle's identity is `fut`
 // itself now, so nothing downstream ever needs the id back.
 /// Starts `fut` as a new task, and returns a `JoinHandle` for it.
 ///
 /// It is not `async`, and the new task does not run yet: it joins the back
-/// of the queue of ready tasks, and runs only while `block_on` is running, so
-/// a task spawned outside `block_on`, with no `block_on` called after, never
-/// runs at all. Each future is meant to run once: do not also await it or
+/// of the queue of ready tasks, and runs only while `block_on` is running,
+/// or, built for WASM, while a turn of an `async fn main` runs, so a task
+/// spawned while neither runs, with no `block_on` called after, never runs
+/// at all. Each future is meant to run once: do not also await it or
 /// pass it to `block_on`. Panics if `fut` is already a task that has not
 /// finished.
 pub fn spawn<T>(fut: Future<T>) -> JoinHandle<T> {

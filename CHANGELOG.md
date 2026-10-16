@@ -20,12 +20,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   world is about 4 KB gzipped. Under Node a panic exits with status 134, as
   natively, and a trap such as a division by zero with 132 (ADR 0039).
 - **Async on WASM:** an `async fn main` returns to JS while its tasks wait
-  on timers, and each timer runs the next turn. `block_on` works too, but
-  holds the page while it waits (ADR 0040).
+  on timers, and each timer runs the next turn; a turn also returns after
+  about 10 ms of work. `block_on` works too, but holds the page while it
+  waits (ADR 0040).
 - **A collector on WASM:** mark-sweep between turns, on the native
   collector's page design. In a program with an `async fn main`,
-  `NOVA_GC_STRESS` and `NOVA_GC_DEBUG` work under Node as natively
-  (ADR 0040).
+  `NOVA_GC_DEBUG` writes the native collector's line under Node, and
+  `NOVA_GC_STRESS` collects at the end of every turn, where natively it
+  collects at every allocation (ADR 0040).
 - **`nova check --target wasm`** checks a program against WASM's std and
   rules: an `extern` block is E0090, and a name from a std module WASM
   lacks is E0092, naming the module.

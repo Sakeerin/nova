@@ -1095,6 +1095,24 @@ fn drain(e: Int) {
     }
 }
 
+// How long a turn polls, in nanoseconds: about 10 ms.
+const TURN_BUDGET: Int = 10000000
+
+// `drain` for a turn, which stops once it has polled for `TURN_BUDGET`
+// with tasks still queued. A task that waits for a lock or a channel yields
+// in a loop, so while the task it waits for sleeps, the queue never empties;
+// the turn returns to JS instead, which runs, and the collector with it at
+// the turn's end. The next turn goes on in the queue's order.
+fn drain_turn(e: Int) {
+    let start = time_now_nanos()
+    let mut now = start
+    while mem_load64(e + 40) > 0 && now - start < TURN_BUDGET {
+        poll_task(e, queue_pop(e))
+        now = time_now_nanos()
+        if mem_load64(e + 64) > 0 { wake(e, 0 - 1, now) }
+    }
+}
+
 // A task for the future at `fut`, queued at the back, not run
 // (`spawn_internal`).
 fn spawn_task(e: Int, fut: Int, keep: Bool) -> Int {
@@ -1282,27 +1300,28 @@ async fn rt_task_timeout_future(nanos: Int, inner: Int) -> Int {
 
 // `async fn main` on the event loop (spec 4.1 §4.4, §5). Its shim calls
 // this with the root's future instead of `block_on`: the root is spawned as
-// `block_on` would, and run until nothing can run without a timer. Then JS
-// calls `nova_turn`, on a timer, until it returns -1. The flag stays set,
-// so a `block_on` inside aborts, as it does natively, where `async fn main`
-// is one `block_on`.
+// `block_on` would, and run as a turn runs. Then JS calls `nova_turn`, on a
+// timer, until it returns -1. The flag stays set, so a `block_on` inside
+// aborts, as it does natively, where `async fn main` is one `block_on`.
 fn rt_task_main(fut: Int) {
     let e = exec()
     mem_store64(e + 112, 1)
     spawn_task(e, fut, true)
-    drain(e)
+    drain_turn(e)
     gc_turn_end()
 }
 
-// `nova_turn`: wake what is due, run what is queued, then the time until
+// `nova_turn`: wake what is due, run what is queued for up to
+// `TURN_BUDGET`, then 0 if tasks are still queued, or else the time until
 // the earliest deadline in milliseconds, rounded up, or -1 when no task is
 // parked. A timer may fire early; the turn then only says what is left.
 // Parked tasks without a deadline can never wake: the deadlock report.
 fn rt_turn() -> Int {
     let e = exec()
     wake(e, 0 - 1, time_now_nanos())
-    drain(e)
+    drain_turn(e)
     gc_turn_end()
+    if mem_load64(e + 40) > 0 { return 0 }
     if mem_load64(e + 64) == 0 { return 0 - 1 }
     let at = earliest(e)
     if at < 0 { report_deadlock(e) }

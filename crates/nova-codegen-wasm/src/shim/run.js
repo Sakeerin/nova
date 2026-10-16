@@ -13,8 +13,9 @@ async function load(options) {
 // The event loop, for a module with an `async fn main` (spec
 // docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
 // §5): `nova_turn` runs what is due and returns the milliseconds until the
-// next deadline, or -1 once no task waits, and a timer calls it again. A
-// timer that fires early makes a turn that only says what is left.
+// next deadline, 0 when it stopped at its time budget with tasks queued
+// (ADR 0040), or -1 once no task waits, and a timer calls it again. A timer
+// that fires early makes a turn that only says what is left.
 function turns() {
   return new Promise((resolve, reject) => {
     const turn = () => {
