@@ -1158,6 +1158,35 @@ fn block_on_in_a_task_a_click_spawned_panics() {
     }
 }
 
+/// Timers: a timeout, an interval cleared after three ticks, and a cleared
+/// timeout that never runs, in order; clearing a timer again, or one that
+/// has run, releases no entry another timer took; `init` resolves while
+/// they are still pending. Each entry of std/rt's table leaves it when its timeout fires
+/// or its timer is cleared, so none is left at the end (spec 4.2 §6.2,
+/// §7.3).
+#[test]
+fn timers_run_in_order_until_cleared() {
+    dom_program("timers", &[]);
+    let err = dom_program("timers", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert_eq!(calls_after_each(&err).last(), Some(&0), "{err}");
+}
+
+/// The location and history change without a load, and the window hears
+/// `hashchange` and `popstate` after the calls that cause them (spec 4.2
+/// §6.2).
+#[test]
+fn the_location_and_history_change_in_place() {
+    dom_program("history", &[]);
+    let err = dom_program("history", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert!(!live_after_each(&err).is_empty(), "{err}");
+}
+
 /// The entries of std/rt's table of closures JS may call in use after each
 /// collection, from `NOVA_GC_DEBUG`'s `nova-dom:` lines.
 fn calls_after_each(stderr: &str) -> Vec<u64> {

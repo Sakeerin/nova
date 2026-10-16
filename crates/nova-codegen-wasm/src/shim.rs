@@ -134,6 +134,18 @@ fn js_function(name: &str) -> Option<&'static str> {
         "dom_prevent_default" => "(ev) => { object(ev).preventDefault(); }",
         "dom_stop_propagation" => "(ev) => { object(ev).stopPropagation(); }",
         "dom_click" => "(el) => { object(el).click(); }",
+        "dom_set_timeout" => "(ms, id) => handle(setTimeout(() => call(id, 0n), Number(ms)))",
+        "dom_set_interval" => "(ms, id) => handle(setInterval(() => call(id, 0n), Number(ms)))",
+        "dom_clear_timeout" => "(t) => { clearTimeout(object(t)); }",
+        "dom_clear_interval" => "(t) => { clearInterval(object(t)); }",
+        "dom_location_href" => "() => string(location.href)",
+        "dom_location_pathname" => "() => string(location.pathname)",
+        "dom_location_search" => "() => string(location.search)",
+        "dom_location_hash" => "() => string(location.hash)",
+        "dom_set_location_hash" => "(h) => { location.hash = text(h); }",
+        "dom_history_push" => "(url) => { history.pushState(null, \"\", text(url)); }",
+        "dom_history_replace" => "(url) => { history.replaceState(null, \"\", text(url)); }",
+        "dom_history_back" => "() => { history.back(); }",
         _ => return None,
     })
 }
