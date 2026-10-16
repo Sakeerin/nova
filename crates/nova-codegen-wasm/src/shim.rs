@@ -17,6 +17,8 @@ const CORE: &str = include_str!("shim/core.js");
 const RUN: &str = include_str!("shim/run.js");
 const FLOAT: &str = include_str!("shim/float.js");
 const DOM: &str = include_str!("shim/dom.js");
+const DOM_CALL: &str = include_str!("shim/dom_call.js");
+const DOM_FETCH: &str = include_str!("shim/dom_fetch.js");
 
 /// `int_hash_seed`'s value: drawn once, then the same for the rest of the
 /// run, as the native runtime's is.
@@ -146,6 +148,13 @@ fn js_function(name: &str) -> Option<&'static str> {
         "dom_history_push" => "(url) => { history.pushState(null, \"\", text(url)); }",
         "dom_history_replace" => "(url) => { history.replaceState(null, \"\", text(url)); }",
         "dom_history_back" => "() => { history.back(); }",
+        "dom_fetch" => "(url, method, headers, body) => fetchToken(text(url), text(method), text(headers), text(body))",
+        "host_done" => "(t) => (object(t).done ? 1 : 0)",
+        "dom_fetch_failed" => "(t) => (object(t).error !== undefined ? 1 : 0)",
+        "dom_fetch_error" => "(t) => string(object(t).error)",
+        "dom_fetch_status" => "(t) => BigInt(object(t).status)",
+        "dom_fetch_ok" => "(t) => (object(t).ok ? 1 : 0)",
+        "dom_fetch_body" => "(t) => string(object(t).body)",
         _ => return None,
     })
 }
@@ -175,6 +184,17 @@ pub fn shim<S: AsRef<str>>(imports: &[S]) -> Result<String> {
     }
     if imports.iter().any(|i| js_function(i).is_some()) {
         js.push_str(DOM);
+    }
+    if uses(&[
+        "dom_listen",
+        "dom_window_listen",
+        "dom_set_timeout",
+        "dom_set_interval",
+    ]) {
+        js.push_str(DOM_CALL);
+    }
+    if uses(&["dom_fetch"]) {
+        js.push_str(DOM_FETCH);
     }
     js.push_str("\n// The host functions the module imports.\nconst env = {\n");
     for name in &imports {

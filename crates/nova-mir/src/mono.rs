@@ -44,19 +44,35 @@ const RT_TURN_EXPORTS: [(&str, &str); 2] = [
     ("nova_gc_switches", "rt_gc_switches"),
 ];
 
-/// What a WASM build exports once it registers a closure JS may call, by
-/// export name: the call itself, and the turn and the switches, if an
+/// What a WASM build exports once JS can call in, by export name, keyed by
+/// the `std/rt` function whose presence means it can: registering a
+/// closure JS may call brings `nova_call`, and waiting on a token
+/// `nova_wake`; either brings the turn and the switches, if an
 /// `async fn main` has not already rooted them (spec
 /// `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
-/// §5.2).
-const RT_CALL_EXPORTS: [(&str, &str); 3] = [
-    ("nova_call", "rt_call"),
-    ("nova_turn", "rt_turn"),
-    ("nova_gc_switches", "rt_gc_switches"),
+/// §5.2, §7.1).
+const RT_JS_ENTRIES: [(&str, [(&str, &str); 3]); 2] = [
+    (
+        "rt_closure_register",
+        [
+            ("nova_call", "rt_call"),
+            ("nova_turn", "rt_turn"),
+            ("nova_gc_switches", "rt_gc_switches"),
+        ],
+    ),
+    (
+        "rt_task_host_future",
+        [
+            ("nova_wake", "rt_wake"),
+            ("nova_turn", "rt_turn"),
+            ("nova_gc_switches", "rt_gc_switches"),
+        ],
+    ),
 ];
 
-/// The `std/rt` function whose presence means a closure JS may call.
-const RT_REGISTER: &str = "rt_closure_register";
+/// One of [`RT_JS_ENTRIES`]'s roots: its export, its function, and that
+/// function's mangled name.
+type JsRoot = (&'static str, DefId, String);
 
 /// The other `std/rt` functions every WASM build exports, by export name:
 /// roots, since only the shim calls them (spec 4.1 §6.3).
@@ -126,20 +142,24 @@ pub fn lower_module_with(
             }
         }
     }
-    // The roots a closure JS may call needs, added once `rt_closure_register`
-    // is lowered (spec 4.2 §5.2).
-    let register = options
-        .runtime
-        .and_then(|impls| impls.functions.get(RT_REGISTER).copied());
-    let call_roots: Vec<(&'static str, DefId, String)> = options
+    // The roots JS's calls in need, added once the function that means them
+    // is lowered (spec 4.2 §5.2, §7.1).
+    let js_entries: Vec<(DefId, Vec<JsRoot>)> = options
         .runtime
         .map(|impls| {
-            RT_CALL_EXPORTS
+            RT_JS_ENTRIES
                 .iter()
-                .filter_map(|&(export, rt)| {
-                    let def = *impls.functions.get(rt)?;
-                    let f = module.function(def)?;
-                    Some((export, def, mangle(def, &f.name, &[])))
+                .filter_map(|(trigger, exports)| {
+                    let trigger = *impls.functions.get(*trigger)?;
+                    let roots = exports
+                        .iter()
+                        .filter_map(|&(export, rt)| {
+                            let def = *impls.functions.get(rt)?;
+                            let f = module.function(def)?;
+                            Some((export, def, mangle(def, &f.name, &[])))
+                        })
+                        .collect();
+                    Some((trigger, roots))
                 })
                 .collect()
         })
@@ -150,8 +170,11 @@ pub fn lower_module_with(
     let mut async_entry: Option<String> = None;
 
     while let Some((def_id, type_args)) = worklist.pop() {
-        if Some(def_id) == register {
-            for (export, def, name) in &call_roots {
+        for (trigger, roots) in &js_entries {
+            if *trigger != def_id {
+                continue;
+            }
+            for (export, def, name) in roots {
                 if !mir.runtime_exports.iter().any(|(e, _)| e == export) {
                     worklist.push((*def, Vec::new()));
                     mir.runtime_exports.push((export, name.clone()));
