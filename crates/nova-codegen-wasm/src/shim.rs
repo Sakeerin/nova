@@ -116,6 +116,24 @@ fn js_function(name: &str) -> Option<&'static str> {
         "dom_is_same" => "(a, b) => (object(a) === object(b) ? 1 : 0)",
         "host_release" => "(id) => { release(id); }",
         "host_handles" => "() => BigInt(handles.length - 1 - freeHandles.length)",
+        "dom_listen" => {
+            "(t, kind, id) => { const f = listener(id); object(t).addEventListener(text(kind), f); return handle(f); }"
+        }
+        "dom_unlisten" => {
+            "(t, kind, f) => { object(t).removeEventListener(text(kind), object(f)); }"
+        }
+        "dom_window_listen" => {
+            "(kind, id) => { const f = listener(id); window.addEventListener(text(kind), f); return handle(f); }"
+        }
+        "dom_window_unlisten" => "(kind, f) => { window.removeEventListener(text(kind), object(f)); }",
+        "dom_event_kind" => "(ev) => string(object(ev).type)",
+        "dom_event_target" => {
+            "(ev) => { const t = object(ev).target; return t === window ? 0n : handle(t); }"
+        }
+        "dom_event_key" => "(ev) => string(object(ev).key ?? \"\")",
+        "dom_prevent_default" => "(ev) => { object(ev).preventDefault(); }",
+        "dom_stop_propagation" => "(ev) => { object(ev).stopPropagation(); }",
+        "dom_click" => "(el) => { object(el).click(); }",
         _ => return None,
     })
 }
@@ -241,7 +259,7 @@ mod tests {
             .next()
             .unwrap();
         let script = format!(
-            "{core}\nconst lines = [];\nwrite = (fd, s) => lines.push(s);\n\
+            "{core}\nlet ended = false;\nconst lines = [];\nwrite = (fd, s) => lines.push(s);\n\
              globalThis.document = {{ createElement: () => {{ const e = new Error(\"boom\"); e.name = \"NotSupportedError\"; throw e; }} }};\n\
              text = (s) => s;\n\
              const create = guard(\"dom_create_element\", (tag) => handle(document.createElement(text(tag))));\n\

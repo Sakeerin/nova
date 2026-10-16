@@ -940,6 +940,14 @@ builtins! {
     /// nothing: the deadlock report has written its own lines (spec 4.1
     /// §4.5). WASM-only.
     HostAbort,
+    /// `closure_word(f: fn(Int)) -> Int` — the address of the closure `f`,
+    /// for `std/rt`'s table of closures JS may call (spec
+    /// `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+    /// §5.1). WASM-only.
+    ClosureWord,
+    /// `closure_call(f: Int, arg: Int)` — call the `fn(Int)` closure at
+    /// address `f` with `arg` (spec 4.2 §5.1). WASM-only.
+    ClosureCall,
 }
 
 impl Builtin {
@@ -1049,6 +1057,8 @@ impl Builtin {
             Builtin::HeapBase => "heap_base",
             Builtin::FuturePoll => "future_poll",
             Builtin::HostAbort => "host_abort",
+            Builtin::ClosureWord => "closure_word",
+            Builtin::ClosureCall => "closure_call",
         }
     }
 
@@ -1163,10 +1173,11 @@ impl Builtin {
     /// Builtins seeded into an std module's scope only when the target is
     /// [`CompileTarget::Wasm`]: the memory access `std/rt` is written on (spec
     /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
-    /// §3.3, §5.1), and the executor's poll and abort (spec 4.1 §4.3, §4.5).
-    /// They are not in [`Builtin::STD_ONLY`], so a native build has none of
-    /// them, in std or anywhere else.
-    pub const WASM_ONLY: [Builtin; 11] = [
+    /// §3.3, §5.1), the executor's poll and abort (spec 4.1 §4.3, §4.5), and
+    /// the closures JS may call (spec 4.2 §5.1). They are not in
+    /// [`Builtin::STD_ONLY`], so a native build has none of them, in std or
+    /// anywhere else.
+    pub const WASM_ONLY: [Builtin; 13] = [
         Builtin::MemLoad8,
         Builtin::MemStore8,
         Builtin::MemLoad64,
@@ -1178,6 +1189,8 @@ impl Builtin {
         Builtin::HeapBase,
         Builtin::FuturePoll,
         Builtin::HostAbort,
+        Builtin::ClosureWord,
+        Builtin::ClosureCall,
     ];
 }
 

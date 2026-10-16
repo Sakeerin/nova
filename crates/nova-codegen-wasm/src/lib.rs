@@ -148,6 +148,11 @@ fn poll_type() -> (Vec<ValType>, Vec<ValType>) {
     indirect_type(&[MirTy::Ptr], MirTy::I64)
 }
 
+/// A `fn(Int)` closure's type on WASM: `(env, arg)` (spec 4.2 §5.1).
+fn closure_type() -> (Vec<ValType>, Vec<ValType>) {
+    indirect_type(&[MirTy::I64], MirTy::Unit)
+}
+
 /// A `call_indirect`'s type: the environment pointer, then `params`.
 fn indirect_type(params: &[MirTy], ret: MirTy) -> (Vec<ValType>, Vec<ValType>) {
     let mut abi = vec![ValType::I32];
@@ -225,13 +230,14 @@ fn compile(mir: &Module) -> Result<Output> {
     // The host functions the program calls, in first-use order; whether it
     // builds a yield future, polls one, or aborts.
     let mut host_order: Vec<RtFunc> = Vec::new();
-    let (mut yields, mut polls, mut aborts) = (false, false, false);
+    let (mut yields, mut polls, mut aborts, mut calls) = (false, false, false, false);
     for f in &mir.functions {
         for b in &f.blocks {
             for s in &b.stmts {
                 if let Stmt::Mem { op, .. } = s {
                     polls |= *op == MemOp::Poll;
                     aborts |= *op == MemOp::Abort;
+                    calls |= *op == MemOp::ClosureCall;
                 }
                 if let Stmt::CallRuntime { func, .. } = s {
                     match func.on_wasm() {
@@ -323,6 +329,11 @@ fn compile(mir: &Module) -> Result<Output> {
     }
     if polls || yields {
         let key = poll_type();
+        let ty = types.of(key.0.clone(), key.1.clone());
+        layout.indirect.insert(key, ty);
+    }
+    if calls {
+        let key = closure_type();
         let ty = types.of(key.0.clone(), key.1.clone());
         layout.indirect.insert(key, ty);
     }
@@ -1220,6 +1231,24 @@ impl<'a> FnLower<'a> {
                 self.out.push(I::Call(abort));
                 self.out.push(I::Unreachable);
             }
+            MemOp::ClosureWord => {
+                self.get(arg(0)?);
+                self.out.push(I::I64ExtendI32U);
+            }
+            MemOp::ClosureCall => {
+                // `code(env, arg)`, as `CallIndirect` calls a closure.
+                self.wrap(arg(0)?);
+                self.out.push(I::LocalSet(self.scratch));
+                self.out.push(I::LocalGet(self.scratch));
+                self.out.push(I::I32Load(mem(8, 2)));
+                self.get(arg(1)?);
+                self.out.push(I::LocalGet(self.scratch));
+                self.out.push(I::I32Load(mem(0, 2)));
+                self.out.push(I::CallIndirect {
+                    type_index: self.layout.indirect[&closure_type()],
+                    table_index: 0,
+                });
+            }
         }
         let produces = matches!(
             op,
@@ -1229,6 +1258,7 @@ impl<'a> FnLower<'a> {
                 | MemOp::Grow
                 | MemOp::HeapBase
                 | MemOp::Poll
+                | MemOp::ClosureWord
         );
         if produces {
             self.result(dst, MirTy::I64);

@@ -4277,7 +4277,9 @@ impl<'a> Checker<'a> {
             | Builtin::MemGrow
             | Builtin::HeapBase
             | Builtin::FuturePoll
-            | Builtin::HostAbort => "",
+            | Builtin::HostAbort
+            | Builtin::ClosureWord
+            | Builtin::ClosureCall => "",
         };
         let mut checked = Vec::with_capacity(args.len());
         for (arg, param) in args.iter().zip(&params) {
@@ -8147,6 +8149,14 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::MemGrow => (vec![Ty::Int], Ty::Int),
         Builtin::FuturePoll => (vec![Ty::Int], Ty::Int),
         Builtin::HostAbort => (vec![], Ty::Unit),
+        Builtin::ClosureWord => (
+            vec![Ty::Fn {
+                params: vec![Ty::Int],
+                ret: Box::new(Ty::Unit),
+            }],
+            Ty::Int,
+        ),
+        Builtin::ClosureCall => (vec![Ty::Int, Ty::Int], Ty::Unit),
     }
 }
 
@@ -16387,6 +16397,20 @@ mod tests {
                 Builtin::HostAbort => (
                     (vec![], Ty::Unit),
                     "`host_abort()` in `std/rt`'s deadlock report",
+                ),
+                Builtin::ClosureWord => (
+                    (
+                        vec![Ty::Fn {
+                            params: vec![Ty::Int],
+                            ret: Box::new(Ty::Unit),
+                        }],
+                        Ty::Int,
+                    ),
+                    "`closure_word(f)` in `std/dom`'s listeners and timers",
+                ),
+                Builtin::ClosureCall => (
+                    (vec![Ty::Int, Ty::Int], Ty::Unit),
+                    "`closure_call(f, arg)` in `std/rt`'s `rt_call`",
                 ),
             }
         }

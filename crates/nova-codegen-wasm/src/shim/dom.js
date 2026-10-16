@@ -38,11 +38,15 @@ function novaPanic(message) {
 
 // `f` as an `env` function named `name`: a JS exception becomes a Nova panic
 // that names the function and quotes the exception (§3.1). A panic, a trap
-// or a stack overflow from Nova code it called passes through as it is.
+// or a stack overflow from Nova code it called passes through as it is. If
+// the program ended while `f` ran, in a listener a browser called and kept
+// the panic of, the Nova code that called `f` unwinds too (§5.3).
 function guard(name, f) {
   return (...args) => {
     try {
-      return f(...args);
+      const result = f(...args);
+      if (ended) throw new NovaPanic();
+      return result;
     } catch (e) {
       if (
         e instanceof NovaPanic ||
@@ -55,5 +59,19 @@ function guard(name, f) {
       const message = e != null && e.message !== undefined ? e.message : String(e);
       novaPanic(`std/dom: ${name}: ${kind}: ${message}`);
     }
+  };
+}
+
+// A closure JS calls, entry `id` of std/rt's table (§5.2): only the
+// outermost call into Nova runs a turn.
+function call(id, arg) {
+  run(() => wasm.nova_call(id, arg, depth === 1 ? 1n : 0n));
+}
+
+// A JS listener that calls entry `id` with the event's handle; after the
+// end of the program, it makes no handle and calls nothing.
+function listener(id) {
+  return (event) => {
+    if (!ended) call(id, handle(event));
   };
 }

@@ -1,0 +1,13 @@
+click 1
+inner, once
+outer saw click at button
+click 2
+inner stopped it
+click 3
+outer saw click at button
+link: default prevented
+outer saw click at a
+link dispatch returned false
+key Enter
+window saw ping at none
+<body><div><button></button><a></a></div></body>

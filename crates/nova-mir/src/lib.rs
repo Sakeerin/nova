@@ -1198,6 +1198,11 @@ pub enum MemOp {
     Poll,
     /// `()`: the host's abort, which ends the program writing nothing.
     Abort,
+    /// `(closure) -> address`: a `fn(Int)` closure's address, as a word
+    /// (spec 4.2 §5.1).
+    ClosureWord,
+    /// `(address, arg)`: call the `fn(Int)` closure at `address` with `arg`.
+    ClosureCall,
 }
 
 /// Block terminators.

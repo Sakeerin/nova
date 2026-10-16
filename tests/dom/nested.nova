@@ -1,0 +1,40 @@
+// A call from JS inside a call from JS (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5.2): the outer handler holds a record only in its own frame, clicks
+// another element, whose handler makes garbage, then reads the record. The
+// inner call runs its handler only; the collector waits for the outer call
+// to end, so under NOVA_GC_STRESS it never frees the record, which the
+// garbage made after the inner click would otherwise overwrite.
+
+import dom
+
+record Held { name: String, parts: [Int] }
+
+fn churn(n: Int) -> Int {
+    let mut sum = 0
+    let mut i = 0
+    while i < n {
+        let parts = [i, i + 1, i + 2]
+        sum = sum + parts[2] - parts[0]
+        i = i + 1
+    }
+    sum
+}
+
+fn main() {
+    let page = body()
+    let outer = create_element("button")
+    let inner = create_element("button")
+    page.append_child(outer)
+    page.append_child(inner)
+    inner.add_event_listener("click", |e: Event| println("inner churned ${churn(2000)}"))
+    let _ = outer.add_event_listener(
+        "click",
+        |e: Event| {
+            let held = Held { name: "held ${churn(10)}", parts: [1, 2, 3] }
+            inner.click()
+            let _ = churn(2000)
+            println("outer still has ${held.name} ${held.parts[0] + held.parts[1] + held.parts[2]}")
+        },
+    )
+}

@@ -5,7 +5,12 @@
 //
 // It holds what a browser holds and no more: a listener it keeps is the
 // function it was given, so if std/rt's closure table were not a root, a
-// collection under stress would free the closure behind it.
+// collection under stress would free the closure behind it. And as a
+// browser does, it keeps an exception a listener throws, in `uncaught`,
+// and goes on: the dispatch that called the listener returns normally.
+
+// What listeners threw, as a browser reports them.
+const uncaught = [];
 
 class FakeEvent {
   constructor(type, init = {}) {
@@ -50,7 +55,16 @@ class Target {
     const list = this.listeners.get(event.type);
     if (!list) return;
     event.currentTarget = this;
-    for (const fn of [...list]) fn.call(this, event);
+    for (const fn of [...list]) {
+      // A listener removed earlier in this dispatch does not run, as in a
+      // browser.
+      if (!list.includes(fn)) continue;
+      try {
+        fn.call(this, event);
+      } catch (e) {
+        uncaught.push(e);
+      }
+    }
   }
   dispatchEvent(event) {
     event.target = this;
@@ -395,6 +409,7 @@ class FakeWindow extends Target {
     // `fetch`'s answers, by "METHOD path" or by path, and what it was asked.
     this.routes = {};
     this.requests = [];
+    this.uncaught = uncaught;
   }
   // A reply after a timer, never from the network: a route's
   // `{ status, body }`, or a `TypeError` for `{ error }` or no route.
