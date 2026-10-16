@@ -109,6 +109,9 @@ fn each_broken_rule_is_m0003() {
         ("name", "\"con\"", "reserves for a device"),
         ("name", "\"COM1\"", "reserves for a device"),
         ("name", "\"Lpt9\"", "reserves for a device"),
+        // Spec 4.2 §3.2: std's module names.
+        ("name", "\"dom\"", "is the name of a std module"),
+        ("name", "\"ui\"", "is the name of a std module"),
         // Review Focus 5: names that look like paths.
         ("name", "\"../escape\"", "must start with an ASCII letter"),
         ("name", "\"a/b\"", "contains '/'"),

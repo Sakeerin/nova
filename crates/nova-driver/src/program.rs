@@ -599,8 +599,32 @@ impl<'a> Loader<'a> {
     }
 
     /// What `import name`, at `at` in the module at `from`, names (spec
-    /// §4.3).
+    /// §4.3). A module or a dependency under a std module's name is E0093,
+    /// and a std module's name that names neither is left to the resolver
+    /// (spec 4.2 §3.2).
     fn find(&mut self, from: &Place, name: &str, at: Span, db: &FileDb) -> Found {
+        let found = self.find_place(from, name, at, db);
+        if !nova_resolver::RESERVED_MODULE_NAMES.contains(&name) {
+            return found;
+        }
+        let what = match &found {
+            Found::Module(_, path) => path.display().to_string(),
+            Found::Reported(_) => "this module or dependency".to_string(),
+            Found::Nothing => return found,
+        };
+        Found::Reported(
+            Diagnostic::error(
+                "E0093",
+                format!(
+                    "`{name}` is the name of a std module, so no module may take it: rename {what}"
+                ),
+            )
+            .with_primary_label(at, "std's module, not this one"),
+        )
+    }
+
+    /// [`Loader::find`], before std's names are checked.
+    fn find_place(&mut self, from: &Place, name: &str, at: Span, db: &FileDb) -> Found {
         let (package, tests, siblings) = match from {
             Place::Loose { dir, .. } => {
                 if !self.has(dir, name) {
@@ -792,4 +816,17 @@ fn clash(name: &str, file: &Path, edge: &Edge, at: Span, db: &FileDb) -> Diagnos
     )
     .with_primary_label(at, "this import is ambiguous")
     .with_secondary_label(edge.span, "the dependency")
+}
+
+#[cfg(test)]
+mod tests {
+    /// The package manager refuses exactly the module names the resolver
+    /// reserves for std (spec 4.2 §3.2).
+    #[test]
+    fn the_package_manager_refuses_the_resolvers_reserved_names() {
+        assert_eq!(
+            nova_pm::STD_MODULE_NAMES,
+            nova_resolver::RESERVED_MODULE_NAMES
+        );
+    }
 }

@@ -9,9 +9,15 @@ const WINDOWS_DEVICES: [&str; 22] = [
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
+/// The names of std's imported modules, now and coming, which `import`
+/// would read as std's: `nova_resolver::RESERVED_MODULE_NAMES` (spec
+/// `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+/// §3.2).
+pub const STD_MODULE_NAMES: [&str; 2] = ["dom", "ui"];
+
 /// Check a package name: ASCII letters, digits, `-` and `_`, starting with
-/// a letter, at most 64 characters, and not a Windows device name. The
-/// error says which rule the name breaks.
+/// a letter, at most 64 characters, not a Windows device name, and not the
+/// name of a std module. The error says which rule the name breaks.
 pub fn check_name(name: &str) -> Result<(), String> {
     let Some(first) = name.chars().next() else {
         return Err("a package name cannot be empty".to_string());
@@ -38,6 +44,11 @@ pub fn check_name(name: &str) -> Result<(), String> {
     }
     if WINDOWS_DEVICES.contains(&name.to_ascii_lowercase().as_str()) {
         return Err(format!("`{name}` is a name Windows reserves for a device"));
+    }
+    if STD_MODULE_NAMES.contains(&name) {
+        return Err(format!(
+            "`{name}` is the name of a std module, which `import {name}` names"
+        ));
     }
     Ok(())
 }

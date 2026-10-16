@@ -1927,6 +1927,7 @@ pub fn resolve_program_for(
                     &mut definitions,
                     &exports,
                     &all,
+                    target,
                     mid,
                     imp,
                     &mut diagnostics,
@@ -1963,8 +1964,15 @@ pub fn resolve_program_for(
     // exports glob into std/collections's scope exactly as they would into a
     // user module's, which is what lets std/collections use
     // `Option`/`Some`/`None` with no `import` of its own.
+    // An imported std module (`std/dom`) globs into no module, and
+    // `std/rt`'s names only into std's (spec 4.2 §3.2, §5).
     for (mid, std_exports) in exports.iter().enumerate().skip(std_start) {
-        import_std_module(&mut definitions, std_exports, mid);
+        let name = all[mid].name.as_str();
+        if IMPORTED_STD.iter().any(|&(_, m)| m == name) {
+            continue;
+        }
+        let from = if name == STD_INTERNAL { std_start } else { 0 };
+        import_std_module(&mut definitions, std_exports, mid, from);
     }
 
     // Spec 3.4b §4.6: what a fix needs to know.
@@ -2094,12 +2102,13 @@ impl CompileTarget {
     }
 }
 
-/// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1): the
-/// ten of [`STD_MODULES`] that need no operating system, in the same order,
-/// then `std/rt`, the runtime written in Nova. Their names are those of
+/// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1, 4.2
+/// §3.2): the ten of [`STD_MODULES`] that need no operating system, in the
+/// same order, then `std/dom`, which only an `import` reaches, then
+/// `std/rt`, the runtime written in Nova. Their names are those of
 /// [`STD_MODULES`], so `std/core` keeps its place first, and the same order
 /// gives a name the same winner in std's glob imports.
-pub const WASM_STD_MODULES: [(&str, &str); 11] = [
+pub const WASM_STD_MODULES: [(&str, &str); 12] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.collections", nova_std::COLLECTIONS),
@@ -2110,8 +2119,23 @@ pub const WASM_STD_MODULES: [(&str, &str); 11] = [
     ("$std.time", nova_std::TIME),
     ("$std.json", nova_std::JSON),
     ("$std.log", nova_std::LOG),
+    ("$std.dom", nova_std::DOM),
     ("$std.rt", nova_std::RT),
 ];
+
+/// The std modules a program imports by name instead of finding in its
+/// prelude, by the name an `import` writes, and the module's own name
+/// (spec `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+/// §3.2).
+pub const IMPORTED_STD: [(&str, &str); 1] = [("dom", "$std.dom")];
+
+/// The names a project's module or a dependency may not take: those of
+/// std's imported modules, with 4.3's `ui` (spec 4.2 §3.2).
+pub const RESERVED_MODULE_NAMES: [&str; 2] = ["dom", "ui"];
+
+/// The std module whose public names only std's other modules see:
+/// `std/rt`, the runtime, whose functions `std/dom` calls (spec 4.2 §5).
+const STD_INTERNAL: &str = "$std.rt";
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
 /// that array's length does not depend on compilation mode: every consumer
@@ -2145,8 +2169,15 @@ fn std_module(src: &str, file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
 /// or another std module's own — item shadows a std one). Called once per
 /// entry in [`STD_MODULES`], so this also runs std-into-std (e.g. std/core's
 /// `Option` into std/collections's scope), which is what lets std/collections
-/// use `Option`/`Some`/`None` with no `import` of its own.
-fn import_std_module(definitions: &mut Definitions, std_exports: &Exports, std_mid: usize) {
+/// use `Option`/`Some`/`None` with no `import` of its own. Only the modules
+/// from index `from` on receive them: 0 for every module, or the first std
+/// module's index for std's alone (spec 4.2 §5).
+fn import_std_module(
+    definitions: &mut Definitions,
+    std_exports: &Exports,
+    std_mid: usize,
+    from: usize,
+) {
     let values: Vec<(String, Res)> = std_exports
         .values
         .iter()
@@ -2162,7 +2193,7 @@ fn import_std_module(definitions: &mut Definitions, std_exports: &Exports, std_m
         .iter()
         .map(|(k, v)| (k.clone(), *v))
         .collect();
-    for mid in 0..definitions.modules.len() {
+    for mid in from..definitions.modules.len() {
         if mid == std_mid {
             continue;
         }
@@ -2714,6 +2745,7 @@ fn resolve_import(
     definitions: &mut Definitions,
     exports: &[Exports],
     modules: &[ModuleSource],
+    compile_target: CompileTarget,
     mid: usize,
     imp: &Import,
     diagnostics: &mut Vec<Diagnostic>,
@@ -2743,11 +2775,32 @@ fn resolve_import(
         Some(ImportTarget::Module(target)) => *target,
         Some(ImportTarget::Reported) => return,
         None => {
-            diagnostics.push(
-                Diagnostic::error("E0001", format!("cannot find module `{target_name}`"))
-                    .with_primary_label(span, "no such module"),
-            );
-            return;
+            // An imported std module: the target's, or E0092 when the
+            // target does not compile it (spec 4.2 §3.2).
+            if let Some(&(_, std_name)) = IMPORTED_STD.iter().find(|&&(n, _)| n == target_name) {
+                match modules.iter().position(|m| m.name == std_name) {
+                    Some(t) => t,
+                    None => {
+                        let target = compile_target.name();
+                        diagnostics.push(
+                            Diagnostic::error(
+                                "E0092",
+                                format!(
+                                    "`{target_name}` is a std module, which target {target} does not have"
+                                ),
+                            )
+                            .with_primary_label(span, format!("not on target {target}")),
+                        );
+                        return;
+                    }
+                }
+            } else {
+                diagnostics.push(
+                    Diagnostic::error("E0001", format!("cannot find module `{target_name}`"))
+                        .with_primary_label(span, "no such module"),
+                );
+                return;
+            }
         }
     };
     if target == mid {
@@ -3415,9 +3468,9 @@ mod tests {
         resolve_program_for(target, &sources, &std_files, None)
     }
 
-    /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1): ten of
-    /// the native modules, in native's order, then `std/rt`, after the
-    /// user's. A native build has no `std/rt`.
+    /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1, 4.2
+    /// §3.2): ten of the native modules, in native's order, then `std/dom`
+    /// and `std/rt`, after the user's. A native build has neither.
     #[test]
     fn a_wasm_build_compiles_wasms_std_modules() {
         let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
@@ -3438,6 +3491,7 @@ mod tests {
                 "$std.time",
                 "$std.json",
                 "$std.log",
+                "$std.dom",
                 "$std.rt"
             ]
         );
@@ -3445,6 +3499,39 @@ mod tests {
         assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
         assert!((1..=STD_MODULES.len())
             .all(|m| native.definitions.module_name(ModuleId(m as u32)) != "$std.rt"));
+    }
+
+    /// `std/dom` globs into no module: a user's module sees its names only
+    /// through `import dom`, and natively that import is E0092 (spec 4.2
+    /// §3.2).
+    #[test]
+    fn dom_is_seen_only_through_an_import() {
+        let bare = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
+        assert!(bare.diagnostics.is_empty(), "{:?}", bare.diagnostics);
+        assert!(bare
+            .definitions
+            .resolve_type(ModuleId(0), "Element")
+            .is_none());
+        let imported = resolve_for(
+            CompileTarget::Wasm,
+            "import dom::{Element}\nfn main() { }\n",
+        );
+        assert!(
+            imported.diagnostics.is_empty(),
+            "{:?}",
+            imported.diagnostics
+        );
+        assert!(imported
+            .definitions
+            .resolve_type(ModuleId(0), "Element")
+            .is_some());
+        let native = resolve_for(CompileTarget::Native, "import dom\nfn main() { }\n");
+        let codes: Vec<&str> = native.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["E0092"], "{:?}", native.diagnostics);
+        assert_eq!(
+            native.diagnostics[0].message,
+            "`dom` is a std module, which target native does not have"
+        );
     }
 
     /// A WASM build knows the module of each public name of the std
