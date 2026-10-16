@@ -1187,6 +1187,39 @@ fn the_location_and_history_change_in_place() {
     assert!(!live_after_each(&err).is_empty(), "{err}");
 }
 
+/// `fetch` from an `async fn main`: replies of 200 and 404, a failure, and
+/// a POST with a header and a body; and from a click handler, through a
+/// task it spawns, which waits on its token after the call returns (spec
+/// 4.2 §6.2, §7).
+#[test]
+fn fetch_waits_for_the_reply() {
+    dom_program("fetch", &[]);
+    let err = dom_program("fetch", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert!(!live_after_each(&err).is_empty(), "{err}");
+}
+
+/// A `fetch` awaited inside `block_on` cannot be answered: a panic that
+/// names `async fn main` (spec 4.2 §7.2).
+#[test]
+fn a_fetch_in_block_on_panics() {
+    for env in [&[][..], &STRESS[..]] {
+        let Some(a) = dom_run("fetch_block_on", env) else {
+            return;
+        };
+        let a = a.code(134);
+        assert!(
+            stderr(&a).contains(
+                "nova: panic: nova_rt_task_block_on: a task waits for JS, as `fetch` does, and JS cannot answer while block_on holds the thread; await it from an `async fn main` instead"
+            ),
+            "{}",
+            stderr(&a)
+        );
+    }
+}
+
 /// The entries of std/rt's table of closures JS may call in use after each
 /// collection, from `NOVA_GC_DEBUG`'s `nova-dom:` lines.
 fn calls_after_each(stderr: &str) -> Vec<u64> {

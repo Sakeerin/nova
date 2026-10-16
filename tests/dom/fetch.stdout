@@ -1,0 +1,9 @@
+ok: 200 true hello
+missing: 404 false not found
+down: failed: connection refused
+post: 201 true pong
+main done
+init resolved
+from the click: 200 true hello
+POST /echo {"Content-Type":"text/plain"} ping
+5 requests

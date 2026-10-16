@@ -64,6 +64,12 @@ extern "js" {
     fn dom_history_push(url: String)
     fn dom_history_replace(url: String)
     fn dom_history_back()
+    fn dom_fetch(url: String, method: String, headers: String, body: String) -> Int
+    fn dom_fetch_failed(token: Int) -> Bool
+    fn dom_fetch_error(token: Int) -> String
+    fn dom_fetch_status(token: Int) -> Int
+    fn dom_fetch_ok(token: Int) -> Bool
+    fn dom_fetch_body(token: Int) -> String
 }
 
 /// A node of the page: an element, or a text node.
@@ -83,6 +89,41 @@ pub record Listener { target: Int, kind: String, entry: Int, js: Int }
 /// A timeout or an interval, from `set_timeout` or `set_interval`, which
 /// `clear` stops.
 pub record Timer { slot: Entry, js: Int, repeats: Bool }
+
+/// A header of a request.
+pub record Header {
+    /// The header's name, such as `"Content-Type"`.
+    pub name: String,
+    /// Its value.
+    pub value: String,
+}
+
+/// How `fetch_with` asks: a method, headers, and a body.
+pub record FetchInit {
+    /// The method, such as `"GET"` or `"POST"`.
+    pub method: String,
+    /// The request's headers.
+    pub headers: [Header],
+    /// The body, or `""` for none.
+    pub body: String,
+}
+
+/// A reply to a request, its body read in full.
+pub record Response {
+    /// The status, such as 200.
+    pub status: Int,
+    /// Whether the status is from 200 to 299.
+    pub ok: Bool,
+    /// The body, as text.
+    pub body: String,
+}
+
+/// A request that got no reply: the network failed, or the request was
+/// refused before it was sent.
+pub record FetchError {
+    /// The browser's description.
+    pub message: String,
+}
 
 // An entry of std/rt's table of closures JS may call, 0 once released,
 // shared by a timer and its closure.
@@ -146,6 +187,32 @@ pub fn set_timeout(ms: Int, f: fn()) -> Timer {
 pub fn set_interval(ms: Int, f: fn()) -> Timer {
     let slot = Entry { id: rt_closure_register(closure_word(|unused: Int| f())) }
     Timer { slot: slot, js: rt_handle_box(dom_set_interval(ms, slot.id)), repeats: true }
+}
+
+/// Sends a `GET` for `url`, relative to the page's address, and waits for
+/// the whole reply.
+pub async fn fetch(url: String) -> Result<Response, FetchError> {
+    fetch_with(url, FetchInit::new()).await
+}
+
+/// Sends the request `init` describes to `url`, and waits for the whole
+/// reply. A reply of any status is `Ok`; `Err` is a request that got none.
+pub async fn fetch_with(url: String, init: FetchInit) -> Result<Response, FetchError> {
+    let mut headers = ""
+    let mut i = 0
+    while i < init.headers.len() {
+        let h = init.headers[i]
+        headers = "${headers}${h.name}: ${h.value}\n"
+        i = i + 1
+    }
+    let wait = node(dom_fetch(url, init.method, headers, init.body))
+    rt_task_host_future(handle_of(wait)).await
+    let t = handle_of(wait)
+    if dom_fetch_failed(t) {
+        Err(FetchError { message: dom_fetch_error(t) })
+    } else {
+        Ok(Response { status: dom_fetch_status(t), ok: dom_fetch_ok(t), body: dom_fetch_body(t) })
+    }
 }
 
 /// The page's address, in full.
@@ -337,5 +404,13 @@ impl Timer {
         if self.repeats { dom_clear_interval(h) } else { dom_clear_timeout(h) }
         rt_closure_release(slot.id)
         slot.id = 0
+    }
+}
+
+impl FetchInit {
+    /// A `GET` with no headers and no body.
+    pub fn new() -> FetchInit {
+        let headers: [Header] = []
+        FetchInit { method: "GET", headers: headers, body: "" }
     }
 }

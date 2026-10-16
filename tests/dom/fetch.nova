@@ -1,0 +1,32 @@
+// `fetch` (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §6.2, §7): from an `async fn main`, a reply of 200, one of 404, a failure
+// and a POST with a header; and from a click handler, through a task it
+// spawns. The fake DOM answers from its routes, after a timer.
+
+import dom
+
+fn show(label: String, r: Result<Response, FetchError>) {
+    match r {
+        Ok(res) => println("${label}: ${res.status} ${res.ok} ${res.body}")
+        Err(e) => println("${label}: failed: ${e.message}")
+    }
+}
+
+async fn clicked() { show("from the click", fetch("/ok").await) }
+
+async fn main() {
+    show("ok", fetch("/ok").await)
+    show("missing", fetch("/missing").await)
+    show("down", fetch("/down").await)
+    let init = FetchInit {
+        method: "POST",
+        headers: [Header { name: "Content-Type", value: "text/plain" }],
+        body: "ping",
+    }
+    show("post", fetch_with("/echo", init).await)
+    let button = create_element("button")
+    body().append_child(button)
+    let _ = button.add_event_listener("click", |e: Event| { let _ = spawn(clicked()) })
+    println("main done")
+}

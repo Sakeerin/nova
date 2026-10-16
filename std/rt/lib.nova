@@ -1049,6 +1049,52 @@ fn stage_task(e: Int, id: Int) {
     mem_store64(e + 88, staged | 2)
 }
 
+// Stage a wait for the shim's token `token` (spec 4.2 §7.1): a park whose
+// target is the token, negated, so it is told from a task's.
+fn stage_host(e: Int, token: Int) {
+    if mem_load64(e + 80) == 0 { panic("nova_rt: a park was staged outside a poll") }
+    let staged = mem_load64(e + 88)
+    if (staged & 6) != 0 {
+        panic(
+            "nova_rt: two parks staged in one poll; an inner future's POLL_PENDING did not propagate",
+        )
+    }
+    mem_store64(e + 104, token)
+    mem_store64(e + 88, staged | 4)
+}
+
+// Queue every task parked on the shim's token `token`, in the order they
+// were parked.
+fn wake_host(e: Int, token: Int) {
+    let parked = mem_load64(e + 56)
+    let n = mem_load64(e + 64)
+    let mut kept = 0
+    let mut i = 0
+    while i < n {
+        let p = parked + 32 * i
+        if mem_load64(p + 8) == 0 - token {
+            queue_push(e, mem_load64(p))
+        } else {
+            mem_copy(parked + 32 * kept, p, 32)
+            kept = kept + 1
+        }
+        i = i + 1
+    }
+    mem_store64(e + 64, kept)
+}
+
+// Whether a parked task waits on one of the shim's tokens.
+fn waits_on_host(e: Int) -> Bool {
+    let parked = mem_load64(e + 56)
+    let n = mem_load64(e + 64)
+    let mut i = 0
+    while i < n {
+        if mem_load64(parked + 32 * i + 8) < 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
 // Release task `id`, once: its state stops being a root.
 fn release_id(e: Int, id: Int) {
     let flags = task_flags(e, id)
@@ -1071,6 +1117,7 @@ fn poll_task(e: Int, id: Int) {
         } else {
             let mut target1 = 0
             if (staged & 2) != 0 { target1 = mem_load64(e + 104) + 1 }
+            if (staged & 4) != 0 { target1 = 0 - mem_load64(e + 104) }
             park(e, id, target1, staged & 1, mem_load64(e + 96))
         }
         return
@@ -1211,7 +1258,14 @@ fn rt_task_block_on(fut: Int) -> Int {
     drain(e)
     while mem_load64(e + 64) > 0 {
         let at = earliest(e)
-        if at < 0 { report_deadlock(e) }
+        if at < 0 {
+            if waits_on_host(e) {
+                panic(
+                    "nova_rt_task_block_on: a task waits for JS, as `fetch` does, and JS cannot answer while block_on holds the thread; await it from an `async fn main` instead",
+                )
+            }
+            report_deadlock(e)
+        }
         while time_now_nanos() < at {}
         wake(e, 0 - 1, time_now_nanos())
         drain(e)
@@ -1331,14 +1385,17 @@ fn rt_turn() -> Int {
 // The rest of a turn, after what woke it (spec 4.2 §5.2, §7.2): run the
 // queue for up to `TURN_BUDGET`, collect if due, then 0 if tasks are still
 // queued, or else the milliseconds to the earliest deadline, or -1 when no
-// task is parked.
+// task is parked, or -2 when the only waits are on the shim's tokens.
 fn turn_end(e: Int) -> Int {
     drain_turn(e)
     gc_turn_end()
     if mem_load64(e + 40) > 0 { return 0 }
     if mem_load64(e + 64) == 0 { return 0 - 1 }
     let at = earliest(e)
-    if at < 0 { report_deadlock(e) }
+    if at < 0 {
+        if waits_on_host(e) { return 0 - 2 }
+        report_deadlock(e)
+    }
     let left = at - time_now_nanos()
     if left <= 0 { return 0 }
     let ms = left / 1000000
@@ -1411,6 +1468,31 @@ pub fn rt_closure_release(id: Int) {
     let c = mem_load64(CALLS)
     if c == 0 || id < 1 || id > mem_load64(c + 8) { return }
     mem_store64(mem_load64(c) + 8 * (id - 1), 0)
+}
+
+// The shim's side of a token: whether what it waits for has settled.
+extern "js" {
+    fn host_done(token: Int) -> Bool
+}
+
+/// A future that completes once the shim's token `token` has settled, as a
+/// `fetch` does (spec 4.2 §7.1). Its task parks meanwhile; `nova_wake`
+/// queues it. Only `std/dom` awaits it.
+pub async fn rt_task_host_future(token: Int) -> Int {
+    while !host_done(token) {
+        stage_host(exec(), token)
+        task_yield_future().await
+    }
+    0
+}
+
+// `nova_wake` (spec 4.2 §7.1): the shim's token `token` has settled. Queue
+// the tasks parked on it, then run a turn, as `nova_call` does.
+fn rt_wake(token: Int) -> Int {
+    let e = exec()
+    wake_host(e, token)
+    wake(e, 0 - 1, time_now_nanos())
+    turn_end(e)
 }
 
 // `nova_call` (spec 4.2 §5.2): call entry `id` with `arg`; an entry that is

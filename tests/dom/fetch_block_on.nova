@@ -1,0 +1,14 @@
+// `block_on` holds the thread, so JS cannot answer a `fetch` inside it:
+// the program panics, naming `async fn main` as the way (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §7.2).
+
+import dom
+
+fn main() {
+    println("before")
+    match block_on(fetch("/ok")) {
+        Ok(r) => println("${r.status}")
+        Err(e) => println(e.message)
+    }
+}
