@@ -1,0 +1,8 @@
+http://localhost/
+/posts ?page=2 #top
+http://localhost/about
+#team
+hashchange: #team
+back
+popstate: http://localhost/about
+http://localhost/about

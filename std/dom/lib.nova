@@ -52,6 +52,18 @@ extern "js" {
     fn dom_event_key(event: Int) -> String
     fn dom_prevent_default(event: Int)
     fn dom_stop_propagation(event: Int)
+    fn dom_set_timeout(ms: Int, entry: Int) -> Int
+    fn dom_set_interval(ms: Int, entry: Int) -> Int
+    fn dom_clear_timeout(timer: Int)
+    fn dom_clear_interval(timer: Int)
+    fn dom_location_href() -> String
+    fn dom_location_pathname() -> String
+    fn dom_location_search() -> String
+    fn dom_location_hash() -> String
+    fn dom_set_location_hash(hash: String)
+    fn dom_history_push(url: String)
+    fn dom_history_replace(url: String)
+    fn dom_history_back()
 }
 
 /// A node of the page: an element, or a text node.
@@ -67,6 +79,14 @@ pub record Event { box: Int }
 /// A listener added with `add_event_listener` or
 /// `window_add_event_listener`, which `remove` removes.
 pub record Listener { target: Int, kind: String, entry: Int, js: Int }
+
+/// A timeout or an interval, from `set_timeout` or `set_interval`, which
+/// `clear` stops.
+pub record Timer { slot: Entry, js: Int, repeats: Bool }
+
+// An entry of std/rt's table of closures JS may call, 0 once released,
+// shared by a timer and its closure.
+record Entry { id: Int }
 
 // A node for handle `h`, boxed so the collector releases it.
 fn node(h: Int) -> Element { Element { box: rt_handle_box(h) } }
@@ -105,6 +125,54 @@ pub fn window_add_event_listener(kind: String, handler: fn(Event)) -> Listener {
     let js = dom_window_listen(kind, entry)
     Listener { target: 0, kind: kind, entry: entry, js: rt_handle_box(js) }
 }
+
+/// Calls `f` once, `ms` milliseconds from now, unless the timer is cleared
+/// first.
+pub fn set_timeout(ms: Int, f: fn()) -> Timer {
+    let mut slot = Entry { id: 0 }
+    slot.id = rt_closure_register(
+        closure_word(
+            |unused: Int| {
+                rt_closure_release(slot.id)
+                slot.id = 0
+                f()
+            },
+        ),
+    )
+    Timer { slot: slot, js: rt_handle_box(dom_set_timeout(ms, slot.id)), repeats: false }
+}
+
+/// Calls `f` every `ms` milliseconds until the timer is cleared.
+pub fn set_interval(ms: Int, f: fn()) -> Timer {
+    let slot = Entry { id: rt_closure_register(closure_word(|unused: Int| f())) }
+    Timer { slot: slot, js: rt_handle_box(dom_set_interval(ms, slot.id)), repeats: true }
+}
+
+/// The page's address, in full.
+pub fn location_href() -> String { dom_location_href() }
+
+/// The path of the page's address, such as `"/posts/7"`.
+pub fn location_pathname() -> String { dom_location_pathname() }
+
+/// The query of the page's address, from its `?`, or `""`.
+pub fn location_search() -> String { dom_location_search() }
+
+/// The fragment of the page's address, from its `#`, or `""`.
+pub fn location_hash() -> String { dom_location_hash() }
+
+/// Moves to the fragment `hash` of the page: a new history entry, and a
+/// `hashchange` event on the window, after this returns.
+pub fn set_location_hash(hash: String) { dom_set_location_hash(hash) }
+
+/// Adds a history entry for `url`, relative to the page's address, and
+/// moves to it without loading it.
+pub fn history_push(url: String) { dom_history_push(url) }
+
+/// Replaces the current history entry with `url`, without loading it.
+pub fn history_replace(url: String) { dom_history_replace(url) }
+
+/// Goes back one history entry: a `popstate` event on the window follows.
+pub fn history_back() { dom_history_back() }
 
 /// The page's `<body>`.
 pub fn body() -> Element { node(dom_body()) }
@@ -257,4 +325,17 @@ impl Event {
 
     /// Stops the event from bubbling to the node's ancestors.
     pub fn stop_propagation(self) { dom_stop_propagation(rt_handle_id(self.box)) }
+}
+
+impl Timer {
+    /// Stops the timer: `f` runs no more. Clearing it again, or a timeout
+    /// that has run, does nothing.
+    pub fn clear(self) {
+        let mut slot = self.slot
+        if slot.id == 0 { return }
+        let h = rt_handle_id(self.js)
+        if self.repeats { dom_clear_interval(h) } else { dom_clear_timeout(h) }
+        rt_closure_release(slot.id)
+        slot.id = 0
+    }
 }

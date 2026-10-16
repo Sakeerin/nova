@@ -1,0 +1,24 @@
+// The location and history (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §6.2): pushing, replacing, the fragment, and the window's `hashchange`
+// and `popstate`, which come after the calls that cause them.
+
+import dom
+
+fn main() {
+    let _ = window_add_event_listener(
+        "hashchange",
+        |e: Event| println("hashchange: ${location_hash()}"),
+    )
+    let _ = window_add_event_listener(
+        "popstate",
+        |e: Event| println("popstate: ${location_href()}"),
+    )
+    println(location_href())
+    history_push("/posts?page=2#top")
+    println("${location_pathname()} ${location_search()} ${location_hash()}")
+    history_replace("/about")
+    println(location_href())
+    set_location_hash("team")
+    println(location_hash())
+}
