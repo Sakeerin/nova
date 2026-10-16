@@ -90,6 +90,33 @@ jobs:
         continue-on-error: true
         run: cargo test --locked --workspace --all-features --no-fail-fast -- --ignored
 
+  # 4.2's gate in a real browser (spec
+  # docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+  # §10.3): the counter `cargo test` drives under the fake DOM, built for
+  # WASM and clicked in Chromium through Playwright. Playwright, pinned, is
+  # installed here only, into a scratch directory; nothing in `cargo test` or
+  # `nova` installs a package. Ubuntu only: one browser job suffices.
+  browser:
+    name: Browser (Chromium)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: cargo build -p nova-cli
+        run: cargo build --locked -p nova-cli
+      - name: Build the counter for WASM
+        run: target/debug/nova build --target wasm tests/dom/counter.nova -o "$RUNNER_TEMP/counter"
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: Click the counter in Chromium
+        run: node tests/browser/counter.mjs "$RUNNER_TEMP/counter" "$RUNNER_TEMP/pw"
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
