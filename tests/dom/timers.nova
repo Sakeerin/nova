@@ -2,16 +2,20 @@
 // docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
 // §6.2): a timeout, an interval cleared from inside after three ticks, and
 // a cleared timeout that never runs; clearing a timer again, or one that
-// has run, does nothing, though another timer has its entry by then. Their
-// times are far apart, so their lines keep their order however slow the
-// machine. (`| |` is a closure with no parameters: `||`
-// comes with 4.4.)
+// has run, does nothing, though another timer has its entry by then; and a
+// timeout too long for JS, which must not fire at once. Each late line's
+// timer is set by the line before it, and the harness waits until the page
+// says the last has run, so the order holds however slow the machine. (`| |`
+// is a closure with no parameters: `||` comes with 4.4.)
 
 import dom
 
 record Ticks { n: Int, timer: Option<Timer> }
 
 fn main() {
+    // Over 2^31 - 1 ms, which JS would fire at once; the last timeout
+    // clears it.
+    let far = set_timeout(3000000000, | | println("far"))
     let first = set_timeout(1, | | println("timeout 1"))
     let never = set_timeout(10, | | println("never"))
     never.clear()
@@ -27,6 +31,24 @@ fn main() {
                         Some(t) => t.clear()
                         None => println("no timer")
                     }
+                    let _ = set_timeout(
+                        20,
+                        | | {
+                            // This timeout takes the entry `first` left when
+                            // it ran, so clearing `first` now must release
+                            // nothing either.
+                            let _ = set_timeout(
+                                1,
+                                | | {
+                                    println("timeout after the last")
+                                    body().set_attribute("data-done", "yes")
+                                },
+                            )
+                            first.clear()
+                            far.clear()
+                            println("last timeout")
+                        },
+                    )
                 }
             },
         ),
@@ -34,15 +56,5 @@ fn main() {
     // The interval took the entry `never` left: clearing `never` again
     // releases nothing.
     never.clear()
-    let last = set_timeout(
-        400,
-        | | {
-            // This timeout takes the entry `first` left when it ran, so
-            // clearing `first` now must release nothing either.
-            let _ = set_timeout(1, | | println("timeout after 400"))
-            first.clear()
-            println("timeout 400")
-        },
-    )
     println("main done")
 }

@@ -1,8 +1,9 @@
 // `fetch` (spec
 // docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
-// §6.2, §7): from an `async fn main`, a reply of 200, one of 404, a failure
-// and a POST with a header; and from a click handler, through a task it
-// spawns. The fake DOM answers from its routes, after a timer.
+// §6.2, §7): from an `async fn main`, a reply of 200, one of 404, a failure,
+// a POST with a header, and a header that would split, refused before it is
+// sent; and from a click handler, through a task it spawns. The fake DOM
+// answers from its routes, after a timer.
 
 import dom
 
@@ -25,6 +26,13 @@ async fn main() {
         body: "ping",
     }
     show("post", fetch_with("/echo", init).await)
+    // A value that would make a second header is refused before sending.
+    let split = FetchInit {
+        method: "GET",
+        headers: [Header { name: "X-Name", value: "a\nAuthorization: b" }],
+        body: "",
+    }
+    show("split", fetch_with("/ok", split).await)
     let button = create_element("button")
     body().append_child(button)
     let _ = button.add_event_listener("click", |e: Event| { let _ = spawn(clicked()) })

@@ -4,6 +4,6 @@ timeout 1
 tick 1
 tick 2
 tick 3
-timeout 400
-timeout after 400
+last timeout
+timeout after the last
 waited

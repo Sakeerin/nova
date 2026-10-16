@@ -2,6 +2,7 @@ ok: 200 true hello
 missing: 404 false not found
 down: failed: connection refused
 post: 201 true pong
+split: failed: invalid header: a name is empty or holds a colon, or a name or value holds a line break
 main done
 init resolved
 from the click: 200 true hello

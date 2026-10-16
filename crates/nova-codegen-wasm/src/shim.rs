@@ -136,8 +136,14 @@ fn js_function(name: &str) -> Option<&'static str> {
         "dom_prevent_default" => "(ev) => { object(ev).preventDefault(); }",
         "dom_stop_propagation" => "(ev) => { object(ev).stopPropagation(); }",
         "dom_click" => "(el) => { object(el).click(); }",
-        "dom_set_timeout" => "(ms, id) => handle(setTimeout(() => call(id, 0n), Number(ms)))",
-        "dom_set_interval" => "(ms, id) => handle(setInterval(() => call(id, 0n), Number(ms)))",
+        // A delay JS cannot hold, over 2^31 - 1 ms, would fire at once; an
+        // interval clears itself once the program has ended, so Node exits.
+        "dom_set_timeout" => {
+            "(ms, id) => handle(setTimeout(() => call(id, 0n), Math.min(Number(ms), 2147483647)))"
+        }
+        "dom_set_interval" => {
+            "(ms, id) => { const t = setInterval(() => { if (ended) clearInterval(t); else call(id, 0n); }, Math.min(Number(ms), 2147483647)); return handle(t); }"
+        }
         "dom_clear_timeout" => "(t) => { clearTimeout(object(t)); }",
         "dom_clear_interval" => "(t) => { clearInterval(object(t)); }",
         "dom_location_href" => "() => string(location.href)",

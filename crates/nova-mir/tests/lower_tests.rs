@@ -2008,10 +2008,10 @@ fn a_wasm_build_of_an_async_main_holds_the_event_loop() {
 
 /// A std module's `extern "js"` block on WASM: its functions take and
 /// return `Int`, `Float`, `Bool` and `String`, and anything else, a record
-/// here, is E0900;
-/// MIR records each called one with the JS ABI. Natively, std's `"js"` is
-/// E0900 as a user's would be (spec 4.2 §3.1). The std module is a stand-in
-/// passed as `extra_std`, the mechanism `nova test` uses for `std/test`.
+/// here, is E0900; the checker records each one with the JS ABI. Natively,
+/// std's `"js"` is E0900 as a user's would be (spec 4.2 §3.1). The std
+/// module is a stand-in passed as `extra_std`, the mechanism `nova test`
+/// uses for `std/test`.
 #[test]
 fn a_std_extern_js_block_is_wasms_alone() {
     use nova_resolver::{resolve_program_for, CompileTarget, ModuleSource};

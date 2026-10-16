@@ -636,8 +636,9 @@ a page that sleeps in it does not respond
 `std/rt` a weak registry, a root, and waits that JS ends. The registry of
 the boxes that hold JS handles is walked after each sweep, and a freed box's
 handle is released. A table of closures JS may call is a root. A task can
-park on a token the shim settles, as `fetch` does; a turn with only such
-waits returns -2, and a call from JS, `nova_call` or `nova_wake`, is a turn
+park on a token the shim settles, as `fetch` does; a turn that ends with no
+parked task's deadline and such a wait returns -2, and an outermost call
+from JS, `nova_call` or `nova_wake`, is a turn
 (`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 §4, §5, §7; ADR 0041).
 
