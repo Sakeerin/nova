@@ -1012,6 +1012,80 @@ fn std_dom_builds_a_page() {
     assert!(live_after_each(&err).is_empty(), "{err}");
 }
 
+/// The `nova-dom:` lines of `NOVA_GC_DEBUG`: each collection's handles
+/// released, and those the shim's table still holds.
+fn handles_released(stderr: &str) -> Vec<(u64, u64)> {
+    stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("nova-dom: collection "))
+        .map(|rest| {
+            let (_, rest) = rest.split_once(" released ").expect("released");
+            let (released, rest) = rest.split_once(" handles, ").expect("handles");
+            let (live, _) = rest.split_once(" live").expect("live");
+            (
+                released.parse().expect("a count"),
+                live.parse().expect("a count"),
+            )
+        })
+        .collect()
+}
+
+/// A handle is released once no value holds it: over 50 turns of 200
+/// nodes each, the collector releases nearly all of them, and the shim's
+/// table, which counts its own slots, never holds 400 at once (spec 4.2
+/// §4.2).
+#[test]
+fn handles_are_released_when_no_value_holds_them() {
+    dom_program("handles", &[]);
+    let err = dom_program("handles", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    let lines = handles_released(&err);
+    let released: u64 = lines.iter().map(|(r, _)| r).sum();
+    assert!(released >= 9_900, "{err}");
+    assert!(lines.iter().all(|&(_, live)| live < 400), "{err}");
+}
+
+/// An `Element` built by hand names no handle: using it is a panic, not an
+/// access to another object (spec 4.2 §4.1).
+#[test]
+fn a_forged_element_panics() {
+    let Some(node) = node() else { return };
+    let dir = fresh("dom-forged");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "import dom\nfn main() {\n    let e = Element { box: 0 }\n    println(\"before\")\n    e.set_text(\"x\")\n}\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stdout(&a), "before\n");
+    assert_eq!(stderr(&a), "nova: panic: std/dom: handle 0 is not live\n");
+}
+
+/// `std/rt`'s public functions are std's alone: a user's module cannot
+/// call one (spec 4.2 §5).
+#[test]
+fn std_rts_functions_are_std_internal() {
+    let dir = fresh("rt-internal");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn main() { println(\"${rt_handle_box(1)}\") }\n",
+        )],
+    );
+    let a = nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).failure();
+    assert!(
+        stderr(&a).contains("error[E0001]: cannot find function `rt_handle_box`"),
+        "{}",
+        stderr(&a)
+    );
+}
+
 /// One of the gate's programs (spec §9.2): built for WASM, it prints under
 /// Node what its `.stdout` file says the native build prints.
 fn gate_program(name: &str) {

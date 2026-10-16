@@ -114,6 +114,8 @@ fn js_function(name: &str) -> Option<&'static str> {
         "dom_first_child" => "(el) => handle(object(el).firstChild)",
         "dom_next_sibling" => "(el) => handle(object(el).nextSibling)",
         "dom_is_same" => "(a, b) => (object(a) === object(b) ? 1 : 0)",
+        "host_release" => "(id) => { release(id); }",
+        "host_handles" => "() => BigInt(handles.length - 1 - freeHandles.length)",
         _ => return None,
     })
 }
