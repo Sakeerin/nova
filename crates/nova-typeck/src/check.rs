@@ -7130,6 +7130,11 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
+                if self.defs.resolve_type(self.cur_module, ty_name).is_none()
+                    && self.missing_on_target(ty_name, path.segments[0].span)
+                {
+                    return hir::Pattern::Wildcard;
+                }
                 self.error(
                     "E0001",
                     format!("`{ty_name}::{v_name}` is not a variant of the matched type"),
@@ -7170,6 +7175,21 @@ impl<'a> Checker<'a> {
                     None
                 };
                 let Some((sum_id, vi)) = resolved else {
+                    // A type of a module the target lacks: its fields bind
+                    // nothing usable, so they are checked against the error
+                    // type, which keeps their names from being E0001 too.
+                    if path.segments.len() == 2
+                        && self
+                            .defs
+                            .resolve_type(self.cur_module, &path.segments[0].value)
+                            .is_none()
+                        && self.missing_on_target(&path.segments[0].value, path.segments[0].span)
+                    {
+                        for field in fields {
+                            self.check_pattern(fcx, field, &Ty::Error);
+                        }
+                        return hir::Pattern::Wildcard;
+                    }
                     self.error(
                         "E0001",
                         "cannot resolve this pattern to a sum type variant",

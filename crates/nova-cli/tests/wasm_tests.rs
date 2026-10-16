@@ -100,6 +100,7 @@ fn missing_on_wasm(name: &str, source: &str, error: &str) {
         stderr(&a)
     );
     assert!(!stderr(&a).contains("E0001"), "{}", stderr(&a));
+    assert!(!stderr(&a).contains("E0900"), "{}", stderr(&a));
     nova_in(&dir, &["check", "main.nova"]).success();
 }
 
@@ -143,6 +144,27 @@ fn a_native_only_record_literal_is_e0092_on_wasm() {
     );
 }
 
+/// A variant of a native-only module's type, in a pattern.
+#[test]
+fn a_native_only_variant_pattern_is_e0092_on_wasm() {
+    missing_on_wasm(
+        "pattern",
+        "fn name(k: IoErrorKind) -> String {\n    match k {\n        IoErrorKind::NotFound => \"nf\"\n        _ => \"other\"\n    }\n}\nfn main() { println(\"x\") }\n",
+        "`IoErrorKind` is in `std/io`, which target wasm does not have",
+    );
+}
+
+/// A variant with a payload of a native-only module's type, in a pattern:
+/// the name it binds is not E0001 either.
+#[test]
+fn a_native_only_payload_pattern_is_e0092_on_wasm() {
+    missing_on_wasm(
+        "payload-pattern",
+        "fn name(m: Method) -> String {\n    match m {\n        Method::Unknown(s) => s\n        _ => \"known\"\n    }\n}\nfn main() { println(\"x\") }\n",
+        "`Method` is in `std/http`, which target wasm does not have",
+    );
+}
+
 /// The memory builtins are `std/rt`'s: a user module cannot call one, even
 /// on WASM (spec §3.3).
 #[test]
@@ -160,40 +182,74 @@ fn a_user_module_cannot_call_a_memory_builtin() {
     );
 }
 
-/// While an `async fn main` sleeps, it has returned to JS, which runs
-/// other work, here an interval's ticks; `init` resolves when the program
-/// ends; and `init`'s options set the collector's switches, as a page
-/// would (spec 4.1 §5, §6.6, §7.2).
-#[test]
-fn an_async_main_returns_to_js_while_it_sleeps() {
-    let Some(node) = node() else { return };
-    let dir = fresh("event-loop");
+/// Build `source` for WASM and run it under Node from a page-like harness
+/// that counts an interval's ticks and records the count at each write to
+/// stdout, with `init`'s options for stress and debug. The harness prints
+/// "responsive" when ticks fell between the program's first write and its
+/// last, which a turn that holds the thread throughout can never do.
+fn ticks_between(name: &str, source: &str) -> Assert {
+    let node = node().expect("the caller checked for node");
+    let dir = fresh(name);
     write(
         &dir,
         &[
-            (
-                "main.nova",
-                "async fn main() {\n    sleep(Duration::from_millis(100)).await\n    println(\"woke\")\n}\n",
-            ),
+            ("main.nova", source),
             (
                 "run.mjs",
-                "import init from \"./dist/app.js\";\nlet ticks = 0;\nconst timer = setInterval(() => ticks++, 5);\nawait init({ gcStress: true, gcDebug: true });\nclearInterval(timer);\nconsole.log(ticks > 0 ? \"responsive\" : \"blocked\");\n",
+                "import init from \"./dist/app.js\";\n\
+                 let ticks = 0;\n\
+                 const at = [];\n\
+                 const write = process.stdout.write.bind(process.stdout);\n\
+                 process.stdout.write = (...args) => { at.push(ticks); return write(...args); };\n\
+                 const timer = setInterval(() => ticks++, 5);\n\
+                 await init({ gcStress: true, gcDebug: true });\n\
+                 clearInterval(timer);\n\
+                 process.stdout.write = write;\n\
+                 console.log(at[at.length - 1] > at[0] ? \"responsive\" : `blocked ${at}`);\n",
             ),
         ],
     );
     build_wasm(&dir, Path::new("main.nova"));
     let mut node = node;
-    let a = node
-        .arg(dir.join("run.mjs"))
+    node.arg(dir.join("run.mjs"))
         .timeout(std::time::Duration::from_secs(60))
         .assert()
-        .success();
-    assert_eq!(stdout(&a), "woke\nresponsive\n");
+        .success()
+}
+
+/// While an `async fn main` sleeps, it has returned to JS, which runs
+/// other work, here an interval's ticks between the lines around the sleep;
+/// `init` resolves when the program ends; and `init`'s options set the
+/// collector's switches, as a page would (spec 4.1 §5, §6.6, §7.2).
+#[test]
+fn an_async_main_returns_to_js_while_it_sleeps() {
+    if node().is_none() {
+        return;
+    }
+    let a = ticks_between(
+        "event-loop",
+        "async fn main() {\n    println(\"sleeping\")\n    sleep(Duration::from_millis(100)).await\n    println(\"woke\")\n}\n",
+    );
+    assert_eq!(stdout(&a), "sleeping\nwoke\nresponsive\n");
     assert!(
         stderr(&a).starts_with("nova-gc: collection 1 freed "),
         "{}",
         stderr(&a)
     );
+}
+
+/// A task that waits for a channel yields in a loop, so while the sender
+/// sleeps the queue never empties; a turn stops at its time budget and
+/// returns to JS all the same (ADR 0040).
+#[test]
+fn a_task_waiting_in_a_loop_returns_to_js() {
+    if node().is_none() {
+        return;
+    }
+    let source = std::fs::read_to_string(repo_root().join("tests/wasm/turn_budget.nova"))
+        .expect("the program");
+    let a = ticks_between("turn-budget", &source);
+    assert_eq!(stdout(&a), "waiting\ngot 7\nresponsive\n");
 }
 
 /// Only a module with an `async fn main` exports the turn: one without
@@ -637,23 +693,40 @@ fn the_allocator_keeps_objects_apart() {
     differential("alloc_classes");
 }
 
+/// `block_on` wakes due deadlines between polls while a task waits for a
+/// channel in a loop, so the sender's sleep ends: it runs the queue until
+/// it is empty, with no time budget (spec 4.1 §4.4).
+#[test]
+fn block_on_wakes_a_sleeper_while_a_task_waits_in_a_loop() {
+    differential("block_on_waits_in_a_loop");
+}
+
 /// An allocation over 1 GB, the memory's limit, is refused with "out of
-/// memory" before any page arithmetic could wrap (spec 4.1 §6.2).
+/// memory": 1.6 GB, more pages than memory can have, and a size just under
+/// 2^63, which `gc_alloc` refuses before rounding it up to a multiple of 8
+/// would wrap it negative (spec 4.1 §6.2).
 #[test]
 fn an_allocation_over_1_gb_is_out_of_memory() {
-    let Some(node) = node() else { return };
-    let dir = fresh("oom");
-    write(
-        &dir,
-        &[(
-            "main.nova",
-            "fn main() {\n    println(\"before\")\n    let n = 200000000\n    let xs = [0; n]\n    println(\"${xs.len()}\")\n}\n",
-        )],
-    );
-    let dist = build_wasm(&dir, Path::new("main.nova"));
-    let a = run_wasm(node, &dist).code(134);
-    assert_eq!(stdout(&a), "before\n");
-    assert_eq!(stderr(&a), "nova: panic: out of memory\n");
+    if node().is_none() {
+        return;
+    }
+    for (name, n) in [("oom", "200000000"), ("oom-wrap", "1152921504606846974")] {
+        let dir = fresh(name);
+        write(
+            &dir,
+            &[(
+                "main.nova",
+                &format!(
+                    "fn main() {{\n    println(\"before\")\n    let n = {n}\n    let xs = [0; n]\n    println(\"${{xs.len()}}\")\n}}\n"
+                ),
+            )],
+        );
+        let dist = build_wasm(&dir, Path::new("main.nova"));
+        let node = node().expect("node is on PATH");
+        let a = run_wasm(node, &dist).code(134);
+        assert_eq!(stdout(&a), "before\n", "{n}");
+        assert_eq!(stderr(&a), "nova: panic: out of memory\n", "{n}");
+    }
 }
 
 /// A program in `tests/wasm/` that needs the collector: natively, then
@@ -718,6 +791,21 @@ fn a_record_only_a_task_reaches_survives() {
     assert!(live_after_each(&err).len() >= 50, "{err}");
 }
 
+/// A record only a detached task reaches survives: nothing holds the
+/// task's handle, so only the executor's root for the task keeps its state
+/// until it completes (spec 4.1 §6.4).
+#[test]
+fn a_record_only_a_detached_task_reaches_survives() {
+    let err = collected(
+        "gc_keeps_detached_tasks",
+        &[("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")],
+    );
+    if node().is_none() {
+        return;
+    }
+    assert!(live_after_each(&err).len() >= 100, "{err}");
+}
+
 /// A yield still yields once collections have freed slots for reuse: the
 /// allocator zeroes every slot it hands out, and the yield future's state
 /// starts at tag 0 by that (spec 4.1 §6.2).
@@ -731,6 +819,22 @@ fn a_yield_yields_after_collections() {
         return;
     }
     assert!(live_after_each(&err).len() >= 4, "{err}");
+}
+
+/// A turn stops at its time budget while a task waits for a channel in a
+/// loop and the sender sleeps for 300 ms, so the collector runs during the
+/// wait, at the end of each turn; one turn that held the thread until the
+/// send would end with two collections in all (ADR 0040).
+#[test]
+fn a_turn_stops_at_its_budget_and_collects() {
+    let err = collected(
+        "turn_budget",
+        &[("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")],
+    );
+    if node().is_none() {
+        return;
+    }
+    assert!(live_after_each(&err).len() >= 5, "{err}");
 }
 
 /// 20,000 records a task keeps survive collections: their array is a

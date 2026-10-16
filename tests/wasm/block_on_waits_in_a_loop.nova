@@ -1,0 +1,27 @@
+// `block_on` while a task waits for a channel in a loop and the task that
+// sends sleeps (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §4.4). The queue never empties while the receiver waits, so the executor
+// wakes due deadlines between polls, as `task.rs` does; without that, the
+// sender would never wake, and the receiver would wait for ever.
+
+async fn send_late(mut tx: Sender<Int>) {
+    sleep(Duration::from_millis(50)).await
+    tx.send(7).await
+    tx.close()
+}
+
+async fn receive() -> Int {
+    let ch: Channel<Int> = channel(1)
+    let a = spawn(send_late(ch.sender()))
+    let mut rx = ch.receiver()
+    let mut got = 0
+    match rx.recv().await {
+        Some(v) => got = v
+        None => got = 0 - 1
+    }
+    a.join().await
+    got
+}
+
+fn main() { println("got ${block_on(receive())}") }

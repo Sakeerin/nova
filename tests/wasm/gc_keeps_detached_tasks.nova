@@ -1,0 +1,50 @@
+// A record only a detached task reaches survives the collections around it
+// (spec
+// docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
+// §6.4). `start` drops each task's handle, so nothing reaches a holder's
+// state but the executor's root for its task, which stays until the task
+// completes. Run under NOVA_GC_STRESS, the collector runs at the end of
+// every turn, while each holder keeps its record across 40 of them and
+// `main` makes garbage. Only the holders print after `main` starts them,
+// so the output does not depend on how the tasks interleave.
+
+record Kept { v: Int, name: String, parts: [Int] }
+
+fn churn(n: Int) -> Int {
+    let mut sum = 0
+    let mut i = 0
+    while i < n {
+        let parts = [i, i + 1, i + 2]
+        sum = sum + parts[2] - parts[0]
+        i = i + 1
+    }
+    sum
+}
+
+async fn holder(v: Int, turns: Int) {
+    let kept = Kept { v: v, name: "kept ${v * 2}", parts: [v, v + 1, v + 2] }
+    let mut turn = 0
+    while turn < turns {
+        sleep(Duration::from_millis(1)).await
+        turn = turn + 1
+    }
+    println("${kept.name} ${kept.parts[0] + kept.parts[1] + kept.parts[2]}")
+}
+
+fn start() {
+    let _ = spawn(holder(1, 40))
+    let _ = spawn(holder(2, 80))
+    let _ = spawn(holder(3, 120))
+}
+
+async fn main() {
+    println("started")
+    start()
+    let mut junk = 0
+    let mut turn = 0
+    while turn < 20 {
+        junk = junk + churn(500)
+        sleep(Duration::from_millis(1)).await
+        turn = turn + 1
+    }
+}

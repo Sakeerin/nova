@@ -1,0 +1,22 @@
+// A task that waits for a channel yields in a loop, so while the task that
+// sends sleeps, the executor's queue never empties (ADR 0040). On WASM each
+// turn stops at its time budget instead and returns to JS: under
+// NOVA_GC_STRESS the collector runs at the end of each, during the wait.
+
+async fn send_late(mut tx: Sender<Int>) {
+    sleep(Duration::from_millis(300)).await
+    tx.send(7).await
+    tx.close()
+}
+
+async fn main() {
+    let ch: Channel<Int> = channel(1)
+    let a = spawn(send_late(ch.sender()))
+    let mut rx = ch.receiver()
+    println("waiting")
+    match rx.recv().await {
+        Some(v) => println("got ${v}")
+        None => println("closed")
+    }
+    a.join().await
+}
