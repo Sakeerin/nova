@@ -33,7 +33,7 @@ new CI job.
   `shim/dom_call.js`, `shim/dom_fetch.js`; the scheduler in `run.js`.
 - **`std/dom`:** new. **`std/rt`:** boxes and their registry, the closure
   table, token waits, `rt_call`, `rt_wake`, and `-2`.
-- **Tests:** `tests/dom/`, the fake DOM and eleven programs with their
+- **Tests:** `tests/dom/`, the fake DOM and twelve programs with their
   harnesses; `tests/browser/counter.mjs`; the `browser` job.
 - **Records:** ADR 0041, and dated notes.
 
@@ -63,20 +63,53 @@ approved by the user on 2026-10-16.
   - every task's tree was the prototype's exactly;
   - each test-first step's failure was seen by applying that task's test
     patch to the commit before it, and each step's counts are that run's;
+  - after each of Tasks 1 to 6, `cargo fmt`, clippy with `-D warnings` and
+    `nova fmt` were clean (in Task 1, `nova fmt` without `tests/dom`,
+    which does not exist yet);
   - `Cargo.lock` did not change.
 - **The gate passed in the replay:** `tests/dom/counter.nova` under the
   fake DOM, as is and under `NOVA_GC_STRESS`, and in Chromium through
-  Playwright 1.56.1, with the script Task 7 adds; and the ten other DOM
+  Playwright 1.56.1, with the script Task 7 adds; and the eleven other DOM
   programs.
 - **On the last commit, in the replay:**
-  - the full suite gave 2256 passed, 1 failed (the IPv6 test) and 10
+  - the full suite gave 2257 passed, 1 failed (the IPv6 test) and 10
     ignored, against the baseline's 2233, 1 and 10;
   - clippy with `-D warnings` and both formatters were clean;
   - hello world was 2,159 and 2,822 bytes by `gzip -9`, where it was
     2,159 and 2,313 (decision 14).
-- **All 19 mutants** in Task 9 failed their named tests, with the results
+- **All 23 mutants** in Task 9 failed their named tests, with the results
   given, run on the replay's last commit.
-- @@FACTCHECK@@
+- **A fresh read-only fact-check** read the first draft against the spec,
+  the prototype and the captured runs. It found every patch block, count
+  and quoted message right, and found what follows, each fixed here; the
+  replay and the mutants then ran again, and the figures above are that
+  second run's:
+  - a code fault: a task a click spawned, polled by the click's turn,
+    could call `block_on` and run a second executor inside the poll, then
+    panic at its next `.await` with an internal message; `block_on` now
+    refuses a poll in progress too (decision 23, mutant 20);
+  - tests that passed without the code they named: removing a listener
+    or clearing a timer twice, where nothing had taken the entry between;
+    the listeners and timers programs now remove and clear again after
+    another has taken the entry (mutants 21 to 23); and the nested
+    program's output could not show a collection inside the outer
+    handler, which now makes garbage after the inner click (mutants 13 and
+    14);
+  - departures the draft did not record: decisions 7, 10, 21 and 25 to 28
+    now say how they differ from the spec, and decision 26 why `handles`
+    turns by sleeping, not by clicks, while the counter now checks each
+    click's handle;
+  - the fake DOM called a listener removed earlier in the same dispatch,
+    which a browser does not, and the shim's listener made a handle after
+    the program ended; both are fixed (decisions 10 and 25);
+  - records that said what the code does not: ADR 0041 on a DOM function's
+    cost and on forged handles, `13-RUNTIME.md`'s "three more roots", and
+    the CHANGELOG's and `20-STDLIB.md`'s E0093 for a module no `import`
+    reaches; `std/rt`'s header, which said no function is `pub`;
+  - mutant 17's text, which occurred twice; the `extern "js"` refused in
+    `lower_tests.rs`, which now takes a record, as spec §10.2 says;
+    `fetch_block_on`, which now runs under stress too; the file map; and
+    Task 1's `nova fmt` check, which named a directory Task 2 makes.
 - **Faults found while prototyping, fixed here:**
   - A harness that clicked before `main` had made the button failed now
     and then; `scheduler.mjs` waits for the button, and `main` sleeps
@@ -94,8 +127,6 @@ approved by the user on 2026-10-16.
     (decision 27).
   - The state words' comment in `std/rt` named a depth word that no code
     has (decision 9).
-  - ADR 0041's first wording said a forged handle reaches no other
-    object; decision 5 says what it can reach.
 
 ## Global Constraints
 
@@ -179,7 +210,8 @@ approved by the user on 2026-10-16.
   - the workspace's clippy, `cargo clippy --locked --all-targets
     --all-features -- -D warnings`, as CI runs it;
   - `cargo run --locked -q -p nova-cli -- fmt --check std examples
-    tests/wasm tests/dom`, when it changes a `.nova` file.
+    tests/wasm tests/dom`, when it changes a `.nova` file; in Task 1,
+    before `tests/dom/` exists, without `tests/dom`.
 
   It ends with one commit. A difference from an `Expected:` is fixed in
   the smallest way and recorded in the ledger as a ruling, with its cost if
@@ -194,37 +226,48 @@ in the task that owns the code:
    no more than a browser → the counter, listeners, timers, nested and
    fetch programs under `NOVA_GC_STRESS` (Tasks 4 to 6), the counter's
    `[1, 1, 1, 1]` closures in use, and mutant 11.
-2. **A handle released while a value holds it, or never released:** the
+2. **A closure entry released twice,** after another listener or timer
+   took it, so the other one's closure stops being called: a removed
+   listener's and a timer's entry is zeroed where it is released →
+   `listeners_run_until_removed` and `timers_run_in_order_until_cleared`,
+   which remove and clear again once the entry is another's (Tasks 4 and
+   5), and mutants 21 to 23.
+3. **A handle released while a value holds it, or never released:** the
    registry is weak, walked after each sweep →
    `handles_are_released_when_no_value_holds_them` (Task 3), which bounds
-   the shim's own count of live slots, and mutants 9 and 10.
-3. **The collector running with a Nova frame on the WASM stack,** through
+   the shim's own count of live slots, the counter's handles per click
+   (Task 4), and mutants 9 and 10.
+4. **The collector running with a Nova frame on the WASM stack,** through
    a call from JS inside another: only the outermost call runs a turn →
    `a_nested_call_from_js_waits_for_the_outer_one` (Task 4), mutants 13
    and 14.
-4. **A page that stops answering, or a program that never ends:** one
+5. **A page that stops answering, or a program that never ends:** one
    timer at most, a sooner turn replacing a later one; `-1` resolves
    `init`; `-2` sets no timer and reports no deadlock →
    `a_sooner_turn_replaces_a_later_timer`, `timers_run_in_order_until_cleared`,
    `fetch_waits_for_the_reply` (Tasks 4 to 6), mutants 16 and 19.
-5. **A panic in a listener that leaves the program running,** or one a
+6. **A panic in a listener that leaves the program running,** or one a
    browser swallows mid-handler → `a_panic_in_a_listener_ends_the_program`
    (Task 4), mutant 15.
-6. **A JS exception that escapes as a JS error** instead of a Nova panic
+7. **A JS exception that escapes as a JS error** instead of a Nova panic
    naming the function, and a forged `Element` → the shim's unit test,
    `a_forged_element_panics` (Tasks 2 and 3), mutants 7 and 8; decision 5
    says what a forged value can still reach.
-7. **A project broken by the reserved names,** or one that takes them
+8. **A project broken by the reserved names,** or one that takes them
    unnoticed → the E0093 and package-name tests (Task 1), mutants 3 and 4;
    the index and the repository hold neither name (decision 31).
-8. **A `fetch` inside `block_on`,** which JS can never answer while
-   `block_on` holds the thread → `a_fetch_in_block_on_panics` (Task 6),
-   mutant 17.
+9. **`block_on` where it cannot work:** a `fetch` inside it, which JS can
+   never answer while `block_on` holds the thread, and a task that calls
+   it from a click's turn, which would run a second executor inside a poll
+   → `a_fetch_in_block_on_panics` (Task 6),
+   `block_on_in_a_task_a_click_spawned_panics` (Task 4), mutants 17 and
+   20.
 ## Decisions: where this plan settles what the spec leaves open
 
 Each was a ruling while prototyping; each is open to the user's review.
-Decisions 2, 3, 5, 6, 7, 9, 11, 13, 14, 16, 17, 19, 24 and 26 differ from a
-sentence of the approved spec, and decision 29 from its list of crates.
+Decisions 2, 3, 5, 6, 7, 9, 10, 11, 13, 14, 16, 17, 19, 21, 24, 25, 26, 27
+and 28 differ from a sentence of the approved spec, and decision 29 from
+its list of crates.
 
 ### The language
 
@@ -270,9 +313,11 @@ sentence of the approved spec, and decision 29 from its list of crates.
    Spec §7.1 reaches the host future "through a routed builtin".
 7. **A token is a handle of the shim's one table,** boxed as a node is and
    released by the collector; the wait object holds `done`, then `status`,
-   `ok` and `body`, or `error`, which `dom_fetch_*` read. Spec §7.1 keeps
-   "a table of pending waits, as it keeps handles", and has `fetch` free
-   its token.
+   `ok` and `body`, or `error`, which `dom_fetch_*` read. A park on a token
+   holds it negated, where a park on a task holds its id plus 1, so the
+   sign tells them apart. Spec §7.1 keeps "a table of pending waits, as it
+   keeps handles", has `fetch` free its token, and marks a token's park
+   "with a flag".
 8. **The state words: 88 the handle registry, 96 the closure table.** Each
    is a 24-byte leaf block, made at first use: a leaf table's address,
    the entries used, and the capacity, which doubles. The registry's
@@ -288,9 +333,12 @@ sentence of the approved spec, and decision 29 from its list of crates.
    `nova_call(id, arg)`. Only JS knows a call is nested: a listener a
    `dom_*` function dispatches runs inside that function's JS.
 10. **A closure entry's id is its index plus 1;** 0 marks a free entry,
-    which the next registration takes. Releasing a free or unknown id
-    changes nothing; calling a free entry calls nothing, and the call still
-    runs its turn.
+    and registration takes the first free one it finds by a scan of the
+    entries, where spec §5.1 keeps "a free list". Releasing a free or
+    unknown id changes nothing; calling a free entry calls nothing, and the
+    call still runs its turn. A listener's JS side is removed before its
+    entry is released, and a browser does not call a listener removed
+    during a dispatch, so only a forged id reaches a free entry.
 11. **`closure_word(f)` is a second WASM-only builtin,** a `fn(Int)`
     closure's address as an `Int`, which `std/dom` passes to
     `rt_closure_register`. Both builtins are in every std module's scope
@@ -350,16 +398,27 @@ sentence of the approved spec, and decision 29 from its list of crates.
     timeout that fires releases its own entry. Spec §6.1 has `target:
     Element` and `Timer { entry: Int, … }`.
 20. **A listener's and a timer's JS side is a handle too,** `js`: the JS
-    function, or the timer's id. `remove` and `clear` name it; doing either
-    twice does nothing.
-21. **`query_selector_all` takes one handle, to a JS array,** and reads it
-    with `dom_list_len` and `dom_list_item`; the array goes with its box.
+    function, or the timer's id. `remove` and `clear` name it, then zero
+    the entry's id where they release it, so doing either again releases
+    nothing, though another listener or timer has taken the entry since.
+21. **The JS functions are named for the JS they run, with `dom_`:**
+    `dom_listen`, `dom_unlisten`, `dom_window_listen`, `dom_query_all`,
+    `dom_query_selector_in`, `dom_has_attribute`, `dom_event_*`,
+    `dom_clear_timeout` and `dom_clear_interval`, `dom_fetch_*`. Some Nova
+    functions call two: `attribute` asks `dom_has_attribute`, then
+    `dom_attribute`; `query_selector_all` takes one handle, to a JS array,
+    and reads it with `dom_list_len` and `dom_list_item`, the array going
+    with its box. Spec §6.2 names each JS function after the Nova one.
 22. **`fetch_with` sends the headers as `name: value` lines in one
     string,** and an empty string sends none, as an empty body does.
 23. **A token wait inside `block_on` is a panic:** "a task waits for JS,
     as `fetch` does, and JS cannot answer while block_on holds the thread;
     await it from an `async fn main` instead" (`a_fetch_in_block_on_panics`).
-    The spec leaves `block_on` open.
+    And `block_on` from a task is re-entrant wherever the task runs: the
+    check reads the poll in progress too, since a task a click spawned runs
+    in the click's turn, where no loop has set 4.1's flag
+    (`block_on_in_a_task_a_click_spawned_panics`). The spec leaves
+    `block_on` open.
 
 ### The fake DOM and the tests
 
@@ -367,21 +426,41 @@ sentence of the approved spec, and decision 29 from its list of crates.
     `click()`. `std/dom` has no way to focus an element, so a blur on
     removal could not be reached. Spec §9 lists "a blur when a focused
     element is removed".
-25. **The fake DOM keeps an exception a listener throws, in `uncaught`,**
-    as a browser reports it and goes on; decision 4's `ended` check then
-    stops the outer handler.
-26. **Selectors are part of `build`,** matching and not, where spec §10.2
-    lists a program of their own. Five tests the spec does not name:
-    `scheduler` (one timer, a sooner turn first), `fetch_block_on`,
+25. **The fake DOM's events are its own `Target`, not Node's
+    `EventTarget`,** where spec §9 names Node's. Node's reports an
+    exception a listener throws as an uncaught error, which would end the
+    harness; the fake keeps it, in `uncaught`, as a browser reports it and
+    goes on, and decision 4's `ended` check then stops the outer handler.
+    It bubbles to the document and the window itself, and skips a listener
+    removed earlier in the same dispatch, as a browser does.
+26. **The DOM programs differ from spec §10.2's list in three ways.**
+    - Selectors are part of `build`, matching and not, where the spec
+      lists a program of their own.
+    - `handles` makes and drops its nodes over 50 turns of an `async fn
+      main`, where the spec has 50 clicks: Task 3 comes before listeners.
+      The click's path is the counter's, whose stress run checks that each
+      click's event handle is released at the end of its call.
+    - The refused `extern "js"` with a record parameter is in
+      `lower_tests.rs`, a stand-in std module being the only place such a
+      block can be written.
+
+    Six `wasm_tests` the spec does not name: `scheduler` (one timer, a
+    sooner turn first), `fetch_block_on`, `reentrant`
+    (`block_on_in_a_task_a_click_spawned_panics`),
     `a_listener_exports_the_call_and_the_turn`,
-    `std_rts_functions_are_std_internal`, and `a_forged_element_panics`
-    as a test of its own.
-27. **Each DOM program's stress run checks that the collector ran,** or,
-    for `build`, whose `main` registers nothing, that it did not.
+    `std_rts_functions_are_std_internal`, and `a_forged_element_panics` as
+    a test of its own.
+27. **Each DOM program runs twice, as is and under stress, and the stress
+    run checks that the collector ran;** but for `build`, whose `main`
+    registers nothing, it checks that the collector did not, where spec
+    §10.2 has every stress run "show collections" (decision 13).
 28. **The browser script takes `dist/` and a directory holding
     `node_modules/playwright`.** The job installs `playwright@1.56.1` with
     `npm install --no-save --prefix "$RUNNER_TEMP/pw"`, then Chromium with
-    that install's `playwright install --with-deps chromium`.
+    that install's own `node_modules/.bin/playwright install --with-deps
+    chromium`, where spec §10.3 writes `npx playwright install`: the
+    binary path names the pinned copy, which `npx` might not find outside
+    the prefix.
 29. **`nova-driver` changes,** where spec §11 does not list it: E0093 is
     its loader's, and its unit test pins the two name lists.
 30. **The `nova new` test gains `ui`**, refused by `check_name`.
@@ -427,8 +506,8 @@ sentence of the approved spec, and decision 29 from its list of crates.
 | `crates/nova-codegen-wasm/src/shim.rs` | 2-6 | `js_function`, which parts a shim carries |
 | `crates/nova-codegen-wasm/src/shim/{dom,dom_call,dom_fetch,run}.js` | 2, 4, 6 | Handles, `guard`, calls from JS, `fetch`'s token, the scheduler |
 | `std/lib.rs` | 1, 2 | Embeds `std/dom` |
-| `std/dom/lib.nova` | 1-6 | The module |
-| `std/rt/lib.nova` | 2-6 | Boxes and the registry, the closure table, `rt_call`, token waits, `rt_wake` |
+| `std/dom/lib.nova` | 1, 2, 4, 5, 6 | The module |
+| `std/rt/lib.nova` | 2, 3, 4, 6 | Boxes and the registry, the closure table, `rt_call`, `block_on` in a poll, token waits, `rt_wake` |
 | `crates/nova-cli/tests/{wasm_tests,project}.rs` | 1-6 | The checks, the DOM programs |
 | `crates/nova-mir/tests/lower_tests.rs` | 2 | `extern "js"` in std |
 | `crates/nova-pm/tests/manifest.rs` | 1 | The package names |
@@ -1077,8 +1156,8 @@ decisions 1, 2, 4, 5, 21, 26 and 27.
   - `lower_tests.rs`'s `a_std_extern_js_block_is_wasms_alone`: a stand-in
     std module, passed as `extra_std`, declares an `extern "js"` function
     of `String`, `Int`, `Float` and `Bool`; on WASM it checks and records
-    `ExternAbi::Js`, a `Bytes` parameter is E0900, and natively the block
-    is E0900, "only the C ABI is supported".
+    `ExternAbi::Js`, a record parameter is E0900, and natively the block is
+    E0900, "only the C ABI is supported".
   - `tests/dom/fake_dom.mjs`, spec §9 and decision 24: nodes, elements
     and text; attributes and the six properties; selectors by tag, `#id`,
     `.class` and `[attr]`, compound, with descendants; events that bubble
@@ -1126,7 +1205,9 @@ decisions 1, 2, 4, 5, 21, 26 and 27.
     `element_by_id`; and `Element`'s methods of spec §6.2 from `tag` to
     `query_selector`, and `is_same`, each with a `///` doc.
   - **`std/rt/lib.nova`:** `rt_handle_box(id)`, a 16-byte leaf holding
-    the handle, then 0; `rt_handle_id(b)`. Task 3 registers the boxes.
+    the handle, then 0; `rt_handle_id(b)`. Task 3 registers the boxes. Its
+    header no longer says no function is `pub`: the few that are, are for
+    std's modules (decision 6).
   - **`std/lib.rs`:** `RT`'s doc: its public items are for std's modules.
 - [ ] **Step 4: Run.**
   - `W`. Expected: `175 passed`.
@@ -1228,16 +1309,17 @@ index 1028bb4..78b4ddd 100644
  /// Node what its `.stdout` file says the native build prints.
  fn gate_program(name: &str) {
 diff --git a/crates/nova-mir/tests/lower_tests.rs b/crates/nova-mir/tests/lower_tests.rs
-index fe7d5f4..516ab24 100644
+index fe7d5f4..007b4fa 100644
 --- a/crates/nova-mir/tests/lower_tests.rs
 +++ b/crates/nova-mir/tests/lower_tests.rs
-@@ -2005,3 +2005,78 @@ fn a_wasm_build_of_an_async_main_holds_the_event_loop() {
+@@ -2005,3 +2005,80 @@ fn a_wasm_build_of_an_async_main_holds_the_event_loop() {
          assert!(names.contains(&f.as_str()), "{f}: {names:?}");
      }
  }
 +
 +/// A std module's `extern "js"` block on WASM: its functions take and
-+/// return `Int`, `Float`, `Bool` and `String`, and anything else is E0900;
++/// return `Int`, `Float`, `Bool` and `String`, and anything else, a record
++/// here, is E0900;
 +/// MIR records each called one with the JS ABI. Natively, std's `"js"` is
 +/// E0900 as a user's would be (spec 4.2 §3.1). The std module is a stand-in
 +/// passed as `extra_std`, the mechanism `nova test` uses for `std/test`.
@@ -1247,8 +1329,9 @@ index fe7d5f4..516ab24 100644
 +
 +    let stub = "extern \"js\" {\n    fn lower_tests_js_text(s: String, n: Int, f: Float, b: Bool) -> String\n}\n\
 +                pub fn lower_tests_js_call() -> String { lower_tests_js_text(\"x\", 1, 2.0, true) }\n";
-+    let bad = "extern \"js\" {\n    fn lower_tests_js_bytes(b: Bytes)\n}\n\
-+               pub fn lower_tests_js_bad() { lower_tests_js_bytes(bytes_from_string(\"x\")) }\n";
++    let bad = "pub record LowerTestsPair { a: Int }\n\
++               extern \"js\" {\n    fn lower_tests_js_pair(p: LowerTestsPair)\n}\n\
++               pub fn lower_tests_js_bad() { lower_tests_js_pair(LowerTestsPair { a: 1 }) }\n";
 +    let resolve = |target: CompileTarget, std_src: &'static str, main: &str| {
 +        let (tokens, _) = lex(main, FileId::DUMMY);
 +        let (ast, _) = parse(&tokens, FileId::DUMMY);
@@ -2602,10 +2685,22 @@ index 3a6777a..e50f682 100644
  
  /// Every documented module, by its directory under `std/`: all but
 diff --git a/std/rt/lib.nova b/std/rt/lib.nova
-index 7eb495f..2a48809 100644
+index 7eb495f..4147c78 100644
 --- a/std/rt/lib.nova
 +++ b/std/rt/lib.nova
-@@ -1331,6 +1331,23 @@ fn rt_turn() -> Int {
+@@ -6,7 +6,10 @@
+ // docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md).
+ // Where a native build calls a `nova-runtime` function, MIR calls the
+ // function here of the same name with an `rt_` prefix, and each is a port of
+-// that one, with the same results. None is `pub`, so no program sees them.
++// that one, with the same results. The few that are `pub` are for std's
++// other modules, which alone see `std/rt`'s names (spec
++// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
++// §5), so no program sees them.
+ //
+ // A runtime value is an `Int` address. A `String` or `Bytes` value is a
+ // 16-byte header: its length at offset 0, and at offset 8 the address of its
+@@ -1331,6 +1334,23 @@ fn rt_turn() -> Int {
      if left % 1000000 == 0 { ms } else { ms + 1 }
  }
  
@@ -2840,10 +2935,10 @@ index 3f7ea2f..663fe8a 100644
      })
  }
 diff --git a/std/rt/lib.nova b/std/rt/lib.nova
-index 2a48809..99943f5 100644
+index 4147c78..0a3a847 100644
 --- a/std/rt/lib.nova
 +++ b/std/rt/lib.nova
-@@ -15,10 +15,10 @@
+@@ -18,10 +18,10 @@
  // target's std sees.
  
  // The runtime's state words, at fixed addresses below the data segment
@@ -2858,7 +2953,7 @@ index 2a48809..99943f5 100644
  
  // The allocator (spec 4.1 §6.2), ported from `nova-runtime`'s
  // `gc/pages.rs`. Memory from the first 64 KiB boundary at or above
-@@ -1336,11 +1336,49 @@ fn rt_turn() -> Int {
+@@ -1339,11 +1339,49 @@ fn rt_turn() -> Int {
  // §4): a box is a 16-byte leaf holding a handle of the shim's table, then 0.
  // A record holds the box's address in an `Int` field, which the collector,
  // being conservative, reads as a pointer.
@@ -2910,7 +3005,7 @@ index 2a48809..99943f5 100644
      b
  }
  
-@@ -1394,9 +1432,16 @@ fn gc_collect() {
+@@ -1397,9 +1435,16 @@ fn gc_collect() {
              id = id + 1
          }
      }
@@ -2927,7 +3022,7 @@ index 2a48809..99943f5 100644
      let count = mem_load64(GC_COUNT) + 1
      mem_store64(GC_COUNT, count)
      let bytes = mem_load64(m + 56)
-@@ -1409,10 +1454,36 @@ fn gc_collect() {
+@@ -1412,10 +1457,36 @@ fn gc_collect() {
          eprintln(
              "nova-gc: collection ${count} freed ${freed} bytes, ${live} objects live (${bytes} bytes)",
          )
@@ -2969,10 +3064,10 @@ index 2a48809..99943f5 100644
 ### Task 4: Calls from JS: the closure table, the scheduler, listeners and events, the gate's counter
 
 Spec §1's gate, §5, §6.2's event, listener and window rows, §7.3; decisions
-4, 9 to 14, 16, 19, 20, 25 and 27.
+4, 9 to 14, 16, 19, 20, 23, 25 and 27.
 
 **Files:**
-- Create: `tests/dom/{counter,listeners,nested,panic,scheduler}.{nova,mjs,stdout}`
+- Create: `tests/dom/{counter,listeners,nested,panic,scheduler,reentrant}.{nova,mjs,stdout}`
 - Modify:
   - `crates/nova-resolver/src/lib.rs`, `crates/nova-typeck/src/check.rs`
   - `crates/nova-mir/src/{lib,lower,mono}.rs`
@@ -2991,17 +3086,19 @@ Spec §1's gate, §5, §6.2's event, listener and window rows, §7.3; decisions
     listener adds `nova_call nova_turn nova_gc_switches`.
   - `the_counter_counts_clicks`, the gate: three clicks, and the count
     reads 3; under stress, four collections, `main`'s and each click's,
-    each with one closure in use.
+    each with one closure in use; `main`'s releases three handles and each
+    click's one, its event's, and one stays live, the label's.
   - `listeners_run_until_removed`: a removed listener runs no more, and
-    removing it twice does nothing; `stop_propagation`, `prevent_default`
-    (the dispatch returns `false`), `kind`, `target` and `key`; a window
-    listener, whose event has no target. Under stress, seven closures
-    after `main`, one of them the stopper added again in the entry its
-    removal freed, and six at the end.
+    removing it again, once a new listener has taken its entry, releases
+    nothing; `stop_propagation`, `prevent_default` (the dispatch returns
+    `false`), `kind`, `target` and `key`; a window listener, whose event
+    has no target. Under stress, seven closures after `main`, one of them
+    the stopper added again in the entry its removal freed, and six at the
+    end.
   - `a_nested_call_from_js_waits_for_the_outer_one`: a handler clicks
-    another element, whose handler makes garbage; the outer handler's
-    record survives, and under stress three collections run, `main`'s and
-    each outer click's.
+    another element, whose handler makes garbage, then makes more; the
+    outer handler's record survives it, and under stress three collections
+    run, `main`'s and each outer click's.
   - `a_panic_in_a_listener_ends_the_program`: the second click's handler
     clicks a button whose handler panics; the page keeps the panic, the
     outer handler goes no further, the third click calls nothing, and the
@@ -3009,10 +3106,15 @@ Spec §1's gate, §5, §6.2's event, listener and window rows, §7.3; decisions
   - `a_sooner_turn_replaces_a_later_timer`: `main` sleeps 1000 ms; a
     click spawns a task that sleeps 20 ms, whose line comes first; `init`
     resolves after `main`'s; the stress run collects.
-  - `fake_dom.mjs` keeps a listener's exception in `uncaught` and goes on
-    (decision 25).
-- [ ] **Step 2: Run, and see them fail.** `W`. Expected: `178 passed; 6
-  failed`, the six new tests, their builds refused with ``error[E0001]:
+  - `block_on_in_a_task_a_click_spawned_panics`: `reentrant`, whose click
+    spawns a task that calls `block_on`; it exits 134 with
+    `nova_rt_task_block_on called re-entrantly`, as is and under stress
+    (decision 23).
+  - `fake_dom.mjs` keeps a listener's exception in `uncaught` and goes on,
+    and skips a listener removed earlier in the same dispatch (decision
+    25).
+- [ ] **Step 2: Run, and see them fail.** `W`. Expected: `178 passed; 7
+  failed`, the seven new tests, their builds refused with ``error[E0001]:
   cannot find type `Event` `` and ``error[E0014]: no method
   `add_event_listener` on type `Element` ``.
 - [ ] **Step 3: The code.** `patch_block t4-code`:
@@ -3032,19 +3134,21 @@ Spec §1's gate, §5, §6.2's event, listener and window rows, §7.3; decisions
     the module has it, inside `run`, and resolves at the first -1 or at
     the end (decision 13).
   - **`shim/dom.js`:** `guard`'s `ended` check (decision 4); `call(id,
-    arg)` and `listener(id)` (Task 6 moves them to `shim/dom_call.js`).
+    arg)`, and `listener(id)`, which after the end makes no handle and
+    calls nothing (Task 6 moves both to `shim/dom_call.js`).
   - **`shim.rs`:** the listener, event and `click` functions; the guard
     test declares `ended`.
   - **`std/rt/lib.nova`:** `CALLS`, state word 96, and `calls()`;
     `rt_closure_register`, `rt_closure_release`, `calls_in_use`;
     `rt_call(id, arg, outer)` (decisions 9 and 10); `turn_end`, the end of
     `rt_turn` that `rt_call` shares; `gc_collect` marks the table and every
-    closure in it, and the `nova-dom:` line counts the closures.
+    closure in it, and the `nova-dom:` line counts the closures;
+    `rt_task_block_on` also refuses a poll in progress (decision 23).
   - **`std/dom/lib.nova`:** `Event`, `Listener` (decisions 19 and 20),
     `event_entry`, `window_add_event_listener`, `Element::click` and
     `add_event_listener`, `Listener::remove`, and `Event`'s five methods.
 - [ ] **Step 4: Run.**
-  - `W`. Expected: `184 passed`.
+  - `W`. Expected: `185 passed`.
   - `CARGO_INCREMENTAL=0 NOVA_REQUIRE_NODE=1 cargo test -p nova-codegen-wasm -p nova-typeck -p nova-resolver`.
     Expected: `486 passed` in all.
   - `L`. Expected: `59 passed`.
@@ -3057,7 +3161,7 @@ Spec §1's gate, §5, §6.2's event, listener and window rows, §7.3; decisions
 
 ````diff
 diff --git a/crates/nova-cli/tests/wasm_tests.rs b/crates/nova-cli/tests/wasm_tests.rs
-index b54be5e..4e396d8 100644
+index b54be5e..85a4d67 100644
 --- a/crates/nova-cli/tests/wasm_tests.rs
 +++ b/crates/nova-cli/tests/wasm_tests.rs
 @@ -974,9 +974,15 @@ fn a_freed_state_names_no_old_task() {
@@ -3092,7 +3196,7 @@ index b54be5e..4e396d8 100644
  }
  
  /// Under `NOVA_GC_STRESS` and `NOVA_GC_DEBUG`.
-@@ -1012,6 +1017,136 @@ fn std_dom_builds_a_page() {
+@@ -1012,6 +1017,161 @@ fn std_dom_builds_a_page() {
      assert!(live_after_each(&err).is_empty(), "{err}");
  }
  
@@ -3139,6 +3243,8 @@ index b54be5e..4e396d8 100644
 +/// The gate (spec 4.2 §1): a button and a count, and three clicks make the
 +/// count 3. Under stress the collector runs after `main` and after each
 +/// click, and the listener's closure, a root of std/rt's table, survives.
++/// Each click's event handle is released at the end of its call, and only
++/// the label's, which the closure holds, stays live.
 +#[test]
 +fn the_counter_counts_clicks() {
 +    dom_program("counter", &[]);
@@ -3148,6 +3254,11 @@ index b54be5e..4e396d8 100644
 +    }
 +    assert_eq!(live_after_each(&err).len(), 4, "{err}");
 +    assert_eq!(calls_after_each(&err), [1, 1, 1, 1], "{err}");
++    assert_eq!(
++        handles_released(&err),
++        [(3, 1), (1, 1), (1, 1), (1, 1)],
++        "{err}"
++    );
 +}
 +
 +/// Listeners: a removed one runs no more; `stop_propagation`,
@@ -3210,6 +3321,24 @@ index b54be5e..4e396d8 100644
 +        return;
 +    }
 +    assert!(!live_after_each(&err).is_empty(), "{err}");
++}
++
++/// `block_on` in a task is re-entrant wherever the task runs: one a click
++/// spawned, which the click's turn polls, panics as one under an `async fn
++/// main` does (spec 4.2 §5.2).
++#[test]
++fn block_on_in_a_task_a_click_spawned_panics() {
++    for env in [&[][..], &STRESS[..]] {
++        let Some(a) = dom_run("reentrant", env) else {
++            return;
++        };
++        let a = a.code(134);
++        let err = stderr(&a);
++        assert!(
++            err.contains("nova: panic: nova_rt_task_block_on called re-entrantly"),
++            "{err}"
++        );
++    }
 +}
 +
 +/// The entries of std/rt's table of closures JS may call in use after each
@@ -3290,7 +3419,7 @@ index 0000000..e4019e9
 +3
 +<body><p id="count">3</p><button id="add">add one</button></body>
 diff --git a/tests/dom/fake_dom.mjs b/tests/dom/fake_dom.mjs
-index d8fbd88..a592dbf 100644
+index d8fbd88..34d0254 100644
 --- a/tests/dom/fake_dom.mjs
 +++ b/tests/dom/fake_dom.mjs
 @@ -5,7 +5,12 @@
@@ -3307,12 +3436,15 @@ index d8fbd88..a592dbf 100644
  
  class FakeEvent {
    constructor(type, init = {}) {
-@@ -50,7 +55,13 @@ class Target {
+@@ -50,7 +55,16 @@ class Target {
      const list = this.listeners.get(event.type);
      if (!list) return;
      event.currentTarget = this;
 -    for (const fn of [...list]) fn.call(this, event);
 +    for (const fn of [...list]) {
++      // A listener removed earlier in this dispatch does not run, as in a
++      // browser.
++      if (!list.includes(fn)) continue;
 +      try {
 +        fn.call(this, event);
 +      } catch (e) {
@@ -3322,7 +3454,7 @@ index d8fbd88..a592dbf 100644
    }
    dispatchEvent(event) {
      event.target = this;
-@@ -395,6 +406,7 @@ class FakeWindow extends Target {
+@@ -395,6 +409,7 @@ class FakeWindow extends Target {
      // `fetch`'s answers, by "METHOD path" or by path, and what it was asked.
      this.routes = {};
      this.requests = [];
@@ -3360,13 +3492,14 @@ index 0000000..805d437
 +console.log(document.body.outerHTML);
 diff --git a/tests/dom/listeners.nova b/tests/dom/listeners.nova
 new file mode 100644
-index 0000000..c799882
+index 0000000..06cb592
 --- /dev/null
 +++ b/tests/dom/listeners.nova
-@@ -0,0 +1,68 @@
+@@ -0,0 +1,72 @@
 +// Listeners (spec
 +// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
-+// §5, §6.2): a removed listener runs no more and leaves std/rt's table;
++// §5, §6.2): a removed listener runs no more and leaves std/rt's table,
++// and removing it again does nothing, though its entry is another's now;
 +// `stop_propagation` and `prevent_default`; an event's kind, target and key;
 +// and a window listener, whose events have no target.
 +
@@ -3420,7 +3553,7 @@ index 0000000..c799882
 +        |e: Event| println("window saw ${e.kind()} at ${name(e.target())}"),
 +    )
 +    stopper.remove()
-+    stopper.remove()
++    let mut old = stopper
 +    stopper = inner.add_event_listener(
 +        "click",
 +        |e: Event| {
@@ -3431,6 +3564,9 @@ index 0000000..c799882
 +            }
 +        },
 +    )
++    // The new stopper took the old one's entry: removing the old one again
++    // releases nothing.
++    old.remove()
 +}
 diff --git a/tests/dom/listeners.stdout b/tests/dom/listeners.stdout
 new file mode 100644
@@ -3469,16 +3605,17 @@ index 0000000..1145e3e
 +}
 diff --git a/tests/dom/nested.nova b/tests/dom/nested.nova
 new file mode 100644
-index 0000000..22dab9a
+index 0000000..9c5e213
 --- /dev/null
 +++ b/tests/dom/nested.nova
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,40 @@
 +// A call from JS inside a call from JS (spec
 +// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
 +// §5.2): the outer handler holds a record only in its own frame, clicks
 +// another element, whose handler makes garbage, then reads the record. The
 +// inner call runs its handler only; the collector waits for the outer call
-+// to end, so under NOVA_GC_STRESS it never frees the record.
++// to end, so under NOVA_GC_STRESS it never frees the record, which the
++// garbage made after the inner click would otherwise overwrite.
 +
 +import dom
 +
@@ -3507,6 +3644,7 @@ index 0000000..22dab9a
 +        |e: Event| {
 +            let held = Held { name: "held ${churn(10)}", parts: [1, 2, 3] }
 +            inner.click()
++            let _ = churn(2000)
 +            println("outer still has ${held.name} ${held.parts[0] + held.parts[1] + held.parts[2]}")
 +        },
 +    )
@@ -3588,6 +3726,56 @@ index 0000000..0b90584d
 +clicked 2
 +clicked 3
 +1 kept by the page
+diff --git a/tests/dom/reentrant.mjs b/tests/dom/reentrant.mjs
+new file mode 100644
+index 0000000..1597470
+--- /dev/null
++++ b/tests/dom/reentrant.mjs
+@@ -0,0 +1,7 @@
++// Click once: the task the click spawns calls `block_on`.
++import { install } from "./fake_dom.mjs";
++install();
++const { default: init } = await import("./dist/app.js");
++await init();
++document.querySelector("button").click();
++console.log("clicked");
+diff --git a/tests/dom/reentrant.nova b/tests/dom/reentrant.nova
+new file mode 100644
+index 0000000..b59977c
+--- /dev/null
++++ b/tests/dom/reentrant.nova
+@@ -0,0 +1,23 @@
++// `block_on` in a task is re-entrant wherever the task runs (spec
++// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
++// §5.2): here a click spawns the task, and the click's turn polls it, as an
++// `async fn main`'s turn would.
++
++import dom
++
++async fn inner() -> Int {
++    sleep(Duration::from_millis(1)).await
++    7
++}
++
++async fn task() {
++    println("task runs")
++    let n = block_on(inner())
++    println("never ${n}")
++}
++
++fn main() {
++    let button = create_element("button")
++    body().append_child(button)
++    let _ = button.add_event_listener("click", |e: Event| { let _ = spawn(task()) })
++}
+diff --git a/tests/dom/reentrant.stdout b/tests/dom/reentrant.stdout
+new file mode 100644
+index 0000000..6fca728
+--- /dev/null
++++ b/tests/dom/reentrant.stdout
+@@ -0,0 +1,2 @@
++task runs
++clicked
 diff --git a/tests/dom/scheduler.mjs b/tests/dom/scheduler.mjs
 new file mode 100644
 index 0000000..69920b9
@@ -3762,7 +3950,7 @@ index 663fe8a..eb03c8a 100644
               text = (s) => s;\n\
               const create = guard(\"dom_create_element\", (tag) => handle(document.createElement(text(tag))));\n\
 diff --git a/crates/nova-codegen-wasm/src/shim/dom.js b/crates/nova-codegen-wasm/src/shim/dom.js
-index 4bf5d17..b387fc7 100644
+index 4bf5d17..cb79157 100644
 --- a/crates/nova-codegen-wasm/src/shim/dom.js
 +++ b/crates/nova-codegen-wasm/src/shim/dom.js
 @@ -38,11 +38,15 @@ function novaPanic(message) {
@@ -3783,7 +3971,7 @@ index 4bf5d17..b387fc7 100644
      } catch (e) {
        if (
          e instanceof NovaPanic ||
-@@ -57,3 +61,14 @@ function guard(name, f) {
+@@ -57,3 +61,17 @@ function guard(name, f) {
      }
    };
  }
@@ -3794,9 +3982,12 @@ index 4bf5d17..b387fc7 100644
 +  run(() => wasm.nova_call(id, arg, depth === 1 ? 1n : 0n));
 +}
 +
-+// A JS listener that calls entry `id` with the event's handle.
++// A JS listener that calls entry `id` with the event's handle; after the
++// end of the program, it makes no handle and calls nothing.
 +function listener(id) {
-+  return (event) => call(id, handle(event));
++  return (event) => {
++    if (!ended) call(id, handle(event));
++  };
 +}
 diff --git a/crates/nova-codegen-wasm/src/shim/run.js b/crates/nova-codegen-wasm/src/shim/run.js
 index 143d17f..35a97d8 100644
@@ -4268,10 +4459,10 @@ index 4f35c8e..21b878b 100644
 +    pub fn stop_propagation(self) { dom_stop_propagation(rt_handle_id(self.box)) }
 +}
 diff --git a/std/rt/lib.nova b/std/rt/lib.nova
-index 99943f5..7f0ad24 100644
+index 0a3a847..76d6dfd 100644
 --- a/std/rt/lib.nova
 +++ b/std/rt/lib.nova
-@@ -15,10 +15,10 @@
+@@ -18,10 +18,10 @@
  // target's std sees.
  
  // The runtime's state words, at fixed addresses below the data segment
@@ -4286,7 +4477,19 @@ index 99943f5..7f0ad24 100644
  
  // The allocator (spec 4.1 §6.2), ported from `nova-runtime`'s
  // `gc/pages.rs`. Memory from the first 64 KiB boundary at or above
-@@ -1319,6 +1319,14 @@ fn rt_task_main(fut: Int) {
+@@ -1198,7 +1198,10 @@ fn rt_task_spawn(fut: Int) -> Int { spawn_task(exec(), fut, false) }
+ // `thread::sleep` holds the thread.
+ fn rt_task_block_on(fut: Int) -> Int {
+     let e = exec()
+-    if mem_load64(e + 112) != 0 {
++    // Inside a poll, from a task, is re-entrant too: a task a call from JS
++    // spawned runs in that call's turn, where no loop has set the flag
++    // (spec 4.2 §5.2).
++    if mem_load64(e + 112) != 0 || mem_load64(e + 80) != 0 {
+         panic(
+             "nova_rt_task_block_on called re-entrantly: an async fn must not call block_on, which would run a second executor loop from inside the first one's frame",
+         )
+@@ -1322,6 +1325,14 @@ fn rt_task_main(fut: Int) {
  fn rt_turn() -> Int {
      let e = exec()
      wake(e, 0 - 1, time_now_nanos())
@@ -4301,7 +4504,7 @@ index 99943f5..7f0ad24 100644
      drain_turn(e)
      gc_turn_end()
      if mem_load64(e + 40) > 0 { return 0 }
-@@ -1331,6 +1339,91 @@ fn rt_turn() -> Int {
+@@ -1334,6 +1345,91 @@ fn rt_turn() -> Int {
      if left % 1000000 == 0 { ms } else { ms + 1 }
  }
  
@@ -4393,7 +4596,7 @@ index 99943f5..7f0ad24 100644
  // JS's objects, as `std/dom` holds them (spec
  // docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
  // §4): a box is a 16-byte leaf holding a handle of the shim's table, then 0.
-@@ -1437,6 +1530,19 @@ fn gc_collect() {
+@@ -1440,6 +1536,19 @@ fn gc_collect() {
          gc_mark(m, r)
          gc_mark(m, mem_load64(r))
      }
@@ -4413,7 +4616,7 @@ index 99943f5..7f0ad24 100644
      gc_trace(m)
      gc_sweep(m)
      if e != 0 { gc_prune(m, e) }
-@@ -1454,9 +1560,9 @@ fn gc_collect() {
+@@ -1457,9 +1566,9 @@ fn gc_collect() {
          eprintln(
              "nova-gc: collection ${count} freed ${freed} bytes, ${live} objects live (${bytes} bytes)",
          )
@@ -4441,9 +4644,12 @@ Spec §5.1's entries, §6.2's location, history and timer rows; decisions 19,
 
 - [ ] **Step 1: The tests.** `patch_block t5-tests`.
   - `timers_run_in_order_until_cleared`: a timeout of 1 ms; one of 10 ms,
-    cleared twice, which never runs; an interval of 40 ms that clears
-    itself at its third tick; and a timeout of 400 ms that clears the
-    first, which has run. `init` resolves first, after `main done`. Under
+    cleared, which never runs; an interval of 40 ms, which takes the
+    cleared timeout's entry and clears itself at its third tick, before
+    which the cleared timeout is cleared again; and a timeout of 400 ms
+    that sets one of 1 ms, which takes the first timeout's entry, and then
+    clears the first, which has run. Clearing again releases nothing, so
+    every line comes; `init` resolves first, after `main done`. Under
     stress the last `nova-dom:` line counts no closure in use: a timeout's
     entry leaves the table when it fires, and an interval's when it is
     cleared.
@@ -4452,7 +4658,7 @@ Spec §5.1's entries, §6.2's location, history and timer rows; decisions 19,
     read it; `set_location_hash` brings `hashchange`, and the harness's
     `history.back()` `popstate`, each after the call, to window
     listeners. The stress run collects.
-- [ ] **Step 2: Run, and see them fail.** `W`. Expected: `184 passed; 2
+- [ ] **Step 2: Run, and see them fail.** `W`. Expected: `185 passed; 2
   failed`, the two new tests, their builds refused: ``error[E0001]:
   cannot find function `location_href` in this scope``, and the same for
   `set_timeout`, `history_push` and the rest.
@@ -4466,7 +4672,7 @@ Spec §5.1's entries, §6.2's location, history and timer rows; decisions 19,
   - **`shim.rs`:** their twelve JS functions; a timer calls `call(id,
     0n)`.
 - [ ] **Step 4: Run.**
-  - `W`. Expected: `186 passed`.
+  - `W`. Expected: `187 passed`.
   - `CARGO_INCREMENTAL=0 NOVA_REQUIRE_NODE=1 cargo test -p nova-codegen-wasm`.
     Expected: `34 passed`.
 - [ ] **Step 5: The checks,** as the conventions list them.
@@ -4478,16 +4684,17 @@ Spec §5.1's entries, §6.2's location, history and timer rows; decisions 19,
 
 ````diff
 diff --git a/crates/nova-cli/tests/wasm_tests.rs b/crates/nova-cli/tests/wasm_tests.rs
-index 4e396d8..e4d64f2 100644
+index 85a4d67..47d8d89 100644
 --- a/crates/nova-cli/tests/wasm_tests.rs
 +++ b/crates/nova-cli/tests/wasm_tests.rs
-@@ -1133,6 +1133,34 @@ fn a_sooner_turn_replaces_a_later_timer() {
-     assert!(!live_after_each(&err).is_empty(), "{err}");
+@@ -1158,6 +1158,35 @@ fn block_on_in_a_task_a_click_spawned_panics() {
+     }
  }
  
 +/// Timers: a timeout, an interval cleared after three ticks, and a cleared
-+/// timeout that never runs, in order; `init` resolves while they are still
-+/// pending. Each entry of std/rt's table leaves it when its timeout fires
++/// timeout that never runs, in order; clearing a timer again, or one that
++/// has run, releases no entry another timer took; `init` resolves while
++/// they are still pending. Each entry of std/rt's table leaves it when its timeout fires
 +/// or its timer is cleared, so none is left at the end (spec 4.2 §6.2,
 +/// §7.3).
 +#[test]
@@ -4594,16 +4801,17 @@ index 0000000..16ecb19
 +console.log("waited");
 diff --git a/tests/dom/timers.nova b/tests/dom/timers.nova
 new file mode 100644
-index 0000000..a523e62
+index 0000000..bb5c0b6
 --- /dev/null
 +++ b/tests/dom/timers.nova
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,48 @@
 +// Timers (spec
 +// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
 +// §6.2): a timeout, an interval cleared from inside after three ticks, and
-+// a cleared timeout that never runs; clearing one that has run does
-+// nothing. Their times are far apart, so their lines keep their order
-+// however slow the machine. (`| |` is a closure with no parameters: `||`
++// a cleared timeout that never runs; clearing a timer again, or one that
++// has run, does nothing, though another timer has its entry by then. Their
++// times are far apart, so their lines keep their order however slow the
++// machine. (`| |` is a closure with no parameters: `||`
 +// comes with 4.4.)
 +
 +import dom
@@ -4613,7 +4821,6 @@ index 0000000..a523e62
 +fn main() {
 +    let first = set_timeout(1, | | println("timeout 1"))
 +    let never = set_timeout(10, | | println("never"))
-+    never.clear()
 +    never.clear()
 +    let mut ticks = Ticks { n: 0, timer: None }
 +    ticks.timer = Some(
@@ -4631,9 +4838,15 @@ index 0000000..a523e62
 +            },
 +        ),
 +    )
++    // The interval took the entry `never` left: clearing `never` again
++    // releases nothing.
++    never.clear()
 +    let last = set_timeout(
 +        400,
 +        | | {
++            // This timeout takes the entry `first` left when it ran, so
++            // clearing `first` now must release nothing either.
++            let _ = set_timeout(1, | | println("timeout after 400"))
 +            first.clear()
 +            println("timeout 400")
 +        },
@@ -4642,10 +4855,10 @@ index 0000000..a523e62
 +}
 diff --git a/tests/dom/timers.stdout b/tests/dom/timers.stdout
 new file mode 100644
-index 0000000..4cc92fd
+index 0000000..bfc8db7
 --- /dev/null
 +++ b/tests/dom/timers.stdout
-@@ -0,0 +1,8 @@
+@@ -0,0 +1,9 @@
 +main done
 +init resolved
 +timeout 1
@@ -4653,6 +4866,7 @@ index 0000000..4cc92fd
 +tick 2
 +tick 3
 +timeout 400
++timeout after 400
 +waited
 ````
 
@@ -4816,10 +5030,14 @@ Spec §6.2's fetch rows, §7; decisions 2, 7, 12, 15, 22, 23 and 27.
     and 404, a failure (`failed: connection refused`), and a POST with a
     header and a body, which the fake DOM records; then, after `init`, a
     click spawns a task that fetches, and waits on its token after the
-    call returns. The stress run collects.
+    call returns. The stress run collects. The harness waits 50 ms after
+    the click; the fake reply's 1 ms timer is set inside the click, by its
+    turn, and Node runs timers by deadline and settles promises between
+    them, so the reply has been printed when the wait ends.
   - `a_fetch_in_block_on_panics`: `block_on(fetch("/ok"))` from a
-    synchronous `main` exits 134 with decision 23's message.
-- [ ] **Step 2: Run, and see them fail.** `W`. Expected: `186 passed; 2
+    synchronous `main` exits 134 with decision 23's message, as is and
+    under stress.
+- [ ] **Step 2: Run, and see them fail.** `W`. Expected: `187 passed; 2
   failed`, the two new tests, their builds refused: ``error[E0001]:
   cannot find function `fetch` in this scope``, and the type errors that
   follow.
@@ -4845,7 +5063,7 @@ Spec §6.2's fetch rows, §7; decisions 2, 7, 12, 15, 22, 23 and 27.
     move from `shim/dom.js` to `shim/dom_call.js`, which a module gets with
     a listener or a timer; `fetch`'s six JS functions and `host_done`.
 - [ ] **Step 4: Run.**
-  - `W`. Expected: `188 passed`.
+  - `W`. Expected: `189 passed`.
   - `CARGO_INCREMENTAL=0 NOVA_REQUIRE_NODE=1 cargo test -p nova-codegen-wasm`.
     Expected: `34 passed`.
   - `L`. Expected: `59 passed`.
@@ -4858,10 +5076,10 @@ Spec §6.2's fetch rows, §7; decisions 2, 7, 12, 15, 22, 23 and 27.
 
 ````diff
 diff --git a/crates/nova-cli/tests/wasm_tests.rs b/crates/nova-cli/tests/wasm_tests.rs
-index e4d64f2..9f200e6 100644
+index 47d8d89..d3887c5 100644
 --- a/crates/nova-cli/tests/wasm_tests.rs
 +++ b/crates/nova-cli/tests/wasm_tests.rs
-@@ -1161,6 +1161,37 @@ fn the_location_and_history_change_in_place() {
+@@ -1187,6 +1187,39 @@ fn the_location_and_history_change_in_place() {
      assert!(!live_after_each(&err).is_empty(), "{err}");
  }
  
@@ -4883,17 +5101,19 @@ index e4d64f2..9f200e6 100644
 +/// names `async fn main` (spec 4.2 §7.2).
 +#[test]
 +fn a_fetch_in_block_on_panics() {
-+    let Some(a) = dom_run("fetch_block_on", &[]) else {
-+        return;
-+    };
-+    let a = a.code(134);
-+    assert!(
-+        stderr(&a).contains(
-+            "nova: panic: nova_rt_task_block_on: a task waits for JS, as `fetch` does, and JS cannot answer while block_on holds the thread; await it from an `async fn main` instead"
-+        ),
-+        "{}",
-+        stderr(&a)
-+    );
++    for env in [&[][..], &STRESS[..]] {
++        let Some(a) = dom_run("fetch_block_on", env) else {
++            return;
++        };
++        let a = a.code(134);
++        assert!(
++            stderr(&a).contains(
++                "nova: panic: nova_rt_task_block_on: a task waits for JS, as `fetch` does, and JS cannot answer while block_on holds the thread; await it from an `async fn main` instead"
++            ),
++            "{}",
++            stderr(&a)
++        );
++    }
 +}
 +
  /// The entries of std/rt's table of closures JS may call in use after each
@@ -5067,10 +5287,10 @@ index 0656795..fe2025d 100644
      for name in &imports {
          js.push_str(&entry(name)?);
 diff --git a/crates/nova-codegen-wasm/src/shim/dom.js b/crates/nova-codegen-wasm/src/shim/dom.js
-index b387fc7..1ed3255 100644
+index cb79157..1ed3255 100644
 --- a/crates/nova-codegen-wasm/src/shim/dom.js
 +++ b/crates/nova-codegen-wasm/src/shim/dom.js
-@@ -61,14 +61,3 @@ function guard(name, f) {
+@@ -61,17 +61,3 @@ function guard(name, f) {
      }
    };
  }
@@ -5081,16 +5301,19 @@ index b387fc7..1ed3255 100644
 -  run(() => wasm.nova_call(id, arg, depth === 1 ? 1n : 0n));
 -}
 -
--// A JS listener that calls entry `id` with the event's handle.
+-// A JS listener that calls entry `id` with the event's handle; after the
+-// end of the program, it makes no handle and calls nothing.
 -function listener(id) {
--  return (event) => call(id, handle(event));
+-  return (event) => {
+-    if (!ended) call(id, handle(event));
+-  };
 -}
 diff --git a/crates/nova-codegen-wasm/src/shim/dom_call.js b/crates/nova-codegen-wasm/src/shim/dom_call.js
 new file mode 100644
-index 0000000..d593c00
+index 0000000..769cd5b
 --- /dev/null
 +++ b/crates/nova-codegen-wasm/src/shim/dom_call.js
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,14 @@
 +
 +// A closure JS calls, entry `id` of std/rt's table (§5.2): only the
 +// outermost call into Nova runs a turn.
@@ -5098,9 +5321,12 @@ index 0000000..d593c00
 +  run(() => wasm.nova_call(id, arg, depth === 1 ? 1n : 0n));
 +}
 +
-+// A JS listener that calls entry `id` with the event's handle.
++// A JS listener that calls entry `id` with the event's handle; after the
++// end of the program, it makes no handle and calls nothing.
 +function listener(id) {
-+  return (event) => call(id, handle(event));
++  return (event) => {
++    if (!ended) call(id, handle(event));
++  };
 +}
 diff --git a/crates/nova-codegen-wasm/src/shim/dom_fetch.js b/crates/nova-codegen-wasm/src/shim/dom_fetch.js
 new file mode 100644
@@ -5344,10 +5570,10 @@ index ada7dc8..e1e4aac 100644
 +    }
 +}
 diff --git a/std/rt/lib.nova b/std/rt/lib.nova
-index 7f0ad24..4a150e0 100644
+index 76d6dfd..9951958 100644
 --- a/std/rt/lib.nova
 +++ b/std/rt/lib.nova
-@@ -1046,6 +1046,52 @@ fn stage_task(e: Int, id: Int) {
+@@ -1049,6 +1049,52 @@ fn stage_task(e: Int, id: Int) {
      mem_store64(e + 88, staged | 2)
  }
  
@@ -5400,7 +5626,7 @@ index 7f0ad24..4a150e0 100644
  // Release task `id`, once: its state stops being a root.
  fn release_id(e: Int, id: Int) {
      let flags = task_flags(e, id)
-@@ -1068,6 +1114,7 @@ fn poll_task(e: Int, id: Int) {
+@@ -1071,6 +1117,7 @@ fn poll_task(e: Int, id: Int) {
          } else {
              let mut target1 = 0
              if (staged & 2) != 0 { target1 = mem_load64(e + 104) + 1 }
@@ -5408,7 +5634,7 @@ index 7f0ad24..4a150e0 100644
              park(e, id, target1, staged & 1, mem_load64(e + 96))
          }
          return
-@@ -1205,7 +1252,14 @@ fn rt_task_block_on(fut: Int) -> Int {
+@@ -1211,7 +1258,14 @@ fn rt_task_block_on(fut: Int) -> Int {
      drain(e)
      while mem_load64(e + 64) > 0 {
          let at = earliest(e)
@@ -5424,7 +5650,7 @@ index 7f0ad24..4a150e0 100644
          while time_now_nanos() < at {}
          wake(e, 0 - 1, time_now_nanos())
          drain(e)
-@@ -1325,14 +1379,17 @@ fn rt_turn() -> Int {
+@@ -1331,14 +1385,17 @@ fn rt_turn() -> Int {
  // The rest of a turn, after what woke it (spec 4.2 §5.2, §7.2): run the
  // queue for up to `TURN_BUDGET`, collect if due, then 0 if tasks are still
  // queued, or else the milliseconds to the earliest deadline, or -1 when no
@@ -5444,7 +5670,7 @@ index 7f0ad24..4a150e0 100644
      let left = at - time_now_nanos()
      if left <= 0 { return 0 }
      let ms = left / 1000000
-@@ -1407,6 +1464,31 @@ pub fn rt_closure_release(id: Int) {
+@@ -1413,6 +1470,31 @@ pub fn rt_closure_release(id: Int) {
      mem_store64(mem_load64(c) + 8 * (id - 1), 0)
  }
  
@@ -5649,10 +5875,11 @@ Spec §12; decisions 5, 14 and 15.
   - **ADR 0041:** `extern "js"` in std only, and why not a builtin per
     function; handles released by the collector through a weak registry,
     and what a forged value reaches; the closure table as a root, every
-    call from JS a turn, the shim counting the nested calls; waits that JS
-    ends, and `block_on`; the importable std module and the reserved
-    names; the fake DOM and the browser job. Its consequences give the
-    scheduler's and the handle table's cost (decisions 14 and 15).
+    call from JS a turn, the shim counting the nested calls, `block_on` in
+    a task refused wherever it runs; waits that JS ends, and `block_on`;
+    the importable std module and the reserved names; the fake DOM and the
+    browser job. Its consequences give the cost of a DOM function, and the
+    scheduler's and the handle table's (decisions 14 and 15).
   - **ADR 0038:** a dated note: `std/dom` reaches the shim through
     `extern "js"`, not compiler-known functions.
   - **Dated notes,** each "Amended 2026-10-16" (`20-STDLIB.md`'s in its
@@ -5697,7 +5924,7 @@ index 0dd6b1e..96d50e9 100644
  | `nova-lsp` | The language server, `nova lsp`: diagnostics, completion, formatting, hover, definition, references, rename, code actions and semantic tokens over `nova_driver::analyze` (ADR 0029, ADR 0032, ADR 0033) |
  | `nova-test` | A stub, `publish = false`; the test runner is `nova-cli`'s `cmd/test.rs` |
 diff --git a/CHANGELOG.md b/CHANGELOG.md
-index a1ba98e..5601330 100644
+index a1ba98e..766e5ae 100644
 --- a/CHANGELOG.md
 +++ b/CHANGELOG.md
 @@ -31,9 +31,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -5716,9 +5943,9 @@ index a1ba98e..5601330 100644
  
  ### Changed
  
-+- **The names `dom` and `ui` are std's:** a project's module named either
-+  is E0093, and `nova new`, a manifest and `nova publish` refuse either as
-+  a package name.
++- **The names `dom` and `ui` are std's:** a project's module named either,
++  which an `import` reaches, is E0093, and `nova new`, a manifest and
++  `nova publish` refuse either as a package name.
  - **`nova-codegen-wasm` is published** with the next release: 20 crates.
  
  ## [0.3.2] - 2026-10-14
@@ -5739,10 +5966,10 @@ index 30e3a56..716cb04 100644
     - bindings generated from `web-sys` descriptors: `std/dom` is a written
 diff --git a/docs/adr/0041-std-dom-and-the-boundary-with-js.md b/docs/adr/0041-std-dom-and-the-boundary-with-js.md
 new file mode 100644
-index 0000000..afa87fd
+index 0000000..cb1f170
 --- /dev/null
 +++ b/docs/adr/0041-std-dom-and-the-boundary-with-js.md
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,99 @@
 +# ADR 0041 — `std/dom` and the boundary with JS
 +
 +## Status
@@ -5760,8 +5987,9 @@ index 0000000..afa87fd
 +  functions. Each such function so far had meant a `Builtin`, an
 +  `RtFunc`, a signature in the checker, and a shim entry.
 +- `nova-spec/30-FRONTEND.md` §9.3 passes JS objects by handle and
-+  functions "by a stable function pointer", but says nothing of when a
-+  handle is released or what keeps a function JS holds alive.
++  functions by a "trampoline via stable function pointer", but says
++  nothing of when a handle is released or what keeps a function JS holds
++  alive.
 +- ADR 0040's collector runs only at the end of a turn, and its roots were
 +  the executor's tables and tasks. A closure only JS holds was in none of
 +  them.
@@ -5792,14 +6020,17 @@ index 0000000..afa87fd
 +   - `std/rt` keeps a table of `fn(Int)` closures, whose entries the
 +     collector marks. `std/dom` wraps each handler in one.
 +   - `nova_call` calls an entry, then runs a turn: it wakes what is due,
-+     runs the queue, and collects. A call made while Nova code is on the
-+     stack (a handler that clicks another element) runs its handler only:
-+     the shim counts the calls in progress, and only the outermost runs
-+     the turn, so the collector never runs with a Nova frame on the stack.
++     runs the queue, and collects if a collection is due. A call made
++     while Nova code is on the stack (a handler that clicks another
++     element) runs its handler only: the shim counts the calls in
++     progress, and only the outermost runs the turn, so the collector
++     never runs with a Nova frame on the stack.
 +   - A module that registers such a closure exports `nova_call`, and the
 +     turn and the switches with it, so a program with a synchronous `main`
 +     collects at the end of each call.
 +   - A listener's closure stays a root until the listener is removed.
++   - A task that calls `block_on` panics as re-entrant wherever it runs,
++     in a call's turn as in an `async fn main`'s.
 +4. **A task can wait for JS.** It parks on a token, a handle the shim
 +   settles: `fetch` settles one with its reply, then calls `nova_wake`,
 +   which queues the tasks parked on it and runs a turn. A turn whose only
@@ -5817,8 +6048,9 @@ index 0000000..afa87fd
 +
 +## Consequences
 +
-+- **Adding a DOM function** is a line of Nova and an entry in the shim,
-+  with no change to the compiler.
++- **Adding a DOM function** is an `extern "js"` declaration and a wrapper
++  in `std/dom`, and an arm in `shim.rs`'s `js_function`: no new `Builtin`,
++  `RtFunc` or signature in the checker.
 +- **Handles and closures are the collector's,** so 4.3's reactive graph,
 +  whose effects JS calls back, needs no new mechanism.
 +- **Every shim carries the scheduler,** about 0.5 KB gzipped: hello world's
@@ -5859,7 +6091,7 @@ index 297951e..f60e3ce 100644
  - **Reactivity:** `signal`, `effect`, `memo`, `on_mount` and `on_cleanup`
    (`30-FRONTEND.md` §2).
 diff --git a/nova-spec/13-RUNTIME.md b/nova-spec/13-RUNTIME.md
-index 808593f..389f1b3 100644
+index 808593f..2d202a4 100644
 --- a/nova-spec/13-RUNTIME.md
 +++ b/nova-spec/13-RUNTIME.md
 @@ -632,6 +632,15 @@ a page that sleeps in it does not respond
@@ -5867,11 +6099,11 @@ index 808593f..389f1b3 100644
  §4 to §6; ADR 0040).
  
 +**Amended 2026-10-16 (branch `claude/loving-archimedes-frtf5q`):** 4.2 gives
-+`std/rt` three more roots and waits. A weak registry of the boxes that hold
-+JS handles is walked after each sweep, and a freed box's handle is
-+released. A table of closures JS may call is a root. A task can park on a
-+token the shim settles, as `fetch` does; a turn with only such waits returns
-+-2, and a call from JS, `nova_call` or `nova_wake`, is a turn
++`std/rt` a weak registry, a root, and waits that JS ends. The registry of
++the boxes that hold JS handles is walked after each sweep, and a freed box's
++handle is released. A table of closures JS may call is a root. A task can
++park on a token the shim settles, as `fetch` does; a turn with only such
++waits returns -2, and a call from JS, `nova_call` or `nova_wake`, is a turn
 +(`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 +§4, §5, §7; ADR 0041).
 +
@@ -5900,17 +6132,18 @@ index 4a003bf..4b9e8a4 100644
  
  ## 9. Debugging
 diff --git a/nova-spec/20-STDLIB.md b/nova-spec/20-STDLIB.md
-index b9310e5..e9afa4d 100644
+index b9310e5..025ef56 100644
 --- a/nova-spec/20-STDLIB.md
 +++ b/nova-spec/20-STDLIB.md
-@@ -49,6 +49,14 @@ ships, with `exit`; `spawn` and `env` do not exist.
+@@ -49,6 +49,15 @@ ships, with `exit`; `spawn` and `env` do not exist.
  in this index shipped by `v0.2.0` is recorded in
  `docs/adr/0025-phase-2-boundary.md`'s inventory table.
  
 +**AMENDED 2026-10-16 (branch `claude/loving-archimedes-frtf5q`): `std/dom`**,
 +a WASM build's only, is std's first module outside the prelude: a program
 +imports it with `import dom`, and natively that import is E0092. The names
-+`dom` and `ui` are std's, so no project module or package may take them.
++`dom` and `ui` are std's: no package may take them, and a project module
++under either that an `import` reaches is E0093.
 +Its functions are listed in
 +`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 +§6 (ADR 0041).
@@ -5974,7 +6207,7 @@ index 7553534..a626e1f 100644
   Expected:
   - `cargo fmt` and `nova fmt` print nothing, and clippy ends with
     `Finished`, with no warning or error;
-  - `2256 1 10`, against the baseline's `2233 1 10`: 23 new tests, 17
+  - `2257 1 10`, against the baseline's `2233 1 10`: 24 new tests, 18
     in `wasm_tests`, three in `nova-codegen-wasm`, and one each in
     `lower_tests`, `nova-resolver` and `nova-driver`;
   - the one failure is Task 0's IPv6 test.
@@ -6048,8 +6281,8 @@ index 7553534..a626e1f 100644
   9. **Handles never released to the shim.** `std/rt/lib.nova`, in
      `gc_release`: the line `host_release(mem_load64(p + 8))` goes.
      - Run `W handles_are_released_when_no_value_holds_them`.
-     - Expected: fails at the live bound: the lines release 200 handles
-       each, and the live count climbs, `202`, `402`, `602`, ….
+     - Expected: fails at the live bound: the lines release about 200
+       handles each, and the live count climbs, `202`, `402`, `602`, ….
   10. **A strong registry.** `std/rt/lib.nova`, in `gc_release`:
       `if gc_is_live(m, mem_load64(p)) {` becomes `if true {`.
       - Run `W handles_are_released_when_no_value_holds_them`.
@@ -6067,12 +6300,14 @@ index 7553534..a626e1f 100644
   13. **An inner call runs a turn.** `std/rt/lib.nova`, in `rt_call`: the
       line `if outer == 0 { return 0 - 2 }` goes.
       - Run `W a_nested_call_from_js_waits_for_the_outer_one`.
-      - Expected: fails; under stress 5 collections run, not 3: two inside
-        the outer handlers.
+      - Expected: fails under stress: a collection inside each outer
+        handler frees its record, and the garbage made after the inner
+        click overwrites it, so stdout reads `outer still has \0\0\0 39`
+        where `outer still has held 20 6` was expected.
   14. **Every call outermost.** `crates/nova-codegen-wasm/src/shim/dom_call.js`:
       `depth === 1 ? 1n : 0n` becomes `1n`.
       - Run `W a_nested_call_from_js_waits_for_the_outer_one`.
-      - Expected: fails as mutant 13 does, 5 collections, not 3.
+      - Expected: fails as mutant 13 does, with the same stdout.
   15. **A kept panic does not stop the outer handler.**
       `crates/nova-codegen-wasm/src/shim/dom.js`, in `guard`: the line
       `if (ended) throw new NovaPanic();` goes.
@@ -6084,7 +6319,10 @@ index 7553534..a626e1f 100644
       - Run `W a_sooner_turn_replaces_a_later_timer`.
       - Expected: fails; `main woke` comes before `quick woke`.
   17. **`block_on` waits on a token.** `std/rt/lib.nova`, in
-      `rt_task_block_on`: `if waits_on_host(e) {` becomes `if false {`.
+      `rt_task_block_on`: the line `            if waits_on_host(e) {`,
+      indented twelve spaces, before the `panic(` (the text occurs once
+      with its indentation, and once more in `turn_end` without it),
+      becomes `            if false {`.
       - Run `W a_fetch_in_block_on_panics`.
       - Expected: fails; stderr is the deadlock report, `nova: deadlock: 1
         task is parked and none can wake`.
@@ -6099,6 +6337,32 @@ index 7553534..a626e1f 100644
       - Run `W fetch_waits_for_the_reply`.
       - Expected: fails; stderr opens with `nova: deadlock: 1 task is
         parked and none can wake`, at the first `fetch`.
+  20. **`block_on` inside a poll.** `std/rt/lib.nova`, in
+      `rt_task_block_on`:
+      `if mem_load64(e + 112) != 0 || mem_load64(e + 80) != 0 {` becomes
+      `if mem_load64(e + 112) != 0 {`.
+      - Run `W block_on_in_a_task_a_click_spawned_panics`.
+      - Expected: fails; stdout holds `never 7`: a second executor ran the
+        inner future to its end inside the click's turn.
+  21. **A removed listener keeps its entry's id.** `std/dom/lib.nova`, in
+      `Listener::remove`: the line `self.entry = 0` goes.
+      - Run `W listeners_run_until_removed`.
+      - Expected: fails; removing the old stopper again releases the new
+        one's entry, and click 2 prints no `inner stopped it`.
+  22. **A timeout that ran keeps its entry's id.** `std/dom/lib.nova`, in
+      `set_timeout`'s closure: `rt_closure_release(slot.id)` and the line
+      after it, `slot.id = 0`, indented sixteen spaces, become
+      `rt_closure_release(slot.id)` alone.
+      - Run `W timers_run_in_order_until_cleared`.
+      - Expected: fails; clearing the first timeout releases the entry the
+        400 ms timeout's new one took, and `timeout after 400` never comes.
+  23. **A cleared timer keeps its entry's id.** `std/dom/lib.nova`, in
+      `Timer::clear`: `rt_closure_release(slot.id)` and the line after it,
+      `slot.id = 0`, indented eight spaces, become
+      `rt_closure_release(slot.id)` alone.
+      - Run `W timers_run_in_order_until_cleared`.
+      - Expected: fails; clearing `never` again releases the interval's
+        entry, and no `tick` line comes.
 - [ ] **Step 5: The size,** for the ledger.
 
   ```sh
@@ -6139,8 +6403,9 @@ index 7553534..a626e1f 100644
     - the gate's evidence: the counter under the fake DOM, as is and
       under stress, and in Chromium in the `browser` job; the other DOM
       programs; the sizes;
-    - the decisions, numbered as here, with 2, 3, 5, 6, 7, 9, 11, 13, 14,
-      16, 17, 19, 24, 26 and 29 marked as differing from the spec;
+    - the decisions, numbered as here, with 2, 3, 5, 6, 7, 9, 10, 11, 13,
+      14, 16, 17, 19, 21, 24, 25, 26, 27, 28 and 29 marked as differing
+      from the spec;
     - that `Cargo.lock` is unchanged, and that the index holds neither
       reserved name;
     - the mutants, and the review's findings and what came of each.
