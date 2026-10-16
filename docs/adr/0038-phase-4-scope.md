@@ -59,7 +59,9 @@ examples 08 to 10 "post-Phase 6", contradicting `30-FRONTEND.md` §12.
    - code splitting with `lazy()`;
    - npm resolution for `@js_import`, and user-level `@js_import` and
      `@js_export`. `std/dom` reaches the shim through compiler-known
-     functions instead;
+     functions instead. **Amended 2026-10-16 (branch
+     `claude/loving-archimedes-frtf5q`):** through `extern "js"`
+     declarations, which only std may write (ADR 0041);
    - source maps (`30-FRONTEND.md` §8; `14-CODEGEN.md` §9.2);
    - HMR that keeps state, `axum`, and `walrus`;
    - bindings generated from `web-sys` descriptors: `std/dom` is a written

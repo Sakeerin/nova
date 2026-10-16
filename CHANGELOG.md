@@ -31,9 +31,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nova check --target wasm`** checks a program against WASM's std and
   rules: an `extern` block is E0090, and a name from a std module WASM
   lacks is E0092, naming the module.
+- **`std/dom`** builds and changes a page from a program built for WASM:
+  elements and text, attributes and properties, listeners, selectors,
+  `location` and `history`, timers, and an async `fetch`. A program
+  imports it with `import dom`; it is std's first module outside the
+  prelude. A JS object's handle is released when no value holds it, and
+  each call from JS, such as a click, is a turn, so the collector runs in
+  a program whose `main` is synchronous too (ADR 0041).
+- **A CI job drives a WASM program in Chromium** through Playwright, which
+  only that job installs.
 
 ### Changed
 
+- **The names `dom` and `ui` are std's:** a project's module named either,
+  which an `import` reaches, is E0093, and `nova new`, a manifest and
+  `nova publish` refuse either as a package name.
 - **`nova-codegen-wasm` is published** with the next release: 20 crates.
 
 ## [0.3.2] - 2026-10-14
