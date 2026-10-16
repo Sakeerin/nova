@@ -253,6 +253,16 @@ starts at 128
 (`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
 §4.3, §6.1; ADR 0040).
 
+**Amended 2026-10-16 (branch `claude/loving-archimedes-frtf5q`):** in 4.2 the
+backend imports std's `extern "js"` functions from `env`, after the
+runtime's host functions and before `abort`, and lowers two more WASM-only
+builtins: `closure_word`, a closure's address as a word, and
+`closure_call`, a `call_indirect` of type `(env, i64)`. A module that
+registers a closure JS may call exports `nova_call`, one that waits on a
+token `nova_wake`, and either exports `nova_turn` and `nova_gc_switches`
+(`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+§3.1, §5, §7; ADR 0041).
+
 ---
 
 ## 9. Debugging

@@ -468,6 +468,16 @@ ADR 0040).
 - **Gate:** a WASM program that builds elements and handles clicks passes
   under the fake DOM, and in Chromium in the CI job.
 
+**Amended 2026-10-16 (branch `claude/loving-archimedes-frtf5q`):** by the
+user's decisions of 2026-10-16, std reaches JS through `extern "js"`, which
+only std may write; the collector releases JS handles, and a listener's
+closure is a root until it is removed; `fetch` is an `async fn`, on a wait
+JS ends; and `std/dom` is imported with `import dom`, which pulls decision
+6's importable std modules into 4.2, with `dom` and `ui` reserved. The gate
+is `tests/dom/counter.nova` under the fake DOM and in Chromium
+(`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`;
+ADR 0041).
+
 ### 4.3 — `std/ui`: reactivity and element builders
 - **Reactivity:** `signal`, `effect`, `memo`, `on_mount` and `on_cleanup`
   (`30-FRONTEND.md` §2).

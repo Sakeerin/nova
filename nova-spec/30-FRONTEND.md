@@ -148,6 +148,15 @@ pub record Element { /* opaque, wraps JS handle */ }
 pub record Event { /* opaque */ }
 ```
 
+**Amended 2026-10-16 (branch `claude/loving-archimedes-frtf5q`):** 4.2
+builds `std/dom` as a written subset, which a program imports with `import
+dom`: elements and text, attributes and properties, inserting and removing,
+listeners, selectors, `location` and `history`, timers, and an async
+`fetch`. It declares its JS functions with `extern "js"`, not
+`@js_import`, and an `Element` holds a handle the collector releases
+(`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+§3, §4, §6; ADR 0041).
+
 Generated JS shim provides `__nova_dom__`:
 
 ```javascript
@@ -299,6 +308,15 @@ console.log(calculate(2, 3))   // 5
 - Strings: copy across boundary (UTF-8 ↔ UTF-16)
 - Objects: pass by handle (ID into a JS-side table)
 - Functions: trampoline via stable function pointer
+
+**Amended 2026-10-16 (branch `claude/loving-archimedes-frtf5q`):** in 4.2
+only std crosses the boundary, through `extern "js"` (`Int`, `Float`, `Bool`
+and `String`); user-level `@js_import` and `@js_export` stay in ADR 0038's
+backlog. A handle is released when the collector frees the box that holds
+it. A function JS holds is an entry of `std/rt`'s table of closures, a
+root, and each call from JS is a turn
+(`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+§3 to §5; ADR 0041).
 
 ---
 

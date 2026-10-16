@@ -49,6 +49,15 @@ ships, with `exit`; `spawn` and `env` do not exist.
 in this index shipped by `v0.2.0` is recorded in
 `docs/adr/0025-phase-2-boundary.md`'s inventory table.
 
+**AMENDED 2026-10-16 (branch `claude/loving-archimedes-frtf5q`): `std/dom`**,
+a WASM build's only, is std's first module outside the prelude: a program
+imports it with `import dom`, and natively that import is E0092. The names
+`dom` and `ui` are std's: no package may take them, and a project module
+under either that an `import` reaches is E0093.
+Its functions are listed in
+`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+§6 (ADR 0041).
+
 ---
 
 ## 2. `std/core` — Foundational Types
