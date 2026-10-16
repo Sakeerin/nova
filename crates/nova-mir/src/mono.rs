@@ -132,6 +132,7 @@ pub fn lower_module_with(
                 if done.insert(ext.symbol.clone()) {
                     mir.externs.push(ExternDecl {
                         symbol: ext.symbol.clone(),
+                        abi: ext.abi,
                         params,
                         ret,
                     });

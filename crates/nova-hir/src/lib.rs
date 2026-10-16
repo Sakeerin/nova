@@ -342,13 +342,26 @@ pub struct Local {
     pub span: Span,
 }
 
-/// An `extern` function declaration: a C-ABI import with no Nova body. Only its
-/// signature and (unmangled) C symbol name are needed to declare and call it.
+/// An `extern` block's ABI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternAbi {
+    /// A C function, linked natively.
+    C,
+    /// A JS function of the shim's `env`, which only std declares on WASM
+    /// (spec `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+    /// §3.1).
+    Js,
+}
+
+/// An `extern` function declaration: an import with no Nova body. Only its
+/// signature and (unmangled) symbol name are needed to declare and call it.
 #[derive(Debug, Clone)]
 pub struct ExternFn {
     pub def_id: DefId,
-    /// The raw C symbol to import and call (never mangled).
+    /// The raw symbol to import and call (never mangled).
     pub symbol: String,
+    /// Where the function comes from.
+    pub abi: ExternAbi,
     pub params: Vec<Ty>,
     pub ret: Ty,
     /// Declaration site, for conflicting-signature diagnostics.

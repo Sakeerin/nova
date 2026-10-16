@@ -16,6 +16,7 @@ pub const PACKAGE_JSON: &str = "{\"type\":\"module\"}\n";
 const CORE: &str = include_str!("shim/core.js");
 const RUN: &str = include_str!("shim/run.js");
 const FLOAT: &str = include_str!("shim/float.js");
+const DOM: &str = include_str!("shim/dom.js");
 
 /// `int_hash_seed`'s value: drawn once, then the same for the rest of the
 /// run, as the native runtime's is.
@@ -77,8 +78,58 @@ fn host(name: &str) -> Result<&'static str> {
     })
 }
 
+/// The JS of std's `extern "js"` function `name` (spec
+/// `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+/// §3.1, §6.2), or `None` for a name std does not declare. Handles are
+/// `BigInt`s, strings addresses, and a `Bool` 0 or 1.
+fn js_function(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "dom_body" => "() => handle(document.body)",
+        "dom_create_element" => "(tag) => handle(document.createElement(text(tag)))",
+        "dom_create_text" => "(s) => handle(document.createTextNode(text(s)))",
+        "dom_query_selector" => "(sel) => handle(document.querySelector(text(sel)))",
+        "dom_query_selector_in" => "(el, sel) => handle(object(el).querySelector(text(sel)))",
+        "dom_query_all" => "(sel) => handle(Array.from(document.querySelectorAll(text(sel))))",
+        "dom_list_len" => "(list) => BigInt(object(list).length)",
+        "dom_list_item" => "(list, i) => handle(object(list)[Number(i)])",
+        "dom_element_by_id" => "(id) => handle(document.getElementById(text(id)))",
+        "dom_tag" => "(el) => string(object(el).nodeName.toLowerCase())",
+        "dom_set_attribute" => "(el, n, v) => { object(el).setAttribute(text(n), text(v)); }",
+        "dom_has_attribute" => "(el, n) => (object(el).hasAttribute(text(n)) ? 1 : 0)",
+        "dom_attribute" => "(el, n) => string(object(el).getAttribute(text(n)) ?? \"\")",
+        "dom_remove_attribute" => "(el, n) => { object(el).removeAttribute(text(n)); }",
+        "dom_set_property" => "(el, n, v) => { object(el)[text(n)] = text(v); }",
+        "dom_property" => "(el, n) => string(String(object(el)[text(n)] ?? \"\"))",
+        "dom_set_property_bool" => "(el, n, v) => { object(el)[text(n)] = v !== 0; }",
+        "dom_property_bool" => "(el, n) => (object(el)[text(n)] ? 1 : 0)",
+        "dom_set_text" => "(el, s) => { object(el).textContent = text(s); }",
+        "dom_text" => "(el) => string(object(el).textContent ?? \"\")",
+        "dom_append_child" => "(p, c) => { object(p).appendChild(object(c)); }",
+        "dom_insert_before" => {
+            "(p, c, b) => { object(p).insertBefore(object(c), b === 0n ? null : object(b)); }"
+        }
+        "dom_remove_child" => "(p, c) => { object(p).removeChild(object(c)); }",
+        "dom_remove" => "(el) => { object(el).remove(); }",
+        "dom_parent" => "(el) => handle(object(el).parentNode)",
+        "dom_first_child" => "(el) => handle(object(el).firstChild)",
+        "dom_next_sibling" => "(el) => handle(object(el).nextSibling)",
+        "dom_is_same" => "(a, b) => (object(a) === object(b) ? 1 : 0)",
+        _ => return None,
+    })
+}
+
+/// An `env` entry for `name`: a host function of the runtime's, or std's
+/// `extern "js"` function, guarded (spec 4.2 §3.1).
+fn entry(name: &str) -> Result<String> {
+    if let Some(f) = js_function(name) {
+        return Ok(format!("  {name}: guard(\"{name}\", {f}),\n"));
+    }
+    host(name).map(str::to_string)
+}
+
 /// `app.js` for a module importing `imports` from `env`.
-pub fn shim(imports: &[&str]) -> Result<String> {
+pub fn shim<S: AsRef<str>>(imports: &[S]) -> Result<String> {
+    let imports: Vec<&str> = imports.iter().map(AsRef::as_ref).collect();
     let mut js = String::from(CORE);
     let uses = |names: &[&str]| imports.iter().any(|i| names.contains(i));
     if uses(&["float_to_str", "float_fixed", "str_to_float"]) {
@@ -90,9 +141,12 @@ pub fn shim(imports: &[&str]) -> Result<String> {
     if uses(&["time_now_nanos", "time_now_epoch_nanos"]) {
         js.push_str(CLOCKS);
     }
+    if imports.iter().any(|i| js_function(i).is_some()) {
+        js.push_str(DOM);
+    }
     js.push_str("\n// The host functions the module imports.\nconst env = {\n");
-    for name in imports {
-        js.push_str(host(name)?);
+    for name in &imports {
+        js.push_str(&entry(name)?);
     }
     js.push_str("};\n");
     js.push_str(RUN);
@@ -154,6 +208,61 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         assert_eq!(String::from_utf8_lossy(&out.stdout), "0n true true\n");
+    }
+
+    /// std's `extern "js"` functions come guarded, with the handle table,
+    /// and only the imported ones (spec 4.2 §3.1, §8).
+    #[test]
+    fn js_functions_come_guarded_and_only_when_imported() {
+        let plain = shim(&["println"]).expect("a shim");
+        assert!(!plain.contains("function handle("), "{plain}");
+        let dom = shim(&["println", "dom_create_element"]).expect("a shim");
+        assert!(
+            dom.contains("  dom_create_element: guard(\"dom_create_element\", (tag) =>"),
+            "{dom}"
+        );
+        assert!(dom.contains("function handle("), "{dom}");
+        assert!(!dom.contains("dom_set_text"), "{dom}");
+    }
+
+    /// A JS exception in a std/dom function is a Nova panic that names the
+    /// function and quotes the exception; a handle the table does not hold
+    /// is a panic too (spec 4.2 §3.1, §4.1).
+    #[test]
+    fn a_js_exception_is_a_panic_naming_its_function() {
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
+        let js = shim(&["dom_create_element", "dom_tag"]).expect("a shim");
+        let core = js
+            .split("\n// The host functions the module imports.")
+            .next()
+            .unwrap();
+        let script = format!(
+            "{core}\nconst lines = [];\nwrite = (fd, s) => lines.push(s);\n\
+             globalThis.document = {{ createElement: () => {{ const e = new Error(\"boom\"); e.name = \"NotSupportedError\"; throw e; }} }};\n\
+             text = (s) => s;\n\
+             const create = guard(\"dom_create_element\", (tag) => handle(document.createElement(text(tag))));\n\
+             for (const f of [() => create(\"div\"), () => object(7n)]) {{\n  \
+             try {{ f(); }} catch (e) {{ lines.push(e instanceof NovaPanic ? \"[panic]\" : String(e)); }}\n}}\n\
+             console.log(lines.join(\"\"));\n"
+        );
+        let dir = std::env::temp_dir().join("nova-codegen-wasm-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let file = dir.join("guard.mjs");
+        std::fs::write(&file, script).expect("the script");
+        let out = node.arg(&file).output().expect("node runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "nova: panic: std/dom: dom_create_element: NotSupportedError: boom\n[panic]\
+             nova: panic: std/dom: handle 7 is not live\n[panic]\n"
+        );
     }
 
     /// An import the shim cannot provide is refused, not left undefined.

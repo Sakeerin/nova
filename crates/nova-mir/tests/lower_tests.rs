@@ -2005,3 +2005,80 @@ fn a_wasm_build_of_an_async_main_holds_the_event_loop() {
         assert!(names.contains(&f.as_str()), "{f}: {names:?}");
     }
 }
+
+/// A std module's `extern "js"` block on WASM: its functions take and
+/// return `Int`, `Float`, `Bool` and `String`, and anything else, a record
+/// here, is E0900;
+/// MIR records each called one with the JS ABI. Natively, std's `"js"` is
+/// E0900 as a user's would be (spec 4.2 §3.1). The std module is a stand-in
+/// passed as `extra_std`, the mechanism `nova test` uses for `std/test`.
+#[test]
+fn a_std_extern_js_block_is_wasms_alone() {
+    use nova_resolver::{resolve_program_for, CompileTarget, ModuleSource};
+
+    let stub = "extern \"js\" {\n    fn lower_tests_js_text(s: String, n: Int, f: Float, b: Bool) -> String\n}\n\
+                pub fn lower_tests_js_call() -> String { lower_tests_js_text(\"x\", 1, 2.0, true) }\n";
+    let bad = "pub record LowerTestsPair { a: Int }\n\
+               extern \"js\" {\n    fn lower_tests_js_pair(p: LowerTestsPair)\n}\n\
+               pub fn lower_tests_js_bad() { lower_tests_js_pair(LowerTestsPair { a: 1 }) }\n";
+    let resolve = |target: CompileTarget, std_src: &'static str, main: &str| {
+        let (tokens, _) = lex(main, FileId::DUMMY);
+        let (ast, _) = parse(&tokens, FileId::DUMMY);
+        let ast = ast.expect("no AST");
+        let sources = [ModuleSource::new("main", &ast)];
+        let std_files: Vec<FileId> = target.std_modules().iter().map(|_| FileId::DUMMY).collect();
+        let resolved = resolve_program_for(
+            target,
+            &sources,
+            &std_files,
+            Some((("$test.js_stub", std_src), FileId::DUMMY)),
+        );
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let checked = check(&resolved.file, &resolved.definitions);
+        let codes: Vec<String> = checked.diagnostics.iter().map(|d| d.code.clone()).collect();
+        (checked, codes)
+    };
+
+    let (ok, codes) = resolve(
+        CompileTarget::Wasm,
+        stub,
+        "fn main() { println(lower_tests_js_call()) }",
+    );
+    assert!(codes.is_empty(), "{:?}", ok.diagnostics);
+    let ext = ok
+        .module
+        .externs
+        .iter()
+        .find(|e| e.symbol == "lower_tests_js_text");
+    assert_eq!(ext.map(|e| e.abi), Some(nova_hir::ExternAbi::Js));
+
+    let (_, codes) = resolve(
+        CompileTarget::Wasm,
+        bad,
+        "fn main() { lower_tests_js_bad() }",
+    );
+    assert_eq!(codes, ["E0900"]);
+
+    let (native, codes) = resolve(
+        CompileTarget::Native,
+        stub,
+        "fn main() { println(lower_tests_js_call()) }",
+    );
+    assert!(
+        codes.contains(&"E0900".to_string()),
+        "{:?}",
+        native.diagnostics
+    );
+    assert!(
+        native
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("only the C ABI is supported")),
+        "{:?}",
+        native.diagnostics
+    );
+}

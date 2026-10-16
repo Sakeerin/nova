@@ -88,6 +88,31 @@ fn check_for_wasm_refuses_an_extern_block() {
     nova_in(&dir, &["check", "main.nova"]).success();
 }
 
+/// A user's `extern "js"` block is E0090 on WASM, as any `extern` block
+/// is, and natively its ABI is E0900: only std declares JS functions (spec
+/// 4.2 §3.1).
+#[test]
+fn a_users_extern_js_is_refused_on_both_targets() {
+    let dir = fresh("check-extern-js");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "extern \"js\" {\n    fn now() -> Int\n}\nfn main() { println(\"${now()}\") }\n",
+        )],
+    );
+    let wasm = nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).failure();
+    assert!(stderr(&wasm).contains("error[E0090]"), "{}", stderr(&wasm));
+    let native = nova_in(&dir, &["check", "main.nova"]).failure();
+    assert!(
+        stderr(&native).contains(
+            "error[E0900]: extern ABI `\"js\"` is not supported; only the C ABI is supported"
+        ),
+        "{}",
+        stderr(&native)
+    );
+}
+
 /// A name from a std module WASM does not compile is E0092 there, naming
 /// the module, and the same program checks natively (spec 4.1 §3.2).
 fn missing_on_wasm(name: &str, source: &str, error: &str) {
@@ -942,6 +967,49 @@ fn a_freed_state_names_no_old_task() {
     let err = stderr(&a);
     assert!(err.contains(message), "{err}");
     assert!(!live_after_each(&err).is_empty(), "{err}");
+}
+
+/// A program of `tests/dom/` (spec 4.2 §10.2): built for WASM, run under
+/// Node by its harness, `<name>.mjs`, which installs the fake DOM, drives
+/// the page and prints it, with `env` set. Its stdout is `<name>.stdout`.
+/// Returns its stderr.
+fn dom_program(name: &str, env: &[(&str, &str)]) -> String {
+    let Some(node) = node() else {
+        return String::new();
+    };
+    let tests = repo_root().join("tests/dom");
+    let expected = std::fs::read_to_string(tests.join(format!("{name}.stdout")))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    let kind = if env.is_empty() { "dom" } else { "dom-stress" };
+    let dir = fresh(&format!("{kind}-{name}"));
+    for file in ["fake_dom.mjs".to_string(), format!("{name}.mjs")] {
+        std::fs::copy(tests.join(&file), dir.join(&file)).expect("copy the harness");
+    }
+    build_wasm(&dir, &tests.join(format!("{name}.nova")));
+    let mut node = node;
+    let a = node
+        .arg(dir.join(format!("{name}.mjs")))
+        .envs(env.iter().copied())
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+    assert_eq!(stdout(&a), expected, "{}", stderr(&a));
+    stderr(&a)
+}
+
+/// Under `NOVA_GC_STRESS` and `NOVA_GC_DEBUG`.
+const STRESS: [(&str, &str); 2] = [("NOVA_GC_STRESS", "1"), ("NOVA_GC_DEBUG", "1")];
+
+/// std/dom builds a page: elements and text, attributes and properties,
+/// inserting, removing and walking, and selectors, matching and not (spec
+/// 4.2 §6.2). Its `main` registers no closure JS may call, so even under
+/// stress nothing collects: `main` is not a call from JS (§5.2).
+#[test]
+fn std_dom_builds_a_page() {
+    dom_program("build", &[]);
+    let err = dom_program("build", &STRESS);
+    assert!(live_after_each(&err).is_empty(), "{err}");
 }
 
 /// One of the gate's programs (spec §9.2): built for WASM, it prints under

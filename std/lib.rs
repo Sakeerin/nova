@@ -48,10 +48,10 @@ pub const TEST: &str = include_str!("test/lib.nova");
 /// `std/time/lib.nova`.
 pub const TIME: &str = include_str!("time/lib.nova");
 /// `std/rt/lib.nova`, the runtime of a WASM build, written in Nova. Not in
-/// [`ALL`]: only a WASM build compiles it, and it has no public item, so it
-/// is not documented (spec
+/// [`ALL`]: only a WASM build compiles it, and its few public items are for
+/// std's other modules alone, so it is not documented (spec
 /// `docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
-/// §3.2).
+/// §3.2; 4.2 §5).
 pub const RT: &str = include_str!("rt/lib.nova");
 
 /// Every documented module, by its directory under `std/`: all but
