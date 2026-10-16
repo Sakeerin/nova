@@ -1,0 +1,25 @@
+// Handles are released once no value holds them (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §4.2): over 50 turns, each makes 200 nodes and keeps none, while one node
+// lives throughout. Under NOVA_GC_STRESS the collector runs at the end of
+// every turn, and the shim's table never holds many handles at once.
+
+import dom
+
+async fn main() {
+    let kept = create_element("p")
+    kept.set_text("kept")
+    body().append_child(kept)
+    let mut turn = 0
+    while turn < 50 {
+        let mut i = 0
+        while i < 200 {
+            let n = create_element("span")
+            n.set_text("${turn}.${i}")
+            i = i + 1
+        }
+        sleep(Duration::from_millis(1)).await
+        turn = turn + 1
+    }
+    println("${kept.text()} ${kept.tag()}")
+}

@@ -18,10 +18,10 @@
 // target's std sees.
 
 // The runtime's state words, at fixed addresses below the data segment
-// (spec 4.0 §4.1, 4.1 §6.1): Nova has no mutable globals. Each is named
-// where it is used: `HEAP_META`, `STR_SEED`, `STR_SEED_DRAWN`, `LOG_SET`,
-// `LOG_LEVEL`, `EXEC`, `GC_SINCE`, `GC_NEXT`, `GC_COUNT` and
-// `GC_SWITCHES`, at 8 to 80.
+// (spec 4.0 §4.1, 4.1 §6.1, 4.2 §4.2): Nova has no mutable globals. Each
+// is named where it is used: `HEAP_META`, `STR_SEED`, `STR_SEED_DRAWN`,
+// `LOG_SET`, `LOG_LEVEL`, `EXEC`, `GC_SINCE`, `GC_NEXT`, `GC_COUNT`,
+// `GC_SWITCHES` and `HANDLES`, at 8 to 88.
 
 // The allocator (spec 4.1 §6.2), ported from `nova-runtime`'s
 // `gc/pages.rs`. Memory from the first 64 KiB boundary at or above
@@ -1339,11 +1339,49 @@ fn rt_turn() -> Int {
 // §4): a box is a 16-byte leaf holding a handle of the shim's table, then 0.
 // A record holds the box's address in an `Int` field, which the collector,
 // being conservative, reads as a pointer.
+//
+// The registry, at state word 88, is a leaf block: the address of a leaf
+// table of (box, handle) pairs at 0, their count at 8, and the table's
+// capacity at 16. It is weak: the collector marks the block and the table,
+// not the boxes, and after each sweep `gc_release` drops the pairs whose box
+// was freed and tells the shim to release their handles.
+const HANDLES: Int = 88
 
-/// A box for the shim's handle `id`. Only `std/dom` calls it.
+// The shim's side: empty a handle's slot, and count the slots in use.
+extern "js" {
+    fn host_release(handle: Int)
+    fn host_handles() -> Int
+}
+
+// The registry, made at its first use.
+fn handles() -> Int {
+    let h = mem_load64(HANDLES)
+    if h != 0 { return h }
+    let block = rt_alloc_leaf(24)
+    mem_store64(block, rt_alloc_leaf(16 * 16))
+    mem_store64(block + 16, 16)
+    mem_store64(HANDLES, block)
+    block
+}
+
+/// A box for the shim's handle `id`, registered so the collector releases
+/// the handle once the box is freed. Only `std/dom` calls it.
 pub fn rt_handle_box(id: Int) -> Int {
     let b = rt_alloc_leaf(16)
     mem_store64(b, id)
+    let r = handles()
+    let n = mem_load64(r + 8)
+    let cap = mem_load64(r + 16)
+    if n == cap {
+        let bigger = rt_alloc_leaf(32 * cap)
+        mem_copy(bigger, mem_load64(r), 16 * n)
+        mem_store64(r, bigger)
+        mem_store64(r + 16, 2 * cap)
+    }
+    let p = mem_load64(r) + 16 * n
+    mem_store64(p, b)
+    mem_store64(p + 8, id)
+    mem_store64(r + 8, n + 1)
     b
 }
 
@@ -1397,9 +1435,16 @@ fn gc_collect() {
             id = id + 1
         }
     }
+    let r = mem_load64(HANDLES)
+    if r != 0 {
+        gc_mark(m, r)
+        gc_mark(m, mem_load64(r))
+    }
     gc_trace(m)
     gc_sweep(m)
     if e != 0 { gc_prune(m, e) }
+    let mut released = 0
+    if r != 0 { released = gc_release(m, r) }
     let count = mem_load64(GC_COUNT) + 1
     mem_store64(GC_COUNT, count)
     let bytes = mem_load64(m + 56)
@@ -1412,8 +1457,34 @@ fn gc_collect() {
         eprintln(
             "nova-gc: collection ${count} freed ${freed} bytes, ${live} objects live (${bytes} bytes)",
         )
+        if r != 0 {
+            eprintln(
+                "nova-dom: collection ${count} released ${released} handles, ${host_handles()} live",
+            )
+        }
     }
     mem_store64(GC_SINCE, 0)
+}
+
+// Drop the registry's pairs whose box no object starts at any more, and
+// release their handles; the rest keep their order. The count released.
+fn gc_release(m: Int, r: Int) -> Int {
+    let table = mem_load64(r)
+    let n = mem_load64(r + 8)
+    let mut kept = 0
+    let mut i = 0
+    while i < n {
+        let p = table + 16 * i
+        if gc_is_live(m, mem_load64(p)) {
+            mem_copy(table + 16 * kept, p, 16)
+            kept = kept + 1
+        } else {
+            host_release(mem_load64(p + 8))
+        }
+        i = i + 1
+    }
+    mem_store64(r + 8, kept)
+    n - kept
 }
 
 // Mark the object word `w` falls in, if any, and queue it to be traced
