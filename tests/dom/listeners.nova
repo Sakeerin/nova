@@ -1,0 +1,72 @@
+// Listeners (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5, §6.2): a removed listener runs no more and leaves std/rt's table,
+// and removing it again does nothing, though its entry is another's now;
+// `stop_propagation` and `prevent_default`; an event's kind, target and key;
+// and a window listener, whose events have no target.
+
+import dom
+
+// Closures capture by value, so the count they share is a record's field.
+record Clicks { n: Int }
+
+fn name(t: Option<Element>) -> String {
+    match t {
+        Some(n) => n.tag()
+        None => "none"
+    }
+}
+
+fn main() {
+    let page = body()
+    let outer = create_element("div")
+    let inner = create_element("button")
+    let link = create_element("a")
+    outer.append_child(inner)
+    outer.append_child(link)
+    page.append_child(outer)
+    outer.add_event_listener(
+        "click",
+        |e: Event| println("outer saw ${e.kind()} at ${name(e.target())}"),
+    )
+    let mut once = inner.add_event_listener("click", |e: Event| println("inner, once"))
+    let mut clicks = Clicks { n: 0 }
+    let mut stopper = inner.add_event_listener(
+        "click",
+        |e: Event| {
+            clicks.n = clicks.n + 1
+            if clicks.n == 2 {
+                e.stop_propagation()
+                println("inner stopped it")
+            }
+        },
+    )
+    inner.add_event_listener("click", |e: Event| once.remove())
+    link.add_event_listener(
+        "click",
+        |e: Event| {
+            e.prevent_default()
+            println("link: default prevented")
+        },
+    )
+    inner.add_event_listener("keydown", |e: Event| println("key ${e.key()}"))
+    window_add_event_listener(
+        "ping",
+        |e: Event| println("window saw ${e.kind()} at ${name(e.target())}"),
+    )
+    stopper.remove()
+    let mut old = stopper
+    stopper = inner.add_event_listener(
+        "click",
+        |e: Event| {
+            clicks.n = clicks.n + 1
+            if clicks.n == 2 {
+                e.stop_propagation()
+                println("inner stopped it")
+            }
+        },
+    )
+    // The new stopper took the old one's entry: removing the old one again
+    // releases nothing.
+    old.remove()
+}

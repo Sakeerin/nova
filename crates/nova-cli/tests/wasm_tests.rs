@@ -974,9 +974,15 @@ fn a_freed_state_names_no_old_task() {
 /// the page and prints it, with `env` set. Its stdout is `<name>.stdout`.
 /// Returns its stderr.
 fn dom_program(name: &str, env: &[(&str, &str)]) -> String {
-    let Some(node) = node() else {
-        return String::new();
-    };
+    match dom_run(name, env) {
+        Some(a) => stderr(&a.success()),
+        None => String::new(),
+    }
+}
+
+/// [`dom_program`]'s run, whatever its status, or `None` without `node`.
+fn dom_run(name: &str, env: &[(&str, &str)]) -> Option<Assert> {
+    let node = node()?;
     let tests = repo_root().join("tests/dom");
     let expected = std::fs::read_to_string(tests.join(format!("{name}.stdout")))
         .expect("the expected output")
@@ -992,10 +998,9 @@ fn dom_program(name: &str, env: &[(&str, &str)]) -> String {
         .arg(dir.join(format!("{name}.mjs")))
         .envs(env.iter().copied())
         .timeout(std::time::Duration::from_secs(60))
-        .assert()
-        .success();
+        .assert();
     assert_eq!(stdout(&a), expected, "{}", stderr(&a));
-    stderr(&a)
+    Some(a)
 }
 
 /// Under `NOVA_GC_STRESS` and `NOVA_GC_DEBUG`.
@@ -1010,6 +1015,161 @@ fn std_dom_builds_a_page() {
     dom_program("build", &[]);
     let err = dom_program("build", &STRESS);
     assert!(live_after_each(&err).is_empty(), "{err}");
+}
+
+/// A module that registers a closure JS may call exports `nova_call`, and
+/// the turn and the switches with it, though its `main` is synchronous; one
+/// that only builds a page exports neither (spec 4.2 §5.2).
+#[test]
+fn a_listener_exports_the_call_and_the_turn() {
+    let Some(node) = node() else { return };
+    let dir = fresh("call-export");
+    write(
+        &dir,
+        &[
+            ("build/main.nova", "import dom\nfn main() { body().set_text(\"x\") }\n"),
+            (
+                "listen/main.nova",
+                "import dom\nfn main() {\n    let _ = body().add_event_listener(\"click\", |e: Event| println(\"x\"))\n}\n",
+            ),
+            (
+                "exports.cjs",
+                "const fs = require(\"fs\");\nconst m = new WebAssembly.Module(fs.readFileSync(process.argv[2]));\nconsole.log(WebAssembly.Module.exports(m).map((e) => e.name).join(\" \"));\n",
+            ),
+        ],
+    );
+    let mut seen = Vec::new();
+    for kind in ["build", "listen"] {
+        let dist = build_wasm(&dir.join(kind), Path::new("main.nova"));
+        let mut node = Command::new("node");
+        let a = node
+            .arg(dir.join("exports.cjs"))
+            .arg(dist.join("app.wasm"))
+            .assert()
+            .success();
+        seen.push(stdout(&a));
+    }
+    drop(node);
+    assert_eq!(seen[0], "main memory nova_alloc nova_alloc_leaf\n");
+    assert_eq!(
+        seen[1],
+        "main memory nova_alloc nova_alloc_leaf nova_call nova_turn nova_gc_switches\n"
+    );
+}
+
+/// The gate (spec 4.2 §1): a button and a count, and three clicks make the
+/// count 3. Under stress the collector runs after `main` and after each
+/// click, and the listener's closure, a root of std/rt's table, survives.
+/// Each click's event handle is released at the end of its call, and only
+/// the label's, which the closure holds, stays live.
+#[test]
+fn the_counter_counts_clicks() {
+    dom_program("counter", &[]);
+    let err = dom_program("counter", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert_eq!(live_after_each(&err).len(), 4, "{err}");
+    assert_eq!(calls_after_each(&err), [1, 1, 1, 1], "{err}");
+    assert_eq!(
+        handles_released(&err),
+        [(3, 1), (1, 1), (1, 1), (1, 1)],
+        "{err}"
+    );
+}
+
+/// Listeners: a removed one runs no more; `stop_propagation`,
+/// `prevent_default`, an event's kind, target and key; and a window
+/// listener (spec 4.2 §5, §6.2).
+/// The table holds seven entries after `main`, one of them the stopper
+/// added again in the entry its removal freed, and six once the first
+/// click has removed `once`.
+#[test]
+fn listeners_run_until_removed() {
+    dom_program("listeners", &[]);
+    let err = dom_program("listeners", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    let calls = calls_after_each(&err);
+    assert_eq!(calls.first(), Some(&7), "{err}");
+    assert_eq!(calls.last(), Some(&6), "{err}");
+}
+
+/// A call from JS inside one runs its handler only: under stress the
+/// collector runs after `main` and after each outer click, three times,
+/// and never frees the record the outer handler holds (spec 4.2 §5.2).
+#[test]
+fn a_nested_call_from_js_waits_for_the_outer_one() {
+    dom_program("nested", &[]);
+    let err = dom_program("nested", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert_eq!(live_after_each(&err).len(), 3, "{err}");
+}
+
+/// A panic in a listener ends the program: its message, an abort's status,
+/// and the next click calls nothing. A panic in a listener called from
+/// inside another, which the page keeps as a browser does, stops the outer
+/// one too (spec 4.2 §5.3). Under stress the collector ran first, after
+/// `main` and after the first click.
+#[test]
+fn a_panic_in_a_listener_ends_the_program() {
+    for env in [&[][..], &STRESS[..]] {
+        let Some(a) = dom_run("panic", env) else {
+            return;
+        };
+        let a = a.code(134);
+        let err = stderr(&a);
+        assert!(err.contains("nova: panic: boom\n"), "{err}");
+        let collections = if env.is_empty() { 0 } else { 2 };
+        assert_eq!(live_after_each(&err).len(), collections, "{err}");
+    }
+}
+
+/// The shim keeps one timer, and a turn a click asks for sooner replaces
+/// the one `main`'s long sleep asked for (spec 4.2 §7.3).
+#[test]
+fn a_sooner_turn_replaces_a_later_timer() {
+    dom_program("scheduler", &[]);
+    let err = dom_program("scheduler", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert!(!live_after_each(&err).is_empty(), "{err}");
+}
+
+/// `block_on` in a task is re-entrant wherever the task runs: one a click
+/// spawned, which the click's turn polls, panics as one under an `async fn
+/// main` does (spec 4.2 §5.2).
+#[test]
+fn block_on_in_a_task_a_click_spawned_panics() {
+    for env in [&[][..], &STRESS[..]] {
+        let Some(a) = dom_run("reentrant", env) else {
+            return;
+        };
+        let a = a.code(134);
+        let err = stderr(&a);
+        assert!(
+            err.contains("nova: panic: nova_rt_task_block_on called re-entrantly"),
+            "{err}"
+        );
+    }
+}
+
+/// The entries of std/rt's table of closures JS may call in use after each
+/// collection, from `NOVA_GC_DEBUG`'s `nova-dom:` lines.
+fn calls_after_each(stderr: &str) -> Vec<u64> {
+    stderr
+        .lines()
+        .filter(|l| l.starts_with("nova-dom: collection "))
+        .map(|l| {
+            let (_, rest) = l.split_once(" live, ").expect("the live count");
+            let (calls, _) = rest.split_once(" calls").expect("the calls");
+            calls.parse().expect("a count")
+        })
+        .collect()
 }
 
 /// The `nova-dom:` lines of `NOVA_GC_DEBUG`: each collection's handles

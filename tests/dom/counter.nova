@@ -1,0 +1,28 @@
+// The gate of 4.2 (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §1): a button and a count, and each click adds one to the count. The same
+// program runs under the fake DOM in `cargo test` and in Chromium in CI.
+
+import dom
+
+record Count { n: Int }
+
+fn main() {
+    let page = body()
+    let label = create_element("p")
+    label.set_attribute("id", "count")
+    label.set_text("0")
+    let button = create_element("button")
+    button.set_attribute("id", "add")
+    button.set_text("add one")
+    let mut count = Count { n: 0 }
+    button.add_event_listener(
+        "click",
+        |e: Event| {
+            count.n = count.n + 1
+            label.set_text("${count.n}")
+        },
+    )
+    page.append_child(label)
+    page.append_child(button)
+}

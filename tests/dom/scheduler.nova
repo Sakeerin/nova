@@ -1,0 +1,19 @@
+// The shim keeps one timer, and a sooner turn replaces a later one (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §7.3): `main` sleeps 1000 ms; a click soon after spawns a task that sleeps
+// 20 ms, whose turn must come first, not with `main`'s.
+
+import dom
+
+async fn quick() {
+    sleep(Duration::from_millis(20)).await
+    println("quick woke")
+}
+
+async fn main() {
+    let button = create_element("button")
+    body().append_child(button)
+    let _ = button.add_event_listener("click", |e: Event| { let _ = spawn(quick()) })
+    sleep(Duration::from_millis(1000)).await
+    println("main woke")
+}

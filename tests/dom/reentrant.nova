@@ -1,0 +1,23 @@
+// `block_on` in a task is re-entrant wherever the task runs (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5.2): here a click spawns the task, and the click's turn polls it, as an
+// `async fn main`'s turn would.
+
+import dom
+
+async fn inner() -> Int {
+    sleep(Duration::from_millis(1)).await
+    7
+}
+
+async fn task() {
+    println("task runs")
+    let n = block_on(inner())
+    println("never ${n}")
+}
+
+fn main() {
+    let button = create_element("button")
+    body().append_child(button)
+    let _ = button.add_event_listener("click", |e: Event| { let _ = spawn(task()) })
+}

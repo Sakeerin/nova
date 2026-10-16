@@ -18,10 +18,10 @@
 // target's std sees.
 
 // The runtime's state words, at fixed addresses below the data segment
-// (spec 4.0 §4.1, 4.1 §6.1, 4.2 §4.2): Nova has no mutable globals. Each
-// is named where it is used: `HEAP_META`, `STR_SEED`, `STR_SEED_DRAWN`,
-// `LOG_SET`, `LOG_LEVEL`, `EXEC`, `GC_SINCE`, `GC_NEXT`, `GC_COUNT`,
-// `GC_SWITCHES` and `HANDLES`, at 8 to 88.
+// (spec 4.0 §4.1, 4.1 §6.1, 4.2 §4.2, §5.1): Nova has no mutable globals.
+// Each is named where it is used: `HEAP_META`, `STR_SEED`,
+// `STR_SEED_DRAWN`, `LOG_SET`, `LOG_LEVEL`, `EXEC`, `GC_SINCE`, `GC_NEXT`,
+// `GC_COUNT`, `GC_SWITCHES`, `HANDLES` and `CALLS`, at 8 to 96.
 
 // The allocator (spec 4.1 §6.2), ported from `nova-runtime`'s
 // `gc/pages.rs`. Memory from the first 64 KiB boundary at or above
@@ -1198,7 +1198,10 @@ fn rt_task_spawn(fut: Int) -> Int { spawn_task(exec(), fut, false) }
 // `thread::sleep` holds the thread.
 fn rt_task_block_on(fut: Int) -> Int {
     let e = exec()
-    if mem_load64(e + 112) != 0 {
+    // Inside a poll, from a task, is re-entrant too: a task a call from JS
+    // spawned runs in that call's turn, where no loop has set the flag
+    // (spec 4.2 §5.2).
+    if mem_load64(e + 112) != 0 || mem_load64(e + 80) != 0 {
         panic(
             "nova_rt_task_block_on called re-entrantly: an async fn must not call block_on, which would run a second executor loop from inside the first one's frame",
         )
@@ -1322,6 +1325,14 @@ fn rt_task_main(fut: Int) {
 fn rt_turn() -> Int {
     let e = exec()
     wake(e, 0 - 1, time_now_nanos())
+    turn_end(e)
+}
+
+// The rest of a turn, after what woke it (spec 4.2 §5.2, §7.2): run the
+// queue for up to `TURN_BUDGET`, collect if due, then 0 if tasks are still
+// queued, or else the milliseconds to the earliest deadline, or -1 when no
+// task is parked.
+fn turn_end(e: Int) -> Int {
     drain_turn(e)
     gc_turn_end()
     if mem_load64(e + 40) > 0 { return 0 }
@@ -1332,6 +1343,91 @@ fn rt_turn() -> Int {
     if left <= 0 { return 0 }
     let ms = left / 1000000
     if left % 1000000 == 0 { ms } else { ms + 1 }
+}
+
+// The closures JS may call (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5): at state word 96, a leaf block holding the address of a leaf table of
+// `fn(Int)` closures' addresses at 0, the entries used so far at 8, and the
+// table's capacity at 16. An entry's index plus 1 is its id, and 0 marks a
+// free entry. The collector marks every closure in it: the table is a root.
+const CALLS: Int = 96
+
+// The table, made at its first use.
+fn calls() -> Int {
+    let c = mem_load64(CALLS)
+    if c != 0 { return c }
+    let block = rt_alloc_leaf(24)
+    mem_store64(block, rt_alloc_leaf(8 * 16))
+    mem_store64(block + 16, 16)
+    mem_store64(CALLS, block)
+    block
+}
+
+/// Put the `fn(Int)` closure at address `f` in the table of closures JS may
+/// call, in the first free entry, and return its id. Only `std/dom` calls
+/// it, with `closure_word`.
+pub fn rt_closure_register(f: Int) -> Int {
+    let c = calls()
+    let used = mem_load64(c + 8)
+    let mut i = 0
+    while i < used {
+        let at = mem_load64(c) + 8 * i
+        if mem_load64(at) == 0 {
+            mem_store64(at, f)
+            return i + 1
+        }
+        i = i + 1
+    }
+    let cap = mem_load64(c + 16)
+    if used == cap {
+        let bigger = rt_alloc_leaf(16 * cap)
+        mem_copy(bigger, mem_load64(c), 8 * used)
+        mem_store64(c, bigger)
+        mem_store64(c + 16, 2 * cap)
+    }
+    mem_store64(mem_load64(c) + 8 * used, f)
+    mem_store64(c + 8, used + 1)
+    used + 1
+}
+
+// The entries of the table in use, for `NOVA_GC_DEBUG`'s line; 0 with no
+// table.
+fn calls_in_use(c: Int) -> Int {
+    if c == 0 { return 0 }
+    let used = mem_load64(c + 8)
+    let mut n = 0
+    let mut i = 0
+    while i < used {
+        if mem_load64(mem_load64(c) + 8 * i) != 0 { n = n + 1 }
+        i = i + 1
+    }
+    n
+}
+
+/// Take entry `id` out of the table, so the collector may free its closure.
+/// An id that is free, or no id at all, changes nothing.
+pub fn rt_closure_release(id: Int) {
+    let c = mem_load64(CALLS)
+    if c == 0 || id < 1 || id > mem_load64(c + 8) { return }
+    mem_store64(mem_load64(c) + 8 * (id - 1), 0)
+}
+
+// `nova_call` (spec 4.2 §5.2): call entry `id` with `arg`; an entry that is
+// free calls nothing. JS says whether the call is outermost (`outer` 1): only
+// then is it a turn, which wakes what is due, runs the queue and collects.
+// An inner call, made while Nova code is on the WASM stack, returns -2 and
+// leaves that to the call it is inside.
+fn rt_call(id: Int, arg: Int, outer: Int) -> Int {
+    let c = mem_load64(CALLS)
+    if c != 0 && id >= 1 && id <= mem_load64(c + 8) {
+        let f = mem_load64(mem_load64(c) + 8 * (id - 1))
+        if f != 0 { closure_call(f, arg) }
+    }
+    if outer == 0 { return 0 - 2 }
+    let e = exec()
+    wake(e, 0 - 1, time_now_nanos())
+    turn_end(e)
 }
 
 // JS's objects, as `std/dom` holds them (spec
@@ -1440,6 +1536,19 @@ fn gc_collect() {
         gc_mark(m, r)
         gc_mark(m, mem_load64(r))
     }
+    let c = mem_load64(CALLS)
+    if c != 0 {
+        gc_mark(m, c)
+        let table = mem_load64(c)
+        gc_mark(m, table)
+        let used = mem_load64(c + 8)
+        let mut i = 0
+        while i < used {
+            let f = mem_load64(table + 8 * i)
+            if f != 0 { gc_mark(m, f) }
+            i = i + 1
+        }
+    }
     gc_trace(m)
     gc_sweep(m)
     if e != 0 { gc_prune(m, e) }
@@ -1457,9 +1566,9 @@ fn gc_collect() {
         eprintln(
             "nova-gc: collection ${count} freed ${freed} bytes, ${live} objects live (${bytes} bytes)",
         )
-        if r != 0 {
+        if r != 0 || c != 0 {
             eprintln(
-                "nova-dom: collection ${count} released ${released} handles, ${host_handles()} live",
+                "nova-dom: collection ${count} released ${released} handles, ${host_handles()} live, ${calls_in_use(c)} calls",
             )
         }
     }

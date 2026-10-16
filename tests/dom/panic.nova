@@ -1,0 +1,30 @@
+// A panic in a call from JS ends the program (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5.3): its message on stderr, an abort's status, and no later call runs.
+// The second click's handler clicks another button, whose handler panics;
+// the fake DOM, as a browser does, keeps that panic and returns from the
+// inner click, and the outer handler goes no further.
+
+import dom
+
+record Count { n: Int }
+
+fn main() {
+    let button = create_element("button")
+    let inner = create_element("button")
+    body().append_child(button)
+    body().append_child(inner)
+    let mut count = Count { n: 0 }
+    let _ = inner.add_event_listener("click", |e: Event| panic("boom"))
+    let _ = button.add_event_listener(
+        "click",
+        |e: Event| {
+            count.n = count.n + 1
+            println("click ${count.n}")
+            if count.n == 2 {
+                inner.click()
+                println("after the inner click")
+            }
+        },
+    )
+}

@@ -42,6 +42,16 @@ extern "js" {
     fn dom_first_child(node: Int) -> Int
     fn dom_next_sibling(node: Int) -> Int
     fn dom_is_same(a: Int, b: Int) -> Bool
+    fn dom_click(node: Int)
+    fn dom_listen(target: Int, kind: String, entry: Int) -> Int
+    fn dom_unlisten(target: Int, kind: String, listener: Int)
+    fn dom_window_listen(kind: String, entry: Int) -> Int
+    fn dom_window_unlisten(kind: String, listener: Int)
+    fn dom_event_kind(event: Int) -> String
+    fn dom_event_target(event: Int) -> Int
+    fn dom_event_key(event: Int) -> String
+    fn dom_prevent_default(event: Int)
+    fn dom_stop_propagation(event: Int)
 }
 
 /// A node of the page: an element, or a text node.
@@ -50,6 +60,13 @@ extern "js" {
 /// no value holds it any more. A value built by hand names no handle, and
 /// using it panics.
 pub record Element { box: Int }
+
+/// An event a listener receives.
+pub record Event { box: Int }
+
+/// A listener added with `add_event_listener` or
+/// `window_add_event_listener`, which `remove` removes.
+pub record Listener { target: Int, kind: String, entry: Int, js: Int }
 
 // A node for handle `h`, boxed so the collector releases it.
 fn node(h: Int) -> Element { Element { box: rt_handle_box(h) } }
@@ -72,6 +89,21 @@ fn nodes(list: Int) -> [Element] {
         i = i + 1
     }
     out
+}
+
+// `handler` as an entry of std/rt's table of closures JS may call: it boxes
+// the event's handle and calls `handler`.
+fn event_entry(handler: fn(Event)) -> Int {
+    rt_closure_register(closure_word(|h: Int| handler(Event { box: rt_handle_box(h) })))
+}
+
+/// Calls `handler` with each event of kind `kind`, such as `"popstate"`,
+/// that reaches the window, until the listener is removed. Their `target`
+/// is `None`: the window is not a node.
+pub fn window_add_event_listener(kind: String, handler: fn(Event)) -> Listener {
+    let entry = event_entry(handler)
+    let js = dom_window_listen(kind, entry)
+    Listener { target: 0, kind: kind, entry: entry, js: rt_handle_box(js) }
 }
 
 /// The page's `<body>`.
@@ -175,7 +207,54 @@ impl Element {
         maybe_node(dom_query_selector_in(handle_of(self), selector))
     }
 
+    /// Clicks the element, as a user would: its `click` listeners, and its
+    /// ancestors', run before this returns.
+    pub fn click(self) { dom_click(handle_of(self)) }
+
+    /// Calls `handler` with each event of kind `kind`, such as `"click"`,
+    /// that reaches this node, its own or one bubbling up from inside it,
+    /// until the listener is removed.
+    pub fn add_event_listener(self, kind: String, handler: fn(Event)) -> Listener {
+        let entry = event_entry(handler)
+        let js = dom_listen(handle_of(self), kind, entry)
+        Listener { target: self.box, kind: kind, entry: entry, js: rt_handle_box(js) }
+    }
+
     /// Whether `other` is the same node: two values may hold handles to
     /// one node.
     pub fn is_same(self, other: Element) -> Bool { dom_is_same(handle_of(self), handle_of(other)) }
+}
+
+impl Listener {
+    /// Removes the listener: its handler runs no more. Removing it again
+    /// does nothing.
+    pub fn remove(mut self) {
+        if self.entry == 0 { return }
+        if self.target == 0 {
+            dom_window_unlisten(self.kind, rt_handle_id(self.js))
+        } else {
+            dom_unlisten(rt_handle_id(self.target), self.kind, rt_handle_id(self.js))
+        }
+        rt_closure_release(self.entry)
+        self.entry = 0
+    }
+}
+
+impl Event {
+    /// The event's kind, such as `"click"`.
+    pub fn kind(self) -> String { dom_event_kind(rt_handle_id(self.box)) }
+
+    /// The node the event happened at, or `None` for the window's events.
+    pub fn target(self) -> Option<Element> { maybe_node(dom_event_target(rt_handle_id(self.box))) }
+
+    /// The key of a keyboard event, such as `"Enter"`, or `""` for any other
+    /// event.
+    pub fn key(self) -> String { dom_event_key(rt_handle_id(self.box)) }
+
+    /// Stops the browser's own action for the event, such as following a
+    /// link.
+    pub fn prevent_default(self) { dom_prevent_default(rt_handle_id(self.box)) }
+
+    /// Stops the event from bubbling to the node's ancestors.
+    pub fn stop_propagation(self) { dom_stop_propagation(rt_handle_id(self.box)) }
 }

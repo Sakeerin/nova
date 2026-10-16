@@ -44,6 +44,20 @@ const RT_TURN_EXPORTS: [(&str, &str); 2] = [
     ("nova_gc_switches", "rt_gc_switches"),
 ];
 
+/// What a WASM build exports once it registers a closure JS may call, by
+/// export name: the call itself, and the turn and the switches, if an
+/// `async fn main` has not already rooted them (spec
+/// `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
+/// §5.2).
+const RT_CALL_EXPORTS: [(&str, &str); 3] = [
+    ("nova_call", "rt_call"),
+    ("nova_turn", "rt_turn"),
+    ("nova_gc_switches", "rt_gc_switches"),
+];
+
+/// The `std/rt` function whose presence means a closure JS may call.
+const RT_REGISTER: &str = "rt_closure_register";
+
 /// The other `std/rt` functions every WASM build exports, by export name:
 /// roots, since only the shim calls them (spec 4.1 §6.3).
 const RT_EXPORTS: [(&str, &str); 1] = [("nova_alloc_leaf", "rt_alloc_leaf")];
@@ -112,12 +126,38 @@ pub fn lower_module_with(
             }
         }
     }
+    // The roots a closure JS may call needs, added once `rt_closure_register`
+    // is lowered (spec 4.2 §5.2).
+    let register = options
+        .runtime
+        .and_then(|impls| impls.functions.get(RT_REGISTER).copied());
+    let call_roots: Vec<(&'static str, DefId, String)> = options
+        .runtime
+        .map(|impls| {
+            RT_CALL_EXPORTS
+                .iter()
+                .filter_map(|&(export, rt)| {
+                    let def = *impls.functions.get(rt)?;
+                    let f = module.function(def)?;
+                    Some((export, def, mangle(def, &f.name, &[])))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     // The symbol an `async fn main` was lowered under, once it has been
     // lowered — the future-building wrapper `async_main_shim` calls. `None`
     // for the ordinary case of a non-async entry point.
     let mut async_entry: Option<String> = None;
 
     while let Some((def_id, type_args)) = worklist.pop() {
+        if Some(def_id) == register {
+            for (export, def, name) in &call_roots {
+                if !mir.runtime_exports.iter().any(|(e, _)| e == export) {
+                    worklist.push((*def, Vec::new()));
+                    mir.runtime_exports.push((export, name.clone()));
+                }
+            }
+        }
         let Some(func) = module.function(def_id) else {
             // Not a Nova function: if it is an `extern` declaration, record it
             // (a leaf — no body to lower) so codegen imports its raw C symbol.

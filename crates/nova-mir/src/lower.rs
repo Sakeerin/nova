@@ -798,6 +798,8 @@ impl<'a> Lowerer<'a> {
                     Builtin::HeapBase => Lowering::Mem(MemOp::HeapBase),
                     Builtin::FuturePoll => Lowering::Mem(MemOp::Poll),
                     Builtin::HostAbort => Lowering::Mem(MemOp::Abort),
+                    Builtin::ClosureWord => Lowering::Mem(MemOp::ClosureWord),
+                    Builtin::ClosureCall => Lowering::Mem(MemOp::ClosureCall),
                 };
                 match how {
                     Lowering::Runtime(func) => self.push(Stmt::CallRuntime {

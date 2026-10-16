@@ -10,27 +10,92 @@ async function load(options) {
   return WebAssembly.instantiateStreaming(fetch(url), imports);
 }
 
-// The event loop, for a module with an `async fn main` (spec
+// The program's turns (spec
 // docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md
-// §5): `nova_turn` runs what is due and returns the milliseconds until the
-// next deadline, 0 when it stopped at its time budget with tasks queued
-// (ADR 0040), or -1 once no task waits, and a timer calls it again. A timer
-// that fires early makes a turn that only says what is left.
-function turns() {
-  return new Promise((resolve, reject) => {
-    const turn = () => {
-      let delay;
-      try {
-        delay = Number(wasm.nova_turn());
-      } catch (e) {
-        reject(e);
-        return;
-      }
-      if (delay < 0) resolve();
-      else setTimeout(turn, Math.min(delay, 2147483647));
-    };
-    turn();
-  });
+// §5, and docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5, §7.3). Every call into Nova from JS, `main` included, goes through
+// `run`, which counts the calls in progress, and each outermost call's
+// result goes to `schedule`: 0 when tasks are still queued (the budget of
+// ADR 0040), a positive number of milliseconds to the next deadline, -1 when
+// no task waits, or -2 when only waits that JS ends remain. One timer at most
+// is pending; a timer that fires early makes a turn that only says what is
+// left. `init` resolves at the first -1, or when the program ends.
+let depth = 0;
+let timer = null;
+let due = Infinity;
+let ended = false;
+let finish = null;
+
+function schedule(result) {
+  const delay = Number(result);
+  if (delay === -1 && finish !== null) end();
+  if (delay < 0) return;
+  const at = Date.now() + delay;
+  if (timer !== null) {
+    if (at >= due) return;
+    clearTimeout(timer);
+  }
+  due = at;
+  timer = setTimeout(() => {
+    timer = null;
+    due = Infinity;
+    run(() => wasm.nova_turn());
+  }, Math.min(delay, 2147483647));
+}
+
+// Call into Nova. A panic or a trap ends the program where it happens; an
+// inner call passes it on, so the WASM stack unwinds to the outermost call.
+// After the end, nothing calls in.
+function run(call) {
+  if (ended) return undefined;
+  depth += 1;
+  let result;
+  try {
+    result = call();
+  } catch (e) {
+    depth -= 1;
+    if (!ended) fail(e);
+    if (depth > 0) throw e;
+    return undefined;
+  }
+  depth -= 1;
+  if (depth === 0 && !ended) schedule(result);
+  return result;
+}
+
+// The end of the program by a panic or a trap, as a native build ends: its
+// message on stderr and, under Node, the exit status of an abort (134) or of
+// a trap (132). Anything else is the shim's own bug, thrown on.
+function fail(e) {
+  let status;
+  if (e instanceof NovaPanic) {
+    status = 134;
+  } else if (e instanceof RangeError && /call stack/i.test(e.message)) {
+    write(2, "nova: stack overflow\n");
+    status = 134;
+  } else if (e instanceof WebAssembly.RuntimeError) {
+    write(2, `nova: trap: ${e.message}\n`);
+    status = 132;
+  } else {
+    ended = true;
+    end();
+    throw e;
+  }
+  ended = true;
+  if (timer !== null) clearTimeout(timer);
+  timer = null;
+  if (isNode) process.exitCode = status;
+  end();
+}
+
+// Resolve `init`, writing the part of a line still unprinted.
+function end() {
+  flush();
+  if (finish !== null) {
+    const f = finish;
+    finish = null;
+    f();
+  }
 }
 
 // The collector's switches (spec 4.1 §6.6): under Node, NOVA_GC_STRESS and
@@ -44,33 +109,19 @@ function gcSwitches(options) {
 }
 
 // Load app.wasm and run `main`, then its turns, if it has any: the promise
-// resolves when the program ends. A panic or a trap ends the program as a
-// native build ends: its message on stderr and, under Node, the exit status
-// of an abort (134) or of a trap (132).
+// resolves when nothing is left to run, though listeners, timers and replies
+// may call in later, or when the program ends by a panic or a trap.
 export default async function init(options = {}) {
   const { instance } = await load(options);
   wasm = instance.exports;
   if (wasm.nova_gc_switches) wasm.nova_gc_switches(BigInt(gcSwitches(options)));
-  try {
-    wasm.main();
-    if (wasm.nova_turn) await turns();
-  } catch (e) {
-    let status;
-    if (e instanceof NovaPanic) {
-      status = 134;
-    } else if (e instanceof RangeError && /call stack/i.test(e.message)) {
-      write(2, "nova: stack overflow\n");
-      status = 134;
-    } else if (e instanceof WebAssembly.RuntimeError) {
-      write(2, `nova: trap: ${e.message}\n`);
-      status = 132;
-    } else {
-      throw e;
-    }
-    if (isNode) process.exitCode = status;
-  } finally {
-    flush();
-  }
+  await new Promise((resolve) => {
+    finish = resolve;
+    run(() => {
+      wasm.main();
+      return wasm.nova_turn ? wasm.nova_turn() : -1n;
+    });
+  });
 }
 
 // Node resolves symbolic links in this module's URL, so the path it was run
