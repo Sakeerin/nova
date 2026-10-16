@@ -17,7 +17,8 @@ async function load(options) {
 // `run`, which counts the calls in progress, and each outermost call's
 // result goes to `schedule`: 0 when tasks are still queued (the budget of
 // ADR 0040), a positive number of milliseconds to the next deadline, -1 when
-// no task waits, or -2 when only waits that JS ends remain. One timer at most
+// no task waits, or -2 when no parked task has a deadline and one waits for
+// JS. One timer at most
 // is pending; a timer that fires early makes a turn that only says what is
 // left. `init` resolves at the first -1, or when the program ends.
 let depth = 0;
@@ -77,8 +78,9 @@ function fail(e) {
     write(2, `nova: trap: ${e.message}\n`);
     status = 132;
   } else {
+    // Not the program's: thrown on, so `init` rejects with it, as before.
     ended = true;
-    end();
+    flush();
     throw e;
   }
   ended = true;

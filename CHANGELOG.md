@@ -35,9 +35,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   elements and text, attributes and properties, listeners, selectors,
   `location` and `history`, timers, and an async `fetch`. A program
   imports it with `import dom`; it is std's first module outside the
-  prelude. A JS object's handle is released when no value holds it, and
-  each call from JS, such as a click, is a turn, so the collector runs in
-  a program whose `main` is synchronous too (ADR 0041).
+  prelude. A collection releases a JS object's handle once no value holds
+  it, and each outermost call from JS, such as a click, is a turn, so the
+  collector runs in a program whose `main` is synchronous too, once it adds
+  a listener, a timer or a `fetch` (ADR 0041).
 - **A CI job drives a WASM program in Chromium** through Playwright, which
   only that job installs.
 

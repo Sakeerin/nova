@@ -314,7 +314,7 @@ only std crosses the boundary, through `extern "js"` (`Int`, `Float`, `Bool`
 and `String`); user-level `@js_import` and `@js_export` stay in ADR 0038's
 backlog. A handle is released when the collector frees the box that holds
 it. A function JS holds is an entry of `std/rt`'s table of closures, a
-root, and each call from JS is a turn
+root, and each outermost call from JS is a turn
 (`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 §3 to §5; ADR 0041).
 

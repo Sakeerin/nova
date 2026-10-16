@@ -44,7 +44,8 @@ touch a page, and JS could not call it.
      value holds it, so no value names a released slot; a value built by
      hand reads whatever word its address holds, and reaches at most an
      object of the program's own table.
-3. **Closures JS may call are a root, and each call from JS is a turn.**
+3. **Closures JS may call are a root, and each outermost call from JS is a
+   turn.**
    - `std/rt` keeps a table of `fn(Int)` closures, whose entries the
      collector marks. `std/dom` wraps each handler in one.
    - `nova_call` calls an entry, then runs a turn: it wakes what is due,
@@ -61,13 +62,15 @@ touch a page, and JS could not call it.
      in a call's turn as in an `async fn main`'s.
 4. **A task can wait for JS.** It parks on a token, a handle the shim
    settles: `fetch` settles one with its reply, then calls `nova_wake`,
-   which queues the tasks parked on it and runs a turn. A turn whose only
-   waits are on tokens returns -2, and JS sets no timer. Inside
-   `block_on`, which holds the thread, such a wait is a panic.
+   which queues the tasks parked on it and runs a turn. A turn that ends
+   with no parked task's deadline, and a task waiting on a token, returns
+   -2, and JS sets no timer. Inside `block_on`, which holds the thread,
+   such a wait is a panic.
 5. **`std/dom` is std's first imported module.** It is in WASM's std but in
    no prelude: a program writes `import dom`. Natively that import is
    E0092. The names `dom` and `ui` are std's: a project's module under
-   either is E0093, and `nova-pm` refuses either as a package name.
+   either, which an `import` reaches, is E0093, and `nova-pm` refuses
+   either as a package name.
    `std/rt`'s public names are seen by std's modules only.
 6. **Tests use a fake DOM; CI uses Chromium.** `tests/dom/fake_dom.mjs` is
    plain JS that holds what a browser holds and no more, so a missing root
@@ -77,8 +80,10 @@ touch a page, and JS could not call it.
 ## Consequences
 
 - **Adding a DOM function** is an `extern "js"` declaration and a wrapper
-  in `std/dom`, and an arm in `shim.rs`'s `js_function`: no new `Builtin`,
-  `RtFunc` or signature in the checker.
+  in `std/dom`, and an arm in `shim.rs`'s `js_function` (and, for one that
+  calls Nova back or settles a token, its name in `shim()`'s list for
+  `shim/dom_call.js` or `shim/dom_fetch.js`): no new `Builtin`, `RtFunc` or
+  signature in the checker.
 - **Handles and closures are the collector's,** so 4.3's reactive graph,
   whose effects JS calls back, needs no new mechanism.
 - **Every shim carries the scheduler,** about 0.5 KB gzipped: hello world's

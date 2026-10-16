@@ -1128,8 +1128,9 @@ fn a_panic_in_a_listener_ends_the_program() {
     }
 }
 
-/// The shim keeps one timer, and a turn a click asks for sooner replaces
-/// the one `main`'s long sleep asked for (spec 4.2 §7.3).
+/// The shim keeps one timer: a turn a click asks for sooner is scheduled
+/// while the one `main`'s long sleep asked for is pending, and comes first
+/// (spec 4.2 §7.3).
 #[test]
 fn a_sooner_turn_replaces_a_later_timer() {
     dom_program("scheduler", &[]);
@@ -1160,10 +1161,10 @@ fn block_on_in_a_task_a_click_spawned_panics() {
 
 /// Timers: a timeout, an interval cleared after three ticks, and a cleared
 /// timeout that never runs, in order; clearing a timer again, or one that
-/// has run, releases no entry another timer took; `init` resolves while
-/// they are still pending. Each entry of std/rt's table leaves it when its timeout fires
-/// or its timer is cleared, so none is left at the end (spec 4.2 §6.2,
-/// §7.3).
+/// has run, releases no entry another timer took; a timeout too long for
+/// JS does not fire at once; `init` resolves while they are still pending.
+/// Each entry of std/rt's table leaves it when its timeout fires or its
+/// timer is cleared, so none is left at the end (spec 4.2 §6.2, §7.3).
 #[test]
 fn timers_run_in_order_until_cleared() {
     dom_program("timers", &[]);
@@ -1187,9 +1188,10 @@ fn the_location_and_history_change_in_place() {
     assert!(!live_after_each(&err).is_empty(), "{err}");
 }
 
-/// `fetch` from an `async fn main`: replies of 200 and 404, a failure, and
-/// a POST with a header and a body; and from a click handler, through a
-/// task it spawns, which waits on its token after the call returns (spec
+/// `fetch` from an `async fn main`: replies of 200 and 404, a failure, a
+/// POST with a header and a body, and a header value that would make a
+/// second header, refused before sending; and from a click handler, through
+/// a task it spawns, which waits on its token after the call returns (spec
 /// 4.2 §6.2, §7).
 #[test]
 fn fetch_waits_for_the_reply() {
@@ -1218,6 +1220,26 @@ fn a_fetch_in_block_on_panics() {
             stderr(&a)
         );
     }
+}
+
+/// A panic in an interval's call ends the program under Node: the interval
+/// stops calling in and clears itself, so Node exits with an abort's
+/// status, and does not wait for the interval for ever (spec 4.2 §5.3).
+#[test]
+fn a_panic_in_an_interval_ends_the_process() {
+    let Some(node) = node() else { return };
+    let dir = fresh("dom-interval-panic");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "import dom\nfn main() {\n    let _ = set_interval(1, | | panic(\"tick\"))\n    println(\"main done\")\n}\n",
+        )],
+    );
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).code(134);
+    assert_eq!(stdout(&a), "main done\n");
+    assert_eq!(stderr(&a), "nova: panic: tick\n");
 }
 
 /// The entries of std/rt's table of closures JS may call in use after each
@@ -1269,8 +1291,9 @@ fn handles_are_released_when_no_value_holds_them() {
     assert!(lines.iter().all(|&(_, live)| live < 400), "{err}");
 }
 
-/// An `Element` built by hand names no handle: using it is a panic, not an
-/// access to another object (spec 4.2 §4.1).
+/// An `Element` built by hand whose box names no live handle is a panic
+/// when used (spec 4.2 §4.1; decision 5 of the plan says what a box that
+/// happens to name one reaches).
 #[test]
 fn a_forged_element_panics() {
     let Some(node) = node() else { return };

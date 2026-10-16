@@ -811,10 +811,11 @@ fn rt_log_set_config(level: Int, to_stderr: Int) {
 // laid out as a future at its start; at 8 its count and at 16 its capacity.
 // At 24 the run queue, a ring of task ids; at 32 its head, 40 its length and
 // 48 its capacity. At 56 the parked tasks, 32 bytes each: the id, the task it
-// waits for plus 1 or 0, whether it has a deadline, and the deadline; at 64
-// their count and at 72 the capacity. At 80 the polled task plus 1, or 0
-// outside a poll. At 88 the wait the poll staged: 1 a deadline, 2 a task; at
-// 96 the deadline and at 104 the task. At 112, 1 while a `block_on` or
+// waits for plus 1, or the shim's token it waits for negated, or 0, whether
+// it has a deadline, and the deadline; at 64 their count and at 72 the
+// capacity. At 80 the polled task plus 1, or 0 outside a poll. At 88 the wait
+// the poll staged: 1 a deadline, 2 a task, 4 a token; at 96 the deadline and
+// at 104 the task or the token. At 112, 1 while a `block_on` or
 // `async fn main` runs. At 120 the index from a state's address to its
 // task, 16 bytes a slot (the address, the id plus 1); at 128 its capacity, a
 // power of 2, and at 136 the slots used.
@@ -1037,7 +1038,7 @@ fn stage_deadline(e: Int, deadline: Int) {
 fn stage_task(e: Int, id: Int) {
     if mem_load64(e + 80) == 0 { panic("nova_rt: a park was staged outside a poll") }
     let staged = mem_load64(e + 88)
-    if (staged & 2) != 0 {
+    if (staged & 6) != 0 {
         let mut deadline = "None"
         if (staged & 1) != 0 { deadline = "Some(_)" }
         let prev = mem_load64(e + 104)
@@ -1385,7 +1386,8 @@ fn rt_turn() -> Int {
 // The rest of a turn, after what woke it (spec 4.2 §5.2, §7.2): run the
 // queue for up to `TURN_BUDGET`, collect if due, then 0 if tasks are still
 // queued, or else the milliseconds to the earliest deadline, or -1 when no
-// task is parked, or -2 when the only waits are on the shim's tokens.
+// task is parked, or -2 when no parked task has a deadline and one waits on
+// the shim's tokens.
 fn turn_end(e: Int) -> Int {
     drain_turn(e)
     gc_turn_end()
@@ -1572,7 +1574,8 @@ pub fn rt_handle_id(b: Int) -> Int { mem_load64(b) }
 // sweeping by bitmap. A word is a pointer if it falls inside an allocated
 // object, at its start or not. It runs only at the end of a turn, when the
 // WASM stack holds nothing it has to see: its roots are the executor's block
-// and tables, and each unreleased task's state.
+// and tables, each unreleased task's state, and the closures JS may call;
+// the handle registry it keeps without its boxes (spec 4.2 §4.2, §5.1).
 
 // The next collection's threshold, or 0 for the first, 1 MiB; collections so
 // far; and the switches, 1 stress and 2 debug.

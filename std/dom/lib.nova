@@ -6,9 +6,11 @@
 //! `import dom` for every name, or `import dom::{Element, create_element}`
 //! for some. Only a WASM build has it; natively, `import dom` is E0092.
 //!
-//! Each `Element` holds a handle to a JS object, which is released once no
-//! value holds it. A JS exception in one of these functions is a panic that
-//! names the function.
+//! Each `Element` holds a handle to a JS object, which a collection releases
+//! once no value holds it. Collections run at the end of a turn, so a program
+//! whose synchronous `main` adds no listener, timer or `fetch` never releases
+//! one. A JS exception in one of these functions is a panic that names the
+//! function.
 
 // The shim's JS functions (spec
 // docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
@@ -74,9 +76,10 @@ extern "js" {
 
 /// A node of the page: an element, or a text node.
 ///
-/// Each value holds a handle to the JS object. The handle is released when
-/// no value holds it any more. A value built by hand names no handle, and
-/// using it panics.
+/// Each value holds a handle to the JS object, which a collection releases
+/// once no value holds it. A value built by hand panics when used, unless its
+/// `box` happens to name a live handle: then it reaches that handle's object,
+/// one this program's own calls made.
 pub record Element { box: Int }
 
 /// An event a listener receives.
@@ -202,6 +205,20 @@ pub async fn fetch_with(url: String, init: FetchInit) -> Result<Response, FetchE
     let mut i = 0
     while i < init.headers.len() {
         let h = init.headers[i]
+        // The shim reads `name: value` lines: a line break or a colon in the
+        // wrong place would make another header, as a browser refuses.
+        if h.name == ""
+            || h.name.contains(":")
+            || h.name.contains("\n")
+            || h.name.contains("\r")
+            || h.value.contains("\n")
+            || h.value.contains("\r") {
+            return Err(
+                FetchError {
+                    message: "invalid header: a name is empty or holds a colon, or a name or value holds a line break",
+                },
+            )
+        }
         headers = "${headers}${h.name}: ${h.value}\n"
         i = i + 1
     }
