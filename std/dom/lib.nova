@@ -5,10 +5,177 @@
 //! It is not in the prelude: a module that uses it imports it, with
 //! `import dom` for every name, or `import dom::{Element, create_element}`
 //! for some. Only a WASM build has it; natively, `import dom` is E0092.
+//!
+//! Each `Element` holds a handle to a JS object, which is released once no
+//! value holds it. A JS exception in one of these functions is a panic that
+//! names the function.
+
+// The shim's JS functions (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §3.1, §6.2). A node is a handle, 0 for none.
+extern "js" {
+    fn dom_body() -> Int
+    fn dom_create_element(tag: String) -> Int
+    fn dom_create_text(text: String) -> Int
+    fn dom_query_selector(selector: String) -> Int
+    fn dom_query_selector_in(node: Int, selector: String) -> Int
+    fn dom_query_all(selector: String) -> Int
+    fn dom_list_len(list: Int) -> Int
+    fn dom_list_item(list: Int, index: Int) -> Int
+    fn dom_element_by_id(id: String) -> Int
+    fn dom_tag(node: Int) -> String
+    fn dom_set_attribute(node: Int, name: String, value: String)
+    fn dom_has_attribute(node: Int, name: String) -> Bool
+    fn dom_attribute(node: Int, name: String) -> String
+    fn dom_remove_attribute(node: Int, name: String)
+    fn dom_set_property(node: Int, name: String, value: String)
+    fn dom_property(node: Int, name: String) -> String
+    fn dom_set_property_bool(node: Int, name: String, value: Bool)
+    fn dom_property_bool(node: Int, name: String) -> Bool
+    fn dom_set_text(node: Int, text: String)
+    fn dom_text(node: Int) -> String
+    fn dom_append_child(parent: Int, child: Int)
+    fn dom_insert_before(parent: Int, child: Int, before: Int)
+    fn dom_remove_child(parent: Int, child: Int)
+    fn dom_remove(node: Int)
+    fn dom_parent(node: Int) -> Int
+    fn dom_first_child(node: Int) -> Int
+    fn dom_next_sibling(node: Int) -> Int
+    fn dom_is_same(a: Int, b: Int) -> Bool
+}
 
 /// A node of the page: an element, or a text node.
 ///
 /// Each value holds a handle to the JS object. The handle is released when
-/// no value holds it any more, and using a node after that, or a value
-/// built by hand, panics.
+/// no value holds it any more. A value built by hand names no handle, and
+/// using it panics.
 pub record Element { box: Int }
+
+// A node for handle `h`, boxed so the collector releases it.
+fn node(h: Int) -> Element { Element { box: rt_handle_box(h) } }
+
+// A node for handle `h`, or `None` for 0.
+fn maybe_node(h: Int) -> Option<Element> { if h == 0 { None } else { Some(node(h)) } }
+
+// The handle a node holds.
+fn handle_of(e: Element) -> Int { rt_handle_id(e.box) }
+
+// The nodes of a JS array of nodes, at handle `list`, which is released
+// with its box. The array's filler, the list's own box, is overwritten.
+fn nodes(list: Int) -> [Element] {
+    let kept = node(list)
+    let n = dom_list_len(list)
+    let mut out = [kept; n]
+    let mut i = 0
+    while i < n {
+        out[i] = node(dom_list_item(handle_of(kept), i))
+        i = i + 1
+    }
+    out
+}
+
+/// The page's `<body>`.
+pub fn body() -> Element { node(dom_body()) }
+
+/// A new element named `tag`, such as `"div"`, not yet in the page.
+pub fn create_element(tag: String) -> Element { node(dom_create_element(tag)) }
+
+/// A new text node holding `text`, not yet in the page.
+pub fn create_text(text: String) -> Element { node(dom_create_text(text)) }
+
+/// The first node of the page that `selector` matches, a CSS selector.
+pub fn query_selector(selector: String) -> Option<Element> {
+    maybe_node(dom_query_selector(selector))
+}
+
+/// Every node of the page that `selector` matches, in the page's order.
+pub fn query_selector_all(selector: String) -> [Element] { nodes(dom_query_all(selector)) }
+
+/// The element whose `id` attribute is `id`.
+pub fn element_by_id(id: String) -> Option<Element> { maybe_node(dom_element_by_id(id)) }
+
+impl Element {
+    /// The node's name in lower case: `"div"` for a `<div>`, `"#text"` for
+    /// a text node.
+    pub fn tag(self) -> String { dom_tag(handle_of(self)) }
+
+    /// Sets the attribute `name` to `value`.
+    pub fn set_attribute(self, name: String, value: String) {
+        dom_set_attribute(handle_of(self), name, value)
+    }
+
+    /// The attribute `name`, or `None` when the element has none.
+    pub fn attribute(self, name: String) -> Option<String> {
+        let h = handle_of(self)
+        if dom_has_attribute(h, name) { Some(dom_attribute(h, name)) } else { None }
+    }
+
+    /// Removes the attribute `name`, if the element has it.
+    pub fn remove_attribute(self, name: String) { dom_remove_attribute(handle_of(self), name) }
+
+    /// Sets the JS property `name` to the string `value`, as `value` on an
+    /// `<input>`.
+    pub fn set_property(self, name: String, value: String) {
+        dom_set_property(handle_of(self), name, value)
+    }
+
+    /// The JS property `name` as a string: `""` when it is unset.
+    pub fn property(self, name: String) -> String { dom_property(handle_of(self), name) }
+
+    /// Sets the JS property `name` to `value`, as `checked` on a checkbox.
+    pub fn set_property_bool(self, name: String, value: Bool) {
+        dom_set_property_bool(handle_of(self), name, value)
+    }
+
+    /// Whether the JS property `name` is truthy.
+    pub fn property_bool(self, name: String) -> Bool { dom_property_bool(handle_of(self), name) }
+
+    /// Replaces the node's content with the text `text`.
+    pub fn set_text(self, text: String) { dom_set_text(handle_of(self), text) }
+
+    /// The text of the node and everything in it.
+    pub fn text(self) -> String { dom_text(handle_of(self)) }
+
+    /// Adds `child` as the node's last child, moving it if it is in the
+    /// page already.
+    pub fn append_child(self, child: Element) {
+        dom_append_child(handle_of(self), handle_of(child))
+    }
+
+    /// Adds `child` before `before`, one of the node's children, or last
+    /// for `None`.
+    pub fn insert_before(self, child: Element, before: Option<Element>) {
+        let mut b = 0
+        match before {
+            Some(n) => b = handle_of(n)
+            None => b = 0
+        }
+        dom_insert_before(handle_of(self), handle_of(child), b)
+    }
+
+    /// Removes `child`, one of the node's children.
+    pub fn remove_child(self, child: Element) {
+        dom_remove_child(handle_of(self), handle_of(child))
+    }
+
+    /// Removes the node from its parent, if it has one.
+    pub fn remove(self) { dom_remove(handle_of(self)) }
+
+    /// The node's parent.
+    pub fn parent(self) -> Option<Element> { maybe_node(dom_parent(handle_of(self))) }
+
+    /// The node's first child.
+    pub fn first_child(self) -> Option<Element> { maybe_node(dom_first_child(handle_of(self))) }
+
+    /// The node after this one in its parent.
+    pub fn next_sibling(self) -> Option<Element> { maybe_node(dom_next_sibling(handle_of(self))) }
+
+    /// The first node inside this one that `selector` matches.
+    pub fn query_selector(self, selector: String) -> Option<Element> {
+        maybe_node(dom_query_selector_in(handle_of(self), selector))
+    }
+
+    /// Whether `other` is the same node: two values may hold handles to
+    /// one node.
+    pub fn is_same(self, other: Element) -> Bool { dom_is_same(handle_of(self), handle_of(other)) }
+}

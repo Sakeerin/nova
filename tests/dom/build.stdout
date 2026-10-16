@@ -1,0 +1,15 @@
+[item 0][item 1][item 2][item 3][last]
+[item 1][item 2][item 3]
+ul li #text
+Some(items)
+None
+typed true false
+3 items
+first: item 1, same: true, other: false
+no #missing
+#list is a ul
+no p
+0 .none
+parent: body
+no input in the list
+<body><ul id="list"><li>item 1</li><li>item 2</li><li>item 3</li></ul><input>a &lt; b &amp; c</body>

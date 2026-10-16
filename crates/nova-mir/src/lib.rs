@@ -21,7 +21,7 @@ mod mono;
 pub use mono::{lower_module, lower_module_with, Options, RuntimeImpls};
 /// The operators of [`Stmt::Bin`], re-exported so a backend needs no
 /// dependency on `nova-hir` to name them.
-pub use nova_hir::BinOp;
+pub use nova_hir::{BinOp, ExternAbi};
 
 /// The async ABI this compiler generates against: the state object's slot
 /// layout, the future value's slot layout, and the poll statuses.
@@ -79,11 +79,13 @@ pub struct Module {
     pub runtime_exports: Vec<(&'static str, String)>,
 }
 
-/// An imported external (C-ABI) function: its raw symbol and ABI classes.
+/// An imported external function: its raw symbol and ABI classes.
 #[derive(Debug, Clone)]
 pub struct ExternDecl {
-    /// The raw C symbol to import and call (never mangled).
+    /// The raw symbol to import and call (never mangled).
     pub symbol: String,
+    /// A C function, or the shim's JS (spec 4.2 §3.1).
+    pub abi: ExternAbi,
     pub params: Vec<MirTy>,
     pub ret: MirTy,
 }

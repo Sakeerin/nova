@@ -22,8 +22,8 @@ use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Result};
 use nova_mir::{
-    BinOp, Function as MirFn, MemOp, MirTy, Module, OperandClass, RtFunc, Stmt, Temp, Terminator,
-    WasmRuntime,
+    BinOp, ExternAbi, Function as MirFn, MemOp, MirTy, Module, OperandClass, RtFunc, Stmt, Temp,
+    Terminator, WasmRuntime,
 };
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, ElementSection, Elements, EntityType,
@@ -68,8 +68,9 @@ pub struct Output {
     /// The module's bytes.
     pub wasm: Vec<u8>,
     /// The shim's functions it imports from `env`, by field name, in the
-    /// order of the module's imports.
-    pub imports: Vec<&'static str>,
+    /// order of the module's imports: the runtime's, then std's
+    /// `extern "js"` functions, then `abort`.
+    pub imports: Vec<String>,
 }
 
 /// The WASM value of a MIR class, or none for `Unit`.
@@ -253,7 +254,7 @@ fn compile(mir: &Module) -> Result<Output> {
             }
         }
     }
-    let mut import_names = Vec::new();
+    let mut import_names: Vec<String> = Vec::new();
     for (i, func) in host_order.iter().enumerate() {
         let WasmRuntime::Host(name) = func.on_wasm() else {
             unreachable!("only host functions are collected");
@@ -262,13 +263,32 @@ fn compile(mir: &Module) -> Result<Output> {
         let ty = types.of(vals(&params), val(ret).into_iter().collect());
         imports.import("env", name, EntityType::Function(ty));
         layout.hosts.insert(*func, i as u32);
-        import_names.push(name);
+        import_names.push(name.to_string());
+    }
+    // std's `extern "js"` functions, which MIR calls by their symbols
+    // (spec 4.2 §3.1). A C function cannot reach here: the resolver refuses
+    // an `extern` block of a user's on WASM.
+    for ext in &mir.externs {
+        if ext.abi != ExternAbi::Js {
+            bail!(
+                "extern \"C\" function `{}` reached the WASM backend",
+                ext.symbol
+            );
+        }
+        let ty = types.of(vals(&ext.params), val(ext.ret).into_iter().collect());
+        imports.import("env", &ext.symbol, EntityType::Function(ty));
+        layout
+            .funcs
+            .insert(ext.symbol.clone(), import_names.len() as u32);
+        layout.rets.insert(ext.symbol.clone(), ext.ret);
+        layout.params.insert(ext.symbol.clone(), ext.params.clone());
+        import_names.push(ext.symbol.clone());
     }
     if aborts {
         let ty = types.of(vec![], vec![]);
         imports.import("env", "abort", EntityType::Function(ty));
         layout.abort = Some(import_names.len() as u32);
-        import_names.push("abort");
+        import_names.push("abort".to_string());
     }
     let first = import_names.len() as u32;
     for (i, f) in mir.functions.iter().enumerate() {
@@ -1781,6 +1801,55 @@ mod tests {
         );
         let out = valid(&module(vec![f]));
         assert_eq!(out.imports, ["println", "print"]);
+    }
+
+    /// std's `extern "js"` functions are imported after the host functions
+    /// and before `abort`, under their symbols, and MIR calls them by name
+    /// (spec 4.2 §3.1).
+    #[test]
+    fn an_extern_js_function_is_imported_after_the_host_functions() {
+        let f = func(
+            "main",
+            0,
+            vec![MirTy::Ptr, MirTy::I64],
+            MirTy::Unit,
+            vec![block(
+                vec![
+                    Stmt::CallRuntime {
+                        dst: None,
+                        func: RtFunc::Println,
+                        args: vec![Temp(0)],
+                    },
+                    Stmt::Call {
+                        dst: Some(Temp(1)),
+                        callee: "dom_create_text".to_string(),
+                        args: vec![Temp(0)],
+                    },
+                    Stmt::Mem {
+                        dst: None,
+                        op: MemOp::Abort,
+                        args: vec![],
+                    },
+                ],
+                ret_unit(),
+            )],
+        );
+        let mut m = module(vec![f]);
+        m.externs.push(nova_mir::ExternDecl {
+            symbol: "dom_create_text".to_string(),
+            abi: ExternAbi::Js,
+            params: vec![MirTy::Ptr],
+            ret: MirTy::I64,
+        });
+        let out = valid(&m);
+        assert_eq!(out.imports, ["println", "dom_create_text", "abort"]);
+        m.externs[0].abi = ExternAbi::C;
+        let e = compile_module(&m).expect_err("refused");
+        assert!(
+            e.to_string()
+                .contains("extern \"C\" function `dom_create_text`"),
+            "{e}"
+        );
     }
 
     /// `host_abort` imports the shim's `abort` after the host functions,

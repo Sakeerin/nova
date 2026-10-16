@@ -7,8 +7,8 @@ use nova_diagnostics::{suggest, Diagnostic, FileDb, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
 use nova_resolver::{
-    Builtin, DefId, DefKind, Definitions, Index, LocalFlags, MethodOwner, ModuleId, Res, Role,
-    Target,
+    Builtin, CompileTarget, DefId, DefKind, Definitions, Index, LocalFlags, MethodOwner, ModuleId,
+    Res, Role, Target,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -2204,8 +2204,12 @@ impl<'a> Checker<'a> {
                 continue;
             }
 
-            // Only the C ABI (explicit `"C"` or omitted) is supported.
-            if !matches!(block.abi.as_deref(), None | Some("C")) {
+            // The C ABI (explicit `"C"` or omitted), or, in a std module of
+            // a WASM build only, the shim's `"js"` (spec 4.2 §3.1).
+            let js = block.abi.as_deref() == Some("js")
+                && self.defs.is_std_module(self.cur_module)
+                && self.defs.target() == CompileTarget::Wasm;
+            if !js && !matches!(block.abi.as_deref(), None | Some("C")) {
                 let abi = block.abi.clone().unwrap_or_default();
                 self.error(
                     "E0900",
@@ -2234,14 +2238,14 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|p| {
                     let ty = self.convert_ty(&p.ty, &empty, &[]);
-                    self.require_ffi_safe(&ty, p.ty.span, false);
+                    self.require_ffi_safe(&ty, p.ty.span, false, js);
                     ty
                 })
                 .collect();
             let ret = match &sig.return_ty {
                 Some(t) => {
                     let ty = self.convert_ty(t, &empty, &[]);
-                    self.require_ffi_safe(&ty, t.span, true);
+                    self.require_ffi_safe(&ty, t.span, true, js);
                     ty
                 }
                 None => Ty::Unit,
@@ -2259,6 +2263,11 @@ impl<'a> Checker<'a> {
             self.externs.push(hir::ExternFn {
                 def_id,
                 symbol: sig.name.value.clone(),
+                abi: if js {
+                    hir::ExternAbi::Js
+                } else {
+                    hir::ExternAbi::C
+                },
                 params,
                 ret,
                 span: sig.name.span,
@@ -2267,10 +2276,12 @@ impl<'a> Checker<'a> {
     }
 
     /// Reject a non-FFI-safe type in an `extern` signature. The FFI-safe types
-    /// are the scalars `Int`, `Float`, `Bool` (and, for a return, unit / `void`).
-    fn require_ffi_safe(&mut self, ty: &Ty, span: Span, is_return: bool) {
+    /// are the scalars `Int`, `Float`, `Bool` (and, for a return, unit / `void`),
+    /// and for `extern "js"` also `String` (spec 4.2 §3.1).
+    fn require_ffi_safe(&mut self, ty: &Ty, span: Span, is_return: bool, js: bool) {
         let ok = match ty {
             Ty::Int | Ty::Float | Ty::Bool => true,
+            Ty::String => js,
             Ty::Unit => is_return,
             // `convert_ty` already reported why this type is unusable.
             Ty::Error => true,
@@ -2281,8 +2292,13 @@ impl<'a> Checker<'a> {
                 "E0900",
                 format!(
                     "`{}` is not FFI-safe in an extern signature yet; only Int, Float, and Bool \
-                     (and a unit return) are supported",
-                    display_ty(ty, self.defs)
+                     (and a unit return) are supported{}",
+                    display_ty(ty, self.defs),
+                    if js {
+                        ", and String for extern \"js\""
+                    } else {
+                        ""
+                    }
                 ),
                 span,
             );

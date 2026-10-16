@@ -6,7 +6,10 @@
 // docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md).
 // Where a native build calls a `nova-runtime` function, MIR calls the
 // function here of the same name with an `rt_` prefix, and each is a port of
-// that one, with the same results. None is `pub`, so no program sees them.
+// that one, with the same results. The few that are `pub` are for std's
+// other modules, which alone see `std/rt`'s names (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §5), so no program sees them.
 //
 // A runtime value is an `Int` address. A `String` or `Bytes` value is a
 // 16-byte header: its length at offset 0, and at offset 8 the address of its
@@ -1330,6 +1333,23 @@ fn rt_turn() -> Int {
     let ms = left / 1000000
     if left % 1000000 == 0 { ms } else { ms + 1 }
 }
+
+// JS's objects, as `std/dom` holds them (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §4): a box is a 16-byte leaf holding a handle of the shim's table, then 0.
+// A record holds the box's address in an `Int` field, which the collector,
+// being conservative, reads as a pointer.
+
+/// A box for the shim's handle `id`. Only `std/dom` calls it.
+pub fn rt_handle_box(id: Int) -> Int {
+    let b = rt_alloc_leaf(16)
+    mem_store64(b, id)
+    b
+}
+
+/// The handle in the box at `b`. A forged address reads whatever is there,
+/// and the shim's table panics on a handle it does not hold.
+pub fn rt_handle_id(b: Int) -> Int { mem_load64(b) }
 
 // The collector (spec 4.1 §6.4 to §6.6), ported from `nova-runtime`'s
 // `gc.rs`: conservative and non-moving, marking from the roots, then

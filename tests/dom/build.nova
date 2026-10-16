@@ -1,0 +1,98 @@
+// Building a page with std/dom (spec
+// docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
+// §6.2): elements and text, attributes and properties, inserting and
+// removing, walking, selectors. The harness prints the page after `main`.
+
+import dom
+
+fn texts(parent: Element) -> String {
+    let mut out = ""
+    let mut at = parent.first_child()
+    let mut more = true
+    while more {
+        match at {
+            Some(n) => {
+                out = "${out}[${n.text()}]"
+                at = n.next_sibling()
+            }
+            None => more = false
+        }
+    }
+    out
+}
+
+fn show(v: Option<String>) -> String {
+    match v {
+        Some(s) => "Some(${s})"
+        None => "None"
+    }
+}
+
+fn main() {
+    let page = body()
+    let list = create_element("ul")
+    list.set_attribute("id", "list")
+    list.set_attribute("class", "items")
+    let mut i = 1
+    while i <= 3 {
+        let item = create_element("li")
+        item.set_text("item ${i}")
+        list.append_child(item)
+        i = i + 1
+    }
+    page.append_child(list)
+    let zero = create_element("li")
+    zero.set_text("item 0")
+    list.insert_before(zero, list.first_child())
+    let last = create_element("li")
+    last.set_text("last")
+    list.insert_before(last, None)
+    println(texts(list))
+    last.remove()
+    match list.first_child() {
+        Some(n) => list.remove_child(n)
+        None => println("no first child")
+    }
+    println(texts(list))
+    println("${list.tag()} ${zero.tag()} ${create_text("t").tag()}")
+    println(show(list.attribute("class")))
+    list.remove_attribute("class")
+    println(show(list.attribute("class")))
+    let input = create_element("input")
+    input.set_property("value", "typed")
+    input.set_property_bool("checked", true)
+    page.append_child(input)
+    println(
+        "${input.property("value")} ${input.property_bool("checked")} ${input.property_bool("disabled")}",
+    )
+    page.append_child(create_text("a < b & c"))
+    let items = query_selector_all("#list li")
+    println("${items.len()} items")
+    match query_selector("ul li") {
+        Some(n) => println(
+            "first: ${n.text()}, same: ${n.is_same(items[0])}, other: ${n.is_same(items[1])}",
+        )
+        None => println("none")
+    }
+    match element_by_id("missing") {
+        Some(n) => println("found ${n.tag()}")
+        None => println("no #missing")
+    }
+    match element_by_id("list") {
+        Some(n) => println("#list is a ${n.tag()}")
+        None => println("no #list")
+    }
+    match query_selector("p") {
+        Some(n) => println("found ${n.tag()}")
+        None => println("no p")
+    }
+    println("${query_selector_all(".none").len()} .none")
+    match page.query_selector("input") {
+        Some(n) => println("parent: ${match n.parent() { Some(p) => p.tag(), None => "none" }}")
+        None => println("no input")
+    }
+    match list.query_selector("input") {
+        Some(n) => println("an input in the list")
+        None => println("no input in the list")
+    }
+}
