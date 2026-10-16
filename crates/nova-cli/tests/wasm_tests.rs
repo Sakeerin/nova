@@ -165,6 +165,75 @@ fn a_native_only_payload_pattern_is_e0092_on_wasm() {
     );
 }
 
+/// A program imports `std/dom` by name, on WASM; natively the import is
+/// E0092, and without it the module's names are unknown (spec 4.2 §3.2).
+#[test]
+fn dom_is_imported_by_name_and_only_on_wasm() {
+    let dir = fresh("import-dom");
+    write(
+        &dir,
+        &[
+            (
+                "main.nova",
+                "import dom::{Element}\nfn f(e: Element) -> Int { 0 }\nfn main() { println(\"x\") }\n",
+            ),
+            (
+                "bare.nova",
+                "fn f(e: Element) -> Int { 0 }\nfn main() { println(\"x\") }\n",
+            ),
+        ],
+    );
+    nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).success();
+    let native = nova_in(&dir, &["check", "main.nova"]).failure();
+    assert!(
+        stderr(&native)
+            .contains("error[E0092]: `dom` is a std module, which target native does not have"),
+        "{}",
+        stderr(&native)
+    );
+    let bare = nova_in(&dir, &["check", "--target", "wasm", "bare.nova"]).failure();
+    assert!(
+        stderr(&bare).contains("error[E0001]: cannot find type `Element`"),
+        "{}",
+        stderr(&bare)
+    );
+}
+
+/// A module of the program under a std module's name is E0093, a file
+/// beside a loose program's or a package's (spec 4.2 §3.2).
+#[test]
+fn a_module_under_a_std_name_is_e0093() {
+    let dir = fresh("std-name");
+    write(
+        &dir,
+        &[
+            ("loose/main.nova", "import ui\nfn main() { hi() }\n"),
+            ("loose/ui.nova", "pub fn hi() { println(\"hi\") }\n"),
+            (
+                "app/nova.toml",
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            ),
+            ("app/src/main.nova", "import dom\nfn main() { hi() }\n"),
+            ("app/src/dom.nova", "pub fn hi() { println(\"hi\") }\n"),
+        ],
+    );
+    let loose = nova_in(&dir.join("loose"), &["check", "main.nova"]).failure();
+    assert!(
+        stderr(&loose).contains("error[E0093]: `ui` is the name of a std module"),
+        "{}",
+        stderr(&loose)
+    );
+    for target in [&["check"][..], &["check", "--target", "wasm"][..]] {
+        let app = nova_in(&dir.join("app"), target).failure();
+        let err = stderr(&app);
+        assert!(
+            err.contains("error[E0093]: `dom` is the name of a std module")
+                && err.contains("dom.nova"),
+            "{err}"
+        );
+    }
+}
+
 /// The memory builtins are `std/rt`'s: a user module cannot call one, even
 /// on WASM (spec §3.3).
 #[test]

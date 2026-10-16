@@ -421,7 +421,7 @@ fn new_refuses_a_non_empty_directory_and_bad_names() {
 
     // Review Focus 5: a bad name is refused before anything touches the
     // disk, names that look like paths included.
-    for bad in ["1abc", "a b", "con", "../nova-escape-test", "a/b"] {
+    for bad in ["1abc", "a b", "con", "../nova-escape-test", "a/b", "ui"] {
         let out = nova()
             .current_dir(&dir)
             .args(["new", bad])
@@ -429,7 +429,7 @@ fn new_refuses_a_non_empty_directory_and_bad_names() {
             .failure();
         let err = stderr(&out);
         assert!(
-            err.contains("package name") || err.contains("reserves"),
+            err.contains("package name") || err.contains("reserves") || err.contains("std module"),
             "{bad}: {err}"
         );
     }

@@ -1,0 +1,14 @@
+//! The browser's page, from a program built for WASM: its elements and
+//! text, their attributes and properties, events, the location and history,
+//! timers, and `fetch`.
+//!
+//! It is not in the prelude: a module that uses it imports it, with
+//! `import dom` for every name, or `import dom::{Element, create_element}`
+//! for some. Only a WASM build has it; natively, `import dom` is E0092.
+
+/// A node of the page: an element, or a text node.
+///
+/// Each value holds a handle to the JS object. The handle is released when
+/// no value holds it any more, and using a node after that, or a value
+/// built by hand, panics.
+pub record Element { box: Int }
