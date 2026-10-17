@@ -216,6 +216,34 @@ the language server (`docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-desig
 `parse` is unchanged, and only the server's analysis type-checks the empty
 name.
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):** component syntax
+(RFC 0001; `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §3):
+
+```ebnf
+item        += [ "pub" ] "component" ident "(" [ params ] ")" block ;
+atom        += "view" "{" { child } "}"
+             | "||" [ "->" type ] expr ;
+child        = ( element | postfix_expr ) [ ";" ] ;
+element      = ident "{" { child } "}"
+             | ident "(" [ view_args ] ")" [ "{" { child } "}" ] ;
+view_args    = view_arg { "," view_arg } [ "," ] ;
+view_arg     = ( ident | keyword ) ":" expr | expr ;
+```
+
+- `component` is a keyword where an item starts, a name and `(` follow,
+  and `{` (or `->`) follows its parameters;
+  the node is a `Function` with `is_component` set and no return type. One
+  written with `->` is an error, "a component returns a `View`, which it
+  does not write".
+- `view` is a keyword where an expression starts and `{` follows, but not
+  where a record literal could not start, in an `if`, `while`, `for` or
+  `match` head. Inside its braces, record literals are allowed again.
+- An element is a name and a block, or a name and arguments holding a
+  named one, or both; a name and positional arguments alone is a call.
+  Named arguments parse nowhere else.
+- A `;` may end a view's child, so the next can begin with `(`, `[` or
+  `{`.
+
 ---
 
 ## 3. AST Node Definitions (Rust)

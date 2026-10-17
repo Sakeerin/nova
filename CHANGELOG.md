@@ -49,6 +49,21 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `mount` keeps one up to date in the page on WASM, and `render_to_string`
   writes one as escaped HTML on either target. A program imports them with
   `import ui` and `import ui::html` (ADR 0042).
+- **Component syntax:** `component Name(params) { … }` is a function that
+  returns a `View`, and `view { … }` writes one as elements, text and
+  views: `div(class: "c") { text("Count: ${count.value()}") }`. An
+  element's named arguments are its attributes, `value` its property and
+  `on_click` its handler; a text or attribute that is not a literal follows
+  the signals it reads. `component` and `view` stay names everywhere else
+  (RFC 0001, ADR 0043).
+- **`||` is a closure with no parameters**, `let f = || 1`, wherever an
+  expression starts.
+- **`nova build --target wasm` finishes the bundle:** a project's own
+  `index.html` is copied into `dist/`, `public/` becomes `assets/`, and
+  `manifest.json` lists what was built; `--release` runs `wasm-opt -Oz`
+  when it is on `PATH`. The generated page has `<div id="app"></div>`.
+- **`examples/06-counter-spa`**, the smallest WASM frontend, 21 KB
+  gzipped.
 
 ### Changed
 
@@ -56,6 +71,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   which an `import` reaches, is E0093, and `nova new`, a manifest and
   `nova publish` refuse either as a package name.
 - **`nova-codegen-wasm` is published** with the next release: 20 crates.
+- **`nova fmt` prints `||`** for a closure with no parameters, where it
+  printed `| |`, and puts `;` before a statement that begins with `||`.
+- **`nova build --target wasm --release` builds** where it was refused.
 
 ## [0.3.2] - 2026-10-14
 

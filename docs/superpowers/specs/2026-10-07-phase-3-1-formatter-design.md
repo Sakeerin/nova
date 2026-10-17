@@ -839,6 +839,9 @@ review. Items 1, 2 and 4 correct what Sections 1, 2 and 5 said. Items 5 to
 4. §5.6's token set is Section 2's six plus `{`, because a block statement
    after a path would read as a record literal. It does not include `&&`
    or `||`: no statement or arm can begin with either (§2).
+   **Amended 2026-10-17 (Phase 4.4, ADR 0043):** a statement can now begin
+   with `||`, a closure with no parameters, so the list includes it, and
+   an empty closure parameter list prints as `||`.
 5. A `return` or `break` without a value keeps its `;` when a statement
    follows (§5.6). Without it, `return` followed by `x = 1` would re-parse
    as `return x = 1`.

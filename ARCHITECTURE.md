@@ -33,14 +33,14 @@ nova-mir            → Mid-level IR
 
 | Crate | Purpose |
 |---|---|
-| `nova-cli` | Binary entry point, CLI argument parsing |
+| `nova-cli` | Binary entry point, CLI argument parsing; a WASM build's bundle: the page, `assets/`, `manifest.json` and `wasm-opt` (ADR 0043) |
 | `nova-driver` | Orchestrates the compilation pipeline |
 | `nova-diagnostics` | Shared error reporting infrastructure, and the fixes a diagnostic suggests |
 | `nova-lexer` | Source → tokens (uses `logos`) |
 | `nova-ast` | AST node type definitions |
 | `nova-parser` | Tokens → AST (hand-written recursive descent) |
 | `nova-resolver` | Name resolution, module graph; the types of the language server's index of names; the make-public and attribute fixes |
-| `nova-typeck` | Type inference and checking (HM + extensions); records the language server's index of names when asked, and attaches fixes to its errors |
+| `nova-typeck` | Type inference and checking (HM + extensions); desugars string interpolation and `view { … }` (RFC 0001) on the way to HIR; records the language server's index of names when asked, and attaches fixes to its errors |
 | `nova-hir` | High-level IR, desugared AST |
 | `nova-mir` | Mid-level IR, 3-address style |
 | `nova-codegen-cranelift` | Fast debug backend |
@@ -53,7 +53,7 @@ nova-mir            → Mid-level IR
 | `nova-test` | A stub, `publish = false`; the test runner is `nova-cli`'s `cmd/test.rs` |
 | `nova-pm` | Package manager: `nova.toml`, the package graph, `nova.lock` and the resolver; it never touches the network (ADR 0030, ADR 0031) |
 | `nova-index` | The package index: reading, downloading, packing, the sync step and publishing (ADR 0031) |
-| `nova-bundler` | Frontend bundler; a stub, `publish = false`, until Phase 4.3 |
+| `nova-bundler` | A stub, `publish = false`: a WASM build's bundle is `nova-cli`'s (ADR 0043) |
 | `nova-doc` | Documentation generator: `nova doc`'s site, from an analysis of the program and of std, with signatures linked through the checker's index and Markdown docs (ADR 0034); a library's and std's code examples as doc test modules, which `nova test` runs (ADR 0035) |
 | `nova-bench-http` | Keep-alive HTTP load generator for benchmarking `std/http` |
 

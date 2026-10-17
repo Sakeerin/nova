@@ -71,6 +71,13 @@ plain comments. `lex_with_comments` returns the same tokens, and every plain
 comment, line or block, with its span, for the formatter
 (`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §3).
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):** `component` and
+`view` are contextual keywords: the lexer makes them identifiers, and the
+parser reads them as keywords only in their places (RFC 0001). `KEYWORDS`,
+the 32 reserved words a test keeps equal to the lexer's tokens, does not
+change. `||` stays one token, which the parser takes as a closure with no
+parameters where an expression starts (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §2, §3; ADR 0043).
+
 ---
 
 ## 3. String Interpolation Handling
