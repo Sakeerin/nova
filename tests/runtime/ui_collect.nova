@@ -1,0 +1,27 @@
+// The state `std/ui` keeps lives across turns, where collections run: a
+// collection between them frees nothing an effect, a memo or a signal still
+// uses (spec 4.3 §8).
+import ui
+
+async fn main() {
+    let log = signal("")
+    let n = signal(1)
+    let doubled = memo(| | n.value() * 2)
+    let stop = root(
+        |dispose: fn()| {
+            effect(| | log.set("n=${n.value()} doubled=${doubled.value()}"))
+            dispose
+        },
+    )
+    let mut i = 0
+    while i < 3 {
+        sleep(Duration::from_millis(1)).await
+        let junk = [0; 1000]
+        n.update(|v: Int| v + 1)
+        println(log.value())
+        i = i + 1
+    }
+    stop()
+    n.set(100)
+    println("after dispose: ${log.value()}")
+}

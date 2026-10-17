@@ -1392,7 +1392,8 @@ mod tests {
                 "sync",
                 "task",
                 "test",
-                "time"
+                "time",
+                "ui"
             ]
         );
         let core = module(&d.site, "std/core/index.html");

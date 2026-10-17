@@ -368,7 +368,7 @@ fn a_warning_is_shown_once() {
 fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
     // Spec §6.1, §9.2, §13: std's examples run, at least one per module,
     // inside a project or not, and every one passes.
-    const MODULES: [&str; 17] = [
+    const MODULES: [&str; 18] = [
         "bytes",
         "collections",
         "core",
@@ -386,6 +386,7 @@ fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
         "task",
         "test",
         "time",
+        "ui",
     ];
     for dir in [fresh("std-outside"), calc("std-inside", LIB)] {
         let a = nova_test(&dir, &["--doc", "--std"]).success();

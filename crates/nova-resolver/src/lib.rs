@@ -2076,7 +2076,8 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 }
 
 /// The embedded standard-library modules, compiled as implicit modules and
-/// glob-imported into every user module. Order is significant only in that it
+/// glob-imported into every user module, but for `std/ui`, which a program
+/// imports (spec 4.3 §3). Order is significant only in that it
 /// fixes module indices; user modules always come first, then these in the
 /// order listed here — `std/core` stays first so its module index is
 /// unchanged from when it was the only embedded module. The sources come
@@ -2085,7 +2086,7 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 /// self-contained executable and `cargo package` keeps the files. Each name
 /// is `$std.*`, not a valid identifier, so it can never collide with a user
 /// module name or be named in an `import`.
-pub const STD_MODULES: [(&str, &str); 16] = [
+pub const STD_MODULES: [(&str, &str); 17] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.io", nova_std::IO),
@@ -2102,6 +2103,7 @@ pub const STD_MODULES: [(&str, &str); 16] = [
     ("$std.http", nova_std::HTTP),
     ("$std.crypto", nova_std::CRYPTO),
     ("$std.process", nova_std::PROCESS),
+    ("$std.ui", nova_std::UI),
 ];
 
 /// What a program is compiled for (spec
@@ -2138,12 +2140,12 @@ impl CompileTarget {
 }
 
 /// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1, 4.2
-/// §3.2): the ten of [`STD_MODULES`] that need no operating system, in the
-/// same order, then `std/dom`, which only an `import` reaches, then
-/// `std/rt`, the runtime written in Nova. Their names are those of
+/// §3.2, 4.3 §3): the ten of [`STD_MODULES`] that need no operating
+/// system, in the same order, then `std/dom`, which only an `import`
+/// reaches, then `std/ui`, then `std/rt`, the runtime written in Nova. Their names are those of
 /// [`STD_MODULES`], so `std/core` keeps its place first, and the same order
 /// gives a name the same winner in std's glob imports.
-pub const WASM_STD_MODULES: [(&str, &str); 12] = [
+pub const WASM_STD_MODULES: [(&str, &str); 13] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.collections", nova_std::COLLECTIONS),
@@ -2155,6 +2157,7 @@ pub const WASM_STD_MODULES: [(&str, &str); 12] = [
     ("$std.json", nova_std::JSON),
     ("$std.log", nova_std::LOG),
     ("$std.dom", nova_std::DOM),
+    ("$std.ui", nova_std::UI),
     ("$std.rt", nova_std::RT),
 ];
 
@@ -2162,7 +2165,7 @@ pub const WASM_STD_MODULES: [(&str, &str); 12] = [
 /// prelude, by the name an `import` writes, and the module's own name
 /// (spec `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 /// §3.2).
-pub const IMPORTED_STD: [(&str, &str); 1] = [("dom", "$std.dom")];
+pub const IMPORTED_STD: [(&str, &str); 2] = [("dom", "$std.dom"), ("ui", "$std.ui")];
 
 /// The names a project's module or a dependency may not take: those of
 /// std's imported modules, with 4.3's `ui` (spec 4.2 §3.2).
@@ -3504,8 +3507,9 @@ mod tests {
     }
 
     /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1, 4.2
-    /// §3.2): ten of the native modules, in native's order, then `std/dom`
-    /// and `std/rt`, after the user's. A native build has neither.
+    /// §3.2, 4.3 §3): ten of the native modules, in native's order, then
+    /// `std/dom`, `std/ui` and `std/rt`, after the user's. A native build
+    /// has neither `std/dom` nor `std/rt`.
     #[test]
     fn a_wasm_build_compiles_wasms_std_modules() {
         let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
@@ -3527,6 +3531,7 @@ mod tests {
                 "$std.json",
                 "$std.log",
                 "$std.dom",
+                "$std.ui",
                 "$std.rt"
             ]
         );
@@ -3567,6 +3572,37 @@ mod tests {
             native.diagnostics[0].message,
             "`dom` is a std module, which target native does not have"
         );
+    }
+
+    /// `std/ui` globs into no module: a program sees its names only through
+    /// `import ui`, on either target (spec 4.3 §3).
+    #[test]
+    fn ui_is_seen_only_through_an_import() {
+        for target in [CompileTarget::Native, CompileTarget::Wasm] {
+            let bare = resolve_for(target, "fn main() { }\n");
+            assert!(bare.diagnostics.is_empty(), "{:?}", bare.diagnostics);
+            assert!(bare
+                .definitions
+                .resolve_value(ModuleId(0), "signal")
+                .is_none());
+            let listed = resolve_for(target, "import ui::{signal}\nfn main() { }\n");
+            assert!(listed.diagnostics.is_empty(), "{:?}", listed.diagnostics);
+            assert!(listed
+                .definitions
+                .resolve_value(ModuleId(0), "signal")
+                .is_some());
+            assert!(listed
+                .definitions
+                .resolve_value(ModuleId(0), "effect")
+                .is_none());
+            let all = resolve_for(target, "import ui\nfn main() { }\n");
+            assert!(all.diagnostics.is_empty(), "{:?}", all.diagnostics);
+            assert!(all.definitions.resolve_value(ModuleId(0), "memo").is_some());
+            assert!(all
+                .definitions
+                .resolve_type(ModuleId(0), "Signal")
+                .is_some());
+        }
     }
 
     /// A WASM build knows the module of each public name of the std

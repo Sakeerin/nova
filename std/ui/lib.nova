@@ -1,0 +1,457 @@
+//! Reactivity: a signal holds a value, and the effects and memos that read
+//! it run again when it changes.
+//!
+//! It is not in the prelude: a module that uses it imports it, with
+//! `import ui` for every name, or `import ui::{signal, effect}` for some.
+//!
+//! `set` runs the effects that read a signal before it returns, each once,
+//! and only after every memo it reads is current. A memo computes when it is
+//! made, then again when it is read after something it read changed. An
+//! effect, a memo and a `root` own the effects and memos made while they
+//! run: running again or being disposed disposes those first,
+//! then runs the cleanups `on_cleanup` added, the last added first.
+//!
+//! The state behind all of this is the thread's, or the page's on WASM, and
+//! lives as long as it does. A value read from a signal is the signal's own:
+//! changing a record read from one changes the signal without telling
+//! anyone, and `set` or `update` is how to tell.
+//!
+//! A signal, and an effect that reads it:
+//!
+//! ```
+//! import ui
+//!
+//! let count = signal(1)
+//! let seen = signal(0)
+//! effect(| | seen.set(count.value() * 10))
+//! count.set(2)
+//! assert_eq(seen.value(), 20)
+//! ```
+
+// The design (spec
+// docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md
+// §4 to §7). Every computation, root and render is an `Owner`, every signal
+// has a `Source`, and both are records, so each refers to the other: a
+// source to the computations that read it, a computation to the sources it
+// read on its last run. `set` marks what reads the signal dirty and what is
+// downstream of that "check"; a queue of effects then runs, each first
+// bringing the memos it read up to date, and running only if one of them
+// ran or it is dirty itself.
+
+// An owner's kinds.
+const ROOT: Int = 0
+
+const EFFECT: Int = 1
+
+const MEMO: Int = 2
+
+// A computation's states: current, maybe stale, and stale.
+const CLEAN: Int = 0
+
+const CHECK: Int = 1
+
+const DIRTY: Int = 2
+
+// The effect runs one flush may make before it is taken for a loop.
+const SETTLE: Int = 100000
+
+// An effect, a memo, a root, or a region's render.
+record Owner {
+    id: Int,
+    kind: Int,
+    state: Int,
+    disposed: Bool,
+    // What a computation runs: for a memo, it also stores the value.
+    run: fn(),
+    // What it owns: what it made on its last run, and its cleanups.
+    children: Vec<Owner>,
+    cleanups: Vec<fn()>,
+    // What it read on its last run.
+    sources: Vec<Source>,
+    // A memo's own source, which its readers subscribe to.
+    out: Option<Source>,
+}
+
+// What a signal's readers subscribe to.
+record Source {
+    id: Int,
+    observers: Vec<Owner>,
+    // The memo whose value this is.
+    memo: Option<Owner>,
+}
+
+// An `on_mount` callback waiting for its nodes, and the owner it was added
+// in, which is disposed when its nodes are gone before they were in the page.
+record Mounted { owner: Option<Owner>, f: fn() }
+
+// The state of the thread's or the page's reactivity (spec §4): what is
+// running and who owns what it makes, the effects waiting to run, and the
+// roots `mount` keeps.
+record UiState {
+    next_id: Int,
+    listener: Option<Owner>,
+    owner: Option<Owner>,
+    queue: Vec<Owner>,
+    batch: Int,
+    flushing: Bool,
+    roots: Vec<Owner>,
+    // How many builds of nodes are in progress, and how many string
+    // renders: `on_mount` waits for the one and is dropped by the other.
+    building: Int,
+    rendering: Int,
+    mounted: Vec<Mounted>,
+}
+
+fn load_state<T>() -> T { ui_state_load() }
+
+fn store_state<T>(state: T) { ui_state_store(state) }
+
+// The state, made the first time it is asked for.
+fn ui() -> UiState {
+    if !ui_state_present() {
+        store_state(
+            UiState {
+                next_id: 1,
+                listener: None,
+                owner: None,
+                queue: Vec::new(),
+                batch: 0,
+                flushing: false,
+                roots: Vec::new(),
+                building: 0,
+                rendering: 0,
+                mounted: Vec::new(),
+            },
+        )
+    }
+    load_state()
+}
+
+fn new_id() -> Int {
+    let mut s = ui()
+    let id = s.next_id
+    s.next_id = id + 1
+    id
+}
+
+fn new_owner(kind: Int, run: fn()) -> Owner {
+    Owner {
+        id: new_id(),
+        kind: kind,
+        state: CLEAN,
+        disposed: false,
+        run: run,
+        children: Vec::new(),
+        cleanups: Vec::new(),
+        sources: Vec::new(),
+        out: None,
+    }
+}
+
+// Element `i` of `v`, which is in range.
+fn at<T>(v: Vec<T>, i: Int) -> T {
+    match v.get(i) {
+        Some(x) => x
+        None => panic("std/ui: an index out of range")
+    }
+}
+
+// Make `o` a child of the current owner, if there is one.
+fn adopt(o: Owner) {
+    match ui().owner {
+        Some(p) => {
+            let mut kids = p.children
+            kids.push(o)
+        }
+        None => {}
+    }
+}
+
+// Run `f` with `owner` and `listener` current, then put back what was.
+fn with_context<T>(owner: Option<Owner>, listener: Option<Owner>, f: fn() -> T) -> T {
+    let mut s = ui()
+    let was_owner = s.owner
+    let was_listener = s.listener
+    s.owner = owner
+    s.listener = listener
+    let out = f()
+    s.owner = was_owner
+    s.listener = was_listener
+    out
+}
+
+// Run `f` with no listener: what it reads subscribes nothing.
+fn untracked<T>(f: fn() -> T) -> T { with_context(ui().owner, None, f) }
+
+// Subscribe the current listener to `src`, once.
+fn track(src: Source) {
+    match ui().listener {
+        Some(l) => {
+            let mut i = 0
+            while i < l.sources.len() {
+                if at(l.sources, i).id == src.id { return }
+                i = i + 1
+            }
+            let mut read = l.sources
+            read.push(src)
+            let mut obs = src.observers
+            obs.push(l)
+        }
+        None => {}
+    }
+}
+
+// Mark `o` at least `state`; the first mark queues an effect, and marks a
+// memo's readers "check".
+fn mark(o: Owner, state: Int) {
+    if o.disposed || o.state >= state { return }
+    let was = o.state
+    let mut m = o
+    m.state = state
+    if was != CLEAN { return }
+    if o.kind == EFFECT {
+        let mut q = ui().queue
+        q.push(o)
+    } else if o.kind == MEMO {
+        match o.out {
+            Some(src) => mark_all(src, CHECK)
+            None => {}
+        }
+    }
+}
+
+fn mark_all(src: Source, state: Int) {
+    let mut i = 0
+    while i < src.observers.len() {
+        mark(at(src.observers, i), state)
+        i = i + 1
+    }
+}
+
+// Run the queue, unless a batch or another flush will.
+fn flush() {
+    let mut s = ui()
+    if s.flushing || s.batch > 0 { return }
+    s.flushing = true
+    let mut runs = 0
+    let mut i = 0
+    while i < s.queue.len() {
+        let o = at(s.queue, i)
+        i = i + 1
+        if !o.disposed && o.state != CLEAN {
+            runs = runs + 1
+            if runs > SETTLE { panic("std/ui: effects did not settle") }
+            refresh(o)
+        }
+    }
+    let mut q = s.queue
+    q.clear()
+    s.flushing = false
+}
+
+// Bring `o` up to date: a "check" first brings the memos it read up to
+// date, and it runs only if one of them ran or it is dirty.
+fn refresh(o: Owner) {
+    if o.disposed { return }
+    if o.state == CHECK {
+        let mut i = 0
+        while i < o.sources.len() && o.state == CHECK {
+            match at(o.sources, i).memo {
+                Some(m) => refresh(m)
+                None => {}
+            }
+            i = i + 1
+        }
+    }
+    if o.state == DIRTY {
+        run_owner(o)
+    } else {
+        let mut m = o
+        m.state = CLEAN
+    }
+}
+
+// Run computation `o`: mark it clean, so that nothing its last run's
+// cleanups read runs it again, dispose of what that run made, then run it as
+// the listener and the owner. A memo that ran makes its readers dirty, since
+// every value counts as a change.
+fn run_owner(o: Owner) {
+    let mut m = o
+    m.state = CLEAN
+    clean(o)
+    let f = o.run
+    with_context(Some(o), Some(o), f)
+    if o.kind == MEMO {
+        match o.out {
+            Some(src) => mark_all(src, DIRTY)
+            None => {}
+        }
+    }
+}
+
+// The elements of `v`, which is emptied, so that what runs while they are
+// used can neither add to them nor take them away.
+fn drain<T>(v: Vec<T>) -> Vec<T> {
+    let mut out = Vec::new()
+    let mut i = 0
+    while i < v.len() {
+        out.push(at(v, i))
+        i = i + 1
+    }
+    let mut w = v
+    w.clear()
+    out
+}
+
+// Drop `o`'s subscriptions, so that nothing its cleanups set runs it again;
+// then dispose of what it owns, last made first, and run its cleanups, last
+// added first.
+fn clean(o: Owner) {
+    let read = drain(o.sources)
+    let mut k = 0
+    while k < read.len() {
+        drop_observer(at(read, k), o.id)
+        k = k + 1
+    }
+    let kids = drain(o.children)
+    let mut i = kids.len() - 1
+    while i >= 0 {
+        dispose(at(kids, i))
+        i = i - 1
+    }
+    let ups = drain(o.cleanups)
+    let mut j = ups.len() - 1
+    while j >= 0 {
+        let f = at(ups, j)
+        with_context(None, None, f)
+        j = j - 1
+    }
+}
+
+// Mark `o` disposed, so that it never runs again, then clean it.
+fn dispose(o: Owner) {
+    let mut m = o
+    m.disposed = true
+    clean(o)
+}
+
+// Take the computation `id` out of `src`'s observers, keeping their order.
+fn drop_observer(src: Source, id: Int) {
+    let mut obs = src.observers
+    let n = obs.len()
+    let mut i = 0
+    while i < n && at(obs, i).id != id { i = i + 1 }
+    if i == n { return }
+    while i + 1 < n {
+        obs.set(i, at(obs, i + 1))
+        i = i + 1
+    }
+    let last = obs.pop()
+}
+
+/// A value that effects and memos read, and run again when it changes.
+pub record Signal<T> { src: Source, val: T }
+
+impl<T> Signal<T> {
+    /// The value. Read in an effect or a memo, it subscribes that
+    /// computation, which runs again when the value changes.
+    pub fn value(self) -> T {
+        match self.src.memo {
+            Some(m) => { if m.state != CLEAN { batch(| | refresh(m)) } }
+            None => {}
+        }
+        track(self.src)
+        self.val
+    }
+
+    /// Stores `new_value` and runs what reads the signal: before returning,
+    /// or inside `batch` or an effect, once that returns. It does so every
+    /// time, even for an equal value. Calling it on a memo's signal panics.
+    pub fn set(self, new_value: T) {
+        match self.src.memo {
+            Some(m) => panic("std/ui: set() on a memo")
+            None => {}
+        }
+        let mut me = self
+        me.val = new_value
+        mark_all(self.src, DIRTY)
+        flush()
+    }
+
+    /// Sets the value to `f` of the current one, which it reads without
+    /// subscribing.
+    pub fn update(self, f: fn(T) -> T) { self.set(f(self.val)) }
+}
+
+/// A new signal holding `initial`.
+pub fn signal<T>(initial: T) -> Signal<T> {
+    Signal { src: Source { id: new_id(), observers: Vec::new(), memo: None }, val: initial }
+}
+
+/// Runs `f` now, and again each time a signal it read on its last run
+/// changes. The current owner owns it.
+pub fn effect(f: fn()) {
+    let o = new_owner(EFFECT, f)
+    adopt(o)
+    batch(| | run_owner(o))
+}
+
+/// A signal whose value is `f`'s: `f` runs now, then again when it is read
+/// after a signal it read changed. Its `set` panics.
+pub fn memo<T>(f: fn() -> T) -> Signal<T> {
+    let mut o = new_owner(MEMO, | | {})
+    adopt(o)
+    let first = with_context(Some(o), Some(o), f)
+    let src = Source { id: new_id(), observers: Vec::new(), memo: Some(o) }
+    let s = Signal { src: src, val: first }
+    o.run = | | {
+        let mut t = s
+        t.val = f()
+    }
+    o.out = Some(src)
+    s
+}
+
+/// Adds `f` to the current owner's cleanups: it runs when the owner runs
+/// again or is disposed. Outside an owner it never runs.
+pub fn on_cleanup(f: fn()) {
+    match ui().owner {
+        Some(o) => {
+            let mut ups = o.cleanups
+            ups.push(f)
+        }
+        None => {}
+    }
+}
+
+/// Runs `f` once its nodes are in the page: after the `mount`, or the
+/// `show` or `for_each` render, that is building, or at once when none is.
+/// It runs untracked, with the owner it was added in, which owns what it
+/// makes. It never runs under `render_to_string`, nor when its render is
+/// disposed before its nodes are in the page.
+pub fn on_mount(f: fn()) {
+    let s = ui()
+    if s.rendering > 0 { return }
+    if s.building > 0 {
+        let mut waiting = s.mounted
+        waiting.push(Mounted { owner: s.owner, f: f })
+    } else {
+        untracked(f)
+    }
+}
+
+/// Runs `f` with a new owner, which no other owns, and gives `f` the
+/// function that disposes of it, in a `batch`; returns what `f` returns.
+pub fn root<T>(f: fn(fn()) -> T) -> T {
+    let o = new_owner(ROOT, | | {})
+    with_context(Some(o), None, | | f(| | batch(| | dispose(o))))
+}
+
+/// Runs `f`, and the effects its `set`s queue once it returns, each once.
+pub fn batch(f: fn()) {
+    let mut s = ui()
+    s.batch = s.batch + 1
+    f()
+    s.batch = s.batch - 1
+    flush()
+}

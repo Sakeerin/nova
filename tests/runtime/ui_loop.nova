@@ -1,0 +1,9 @@
+// An effect that sets the signal it reads never settles, and panics
+// (spec 4.3 §5.2).
+import ui
+
+fn main() {
+    let n = signal(0)
+    effect(| | n.set(n.value() + 1))
+    println("not reached")
+}
