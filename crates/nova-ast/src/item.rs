@@ -51,6 +51,9 @@ pub struct Function {
     pub attrs: Vec<Attribute>,
     pub vis: Visibility,
     pub is_async: bool,
+    /// Written `component Name(params) { … }` (RFC 0001): its return type is
+    /// `std/ui`'s `View`, and `return_ty` is `None`.
+    pub is_component: bool,
     pub name: Spanned<String>,
     pub generics: Vec<crate::ty::TypeParam>,
     pub params: Vec<Param>,

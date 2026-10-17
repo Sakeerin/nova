@@ -3576,6 +3576,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ast::Expr::Cast { .. } => self.unsupported_expr(span, "`as` casts"),
+            ast::Expr::View(_) => self.unsupported_expr(span, "`view { … }` blocks"),
         }
     }
 

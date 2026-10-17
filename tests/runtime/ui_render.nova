@@ -29,7 +29,7 @@ fn main() {
     // Nested elements, attributes, and a void element.
     println(
         render_to_string(
-            | | div(
+            || div(
                 [class("card"), attr("data-id", "7")],
                 [
                     h1([], [text("Title")]),
@@ -42,20 +42,18 @@ fn main() {
 
     // Escaping: text escapes `&`, `<` and `>`; attributes `"` too.
     println(
-        render_to_string(
-            | | p([attr("title", "say \"hi\" & <go>")], [text("1 < 2 & 3 > 2 \"q\"")]),
-        ),
+        render_to_string(|| p([attr("title", "say \"hi\" & <go>")], [text("1 < 2 & 3 > 2 \"q\"")])),
     )
 
     // Dynamic text and attributes are read once; handlers are left out;
     // a property is written as the attribute.
     let n = signal(3)
     let html = render_to_string(
-        | | div(
-            [dyn_attr("class", | | "n${n.value()}")],
+        || div(
+            [dyn_attr("class", || "n${n.value()}")],
             [
-                dyn_text(| | "n is ${n.value()}"),
-                button([on_click(| | n.set(0))], [text("reset")]),
+                dyn_text(|| "n is ${n.value()}"),
+                button([on_click(|| n.set(0))], [text("reset")]),
                 input([value("x\"y"), attr("type", "text")]),
             ],
         ),
@@ -64,7 +62,7 @@ fn main() {
 
     // `show`, both ways.
     let open = signal(true)
-    let panel = | | div([], [show(open, | | p([], [text("open")])), text("|")])
+    let panel = || div([], [show(open, || p([], [text("open")])), text("|")])
     println(render_to_string(panel))
     open.set(false)
     println(render_to_string(panel))
@@ -73,7 +71,7 @@ fn main() {
     let items = signal(
         [Item { name: "milk", done: true }, Item { name: "eggs & ham", done: false }],
     )
-    let list = | | ul(
+    let list = || ul(
         [],
         [
             for_each(
@@ -88,14 +86,14 @@ fn main() {
     println(render_to_string(list))
 
     // `element` writes a tag with no builder of its own.
-    println(render_to_string(| | element("main", [], [text("body")])))
+    println(render_to_string(|| element("main", [], [text("body")])))
 
     // A cleanup in the render runs when it is disposed; `on_mount` never.
     println(
         render_to_string(
-            | | {
-                on_cleanup(| | println("cleanup ran"))
-                on_mount(| | println("on_mount ran"))
+            || {
+                on_cleanup(|| println("cleanup ran"))
+                on_mount(|| println("on_mount ran"))
                 text("done")
             },
         ),

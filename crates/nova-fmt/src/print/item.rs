@@ -89,13 +89,20 @@ impl<'s, 't> Printer<'s, 't> {
     /// one-statement body stays on one line only when the whole function
     /// fits (spec §6, "Blocks"; the 3.1 plan's decision 6).
     fn function(&mut self, f: &Function) -> Doc {
-        let keyword = self.src.start_with(f.name.span.start, &FN_KEYWORDS);
+        let (keyword, words) = if f.is_component {
+            let keywords = [Token::Ident("component".into()), Token::Pub];
+            let keyword = self.src.start_with(f.name.span.start, &keywords);
+            (keyword, format!("{}component ", vis(f.vis)))
+        } else {
+            let keyword = self.src.start_with(f.name.span.start, &FN_KEYWORDS);
+            let words = format!(
+                "{}{}fn ",
+                vis(f.vis),
+                if f.is_async { "async " } else { "" }
+            );
+            (keyword, words)
+        };
         let head = self.item_head(&f.docs, &f.attrs, keyword);
-        let words = format!(
-            "{}{}fn ",
-            vis(f.vis),
-            if f.is_async { "async " } else { "" }
-        );
         let sig = self.signature(
             &f.name,
             &f.generics,

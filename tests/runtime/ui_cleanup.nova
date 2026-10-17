@@ -12,20 +12,20 @@ fn main() {
     let stop = root(
         |dispose: fn()| {
             effect(
-                | | {
+                || {
                     let v = n.value()
                     println("run ${v}")
-                    on_cleanup(| | println("first cleanup of ${v}"))
-                    on_cleanup(| | println("second cleanup of ${v}"))
+                    on_cleanup(|| println("first cleanup of ${v}"))
+                    on_cleanup(|| println("second cleanup of ${v}"))
                     effect(
-                        | | {
+                        || {
                             println("inner of ${v}")
-                            on_cleanup(| | println("inner cleanup of ${v}"))
+                            on_cleanup(|| println("inner cleanup of ${v}"))
                         },
                     )
                 },
             )
-            on_cleanup(| | println("root cleanup"))
+            on_cleanup(|| println("root cleanup"))
             dispose
         },
     )
@@ -39,9 +39,9 @@ fn main() {
     // what the effect read does not run it again.
     let count = signal(0)
     effect(
-        | | {
+        || {
             println("count is ${count.value()}")
-            on_cleanup(| | count.update(|c: Int| c + 1))
+            on_cleanup(|| count.update(|c: Int| c + 1))
         },
     )
     count.set(10)
@@ -50,21 +50,21 @@ fn main() {
     // again; what it sets elsewhere runs once the dispose is done.
     let s = signal(0)
     let elsewhere = signal(0)
-    effect(| | println("elsewhere sees ${elsewhere.value()}"))
+    effect(|| println("elsewhere sees ${elsewhere.value()}"))
     let stop_again = root(
         |dispose: fn()| {
             effect(
-                | | {
+                || {
                     let v = s.value()
                     println("outer of ${v}")
-                    on_cleanup(| | println("last cleanup of ${v}"))
+                    on_cleanup(|| println("last cleanup of ${v}"))
                     on_cleanup(
-                        | | {
+                        || {
                             s.set(-1)
                             elsewhere.set(1)
                         },
                     )
-                    effect(| | println("inner of ${v} sees ${s.value()}"))
+                    effect(|| println("inner of ${v} sees ${s.value()}"))
                 },
             )
             dispose
@@ -78,10 +78,10 @@ fn main() {
     // queued both.
     let a = signal(1)
     effect(
-        | | {
+        || {
             let v = a.value()
             println("parent of ${v}")
-            effect(| | println("child of ${v} sees ${a.value()}"))
+            effect(|| println("child of ${v} sees ${a.value()}"))
         },
     )
     a.set(2)
@@ -91,16 +91,16 @@ fn main() {
     let open = signal(true)
     let index = signal(0)
     effect(
-        | | {
+        || {
             if open.value() {
-                effect(| | println("the child sees index ${index.value()}"))
+                effect(|| println("the child sees index ${index.value()}"))
             } else {
                 println("the parent hides the child")
             }
         },
     )
     batch(
-        | | {
+        || {
             index.set(5)
             open.set(false)
         },
@@ -112,8 +112,8 @@ fn main() {
     root(
         |dispose: fn()| {
             dispose()
-            effect(| | println("made after the dispose, sees t = ${t.value()}"))
-            on_cleanup(| | println("a cleanup added after the dispose runs at once"))
+            effect(|| println("made after the dispose, sees t = ${t.value()}"))
+            on_cleanup(|| println("a cleanup added after the dispose runs at once"))
         },
     )
     t.set(2)

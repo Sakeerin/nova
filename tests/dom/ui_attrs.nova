@@ -28,7 +28,7 @@ fn main() {
     let seen = signal(0)
     mount(
         "#app",
-        | | div(
+        || div(
             [],
             [
                 input(
@@ -42,16 +42,16 @@ fn main() {
                 p(
                     [
                         id("greeting"),
-                        dyn_attr("class", | | if name.value() == "" { "empty" } else { "full" }),
+                        dyn_attr("class", || if name.value() == "" { "empty" } else { "full" }),
                     ],
-                    [dyn_text(| | "hello, ${name.value()}")],
+                    [dyn_text(|| "hello, ${name.value()}")],
                 ),
-                input([id("echo"), dyn_value(| | name.value())]),
+                input([id("echo"), dyn_value(|| name.value())]),
                 button(
                     [
                         id("both"),
                         on_click(
-                            | | {
+                            || {
                                 left.set(1)
                                 right.set(2)
                             },
@@ -60,15 +60,15 @@ fn main() {
                     [text("both")],
                 ),
                 button(
-                    [id("probe"), on_click(| | println("the probe sees ${seen.value()}"))],
+                    [id("probe"), on_click(|| println("the probe sees ${seen.value()}"))],
                     [text("probe")],
                 ),
             ],
         ),
     )
-    effect(| | println("the sum is ${left.value() + right.value()}"))
+    effect(|| println("the sum is ${left.value() + right.value()}"))
     effect(
-        | | {
+        || {
             println("an effect clicks the probe")
             match query_selector("#probe") {
                 Some(e) => e.click()

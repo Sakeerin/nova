@@ -937,3 +937,161 @@ fn parse_recovering_agrees_with_parse_on_a_clean_file() {
         format!("{:?}", file.expect("Some"))
     );
 }
+
+// --- `component`, `view { … }` and `||` (RFC 0001; the 4.4 spec
+// `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`
+// §3, §9.2) ---
+
+/// The functions of a clean parse of `source`.
+fn functions(source: &str) -> Vec<nova_ast::item::Function> {
+    let (file, errs) = parse_str(source);
+    assert!(errs.is_empty(), "{errs:?}");
+    file.items
+        .into_iter()
+        .filter_map(|i| match i.value {
+            Item::Function(f) => Some(f),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The trailing expression of the only function in `source`.
+fn tail(source: &str) -> nova_ast::Expr {
+    let f = functions(source).pop().expect("a function");
+    f.body.value.trailing.expect("a trailing expression").value
+}
+
+/// The children of the view that is `source`'s only function's tail.
+fn view_children(source: &str) -> Vec<Spanned<nova_ast::ViewNode>> {
+    match tail(source) {
+        nova_ast::Expr::View(children) => children,
+        other => panic!("not a view: {other:?}"),
+    }
+}
+
+#[test]
+fn a_component_is_a_function_that_writes_no_return_type() {
+    let fs = functions("component Card(title: String) { 1 }\npub component Page() { 2 }\n");
+    assert!(fs[0].is_component && fs[1].is_component);
+    assert_eq!(fs[0].name.value, "Card");
+    assert_eq!(fs[0].params.len(), 1);
+    assert!(fs[0].return_ty.is_none());
+    assert_eq!(fs[1].vis, Visibility::Pub);
+}
+
+#[test]
+fn component_and_view_are_names_elsewhere() {
+    let fs = functions(
+        "fn component() -> Int { 1 }\n\
+         fn view(x: Int) -> Int { x }\n\
+         fn f() -> Int {\n    let component = component()\n    let view = 2\n    if view > component { view } else { 0 }\n}\n\
+         fn g(view: Bool) -> Int {\n    if view { 1 } else { 2 }\n}\n\
+         fn h() {\n    let mut component = 1\n    component\n    g(true)\n}\n",
+    );
+    assert!(fs.iter().all(|f| !f.is_component));
+}
+
+#[test]
+fn a_component_with_a_return_type_or_type_parameters_does_not_parse() {
+    let (_, errs) = parse_str("component A() -> Int { 1 }\nfn main() { }\n");
+    let messages: Vec<String> = errs.iter().map(|e| e.to_string()).collect();
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains("a component returns a `View`, which it does not write"),
+        "{messages:?}"
+    );
+    let (_, errs) = parse_str("component A<T>() { 1 }\nfn main() { }\n");
+    assert!(!errs.is_empty());
+}
+
+#[test]
+fn pipe_pipe_is_a_closure_where_an_expression_starts_and_an_or_elsewhere() {
+    match tail("fn f() { || 1 }\n") {
+        nova_ast::Expr::Closure { params, ret, .. } => {
+            assert!(params.is_empty() && ret.is_none())
+        }
+        other => panic!("not a closure: {other:?}"),
+    }
+    match tail("fn f() { || -> Int { 1 } }\n") {
+        nova_ast::Expr::Closure { params, ret, .. } => {
+            assert!(params.is_empty() && ret.is_some())
+        }
+        other => panic!("not a closure: {other:?}"),
+    }
+    assert!(matches!(
+        tail("fn f(a: Bool, b: Bool) -> Bool { a || b }\n"),
+        nova_ast::Expr::Binary {
+            op: nova_ast::expr::BinOp::Or,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_view_holds_elements_and_expressions() {
+    use nova_ast::{ViewArg, ViewNode};
+    let children = view_children(
+        "fn f() {\n    view {\n        div(class: \"a\", for: \"b\", type: \"c\", attr(\"d\", \"e\")) {\n            text(\"x\")\n            input(value: v)\n            span { }\n            Counter()\n            show(open, || view { p { } })\n        }\n    }\n}\n",
+    );
+    assert_eq!(children.len(), 1);
+    let ViewNode::Element {
+        name,
+        args,
+        children: Some(inner),
+    } = &children[0].value
+    else {
+        panic!("not an element with a block: {:?}", children[0]);
+    };
+    assert_eq!(name.value, "div");
+    let names: Vec<&str> = args
+        .iter()
+        .filter_map(|a| match a {
+            ViewArg::Named { name, .. } => Some(name.value.as_str()),
+            ViewArg::Positional(_) => None,
+        })
+        .collect();
+    assert_eq!(names, ["class", "for", "type"]);
+    assert!(matches!(args[3], ViewArg::Positional(_)));
+    assert_eq!(inner.len(), 5);
+    assert!(matches!(inner[0].value, ViewNode::Expr(_)));
+    assert!(matches!(
+        &inner[1].value,
+        ViewNode::Element { children: None, .. }
+    ));
+    assert!(matches!(
+        &inner[2].value,
+        ViewNode::Element { args, children: Some(_), .. } if args.is_empty()
+    ));
+    assert!(matches!(inner[3].value, ViewNode::Expr(_)));
+    assert!(matches!(inner[4].value, ViewNode::Expr(_)));
+}
+
+/// Line breaks are skipped, so a child that begins with `(` continues the
+/// one before, unless a `;` ends it (§12).
+#[test]
+fn a_semicolon_ends_a_child_before_a_parenthesis() {
+    assert_eq!(
+        view_children("fn f() { view { text(\"a\") (text(\"b\")) } }\n").len(),
+        1
+    );
+    assert_eq!(
+        view_children("fn f() { view { text(\"a\"); (text(\"b\")) } }\n").len(),
+        2
+    );
+}
+
+/// A `view` in an `if` head is a name: `{` opens the body.
+#[test]
+fn view_before_an_if_body_is_a_name() {
+    assert!(matches!(
+        tail("fn f(view: Bool) -> Int { if view { 1 } else { 2 } }\n"),
+        nova_ast::Expr::If { .. }
+    ));
+}
+
+/// Named arguments exist in an element's argument list only.
+#[test]
+fn a_named_argument_outside_a_view_is_an_error() {
+    let (_, errs) = parse_str("fn main() { f(a: 1) }\n");
+    assert!(!errs.is_empty());
+}
