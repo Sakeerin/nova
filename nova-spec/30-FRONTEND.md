@@ -45,6 +45,17 @@ pub fn on_cleanup(f: fn())
 
 Implementation: each signal owns a list of subscriber effects. `value()` registers current effect (tracked via thread-local "current effect" pointer). `set()` runs all subscribers.
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`):** 4.3
+builds `std/ui`, which a program imports with `import ui`, on both targets.
+`Signal<T>` has no `Clone` bound, and `set` notifies every time; `memo`
+returns a `Signal<T>` whose `set` panics; and `root`, `batch` and `update`
+are added, `root` returning what its function returns. `set` runs the
+effects that read the signal before it returns, each once and after the
+memos it reads are current; memos are lazy. The current effect and owner
+are in a record the runtime keeps for the thread or the page
+(`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+§4, §5; ADR 0042).
+
 ---
 
 ## 3. Component Model
@@ -122,6 +133,18 @@ pub fn for_each<T>(items: Signal<[T]>, render: fn(T) -> View) -> View
 ```
 
 The `view { div { ... } }` macro-like syntax is parser-supported sugar that maps to these builders.
+
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`):** 4.3
+builds `std/ui/html`, imported with `import ui::html` or a list from it.
+An element takes its attributes and its children as two arrays, `[Attr]`
+and `[View]`, until 4.4's `view { … }`; `dyn_text` is reactive text, and
+`dyn_attr` and `dyn_value` reactive attributes and properties. `View` is
+data, which `mount(selector, f)` builds into the page on WASM and
+`render_to_string(f)` writes as escaped HTML on either target; neither
+inserts raw HTML, and both refuse `innerHTML`, `outerHTML` and `srcdoc`. `show` and `for_each` are in `std/ui`, and each rebuilds its
+whole part each time its signal is set; `show` has no type parameter
+(`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+§6, §7; ADR 0042).
 
 ---
 
@@ -218,6 +241,13 @@ resolves when the program ends. A name from a module WASM lacks is E0092,
 naming the module
 (`docs/superpowers/specs/2026-10-15-phase-4-1-the-language-on-wasm-design.md`
 §3, §5, §7; ADR 0040).
+
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`):** by the
+user's decision of 2026-10-16, a user's own `index.html`, `assets/` from
+`public/`, `manifest.json` and `wasm-opt` move from 4.3 to 4.4, with
+`examples/06-counter-spa`
+(`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+decision 7).
 
 ### 7.1 Output Layout
 ```
@@ -359,3 +389,10 @@ examples/
 - Integration: render component, simulate events (use `wasm-bindgen-test`)
 - E2E: Playwright tests against `nova dev` server
 - Visual regression: snapshot DOM state
+
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`):** the
+unit tests are `tests/runtime/ui_*.nova`, which run natively and on WASM,
+those that do not panic under each target's collector stress too;
+`tests/dom/ui_*.nova` render and click under the fake DOM, and CI's
+`browser` job clicks the builder counter in Chromium
+(`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md` §9).

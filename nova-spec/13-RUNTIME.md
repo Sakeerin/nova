@@ -642,6 +642,15 @@ from JS, `nova_call` or `nova_wake`, is a turn
 (`docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 §4, §5, §7; ADR 0041).
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`):** 4.3
+keeps `std/ui`'s state, one record, for the thread or the page: natively in
+a `thread_local` of `nova-runtime`, a collector root from its first store;
+on WASM at `std/rt`'s state word 104, which `gc_collect` marks. Three
+std-only builtins, `ui_state_present`, `ui_state_load` and
+`ui_state_store`, reach it
+(`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+§4, §8; ADR 0042).
+
 ---
 
 ## 9. Build Config Impact

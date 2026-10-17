@@ -58,6 +58,13 @@ Its functions are listed in
 `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 §6 (ADR 0041).
 
+**AMENDED 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`): `std/ui`
+and `std/ui/html`**, on both targets, are imported too: `import ui` for
+reactivity and views, `import ui::html` for the element builders, std's
+only nested import path. Their functions are listed in
+`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+§5 to §7 (ADR 0042).
+
 ---
 
 ## 2. `std/core` — Foundational Types
