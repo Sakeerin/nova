@@ -648,6 +648,15 @@ fn main() {
 
 **Gate:** `nova dev` opens browser, counter responds to clicks. Bundle size < 50 KB gzipped.
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):**
+`examples/06-counter-spa` is built in 4.4 and differs from the above in
+three places, each the API 4.3 built: `import ui` and `import
+ui::html::{button, div}`, `count.value()`, and `mount("#app", Counter)`.
+Its `index.html` loads `./app.js` as a module and calls `init()`, and it has
+a `nova.toml` and a README. The gate is `nova build --target wasm` and
+clicks in Chromium, since `nova dev` comes with 4.5; its `app.wasm` and
+`app.js` are 21 KB gzipped (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §8; ADR 0043).
+
 ---
 
 ## 7. `07-fullstack-blog` (Phase 4 gate)

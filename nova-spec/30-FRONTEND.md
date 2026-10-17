@@ -105,6 +105,23 @@ fn Counter() -> View {
 
 The `|| ...` closure subscribes to `count` because `count.value` access within an effect tracks dependencies.
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):** 4.4 builds
+this syntax (RFC 0001). A signal is read with `count.value()`, as 4.3
+built it. `component` and `view` are contextual keywords: `component` where
+an item starts, a name and `(` follow and a block (or a refused `->`)
+follows the parameters, `view` where an expression starts
+and `{` follows, outside an `if`, `while`, `for` or `match` head. A
+component has no type parameters and no written return type. The type
+checker, not a pass before it, desugars a view into 4.3's builders: an
+element becomes a call of the function of its name with `[Attr]` and
+`[View]`, or `[Attr]` alone for a void element; `text("literal")` is
+`Text`, and any other `text(e)` is `DynText(|| e)`, so text that is not a
+literal follows its signals. A view holds one root (E0094); a void element
+takes no block (E0095); an element names a builder (E0096). `if` and `for`
+are not in a view: `show` with `|| view { … }` and `for_each` with
+`|item| view { … }` do that
+(`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §3, §4; ADR 0043).
+
 ---
 
 ## 4. Element Builder API
@@ -146,6 +163,16 @@ inserts raw HTML, and both refuse `innerHTML`, `outerHTML` and `srcdoc`.
 each time its signal is set; `show` has no type parameter
 (`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
 §6, §7; ADR 0042).
+
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):** inside a
+view, an element takes attributes by name, `div(class: "a") { … }`, with
+no helper needed: `_` becomes `-`, `value` is the property, and `on_kind` is
+the handler of the DOM event `kind`, a `fn()` or a `fn(String)` given the
+target's value. A string literal with no interpolation is fixed; any other
+value becomes `Dynamic`, `DynProperty` or `DynText`, read again when its
+signals change. A value that is not a `String`, or a handler of another
+type, is E0097. A positional argument is an `Attr`, so 4.3's helpers still
+work. Named arguments exist only there (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §4; ADR 0043).
 
 ---
 
@@ -249,6 +276,20 @@ user's decision of 2026-10-16, a user's own `index.html`, `assets/` from
 `examples/06-counter-spa`
 (`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
 decision 7).
+
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):** 4.4 builds
+them, without `chunks/`. A project's own `index.html`, beside `nova.toml`,
+is copied as it is, and must load `app.js` and call its `init()`;
+otherwise the generated page, which has `<div id="app"></div>`, is written.
+`public/` is copied into `assets/` afresh on each build, a link only when
+it leads to a file inside `public/`, and nothing when `public/` itself
+leads outside the project. `manifest.json` holds the build's name and version, from
+`nova.toml` or the file's stem and `null`, whether it was `--release` and
+whether `wasm-opt` ran, and each file written with its size, sorted, and
+nothing that changes between two builds. `--release` runs `wasm-opt -Oz` on
+`app.wasm` when it is on `PATH`, says so when it is not, and fails when it
+fails. An output directory that holds the project or lies inside `public/`
+is refused, and a link at a name the build writes is removed first (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §7; ADR 0043).
 
 ### 7.1 Output Layout
 ```
@@ -397,3 +438,10 @@ those that do not panic under each target's collector stress too;
 `tests/dom/ui_*.nova` render and click under the fake DOM, and CI's
 `browser` job clicks the builder counter in Chromium
 (`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md` §9).
+
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):**
+`tests/runtime/ui_view.nova` renders components and views on both targets;
+`examples/06-counter-spa` is clicked under the fake DOM in `cargo test`, as
+it is and under stress, and in Chromium by the `browser` job
+(`tests/browser/spa.mjs`); its `app.wasm` and `app.js` are under 50 KB
+gzipped (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §9).
