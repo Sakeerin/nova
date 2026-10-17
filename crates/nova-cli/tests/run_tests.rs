@@ -11440,3 +11440,35 @@ fn ui_checks_every_name_and_never_parses_html() {
         );
     }
 }
+
+/// Natively there is no page: `mount` panics, saying how to render, and
+/// `render_to_string` still renders (spec 4.3 §7.1).
+#[test]
+fn ui_mount_panics_natively() {
+    let dir = std::env::temp_dir().join("nova-ui-mount-native");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("main.nova"),
+        "import ui\nimport ui::html::{text}\n\nfn main() {\n    println(render_to_string(| | text(\"fine\")))\n    mount(\"#app\", | | text(\"no page\"))\n    println(\"not reached\")\n}\n",
+    )
+    .expect("write main.nova");
+    let a = nova()
+        .current_dir(&dir)
+        .arg("run")
+        .arg("main.nova")
+        .assert()
+        .failure();
+    let o = a.get_output();
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"),
+        "fine\n"
+    );
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains(
+            "nova: panic: std/ui: mount needs a build for WASM; render_to_string renders on any target"
+        ),
+        "{err}"
+    );
+}

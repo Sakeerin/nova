@@ -1,0 +1,48 @@
+// `std/ui`'s backend natively, where there is no page (spec
+// docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md
+// §7.3): each function panics with `mount`'s message, and only `mount`
+// reaches one. `std/ui/backend/wasm.nova` has the same names on WASM.
+
+/// A node of the page, which natively there is none of.
+pub record Node { unused: Int }
+
+fn no_page<T>() -> T {
+    panic("std/ui: mount needs a build for WASM; render_to_string renders on any target")
+}
+
+/// The first element `selector` matches.
+pub fn backend_query(selector: String) -> Option<Node> { no_page() }
+
+/// A new element.
+pub fn backend_element(tag: String) -> Node { no_page() }
+
+/// A new text node.
+pub fn backend_text(content: String) -> Node { no_page() }
+
+/// Replaces a text node's text.
+pub fn backend_set_text(node: Node, content: String) { no_page() }
+
+/// Sets an attribute.
+pub fn backend_set_attr(node: Node, name: String, value: String) { no_page() }
+
+/// Sets a property.
+pub fn backend_set_prop(node: Node, name: String, value: String) { no_page() }
+
+/// Adds `child` as `parent`'s last child.
+pub fn backend_append(parent: Node, child: Node) { no_page() }
+
+/// Adds `child` to `parent` before `before`.
+pub fn backend_insert_before(parent: Node, child: Node, before: Node) { no_page() }
+
+/// Removes a node from its parent.
+pub fn backend_remove(node: Node) { no_page() }
+
+/// The node after `node` in its parent.
+pub fn backend_next_sibling(node: Node) -> Option<Node> { no_page() }
+
+/// Whether two nodes are one.
+pub fn backend_is_same(a: Node, b: Node) -> Bool { no_page() }
+
+/// Calls `f` with the target's `value` on each event of kind `kind`, until
+/// the function returned is called.
+pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() { no_page() }

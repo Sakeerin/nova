@@ -1,0 +1,11 @@
+the sum is 0
+an effect clicks the probe
+the probe sees 0
+seen is set
+<div><input id="name" type="text"><p id="greeting" class="empty">hello, </p><input id="echo"><button id="both">both</button><button id="probe">probe</button></div>
+name=start echo=
+<div><input id="name" type="text"><p id="greeting" class="full">hello, nova</p><input id="echo"><button id="both">both</button><button id="probe">probe</button></div>
+name=nova echo=nova
+<div><input id="name" type="text"><p id="greeting" class="empty">hello, </p><input id="echo"><button id="both">both</button><button id="probe">probe</button></div>
+name= echo=
+the sum is 3

@@ -1,0 +1,70 @@
+// `std/ui`'s backend on WASM: the page, through `std/dom` (spec
+// docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md
+// §7.3). `std/ui/backend/native.nova` has the same names natively.
+
+import dom
+
+/// A node of the page.
+pub record Node { el: Element }
+
+fn wrap(e: Option<Element>) -> Option<Node> {
+    match e {
+        Some(x) => Some(Node { el: x })
+        None => None
+    }
+}
+
+/// The first element `selector` matches.
+pub fn backend_query(selector: String) -> Option<Node> { wrap(query_selector(selector)) }
+
+/// A new element.
+pub fn backend_element(tag: String) -> Node { Node { el: create_element(tag) } }
+
+/// A new text node.
+pub fn backend_text(content: String) -> Node { Node { el: create_text(content) } }
+
+/// Replaces a text node's text.
+pub fn backend_set_text(node: Node, content: String) { node.el.set_text(content) }
+
+/// Sets an attribute.
+pub fn backend_set_attr(node: Node, name: String, value: String) {
+    node.el.set_attribute(name, value)
+}
+
+/// Sets a property.
+pub fn backend_set_prop(node: Node, name: String, value: String) {
+    node.el.set_property(name, value)
+}
+
+/// Adds `child` as `parent`'s last child.
+pub fn backend_append(parent: Node, child: Node) { parent.el.append_child(child.el) }
+
+/// Adds `child` to `parent` before `before`.
+pub fn backend_insert_before(parent: Node, child: Node, before: Node) {
+    parent.el.insert_before(child.el, Some(before.el))
+}
+
+/// Removes a node from its parent.
+pub fn backend_remove(node: Node) { node.el.remove() }
+
+/// The node after `node` in its parent.
+pub fn backend_next_sibling(node: Node) -> Option<Node> { wrap(node.el.next_sibling()) }
+
+/// Whether two nodes are one.
+pub fn backend_is_same(a: Node, b: Node) -> Bool { a.el.is_same(b.el) }
+
+/// Calls `f` with the target's `value` on each event of kind `kind`, until
+/// the function returned is called.
+pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() {
+    let mut listener = node.el.add_event_listener(
+        kind,
+        |e: Event| {
+            match e.target() {
+                Some(t) => f(t.property("value"))
+                None => f("")
+            }
+        },
+    )
+    let stop = | | listener.remove()
+    stop
+}

@@ -1,0 +1,61 @@
+// `mount` and `on_mount` (spec 4.3 §5.2, §7.1): a mount puts its nodes after
+// what the element holds; the callbacks a mount registers run once its nodes
+// are in the page, in the order they were added, but not one whose render a
+// `set` during the build disposed; each runs with the owner it was added in,
+// so its cleanup runs when its render goes; one outside any mount runs at
+// once; and mounting into a selector nothing matches panics.
+
+import dom
+import ui
+import ui::html::{div, dyn_text, id, li, p, text, ul}
+
+// A row whose `on_mount` says whether the row's node is in the page, and
+// adds a cleanup that says when the row is gone.
+fn row(r: Int) -> View {
+    on_mount(
+        | | {
+            match query_selector("#row${r}") {
+                Some(e) => println("on_mount of row ${r}: in the page")
+                None => println("on_mount of row ${r}: not in the page")
+            }
+            on_cleanup(| | println("row ${r} is gone"))
+        },
+    )
+    li([id("row${r}")], [text("row ${r}")])
+}
+
+fn main() {
+    let rows = signal([1])
+    mount(
+        "#app",
+        | | {
+            on_mount(
+                | | {
+                    match query_selector("#hello") {
+                        Some(e) => println("on_mount: #hello is in the page, reading ${e.text()}")
+                        None => println("on_mount: #hello is not in the page")
+                    }
+                },
+            )
+            on_mount(| | println("the second on_mount"))
+            println("building")
+            div(
+                [],
+                [
+                    p([id("hello")], [text("hi")]),
+                    ul([], [for_each(rows, row)]),
+                    dyn_text(
+                        | | {
+                            rows.set([2])
+                            ""
+                        },
+                    ),
+                ],
+            )
+        },
+    )
+    rows.set([3])
+    on_mount(| | println("on_mount outside a mount runs at once"))
+    mount("#nope", | | text("never"))
+    println("not reached")
+}

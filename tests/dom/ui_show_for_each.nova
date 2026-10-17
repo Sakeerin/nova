@@ -1,0 +1,65 @@
+// `show` and `for_each` in the page (spec 4.3 §6.3, §7.1): `show` builds its
+// branch when its signal becomes true and disposes of it, running its
+// cleanups, when it becomes false; `for_each` builds its rows again each
+// time its list is set, the same list too, between its markers, leaving the
+// nodes around it as they are.
+
+import dom
+import ui
+import ui::html::{button, div, id, li, on_click, p, text, ul}
+
+fn more(xs: [String]) -> [String] {
+    let mut out = [""; xs.len() + 1]
+    let mut i = 0
+    while i < xs.len() {
+        out[i] = xs[i]
+        i = i + 1
+    }
+    out[xs.len()] = "row ${xs.len() + 1}"
+    out
+}
+
+fn main() {
+    let open = signal(false)
+    let rows = signal(["row 1", "row 2"])
+    mount(
+        "#app",
+        | | div(
+            [],
+            [
+                button([id("toggle"), on_click(| | open.update(|o: Bool| !o))], [text("toggle")]),
+                show(
+                    open,
+                    | | {
+                        on_mount(
+                            | | {
+                                match query_selector("#panel") {
+                                    Some(e) => println("on_mount: the panel is in the page")
+                                    None => println("on_mount: the panel is not in the page")
+                                }
+                            },
+                        )
+                        on_cleanup(| | println("the panel is gone"))
+                        p([id("panel")], [text("panel")])
+                    },
+                ),
+                ul(
+                    [id("list")],
+                    [
+                        li([], [text("first")]),
+                        for_each(
+                            rows,
+                            |r: String| li([on_click(| | println("clicked ${r}"))], [text(r)]),
+                        ),
+                        li([], [text("last")]),
+                    ],
+                ),
+                button([id("more"), on_click(| | rows.update(more))], [text("more")]),
+                button(
+                    [id("again"), on_click(| | rows.update(|xs: [String]| xs))],
+                    [text("again")],
+                ),
+            ],
+        ),
+    )
+}
