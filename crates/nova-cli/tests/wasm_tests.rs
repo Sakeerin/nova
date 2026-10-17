@@ -2175,6 +2175,82 @@ fn ui_the_builder_counter_counts_clicks() {
     assert_eq!(calls_after_each(&err), [1, 1, 1, 1], "{err}");
 }
 
+/// `examples/06-counter-spa`, built from its project into `dir/dist`, with
+/// `NOVA_HOME` beside `dir`.
+fn build_counter_spa(dir: &Path) -> PathBuf {
+    let dist = dir.join("dist");
+    let home = dir.with_file_name(format!(
+        "{}-home",
+        dir.file_name().expect("a name").to_string_lossy()
+    ));
+    nova_at(&repo_root().join("examples/06-counter-spa"), &home)
+        .args(["build", "--target", "wasm", "-o", &dist.to_string_lossy()])
+        .assert()
+        .success();
+    dist
+}
+
+/// The gate of 4.4 (spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`
+/// §9.4): `06-counter-spa` takes its own page, and under the fake DOM `+`
+/// three times and `-` once leave `Count: 2`, as it is and under stress,
+/// where each collection keeps the same handles and the two buttons'
+/// calls.
+#[test]
+fn the_counter_spa_counts_clicks() {
+    let page = std::fs::read_to_string(repo_root().join("examples/06-counter-spa/index.html"))
+        .expect("the example's page");
+    let dir = fresh("counter-spa");
+    let dist = build_counter_spa(&dir);
+    assert_eq!(
+        std::fs::read_to_string(dist.join("index.html")).expect("index.html"),
+        page
+    );
+    if node().is_none() {
+        return;
+    }
+    let tests = repo_root().join("tests/dom");
+    let expected = std::fs::read_to_string(tests.join("counter_spa.stdout"))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    for file in ["fake_dom.mjs", "counter_spa.mjs"] {
+        std::fs::copy(tests.join(file), dir.join(file)).expect("copy the harness");
+    }
+    for env in [&[][..], &STRESS[..]] {
+        let mut node = Command::new("node");
+        let a = node
+            .arg(dir.join("counter_spa.mjs"))
+            .envs(env.iter().copied())
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .success();
+        assert_eq!(stdout(&a), expected, "{}", stderr(&a));
+        if !env.is_empty() {
+            let err = stderr(&a);
+            let calls = calls_after_each(&err);
+            assert!(!calls.is_empty(), "{err}");
+            assert!(calls.iter().all(|&c| c == 2), "{err}");
+        }
+    }
+}
+
+/// The gate's size: `06-counter-spa`'s module and shim are under 50 KB
+/// gzipped, without `wasm-opt` (spec 4.4 §1, §9.4).
+#[test]
+fn the_counter_spa_is_under_50_kb_gzipped() {
+    use std::io::Write;
+    let dist = build_counter_spa(&fresh("counter-spa-size"));
+    let mut total = 0;
+    for name in ["app.wasm", "app.js"] {
+        let bytes = std::fs::read(dist.join(name)).expect("read a dist file");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&bytes).expect("compress");
+        total += gz.finish().expect("compress").len();
+    }
+    println!("06-counter-spa: {total} bytes gzipped");
+    assert!(total < 50 * 1024, "{total} bytes gzipped");
+}
+
 /// `show` and `for_each` rebuild their part of the page between their
 /// markers, and a hidden branch's cleanups run (spec 4.3 §6.3). Under
 /// stress, a rebuilt row's listener leaves std/rt's table: after two more
