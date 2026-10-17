@@ -54,8 +54,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   views: `div(class: "c") { text("Count: ${count.value()}") }`. An
   element's named arguments are its attributes, `value` its property and
   `on_click` its handler; a text or attribute that is not a literal follows
-  the signals it reads. `component` and `view` stay names everywhere else
-  (RFC 0001, ADR 0043).
+  the signals it reads. Elsewhere `component` and `view` stay names, but
+  for the two cases ADR 0043 names (RFC 0001, ADR 0043).
 - **`||` is a closure with no parameters**, `let f = || 1`, wherever an
   expression starts.
 - **`nova build --target wasm` finishes the bundle:** a project's own
@@ -74,6 +74,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nova fmt` prints `||`** for a closure with no parameters, where it
   printed `| |`, and puts `;` before a statement that begins with `||`.
 - **`nova build --target wasm --release` builds** where it was refused.
+- **A record named `view` can no longer be written as a literal**, as
+  `view {` where an expression starts begins a view (ADR 0043).
 
 ## [0.3.2] - 2026-10-14
 

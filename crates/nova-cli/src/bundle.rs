@@ -68,13 +68,14 @@ impl Bundle {
         Ok(())
     }
 
-    /// Before the compiler writes `out`: a link at a name the build writes
-    /// is removed, so that no write goes through it to a file elsewhere,
-    /// such as the project's own page.
+    /// Before the compiler writes `out`: a link at a name the build writes,
+    /// symbolic or, on Unix, hard, is removed, so that no write goes through
+    /// it to a file elsewhere, such as the project's own page.
     pub fn prepare(&self, out: &Path) -> Result<()> {
         for name in BUILT.iter().chain(&["manifest.json"]) {
             let path = out.join(name);
-            let link = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink());
+            let link = std::fs::symlink_metadata(&path)
+                .is_ok_and(|m| m.file_type().is_symlink() || hard_linked(&m));
             if link {
                 std::fs::remove_file(&path)
                     .or_else(|_| std::fs::remove_dir(&path))
@@ -86,8 +87,11 @@ impl Bundle {
 
     /// After the compiler has written `out`: the page, `assets/`,
     /// `wasm-opt` and `manifest.json`, in that order, so the manifest lists
-    /// what is there at the end.
+    /// what is there at the end. `assets/` is the build's only when it
+    /// copies a `public/` into it: otherwise it is left as it is, and not
+    /// listed.
     pub fn finish(&self, out: &Path) -> Result<()> {
+        let mut copied = false;
         if let Some(root) = &self.root {
             let page = root.join("index.html");
             let to = out.join("index.html");
@@ -97,14 +101,15 @@ impl Bundle {
                     .with_context(|| format!("copying {} to {}", page.display(), to.display()))?;
             }
             let assets = out.join("assets");
-            if std::fs::symlink_metadata(&assets).is_ok() {
-                remove(&assets)?;
-            }
             let public = root.join("public");
             if public.is_dir() {
                 let base = resolved(&public);
                 if base.starts_with(resolved(root)) {
+                    if std::fs::symlink_metadata(&assets).is_ok() {
+                        remove(&assets)?;
+                    }
                     copy_tree(&public, &assets, &base)?;
+                    copied = true;
                 } else {
                     eprintln!("public/ leads outside the project; it is not copied");
                 }
@@ -115,7 +120,7 @@ impl Bundle {
         for name in BUILT {
             files.insert(name.to_string(), size(&out.join(name))?);
         }
-        if self.root.is_some() {
+        if copied {
             list(&out.join("assets"), "assets", &mut files)?;
         }
         let path = out.join("manifest.json");
@@ -215,6 +220,19 @@ fn list(dir: &Path, prefix: &str, files: &mut BTreeMap<String, u64>) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Whether `meta` is a file with another name, a hard link, so a write to
+/// one writes the other. Unix alone tells, on stable Rust.
+#[cfg(unix)]
+fn hard_linked(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.is_file() && meta.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn hard_linked(_: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn size(path: &Path) -> Result<u64> {

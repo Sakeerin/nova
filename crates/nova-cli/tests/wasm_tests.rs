@@ -632,7 +632,8 @@ fn a_projects_own_page_and_public_go_into_dist() {
     ] {
         std::os::unix::fs::symlink(dir.join(target), dir.join(link)).expect("a link");
     }
-    // Links already at names the build writes: no write goes through them.
+    // Links already at names the build writes, symbolic and hard: no write
+    // goes through them.
     #[cfg(unix)]
     for (target, link) in [
         ("index.html", "dist/index.html"),
@@ -642,6 +643,8 @@ fn a_projects_own_page_and_public_go_into_dist() {
         std::fs::create_dir_all(dir.join("dist")).expect("dist");
         std::os::unix::fs::symlink(dir.join(target), dir.join(link)).expect("a link");
     }
+    #[cfg(unix)]
+    std::fs::hard_link(dir.join("secret.txt"), dir.join("dist/package.json")).expect("a hard link");
     nova_in(&dir, &["build", "--target", "wasm"]).success();
     assert_eq!(
         std::fs::read_to_string(dir.join("index.html")).unwrap(),
@@ -690,6 +693,35 @@ fn a_projects_own_page_and_public_go_into_dist() {
     nova_in(&dir, &["build", "--target", "wasm"]).success();
     assert!(!dist.join("assets/style.css").exists());
     assert!(!read("manifest.json").contains("style.css"));
+}
+
+/// A project with no `public/` leaves an `assets/` already in its output
+/// directory as it is, and its manifest does not list it: a build replaces
+/// `assets/` only when it copies a `public/` into it (spec 4.4 §7).
+#[test]
+fn an_assets_the_build_does_not_write_is_left_alone() {
+    let dir = fresh("bundle-own-assets");
+    write(
+        &dir,
+        &[
+            (
+                "nova.toml",
+                "[package]\nname = \"site\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            ),
+            ("src/main.nova", "fn main() { println(\"hi\") }\n"),
+            ("www/assets/photo.txt", "photo"),
+            ("www/about.html", "about"),
+        ],
+    );
+    nova_in(&dir, &["build", "--target", "wasm", "-o", "www"]).success();
+    let www = dir.join("www");
+    let read = |p: &str| std::fs::read_to_string(www.join(p)).expect(p);
+    assert_eq!(read("assets/photo.txt"), "photo");
+    assert_eq!(read("about.html"), "about");
+    assert_eq!(
+        manifest_files(&www),
+        ["app.js", "app.wasm", "index.html", "package.json"]
+    );
 }
 
 /// An output directory the copies would harm is refused before anything
