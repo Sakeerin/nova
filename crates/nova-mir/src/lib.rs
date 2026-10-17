@@ -530,6 +530,13 @@ rt_funcs! {
     ProcessArg,
     /// `(i64 code) -> unit` — `std::process::exit`; never returns.
     ProcessExit,
+    /// `() -> i8` — whether `std/ui` has stored its state for this thread
+    /// (`crates/nova-runtime/src/ui.rs`; spec 4.3 §4).
+    UiStatePresent,
+    /// `() -> ptr` — the state stored, a record.
+    UiStateLoad,
+    /// `(ptr state) -> unit` — keep `state`, a collector root from then on.
+    UiStateStore,
 }
 
 impl RtFunc {
@@ -630,6 +637,9 @@ impl RtFunc {
             RtFunc::ProcessArgCount => "nova_rt_process_arg_count",
             RtFunc::ProcessArg => "nova_rt_process_arg",
             RtFunc::ProcessExit => "nova_rt_process_exit",
+            RtFunc::UiStatePresent => "nova_rt_ui_state_present",
+            RtFunc::UiStateLoad => "nova_rt_ui_state_load",
+            RtFunc::UiStateStore => "nova_rt_ui_state_store",
         }
     }
 
@@ -820,6 +830,9 @@ impl RtFunc {
             RtFunc::ProcessArgCount => (vec![], MirTy::I64),
             RtFunc::ProcessArg => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::ProcessExit => (vec![MirTy::I64], MirTy::Unit),
+            RtFunc::UiStatePresent => (vec![], MirTy::I8),
+            RtFunc::UiStateLoad => (vec![], MirTy::Ptr),
+            RtFunc::UiStateStore => (vec![MirTy::Ptr], MirTy::Unit),
         }
     }
 }
@@ -934,6 +947,9 @@ impl RtFunc {
             RtFunc::TaskSleepFutureNanos => WasmRuntime::Nova("rt_task_sleep_future_nanos"),
             RtFunc::TaskJoinFuture => WasmRuntime::Nova("rt_task_join_future"),
             RtFunc::TaskTimeoutFuture => WasmRuntime::Nova("rt_task_timeout_future"),
+            RtFunc::UiStatePresent => WasmRuntime::Nova("rt_ui_state_present"),
+            RtFunc::UiStateLoad => WasmRuntime::Nova("rt_ui_state_load"),
+            RtFunc::UiStateStore => WasmRuntime::Nova("rt_ui_state_store"),
             RtFunc::TestSelector
             | RtFunc::FsReadToString
             | RtFunc::FsWriteString

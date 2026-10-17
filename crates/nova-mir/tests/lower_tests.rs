@@ -2082,3 +2082,93 @@ fn a_std_extern_js_block_is_wasms_alone() {
         native.diagnostics
     );
 }
+
+/// `std/ui`'s state builtins (spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+/// §4): natively each is a call of the runtime; on WASM each is a call of
+/// `std/rt`'s function for it, and none is left to the shim. The std module
+/// is a stand-in passed as `extra_std`, as `nova test` passes `std/test`; its
+/// generic wrappers give the builtins their type, as `std/ui`'s do.
+#[test]
+fn the_ui_state_builtins_lower_to_the_runtime_or_std_rt() {
+    use nova_resolver::{resolve_program_for, CompileTarget, Def, DefKind, ModuleSource};
+
+    let stub = "record LowerTestsState { n: Int }\n\
+                fn lower_tests_load<T>() -> T { ui_state_load() }\n\
+                fn lower_tests_store<T>(s: T) { ui_state_store(s) }\n\
+                pub fn lower_tests_state() -> Int {\n\
+                    if !ui_state_present() { lower_tests_store(LowerTestsState { n: 7 }) }\n\
+                    let s: LowerTestsState = lower_tests_load()\n\
+                    s.n\n\
+                }\n";
+    let lower = |target: CompileTarget| {
+        let (tokens, _) = lex(
+            "fn main() { println(\"${lower_tests_state()}\") }",
+            FileId::DUMMY,
+        );
+        let (ast, _) = parse(&tokens, FileId::DUMMY);
+        let ast = ast.expect("no AST");
+        let sources = [ModuleSource::new("main", &ast)];
+        let std_files: Vec<FileId> = target.std_modules().iter().map(|_| FileId::DUMMY).collect();
+        let resolved = resolve_program_for(
+            target,
+            &sources,
+            &std_files,
+            Some((("$test.ui_stub", stub), FileId::DUMMY)),
+        );
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let checked = check(&resolved.file, &resolved.definitions);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let defs = &resolved.definitions;
+        let mut impls = nova_mir::RuntimeImpls::default();
+        for f in &checked.module.functions {
+            if let Some(Def {
+                kind: DefKind::Fn { item_index },
+                ..
+            }) = defs.defs().get(f.def_id.0 as usize)
+            {
+                if defs.module_name(defs.module_of(*item_index)) == "$std.rt" {
+                    impls.functions.insert(f.name.clone(), f.def_id);
+                }
+            }
+        }
+        let runtime = (target == CompileTarget::Wasm).then_some(&impls);
+        nova_mir::lower_module_with(&checked.module, &nova_mir::Options { runtime })
+            .expect("lowers")
+    };
+    use nova_mir::RtFunc::{UiStateLoad, UiStatePresent, UiStateStore};
+    let native = lower(CompileTarget::Native);
+    assert_eq!(
+        count_rt(&stmts_of(&native, "lower_tests_state"), UiStatePresent),
+        1
+    );
+    assert_eq!(
+        count_rt(&stmts_of(&native, "lower_tests_load"), UiStateLoad),
+        1
+    );
+    assert_eq!(
+        count_rt(&stmts_of(&native, "lower_tests_store"), UiStateStore),
+        1
+    );
+    let wasm = lower(CompileTarget::Wasm);
+    for (f, rt) in [
+        ("lower_tests_state", "rt_ui_state_present."),
+        ("lower_tests_load", "rt_ui_state_load."),
+        ("lower_tests_store", "rt_ui_state_store."),
+    ] {
+        let stmts = stmts_of(&wasm, f);
+        for want in [UiStatePresent, UiStateLoad, UiStateStore] {
+            assert_eq!(count_rt(&stmts, want), 0, "{f}");
+        }
+        assert!(
+            stmts.iter().any(
+                |s| matches!(s, nova_mir::Stmt::Call { callee, .. } if callee.starts_with(rt))
+            ),
+            "{f} calls {rt}"
+        );
+    }
+}

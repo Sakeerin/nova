@@ -4267,6 +4267,9 @@ impl<'a> Checker<'a> {
             | Builtin::ProcessArgCount
             | Builtin::ProcessArg
             | Builtin::ProcessExit
+            | Builtin::UiStatePresent
+            | Builtin::UiStateLoad
+            | Builtin::UiStateStore
             | Builtin::MemLoad8
             | Builtin::MemStore8
             | Builtin::MemLoad64
@@ -8142,6 +8145,9 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::ProcessArgCount => (vec![], Ty::Int),
         Builtin::ProcessArg => (vec![Ty::Int], Ty::String),
         Builtin::ProcessExit => (vec![Ty::Int], Ty::Unit),
+        Builtin::UiStatePresent => (vec![], Ty::Bool),
+        Builtin::UiStateLoad => (vec![], Ty::Param(0)),
+        Builtin::UiStateStore => (vec![Ty::Param(0)], Ty::Unit),
         Builtin::MemLoad8 | Builtin::MemLoad64 => (vec![Ty::Int], Ty::Int),
         Builtin::MemStore8 | Builtin::MemStore64 => (vec![Ty::Int, Ty::Int], Ty::Unit),
         Builtin::MemCopy | Builtin::MemFill => (vec![Ty::Int, Ty::Int, Ty::Int], Ty::Unit),
@@ -16369,6 +16375,18 @@ mod tests {
                 Builtin::ProcessExit => (
                     (vec![Ty::Int], Ty::Unit),
                     "`process_exit(code)` in `std/process`'s `exit`",
+                ),
+                Builtin::UiStatePresent => (
+                    (vec![], Ty::Bool),
+                    "`ui_state_present()` in `std/ui`'s `ui`",
+                ),
+                Builtin::UiStateLoad => (
+                    (vec![], Ty::Param(0)),
+                    "`ui_state_load()` in `std/ui`'s `load_state`",
+                ),
+                Builtin::UiStateStore => (
+                    (vec![Ty::Param(0)], Ty::Unit),
+                    "`ui_state_store(state)` in `std/ui`'s `store_state`",
                 ),
                 Builtin::MemLoad8 | Builtin::MemLoad64 => (
                     (vec![Ty::Int], Ty::Int),
