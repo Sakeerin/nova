@@ -90,12 +90,14 @@ jobs:
         continue-on-error: true
         run: cargo test --locked --workspace --all-features --no-fail-fast -- --ignored
 
-  # 4.2's gate in a real browser (spec
+  # 4.2's and 4.3's gates in a real browser (spec
   # docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
-  # §10.3): the counter `cargo test` drives under the fake DOM, built for
-  # WASM and clicked in Chromium through Playwright. Playwright, pinned, is
-  # installed here only, into a scratch directory; nothing in `cargo test` or
-  # `nova` installs a package. Ubuntu only: one browser job suffices.
+  # §10.3, and 4.3's §9.4): the counters `cargo test` drives under the fake
+  # DOM, one written with std/dom and one with std/ui, built for WASM and
+  # clicked in Chromium through Playwright. Both have the ids `#add` and
+  # `#count`, so one script clicks either. Playwright, pinned, is installed
+  # here only, into a scratch directory; nothing in `cargo test` or `nova`
+  # installs a package. Ubuntu only: one browser job suffices.
   browser:
     name: Browser (Chromium)
     runs-on: ubuntu-latest
@@ -108,14 +110,18 @@ jobs:
           node-version: 22
       - name: cargo build -p nova-cli
         run: cargo build --locked -p nova-cli
-      - name: Build the counter for WASM
-        run: target/debug/nova build --target wasm tests/dom/counter.nova -o "$RUNNER_TEMP/counter"
+      - name: Build the counters for WASM
+        run: |
+          target/debug/nova build --target wasm tests/dom/counter.nova -o "$RUNNER_TEMP/counter"
+          target/debug/nova build --target wasm tests/dom/ui_counter.nova -o "$RUNNER_TEMP/ui_counter"
       - name: Install Playwright and Chromium
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
-      - name: Click the counter in Chromium
-        run: node tests/browser/counter.mjs "$RUNNER_TEMP/counter" "$RUNNER_TEMP/pw"
+      - name: Click the counters in Chromium
+        run: |
+          node tests/browser/counter.mjs "$RUNNER_TEMP/counter" "$RUNNER_TEMP/pw"
+          node tests/browser/counter.mjs "$RUNNER_TEMP/ui_counter" "$RUNNER_TEMP/pw"
 
   fmt:
     name: Rustfmt
