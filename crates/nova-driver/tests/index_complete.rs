@@ -133,8 +133,63 @@ fn skipped(tokens: &[Spanned<Token>], i: usize) -> bool {
     if matches!(prev, Some(Token::Module)) {
         return true;
     }
+    // `component` and `view` where they are keywords (the 4.4 spec §6):
+    // before a name and `(`, and before `{`.
+    let next = |k: usize| tokens.get(i + k).map(|t| &t.value);
+    if name == "component"
+        && matches!(next(1), Some(Token::Ident(_)))
+        && matches!(next(2), Some(Token::LParen))
+    {
+        return true;
+    }
+    if name == "view" && matches!(next(1), Some(Token::LBrace)) {
+        return true;
+    }
+    // A named argument's name in an element, `div(class: "a")`: the
+    // attribute it names is no symbol.
+    if in_element_arguments(tokens, i) {
+        return true;
+    }
     // An attribute's arguments, `@test(should_panic)`.
     in_attribute_arguments(tokens, i)
+}
+
+/// Whether the identifier at `i` names an element's argument: it is
+/// followed by `:`, starts an argument, and the innermost open bracket is
+/// the `(` of a call, not of a `fn` or a `component`'s parameters.
+fn in_element_arguments(tokens: &[Spanned<Token>], i: usize) -> bool {
+    if !matches!(tokens.get(i + 1).map(|t| &t.value), Some(Token::Colon)) {
+        return false;
+    }
+    if !matches!(
+        i.checked_sub(1).map(|j| &tokens[j].value),
+        Some(Token::LParen | Token::Comma)
+    ) {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut j = i;
+    while j > 0 {
+        j -= 1;
+        match &tokens[j].value {
+            Token::RParen | Token::RBracket | Token::RBrace => depth += 1,
+            Token::LParen if depth == 0 => {
+                let callee = j.checked_sub(1).map(|k| &tokens[k].value);
+                let before = j.checked_sub(2).map(|k| &tokens[k].value);
+                return matches!(callee, Some(Token::Ident(_)))
+                    && !matches!(before, Some(Token::Fn))
+                    && !matches!(before, Some(Token::Ident(w)) if w == "component");
+            }
+            Token::LParen | Token::LBracket | Token::LBrace => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn in_attribute_arguments(tokens: &[Spanned<Token>], i: usize) -> bool {
@@ -186,9 +241,9 @@ fn every_name_is_covered(a: &Analysis, file: FileId, failures: &mut Vec<String>)
 #[test]
 fn every_name_in_the_corpora_is_indexed() {
     let programs = programs();
-    // 7 examples, 141 top-level runtime programs and the modules program,
-    // on 2026-10-17.
-    assert_eq!(programs.len(), 149, "{programs:#?}");
+    // 7 examples, 142 top-level runtime programs and the modules program,
+    // on 2026-10-17, after 4.4 added `ui_view`.
+    assert_eq!(programs.len(), 150, "{programs:#?}");
     let mut files = 0;
     let mut failures: Vec<String> = Vec::new();
     for (k, path) in programs.iter().enumerate() {
@@ -215,9 +270,9 @@ fn every_name_in_the_corpora_is_indexed() {
             every_name_is_covered(&a, file, &mut failures);
         }
     }
-    // 7 + 141 + 3 files of user code, 05-geometry's library's 2, and
+    // 7 + 142 + 3 files of user code, 05-geometry's library's 2, and
     // native std's 20.
-    assert_eq!(files, 173);
+    assert_eq!(files, 174);
     failures.sort();
     failures.dedup();
     assert!(
