@@ -15,6 +15,7 @@
 //! and Phase 3.5a `nova doc` (spec
 //! `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`).
 
+mod bundle;
 mod cmd;
 mod embedded;
 mod project;
