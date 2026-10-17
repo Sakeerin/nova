@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod fixes;
+mod view;
 
 use fixes::{Binding, Need};
 
@@ -2131,11 +2132,14 @@ impl<'a> Checker<'a> {
                 .iter()
                 .map(|p| self.convert_ty(&p.ty, &generics, &bounds))
                 .collect();
-            let ret = f
-                .return_ty
-                .as_ref()
-                .map(|t| self.convert_ty(t, &generics, &bounds))
-                .unwrap_or(Ty::Unit);
+            let ret = if f.is_component {
+                self.component_ret()
+            } else {
+                f.return_ty
+                    .as_ref()
+                    .map(|t| self.convert_ty(t, &generics, &bounds))
+                    .unwrap_or(Ty::Unit)
+            };
             // An async fn's declared return type is its future's OUTPUT, per
             // the spec's own signatures (`pub async fn join(self) -> T`), so
             // the signature every caller sees is `Future<ret>`. `check_fn_body`
@@ -3576,7 +3580,7 @@ impl<'a> Checker<'a> {
                 }
             }
             ast::Expr::Cast { .. } => self.unsupported_expr(span, "`as` casts"),
-            ast::Expr::View(_) => self.unsupported_expr(span, "`view { … }` blocks"),
+            ast::Expr::View(children) => self.check_view(fcx, children, span),
         }
     }
 
@@ -17427,6 +17431,225 @@ mod tests {
         assert_eq!(
             r.probe.locals,
             vec![("a".to_string(), Ty::String), ("n".to_string(), Ty::Int)]
+        );
+    }
+
+    /// The codes `src` raises, after `import ui` and two element builders
+    /// (the 4.4 spec §4).
+    fn view_codes(src: &str) -> Vec<String> {
+        let src = format!("import ui\nimport ui::html::{{div, input}}\n{src}\nfn main() {{ }}\n");
+        check_src(&src)
+            .diagnostics
+            .iter()
+            .map(|d| d.code.clone())
+            .collect()
+    }
+
+    /// A component returns `View`, and a view's elements, text, named
+    /// arguments and handlers of both kinds check (§4.1 to §4.4).
+    #[test]
+    fn a_view_desugars_to_std_uis_calls() {
+        let codes = view_codes(
+            "fn h() { }\n\
+             fn typed(v: String) { }\n\
+             component Card(title: String, n: Signal<Int>) {\n\
+             \x20   view {\n\
+             \x20       div(class: \"c\", aria_label: title, on_click: h, on_input: typed) {\n\
+             \x20           text(\"fixed\")\n\
+             \x20           text(\"n ${n.value()}\")\n\
+             \x20           input(type: \"text\", value: title, on_change: |v: String| println(v))\n\
+             \x20           div { }\n\
+             \x20       }\n\
+             \x20   }\n\
+             }\n\
+             fn use_it() { let v: View = Card(\"t\", signal(1)) }",
+        );
+        assert!(codes.is_empty(), "{codes:?}");
+    }
+
+    /// What `component`'s body desugars to, as far as a view goes: each
+    /// call by its function's name and its arguments, each variant by its
+    /// name and its fields, each string literal, and `_` for anything else,
+    /// such as a closure.
+    fn view_parts(src: &str, component: &str) -> String {
+        fn walk(m: &hir::Module, e: &hir::Expr, out: &mut Vec<String>) {
+            match &e.kind {
+                hir::ExprKind::Block {
+                    trailing: Some(t), ..
+                } => walk(m, t, out),
+                hir::ExprKind::Call {
+                    func: hir::Callee::Def(d),
+                    args,
+                    ..
+                } => {
+                    let f = m.functions.iter().find(|f| f.def_id == *d);
+                    out.push(format!("{}(", f.expect("a function").name));
+                    for a in args {
+                        walk(m, a, out);
+                    }
+                    out.push(")".to_string());
+                }
+                hir::ExprKind::MakeArray { elems } | hir::ExprKind::StrConcat(elems) => {
+                    for a in elems {
+                        walk(m, a, out);
+                    }
+                }
+                hir::ExprKind::MakeVariant { sum, variant, args } => {
+                    let s = m.sums.iter().find(|s| s.def_id == *sum).expect("a sum");
+                    out.push(s.variants[*variant as usize].name.clone());
+                    for a in args {
+                        walk(m, a, out);
+                    }
+                }
+                hir::ExprKind::StrLit(s) => out.push(format!("{s:?}")),
+                _ => out.push("_".to_string()),
+            }
+        }
+        let src = format!("import ui\nimport ui::html::{{div, input}}\n{src}\nfn main() {{ }}\n");
+        let r = check_src(&src);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        let f = r.module.functions.iter().find(|f| f.name == component);
+        let mut out = Vec::new();
+        walk(&r.module, &f.expect("the component").body, &mut out);
+        out.join(" ")
+    }
+
+    /// The second table of §4.3, and §4.4: a literal is fixed and anything
+    /// else read again; `_` becomes `-`; `value` is the property; `on_kind`
+    /// is `on` for a `fn()` and `On` for a `fn(String)`; `text` is syntax,
+    /// and a one-argument call of another name is a call.
+    #[test]
+    fn a_views_parts_are_fixed_or_read_again_by_literalness() {
+        let parts = view_parts(
+            "fn h() { }\n\
+             fn one(s: String) -> View { div([], []) }\n\
+             component Card(x: String) {\n\
+             \x20   view {\n\
+             \x20       div(class: \"a\", id: r\"r\", aria_label: x, on_click: h, on_input: |v: String| println(v)) {\n\
+             \x20           text(\"t\")\n\
+             \x20           text(x)\n\
+             \x20           input(value: \"v\")\n\
+             \x20           input(value: x, title: \"a ${x}\")\n\
+             \x20           one(\"y\")\n\
+             \x20       }\n\
+             \x20   }\n\
+             }",
+            "Card",
+        );
+        assert_eq!(
+            parts,
+            "div( Static \"class\" \"a\" Static \"id\" \"r\" Dynamic \"aria-label\" _ on( \"click\" _ ) \
+             On \"input\" _ Text \"t\" DynText _ input( Property \"value\" \"v\" ) \
+             input( DynProperty \"value\" _ Dynamic \"title\" _ ) one( \"y\" ) )"
+        );
+    }
+
+    /// `view` holds one root (§4.2).
+    #[test]
+    fn a_view_with_no_root_or_two_is_e0094() {
+        assert_eq!(view_codes("component A() { view { } }"), ["E0094"]);
+        assert_eq!(
+            view_codes("component A() { view { div { } div { } } }"),
+            ["E0094"]
+        );
+    }
+
+    /// A void element takes no block (§4.3).
+    #[test]
+    fn a_void_element_with_children_is_e0095() {
+        assert_eq!(
+            view_codes("component A() { view { input(type: \"x\") { } } }"),
+            ["E0095"]
+        );
+    }
+
+    /// An element names a builder: a function of `([Attr], [View])` or
+    /// `([Attr])` that returns `View`, not another function, a local or a
+    /// variant (§4.3).
+    #[test]
+    fn an_element_that_is_no_builder_is_e0096() {
+        assert_eq!(
+            view_codes("fn f(x: Int) -> View { div([], []) }\ncomponent A() { view { f { } } }"),
+            ["E0096"]
+        );
+        assert_eq!(
+            view_codes("fn A() -> View { let div = 1\n view { div { } } }"),
+            ["E0096"]
+        );
+        assert_eq!(
+            view_codes(
+                "fn two(a: Int, b: Int) -> View { div([], []) }\ncomponent A() { view { two(x: \"a\") { } } }"
+            ),
+            ["E0096"]
+        );
+        assert_eq!(
+            view_codes(
+                "fn b(a: [Attr], c: [View]) -> Int { 1 }\ncomponent A() { view { b(x: \"a\") { } } }"
+            ),
+            ["E0096"]
+        );
+        assert_eq!(
+            view_codes("component A() { view { Some(x: \"a\") } }"),
+            ["E0096"]
+        );
+        assert_eq!(
+            view_codes("component A() { view { nope(x: \"a\") } }"),
+            ["E0001"]
+        );
+    }
+
+    /// An attribute's value is a `String`, and a handler a `fn()` or a
+    /// `fn(String)` (§4.3).
+    #[test]
+    fn an_attribute_or_handler_of_another_type_is_e0097() {
+        assert_eq!(
+            view_codes("component A() { view { div(class: 5) } }"),
+            ["E0097"]
+        );
+        assert_eq!(
+            view_codes("component A() { view { div(value: 1.5) } }"),
+            ["E0097"]
+        );
+        assert_eq!(
+            view_codes("component A() { view { div(on_click: 5) } }"),
+            ["E0097"]
+        );
+        assert_eq!(
+            view_codes("component A() { view { div(on_click: || 5) } }"),
+            ["E0097"]
+        );
+        assert_eq!(
+            view_codes("fn h() { }\ncomponent A() { view { div(on_: h) } }"),
+            ["E0097"]
+        );
+        assert_eq!(
+            view_codes("component A() { view { div(on_click: |n: Int| println(\"x\")) } }"),
+            ["E0097"]
+        );
+    }
+
+    /// A child is a `View`, and a view's text a `String`.
+    #[test]
+    fn a_child_or_text_of_another_type_is_e0010() {
+        assert_eq!(
+            view_codes("component A() { view { div { 5 } } }"),
+            ["E0010"]
+        );
+        let r = check_src(
+            "import ui\nimport ui::html::{div}\n\
+             component A() { view { div(class: 5) { text(5) } } }\nfn main() { }\n",
+        );
+        let found: Vec<(&str, &str)> = r
+            .diagnostics
+            .iter()
+            .map(|d| (d.code.as_str(), d.message.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("E0097", "`class` takes a `String`, found `Int`"),
+                ("E0010", "text must have type `String`, found `Int`"),
+            ]
         );
     }
 }

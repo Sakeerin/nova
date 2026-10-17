@@ -1,0 +1,5 @@
+<div class="card" aria-label="A &amp; B"><p>fixed</p><p class="n7">n is 7</p><label for="box">A &amp; B</label><input type="checkbox" id="box" value="7"><button class="reset">reset</button></div>
+<div><span>open</span>|</div>
+<div>|</div>
+<ul><li class="done">milk</li><li class="todo">eggs</li></ul>
+42 true

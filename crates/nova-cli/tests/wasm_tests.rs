@@ -1543,6 +1543,8 @@ mod gate {
         ui_memo,
         ui_render,
         ui_signal,
+        // `component` and `view { … }` (spec 4.4 §9.2).
+        ui_view,
     );
 
     /// The programs a test of their own in this module checks, by its name.

@@ -1,0 +1,71 @@
+// `component` and `view { … }` (RFC 0001; spec
+// docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md
+// §9.2), through `render_to_string` on both targets: a component with
+// parameters, nested and void elements, attributes by name, fixed and
+// reactive text and attributes, `value`, a handler the render leaves out,
+// `show` and `for_each` with `|| view { … }`, and `||` outside a view.
+import ui
+import ui::html::{button, class, div, input, label, li, p, span, ul}
+
+record Item { name: String, done: Bool }
+
+/// A card titled `title`, which shows `n`.
+component Card(title: String, n: Signal<Int>) {
+    view {
+        div(class: "card", aria_label: title) {
+            p { text("fixed") }
+            p(class: "n${n.value()}") { text("n is ${n.value()}") }
+            label(for: "box") { text(title) }
+            input(type: "checkbox", id: "box", value: "${n.value()}")
+            button(on_click: || n.set(0), class("reset")) { text("reset") }
+        }
+    }
+}
+
+component Panel(open: Signal<Bool>) {
+    view {
+        div {
+            show(
+                open,
+                || view {
+                    span { text("open") }
+                },
+            )
+            text("|")
+        }
+    }
+}
+
+component List(items: Signal<[Item]>) {
+    view {
+        ul {
+            for_each(
+                items,
+                |it: Item| view {
+                    li(class: if it.done { "done" } else { "todo" }) { text(it.name) }
+                },
+            )
+        }
+    }
+}
+
+fn main() {
+    // A reactive value reads the signal as the render finds it.
+    let n = signal(1)
+    n.set(7)
+    println(render_to_string(|| Card("A & B", n)))
+
+    let open = signal(true)
+    println(render_to_string(|| Panel(open)))
+    open.set(false)
+    println(render_to_string(|| Panel(open)))
+
+    let items = signal([Item { name: "milk", done: true }, Item { name: "eggs", done: false }])
+    println(render_to_string(|| List(items)))
+
+    // `||` is a closure with no parameters outside a view too, and `||`
+    // between two values is still the logical or.
+    let f = || 40 + 2
+    let either = false || true
+    println("${f()} ${either}")
+}
