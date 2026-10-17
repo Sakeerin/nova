@@ -239,6 +239,37 @@ mod tests {
         );
     }
 
+    /// An element's name hovers as its builder, and a component as it is
+    /// written (the 4.4 spec §6, §9.2).
+    #[test]
+    fn an_element_hovers_as_its_builder() {
+        let text = "import ui\nimport ui::html::{div}\n\n/// A card.\ncomponent Card(title: String) {\n    view {\n        div(class: title) { text(\"hi\") }\n    }\n}\n\nfn main() {\n    println(render_to_string(|| Card(\"t\")))\n}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-hover-element")
+            .join("main.nova");
+        let overlay = crate::workspace::Overlay::default().with(&path, text.to_string());
+        let options = crate::analysis::options(None, true);
+        let answer = crate::analysis::answering(&path, &overlay, &options).expect("an answer");
+        let shown = |at: usize| {
+            let lsp::HoverContents::Markup(found) =
+                hover(&answer, at as u32).expect("a hover").contents
+            else {
+                panic!("not Markdown");
+            };
+            found.value
+        };
+        let div = shown(text.find("div(class").unwrap());
+        assert!(
+            div.starts_with("```nova\npub fn div(attrs: [Attr], children: [View]) -> View\n```"),
+            "{div}"
+        );
+        assert_eq!(
+            shown(text.find("Card(\"t\")").unwrap()),
+            "```nova\ncomponent Card(title: String)\n```\n\nA card."
+        );
+        assert!(hover(&answer, text.find("class:").unwrap() as u32).is_none());
+    }
+
     #[test]
     fn an_item_line_keeps_pub_async_and_where_and_stops_at_its_body() {
         let text = "    pub async fn f<T>(x: T) -> T\n    where T: Show\n    { x }\n";

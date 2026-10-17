@@ -146,6 +146,11 @@ pub(crate) fn render(
         let word = &text[s..e];
         match &t.value {
             Token::Ident(_) if own == Some(t.span) => span(&mut out, "name", word),
+            // Before the item's own name, a name can only be `component`,
+            // a keyword there (the 4.4 spec §3.1).
+            Token::Ident(w) if w == "component" && own.is_some_and(|o| e <= o.start as usize) => {
+                span(&mut out, "kw", word)
+            }
             Token::Ident(_) => match link(t.span) {
                 Some(url) => {
                     out.push_str("<a href=\"");
@@ -248,6 +253,23 @@ mod tests {
             "<span class=\"kw\">pub</span> <span class=\"kw\">async</span> \
              <span class=\"kw\">fn</span> <span class=\"name\">go</span>&lt;T&gt;(x: T) -&gt; T \
              <span class=\"kw\">where</span> T: Show"
+        );
+    }
+
+    #[test]
+    fn a_component_is_shown_as_it_is_written() {
+        let text = "/// Doc.\npub component Card(title: String) { view { div { } } }\n";
+        let file = parse(text);
+        let Item::Function(f) = &file.items[0].value else {
+            panic!("not a function")
+        };
+        let ft = FileText::new(text, FileId::DUMMY);
+        let start = decl_start(text, f.name.span.start as usize);
+        let end = fn_end(&ft, f.name.span, f.return_ty.as_ref(), &f.where_clause);
+        assert_eq!(
+            render(&ft, start, end, Some(f.name.span), &|_| None),
+            "<span class=\"kw\">pub</span> <span class=\"kw\">component</span> \
+             <span class=\"name\">Card</span>(title: String)"
         );
     }
 

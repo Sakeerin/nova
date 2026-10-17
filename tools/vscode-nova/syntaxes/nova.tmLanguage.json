@@ -10,6 +10,7 @@
     { "include": "#numbers" },
     { "include": "#attributes" },
     { "include": "#function-names" },
+    { "include": "#contextual-keywords" },
     { "include": "#keywords" },
     { "include": "#types" }
   ],
@@ -51,6 +52,18 @@
         "1": { "name": "keyword.other.fn.nova" },
         "2": { "name": "entity.name.function.nova" }
       }
+    },
+    "contextual-keywords": {
+      "patterns": [
+        {
+          "match": "\\b(component)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": { "name": "keyword.other.component.nova" },
+            "2": { "name": "entity.name.function.nova" }
+          }
+        },
+        { "name": "keyword.other.view.nova", "match": "\\bview(?=\\s*\\{)" }
+      ]
     },
     "keywords": {
       "name": "keyword.other.nova",
