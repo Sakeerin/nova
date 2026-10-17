@@ -11313,7 +11313,13 @@ fn example_05_geometry_runs() {
 /// a crash.
 #[test]
 fn ui_programs_run_and_survive_gc_stress() {
-    for name in ["ui_signal", "ui_cleanup", "ui_memo", "ui_collect"] {
+    for name in [
+        "ui_signal",
+        "ui_cleanup",
+        "ui_memo",
+        "ui_render",
+        "ui_collect",
+    ] {
         let source = repo_root().join(format!("tests/runtime/{name}.nova"));
         let expected = std::fs::read_to_string(source.with_extension("stdout"))
             .expect("expected-output fixture exists")
@@ -11330,8 +11336,9 @@ fn ui_programs_run_and_survive_gc_stress() {
     }
 }
 
-/// `std/ui`'s panics (spec 4.3 §5): `set` on a memo, and an effect that
-/// never settles, each with what the program printed first.
+/// `std/ui`'s panics (spec 4.3 §5, §6.1): `set` on a memo, an effect that
+/// never settles, and a name that is not a tag's, each with what the
+/// program printed first.
 #[test]
 fn ui_programs_panic_with_their_message() {
     for (name, out, message) in [
@@ -11344,6 +11351,11 @@ fn ui_programs_panic_with_their_message() {
             "ui_loop",
             "",
             "nova: panic: std/ui: effects did not settle\n",
+        ),
+        (
+            "ui_render_bad_name",
+            "<my-tag>fine</my-tag>\n",
+            "nova: panic: std/ui: \"p onclick=x\" is not a tag name\n",
         ),
     ] {
         let a = nova()
@@ -11359,5 +11371,72 @@ fn ui_programs_panic_with_their_message() {
         );
         let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
         assert!(err.ends_with(message), "{name}: {err}");
+    }
+}
+
+/// Every name `std/ui` writes is checked: an attribute's, a dynamic one's
+/// and a property's; and a name that parses HTML is refused, as a property
+/// or an attribute, in any case (spec 4.3 §6.1, §7.2). Each program prints a
+/// fine render, then panics at the bad one.
+#[test]
+fn ui_checks_every_name_and_never_parses_html() {
+    let dir = std::env::temp_dir().join("nova-ui-names");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for (k, (attrs, message)) in [
+        (
+            "attr(\"on click\", \"x\")",
+            "\"on click\" is not an attribute name",
+        ),
+        (
+            "dyn_attr(\"a=b\", | | \"x\")",
+            "\"a=b\" is not an attribute name",
+        ),
+        ("Property(\"1st\", \"x\")", "\"1st\" is not a property name"),
+        (
+            "Property(\"innerHTML\", \"<b>x</b>\")",
+            "\"innerHTML\" parses HTML, which std/ui does not insert",
+        ),
+        (
+            "DynProperty(\"outerHTML\", | | \"<b>x</b>\")",
+            "\"outerHTML\" parses HTML, which std/ui does not insert",
+        ),
+        (
+            "Property(\"srcdoc\", \"<b>x</b>\")",
+            "\"srcdoc\" parses HTML, which std/ui does not insert",
+        ),
+        (
+            "attr(\"SrcDoc\", \"<b>x</b>\")",
+            "\"SrcDoc\" parses HTML, which std/ui does not insert",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let file = format!("bad{k}.nova");
+        std::fs::write(
+            dir.join(&file),
+            format!(
+                "import ui\nimport ui::html::{{attr, dyn_attr, p, text}}\n\nfn main() {{\n    println(render_to_string(| | p([attr(\"class\", \"ok\")], [text(\"fine\")])))\n    println(render_to_string(| | p([attr(\"id\", \"x\"), {attrs}], [])))\n    println(\"not reached\")\n}}\n"
+            ),
+        )
+        .expect("write the program");
+        let a = nova()
+            .current_dir(&dir)
+            .arg("run")
+            .arg(&file)
+            .assert()
+            .failure();
+        let o = a.get_output();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"),
+            "<p class=\"ok\">fine</p>\n",
+            "{attrs}"
+        );
+        let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
+        assert!(
+            err.ends_with(&format!("nova: panic: std/ui: {message}\n")),
+            "{attrs}: {err}"
+        );
     }
 }

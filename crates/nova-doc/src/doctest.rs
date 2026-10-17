@@ -104,10 +104,11 @@ pub fn std_doc_tests() -> Result<Vec<DocTest>, Failure> {
 }
 
 /// A std module's file as a doc test's name shows it: `<std/time>` is
-/// `std/time/lib.nova` (spec §5.3, §7).
+/// `std/time/lib.nova`, and `<std/ui.html>` `std/ui/html/lib.nova` (spec
+/// §5.3, §7; spec 4.3 §3).
 fn std_place(name: &str) -> String {
     match name.strip_prefix("<std/").and_then(|n| n.strip_suffix('>')) {
-        Some(m) => format!("std/{m}/lib.nova"),
+        Some(m) => format!("std/{}/lib.nova", m.replace('.', "/")),
         None => name.to_string(),
     }
 }

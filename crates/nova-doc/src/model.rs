@@ -499,6 +499,12 @@ impl<'a> Ctx<'a> {
         self.defs.module_name(m).strip_prefix("$std.")
     }
 
+    /// A std module's path under `std/`, as `ui/html` for `$std.ui.html`
+    /// (spec 4.3 §3).
+    fn std_path(&self, m: ModuleId) -> Option<String> {
+        Some(self.std_name(m)?.replace('.', "/"))
+    }
+
     fn module_file(&self, m: ModuleId) -> Option<FileId> {
         let i = m.0 as usize;
         if i < self.users {
@@ -530,7 +536,7 @@ impl<'a> Ctx<'a> {
     fn page(&self, m: ModuleId) -> Option<String> {
         let i = m.0 as usize;
         if i >= self.users {
-            return Some(format!("std/{}/index.html", self.std_name(m)?));
+            return Some(format!("std/{}/index.html", self.std_path(m)?));
         }
         if self.std {
             return None;
@@ -693,8 +699,8 @@ impl<'a> Ctx<'a> {
         let page = self.page(m)?;
         let ft = self.texts.get(&self.module_file(m)?)?;
         let (name, qual, root) = if m.0 as usize >= self.users {
-            let n = self.std_name(m)?.to_string();
-            let qual = format!("std::{n}");
+            let n = self.std_path(m)?;
+            let qual = format!("std::{}", n.replace('/', "::"));
             (n, qual, false)
         } else {
             let stem = self
@@ -1393,7 +1399,8 @@ mod tests {
                 "task",
                 "test",
                 "time",
-                "ui"
+                "ui",
+                "ui/html"
             ]
         );
         let core = module(&d.site, "std/core/index.html");

@@ -1536,10 +1536,12 @@ mod gate {
         hash,
         hash_diffusion,
         json_traits,
-        // `std/ui`: reactivity, and its state across turns (spec 4.3 §9.2).
+        // `std/ui`: reactivity, rendering to a string, and its state across
+        // turns (spec 4.3 §9.2).
         ui_cleanup,
         ui_collect,
         ui_memo,
+        ui_render,
         ui_signal,
     );
 
@@ -1562,6 +1564,7 @@ mod gate {
         "eprint_family",
         "ui_memo_set",
         "ui_loop",
+        "ui_render_bad_name",
     ];
 
     /// `eprint` and `eprintln` write to stderr, as `run_tests.rs` checks
@@ -1705,6 +1708,15 @@ mod gate {
     }
 
     #[test]
+    fn ui_render_bad_name() {
+        super::gate_panics(
+            "ui_render_bad_name",
+            "nova: panic: std/ui: \"p onclick=x\" is not a tag name",
+            |out| out == "<my-tag>fine</my-tag>\n",
+        );
+    }
+
+    #[test]
     fn panic_unwrap() {
         super::gate_panics("panic_unwrap", "nova: panic: called get on None", |out| {
             out.contains('7') && !out.contains("unreachable")
@@ -1805,6 +1817,7 @@ mod stress {
         ui_cleanup,
         ui_collect,
         ui_memo,
+        ui_render,
         ui_signal,
     );
 
@@ -1817,6 +1830,41 @@ mod stress {
             "nova: panic: nova_rt_task_join_future: this future was never spawned, so there is no task to ask about",
             str::is_empty,
         );
+    }
+}
+
+/// `import ui::html::{div}` checks on both targets; a program's own nested
+/// path is still E0900, `ui::nope` is E0001, and `signal` without an import
+/// is E0001 (spec 4.3 §9.5).
+#[test]
+fn ui_imports_check_on_both_targets() {
+    let dir = fresh("ui-imports");
+    write(
+        &dir,
+        &[
+            (
+                "ok.nova",
+                "import ui\nimport ui::html::{div, text}\n\nfn main() {\n    println(render_to_string(| | div([], [text(\"x\")])))\n}\n",
+            ),
+            ("nested.nova", "import a::b\n\nfn main() {}\n"),
+            ("nope.nova", "import ui::nope\n\nfn main() {}\n"),
+            ("bare.nova", "fn main() {\n    let s = signal(0)\n}\n"),
+        ],
+    );
+    for target in ["native", "wasm"] {
+        nova_in(&dir, &["check", "--target", target, "ok.nova"]).success();
+        for (file, code, says) in [
+            ("nested.nova", "E0900", "qualified or nested import paths"),
+            ("nope.nova", "E0001", "cannot find module `ui::nope`"),
+            ("bare.nova", "E0001", "cannot find function `signal`"),
+        ] {
+            let a = nova_in(&dir, &["check", "--target", target, file]).failure();
+            let err = stderr(&a);
+            assert!(
+                err.contains(&format!("error[{code}]")) && err.contains(says),
+                "{target} {file}: {err}"
+            );
+        }
     }
 }
 

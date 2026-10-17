@@ -1,0 +1,103 @@
+// `render_to_string` (spec 4.3 §7.2): nested elements, static and dynamic
+// attributes and properties, `show` and `for_each` both ways, escaping,
+// void elements, and handlers left out.
+import ui
+import ui::html::{
+    attr,
+    button,
+    class,
+    div,
+    dyn_attr,
+    dyn_text,
+    element,
+    h1,
+    img,
+    input,
+    li,
+    on_click,
+    p,
+    span,
+    src,
+    text,
+    ul,
+    value,
+}
+
+record Item { name: String, done: Bool }
+
+fn main() {
+    // Nested elements, attributes, and a void element.
+    println(
+        render_to_string(
+            | | div(
+                [class("card"), attr("data-id", "7")],
+                [
+                    h1([], [text("Title")]),
+                    img([src("a.png")]),
+                    p([], [span([], [text("one")]), text(" two")]),
+                ],
+            ),
+        ),
+    )
+
+    // Escaping: text escapes `&`, `<` and `>`; attributes `"` too.
+    println(
+        render_to_string(
+            | | p([attr("title", "say \"hi\" & <go>")], [text("1 < 2 & 3 > 2 \"q\"")]),
+        ),
+    )
+
+    // Dynamic text and attributes are read once; handlers are left out;
+    // a property is written as the attribute.
+    let n = signal(3)
+    let html = render_to_string(
+        | | div(
+            [dyn_attr("class", | | "n${n.value()}")],
+            [
+                dyn_text(| | "n is ${n.value()}"),
+                button([on_click(| | n.set(0))], [text("reset")]),
+                input([value("x\"y"), attr("type", "text")]),
+            ],
+        ),
+    )
+    println(html)
+
+    // `show`, both ways.
+    let open = signal(true)
+    let panel = | | div([], [show(open, | | p([], [text("open")])), text("|")])
+    println(render_to_string(panel))
+    open.set(false)
+    println(render_to_string(panel))
+
+    // `for_each`, with items and with none.
+    let items = signal(
+        [Item { name: "milk", done: true }, Item { name: "eggs & ham", done: false }],
+    )
+    let list = | | ul(
+        [],
+        [
+            for_each(
+                items,
+                |it: Item| li([class(if it.done { "done" } else { "todo" })], [text(it.name)]),
+            ),
+        ],
+    )
+    println(render_to_string(list))
+    let none: [Item] = []
+    items.set(none)
+    println(render_to_string(list))
+
+    // `element` writes a tag with no builder of its own.
+    println(render_to_string(| | element("main", [], [text("body")])))
+
+    // A cleanup in the render runs when it is disposed; `on_mount` never.
+    println(
+        render_to_string(
+            | | {
+                on_cleanup(| | println("cleanup ran"))
+                on_mount(| | println("on_mount ran"))
+                text("done")
+            },
+        ),
+    )
+}

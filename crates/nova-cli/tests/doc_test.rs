@@ -409,6 +409,10 @@ fn doc_std_runs_stds_doc_tests_inside_a_project_or_not() {
                 "no example of std::{m} ran:\n{out}"
             );
         }
+        assert!(
+            out.contains("\ntest std::ui::html (std/ui/html/lib.nova:"),
+            "no example of std::ui::html ran:\n{out}"
+        );
         assert!(!out.contains("calc"), "{out}");
         assert_eq!(stderr(&a), "");
     }

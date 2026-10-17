@@ -2076,8 +2076,8 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 }
 
 /// The embedded standard-library modules, compiled as implicit modules and
-/// glob-imported into every user module, but for `std/ui`, which a program
-/// imports (spec 4.3 §3). Order is significant only in that it
+/// glob-imported into every user module, but for `std/ui` and `std/ui/html`,
+/// which a program imports (spec 4.3 §3). Order is significant only in that it
 /// fixes module indices; user modules always come first, then these in the
 /// order listed here — `std/core` stays first so its module index is
 /// unchanged from when it was the only embedded module. The sources come
@@ -2086,7 +2086,7 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 /// self-contained executable and `cargo package` keeps the files. Each name
 /// is `$std.*`, not a valid identifier, so it can never collide with a user
 /// module name or be named in an `import`.
-pub const STD_MODULES: [(&str, &str); 17] = [
+pub const STD_MODULES: [(&str, &str); 18] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.io", nova_std::IO),
@@ -2104,6 +2104,7 @@ pub const STD_MODULES: [(&str, &str); 17] = [
     ("$std.crypto", nova_std::CRYPTO),
     ("$std.process", nova_std::PROCESS),
     ("$std.ui", nova_std::UI),
+    ("$std.ui.html", nova_std::UI_HTML),
 ];
 
 /// What a program is compiled for (spec
@@ -2142,10 +2143,11 @@ impl CompileTarget {
 /// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1, 4.2
 /// §3.2, 4.3 §3): the ten of [`STD_MODULES`] that need no operating
 /// system, in the same order, then `std/dom`, which only an `import`
-/// reaches, then `std/ui`, then `std/rt`, the runtime written in Nova. Their names are those of
+/// reaches, then `std/ui` and `std/ui/html`, then `std/rt`, the runtime
+/// written in Nova. Their names are those of
 /// [`STD_MODULES`], so `std/core` keeps its place first, and the same order
 /// gives a name the same winner in std's glob imports.
-pub const WASM_STD_MODULES: [(&str, &str); 13] = [
+pub const WASM_STD_MODULES: [(&str, &str); 14] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.collections", nova_std::COLLECTIONS),
@@ -2158,6 +2160,7 @@ pub const WASM_STD_MODULES: [(&str, &str); 13] = [
     ("$std.log", nova_std::LOG),
     ("$std.dom", nova_std::DOM),
     ("$std.ui", nova_std::UI),
+    ("$std.ui.html", nova_std::UI_HTML),
     ("$std.rt", nova_std::RT),
 ];
 
@@ -2165,7 +2168,11 @@ pub const WASM_STD_MODULES: [(&str, &str); 13] = [
 /// prelude, by the name an `import` writes, and the module's own name
 /// (spec `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 /// §3.2).
-pub const IMPORTED_STD: [(&str, &str); 2] = [("dom", "$std.dom"), ("ui", "$std.ui")];
+pub const IMPORTED_STD: [(&str, &str); 3] = [
+    ("dom", "$std.dom"),
+    ("ui", "$std.ui"),
+    ("ui::html", "$std.ui.html"),
+];
 
 /// The names a project's module or a dependency may not take: those of
 /// std's imported modules, with 4.3's `ui` (spec 4.2 §3.2).
@@ -2791,24 +2798,33 @@ fn resolve_import(
     public_fixes: &mut Vec<(usize, usize, String)>,
 ) {
     let span = imp.path.span;
-    // Only single-segment module imports are supported. A qualified or nested
-    // path (`a::b`) would otherwise silently drop its leading segments and bind
+    let segments = &imp.path.value.segments;
+    let joined = segments
+        .iter()
+        .map(|s| s.value.as_str())
+        .collect::<Vec<_>>()
+        .join("::");
+    // Only single-segment module imports are supported, and std's nested
+    // ones, as `ui::html` (spec 4.3 §3). Any other qualified or nested path
+    // (`a::b`) would otherwise silently drop its leading segments and bind
     // an unrelated module; reject it explicitly like `import ... as`.
-    if imp.path.value.segments.len() > 1 {
-        diagnostics.push(unsupported(
-            span,
-            "qualified or nested import paths (`a::b`) are not supported yet; \
-             import a top-level module by its name",
-        ));
+    if segments.len() > 1 && !IMPORTED_STD.iter().any(|&(n, _)| n == joined) {
+        let first = segments[0].value.as_str();
+        if IMPORTED_STD.iter().any(|&(n, _)| n == first) {
+            diagnostics.push(
+                Diagnostic::error("E0001", format!("cannot find module `{joined}`"))
+                    .with_primary_label(span, "no such module"),
+            );
+        } else {
+            diagnostics.push(unsupported(
+                span,
+                "qualified or nested import paths (`a::b`) are not supported yet; \
+                 import a top-level module by its name",
+            ));
+        }
         return;
     }
-    let target_name = imp
-        .path
-        .value
-        .segments
-        .last()
-        .map(|s| s.value.as_str())
-        .unwrap_or("");
+    let target_name = joined.as_str();
     let target = match modules[mid].imports.get(target_name) {
         Some(ImportTarget::Module(target)) => *target,
         Some(ImportTarget::Reported) => return,
@@ -2848,15 +2864,32 @@ fn resolve_import(
         );
         return;
     }
-    // Spec 3.4a §3.3: the module, at its own segment. Only one-segment
-    // paths reach here, and `path.span` would also cover a list's `::`.
-    if let Some(first) = imp.path.value.segments.first() {
-        occurrences.push(Occurrence {
-            span: first.span,
-            role: Role::Use,
-            target: Target::Module(ModuleId(target as u32)),
-            shorthand: false,
-        });
+    // Spec 3.4a §3.3: the module, at its own segment; `path.span` would
+    // also cover a list's `::`. Each segment of a std module's nested path
+    // names the module its path so far names, as `ui` in `ui::html` (spec
+    // 4.3 §3).
+    for (k, segment) in segments.iter().enumerate() {
+        let named = if k + 1 == segments.len() {
+            Some(target)
+        } else {
+            let prefix = segments[..=k]
+                .iter()
+                .map(|s| s.value.as_str())
+                .collect::<Vec<_>>()
+                .join("::");
+            IMPORTED_STD
+                .iter()
+                .find(|&&(n, _)| n == prefix)
+                .and_then(|&(_, std_name)| modules.iter().position(|m| m.name == std_name))
+        };
+        if let Some(t) = named {
+            occurrences.push(Occurrence {
+                span: segment.span,
+                role: Role::Use,
+                target: Target::Module(ModuleId(t as u32)),
+                shorthand: false,
+            });
+        }
     }
     match &imp.kind {
         ImportKind::Simple => {
@@ -3508,8 +3541,8 @@ mod tests {
 
     /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1, 4.2
     /// §3.2, 4.3 §3): ten of the native modules, in native's order, then
-    /// `std/dom`, `std/ui` and `std/rt`, after the user's. A native build
-    /// has neither `std/dom` nor `std/rt`.
+    /// `std/dom`, `std/ui`, `std/ui/html` and `std/rt`, after the user's. A
+    /// native build has neither `std/dom` nor `std/rt`.
     #[test]
     fn a_wasm_build_compiles_wasms_std_modules() {
         let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
@@ -3532,6 +3565,7 @@ mod tests {
                 "$std.log",
                 "$std.dom",
                 "$std.ui",
+                "$std.ui.html",
                 "$std.rt"
             ]
         );
@@ -3602,6 +3636,35 @@ mod tests {
                 .definitions
                 .resolve_type(ModuleId(0), "Signal")
                 .is_some());
+        }
+    }
+
+    /// A nested import path names a std module, as `ui::html` does; any
+    /// other is E0900 still, and one under std's name that names nothing is
+    /// E0001 (spec 4.3 §3).
+    #[test]
+    fn a_nested_import_path_names_only_stds_modules() {
+        for target in [CompileTarget::Native, CompileTarget::Wasm] {
+            let listed = resolve_for(target, "import ui::html::{div}\nfn main() { }\n");
+            assert!(listed.diagnostics.is_empty(), "{:?}", listed.diagnostics);
+            assert!(listed
+                .definitions
+                .resolve_value(ModuleId(0), "div")
+                .is_some());
+            assert!(listed
+                .definitions
+                .resolve_value(ModuleId(0), "span")
+                .is_none());
+            let all = resolve_for(target, "import ui::html\nfn main() { }\n");
+            assert!(all.diagnostics.is_empty(), "{:?}", all.diagnostics);
+            assert!(all.definitions.resolve_value(ModuleId(0), "span").is_some());
+            let other = resolve_for(target, "import a::b\nfn main() { }\n");
+            let codes: Vec<&str> = other.diagnostics.iter().map(|d| d.code.as_str()).collect();
+            assert_eq!(codes, ["E0900"], "{:?}", other.diagnostics);
+            let nope = resolve_for(target, "import ui::nope\nfn main() { }\n");
+            let codes: Vec<&str> = nope.diagnostics.iter().map(|d| d.code.as_str()).collect();
+            assert_eq!(codes, ["E0001"], "{:?}", nope.diagnostics);
+            assert_eq!(nope.diagnostics[0].message, "cannot find module `ui::nope`");
         }
     }
 

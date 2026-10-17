@@ -1,0 +1,10 @@
+// A tag name that is not ASCII letters, digits and `-`, starting with a
+// letter, panics (spec 4.3 §6.1).
+import ui
+import ui::html::{element, text}
+
+fn main() {
+    println(render_to_string(| | element("my-tag", [], [text("fine")])))
+    println(render_to_string(| | element("p onclick=x", [], [])))
+    println("not reached")
+}

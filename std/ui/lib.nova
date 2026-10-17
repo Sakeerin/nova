@@ -1,8 +1,10 @@
-//! Reactivity: a signal holds a value, and the effects and memos that read
-//! it run again when it changes.
+//! Reactivity, and views that update themselves: a signal holds a value,
+//! and the effects and memos that read it run again when it changes.
 //!
 //! It is not in the prelude: a module that uses it imports it, with
 //! `import ui` for every name, or `import ui::{signal, effect}` for some.
+//! `import ui::html` brings the element builders, `div`, `button`, `text` and
+//! the rest, which make the `View`s that `render_to_string` writes as HTML.
 //!
 //! `set` runs the effects that read a signal before it returns, each once,
 //! and only after every memo it reads is current. A memo computes when it is
@@ -16,16 +18,20 @@
 //! changing a record read from one changes the signal without telling
 //! anyone, and `set` or `update` is how to tell.
 //!
-//! A signal, and an effect that reads it:
+//! A signal, an effect that reads it, and a view rendered to HTML:
 //!
 //! ```
 //! import ui
+//! import ui::html::{div, dyn_text, text}
 //!
 //! let count = signal(1)
 //! let seen = signal(0)
 //! effect(| | seen.set(count.value() * 10))
 //! count.set(2)
 //! assert_eq(seen.value(), 20)
+//!
+//! let html = render_to_string(| | div([], [text("count: "), dyn_text(| | "${count.value()}")]))
+//! assert_eq(html, "<div>count: 2</div>")
 //! ```
 
 // The design (spec
@@ -454,4 +460,207 @@ pub fn batch(f: fn()) {
     f()
     s.batch = s.batch - 1
     flush()
+}
+
+/// What a page shows: an element, text, or a part that changes. The
+/// builders of `std/ui/html` make them.
+pub type View =
+    /// An element: its tag, its attributes, and its children.
+    | Element(String, [Attr], [View])
+    /// Text.
+    | Text(String)
+    /// Text read again when the signals it read change.
+    | DynText(fn() -> String)
+    /// Views that change as a whole: `show`'s and `for_each`'s.
+    | Region(fn() -> [View])
+
+/// An attribute of an element, a property, or an event's handler.
+pub type Attr =
+    /// An attribute's name and value.
+    | Static(String, String)
+    /// An attribute whose value is read again when its signals change.
+    | Dynamic(String, fn() -> String)
+    /// A property, such as an input's `value`.
+    | Property(String, String)
+    /// A property whose value is read again when its signals change.
+    | DynProperty(String, fn() -> String)
+    /// A handler for events of a kind, given the target's `value`.
+    | On(String, fn(String))
+
+// `f` with no listener, for the views `show` and `for_each` build: what
+// those read is theirs, not the region's.
+fn view_of(f: fn() -> View) -> View { untracked(f) }
+
+/// `then()`'s view while `when` holds, and nothing otherwise. It is built
+/// again each time `when` is set to true, even when it already was.
+pub fn show(when: Signal<Bool>, then: fn() -> View) -> View {
+    Region(
+        | | {
+            if when.value() {
+                [view_of(then)]
+            } else {
+                let none: [View] = []
+                none
+            }
+        },
+    )
+}
+
+/// `render` of each item, in order. The whole list is built again each
+/// time `items` changes.
+pub fn for_each<T>(items: Signal<[T]>, render: fn(T) -> View) -> View {
+    Region(
+        | | {
+            let xs = items.value()
+            let mut out = [Text(""); xs.len()]
+            let mut i = 0
+            while i < xs.len() {
+                let x = xs[i]
+                out[i] = view_of(| | render(x))
+                i = i + 1
+            }
+            out
+        },
+    )
+}
+
+// A name `std/ui` writes into markup, checked: ASCII letters, digits and
+// `-`, starting with a letter.
+fn check_name(name: String, what: String) {
+    let cs = name.chars()
+    let mut ok = cs.len() > 0
+    let mut i = 0
+    while ok && i < cs.len() {
+        let c = cs[i]
+        let letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+        let digit = c >= '0' && c <= '9'
+        ok = letter || (i > 0 && (digit || c == '-'))
+        i = i + 1
+    }
+    if !ok { panic("std/ui: \"${name}\" is not ${what}") }
+}
+
+// An attribute's or a property's name, checked as `what`. Three parse their
+// value as HTML, which `std/ui` never inserts: `innerHTML` and `outerHTML`,
+// and `srcdoc`, an iframe's whole document. They are refused as either, and
+// without regard to case, as HTML reads an attribute's name.
+fn check_attr(name: String, what: String) {
+    check_name(name, what)
+    let n = name.to_lower()
+    if n == "innerhtml" || n == "outerhtml" || n == "srcdoc" {
+        panic("std/ui: \"${name}\" parses HTML, which std/ui does not insert")
+    }
+}
+
+// The names of element `tag` and of its attributes and properties, which
+// both renderers check before they write any of them.
+fn check_element(tag: String, attrs: [Attr]) {
+    check_name(tag, "a tag name")
+    let mut i = 0
+    while i < attrs.len() {
+        match attrs[i] {
+            Static(name, value) => check_attr(name, "an attribute name")
+            Dynamic(name, f) => check_attr(name, "an attribute name")
+            Property(name, value) => check_attr(name, "a property name")
+            DynProperty(name, f) => check_attr(name, "a property name")
+            On(kind, f) => {}
+        }
+        i = i + 1
+    }
+}
+
+// The elements written with no closing tag and no children.
+fn is_void(tag: String) -> Bool { tag == "input" || tag == "img" || tag == "br" || tag == "hr" }
+
+// `text` with `&`, `<` and `>` escaped, and `"` too in an attribute.
+fn escape(text: String, attribute: Bool) -> String {
+    let cs = text.chars()
+    let mut parts = Vec::new()
+    let mut i = 0
+    while i < cs.len() {
+        let c = cs[i]
+        if c == '&' {
+            parts.push("&amp;")
+        } else if c == '<' {
+            parts.push("&lt;")
+        } else if c == '>' {
+            parts.push("&gt;")
+        } else if attribute && c == '"' {
+            parts.push("&quot;")
+        } else {
+            parts.push("${c}")
+        }
+        i = i + 1
+    }
+    joined(parts)
+}
+
+fn joined(parts: Vec<String>) -> String {
+    let mut all = [""; parts.len()]
+    let mut i = 0
+    while i < parts.len() {
+        all[i] = at(parts, i)
+        i = i + 1
+    }
+    "".join(all)
+}
+
+// Write `v` as HTML into `out`.
+fn write_view(v: View, out: Vec<String>) {
+    let mut o = out
+    match v {
+        Element(tag, attrs, children) => {
+            check_element(tag, attrs)
+            o.push("<${tag}")
+            let mut i = 0
+            while i < attrs.len() {
+                write_attr(attrs[i], out)
+                i = i + 1
+            }
+            o.push(">")
+            if !is_void(tag) {
+                write_views(children, out)
+                o.push("</${tag}>")
+            }
+        }
+        Text(t) => o.push(escape(t, false))
+        DynText(f) => o.push(escape(f(), false))
+        Region(f) => write_views(f(), out)
+    }
+}
+
+fn write_views(views: [View], out: Vec<String>) {
+    let mut i = 0
+    while i < views.len() {
+        write_view(views[i], out)
+        i = i + 1
+    }
+}
+
+fn write_attr(a: Attr, out: Vec<String>) {
+    let mut o = out
+    match a {
+        Static(name, value) => o.push(" ${name}=\"${escape(value, true)}\"")
+        Dynamic(name, f) => o.push(" ${name}=\"${escape(f(), true)}\"")
+        Property(name, value) => o.push(" ${name}=\"${escape(value, true)}\"")
+        DynProperty(name, f) => o.push(" ${name}=\"${escape(f(), true)}\"")
+        On(kind, f) => {}
+    }
+}
+
+/// `f`'s view as HTML. `f` runs in a new owner, which is disposed once the
+/// HTML is written; text and attributes are read once, handlers are left
+/// out, and `on_mount` never runs. Text and attribute values are escaped.
+pub fn render_to_string(f: fn() -> View) -> String {
+    let mut s = ui()
+    s.rendering = s.rendering + 1
+    let out = Vec::new()
+    root(
+        |dispose: fn()| {
+            write_view(f(), out)
+            dispose()
+        },
+    )
+    s.rendering = s.rendering - 1
+    joined(out)
 }
