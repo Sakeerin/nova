@@ -1,7 +1,7 @@
 # Phase 4.4, "Component syntax": design
 
 - **Date:** 2026-10-17.
-- **Status:** draft, for the user's review.
+- **Status:** approved by the user on 2026-10-17.
 - **The user's decisions, 2026-10-17:**
   1. A signal is read with `count.value()`, as 4.3 built it; `count.value`
      stays a field access, which `Signal` has no field for.
