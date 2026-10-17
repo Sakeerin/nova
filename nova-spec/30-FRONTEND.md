@@ -110,14 +110,17 @@ this syntax (RFC 0001). A signal is read with `count.value()`, as 4.3
 built it. `component` and `view` are contextual keywords: `component` where
 an item starts, a name and `(` follow and a block (or a refused `->`)
 follows the parameters, `view` where an expression starts
-and `{` follows, outside an `if`, `while`, `for` or `match` head. A
+and `{` follows, outside an `if`, `while`, `for` or `match` head, even
+inside parentheses there, as a record literal. A
 component has no type parameters and no written return type. The type
 checker, not a pass before it, desugars a view into 4.3's builders: an
 element becomes a call of the function of its name with `[Attr]` and
 `[View]`, or `[Attr]` alone for a void element; `text("literal")` is
 `Text`, and any other `text(e)` is `DynText(|| e)`, so text that is not a
 literal follows its signals. A view holds one root (E0094); a void element
-takes no block (E0095); an element names a builder (E0096). `if` and `for`
+takes no block (E0095), and one with no attributes is written `br([])`,
+since `br()` is a call with no arguments; an element names a builder
+(E0096). `if` and `for`
 are not in a view: `show` with `|| view { … }` and `for_each` with
 `|item| view { … }` do that
 (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §3, §4; ADR 0043).
@@ -283,13 +286,15 @@ is copied as it is, and must load `app.js` and call its `init()`;
 otherwise the generated page, which has `<div id="app"></div>`, is written.
 `public/` is copied into `assets/` afresh on each build, a link only when
 it leads to a file inside `public/`, and nothing when `public/` itself
-leads outside the project. `manifest.json` holds the build's name and version, from
+leads outside the project; without a `public/` to copy, an `assets/`
+already there is left as it is. `manifest.json` holds the build's name and version, from
 `nova.toml` or the file's stem and `null`, whether it was `--release` and
 whether `wasm-opt` ran, and each file written with its size, sorted, and
 nothing that changes between two builds. `--release` runs `wasm-opt -Oz` on
 `app.wasm` when it is on `PATH`, says so when it is not, and fails when it
 fails. An output directory that holds the project or lies inside `public/`
-is refused, and a link at a name the build writes is removed first (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §7; ADR 0043).
+is refused, and a link at a name the build writes, symbolic or, on Unix,
+hard, is removed first (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §7; ADR 0043).
 
 ### 7.1 Output Layout
 ```

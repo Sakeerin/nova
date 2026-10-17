@@ -76,12 +76,14 @@ language 4.4 starts from has:
    project's own `index.html` from its root, or writes the generated page,
    which now has `<div id="app"></div>`; copies `public/` into `assets/`
    afresh, a link only when it leads to a file inside `public/`, and not
-   at all when `public/` itself leads outside the project; and writes
+   at all when `public/` itself leads outside the project, and leaves an
+   `assets/` it has no `public/` to copy into as it is; and writes
    `manifest.json`, which lists every file it wrote with its size and
    nothing that changes between two builds of the same sources. It
    refuses an output directory that holds the project, however spelled, or
    lies inside `public/`, and removes a link at any name it writes before
-   it writes, so no write reaches a file elsewhere. `--release` runs
+   it writes, symbolic or, on Unix, hard, so no write reaches a file
+   elsewhere; stable Rust cannot see a hard link on Windows. `--release` runs
    `wasm-opt -Oz` on `app.wasm` when `wasm-opt` is on `PATH`, says so in
    one line when it is not, and fails when it fails; nothing installs
    `wasm-opt`.

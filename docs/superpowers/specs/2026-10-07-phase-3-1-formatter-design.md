@@ -88,6 +88,9 @@
     only as binary operators (`grammar.rs:1327`, `:1345`).
   - A closure starts only with a single `|` (`:1869`). So a closure with
     no parameters must be written `| |`.
+    **Amended 2026-10-17 (Phase 4.4, ADR 0043):** `||` now starts a closure with
+    no parameters wherever an expression starts, and is the same node as
+    `| |`.
   - A reference to a reference must be written `& &x`, or `& &T` as a
     type (`:928-940`).
 - **Trailing commas.** Every comma-list site in `grammar.rs` accepts a
@@ -380,6 +383,7 @@ stream, because the AST does not keep them (§2):
   they would lex as one (§2):
   - a `&` before a `&` keeps its space: `& &x`, `& &T`;
   - an empty closure parameter list prints as `| |`.
+    **Amended 2026-10-17 (Phase 4.4, ADR 0043):** it prints as `||`.
 - **Impl member order.** Impl members print in source order, recovered
   from their name spans, because the AST keeps them in three lists (§2).
   §5.5 cannot see that order, so tests pin it (§9.3).
@@ -565,7 +569,8 @@ pub fn connect(
   `pattern if guard => body`. A body that does not fit breaks within
   itself.
 - **Closures:** `|a, b| a + b`, and `| | f()` for none. A block body
-  follows the block rule.
+  follows the block rule. **Amended 2026-10-17 (Phase 4.4, ADR 0043):**
+  `|| f()` for none.
 - **Record literals:** `P { x: 1, y: 2 }` when they fit, with any `..base`
   last; otherwise one field per line.
 - **Function types** print no `-> ()`. The parser gives `fn(T)` a unit
@@ -709,7 +714,8 @@ the constructs themselves, tests cover:
 - a multi-line string, in LF and in CRLF input;
 - the parentheses rule, including `while (if …) {`, a parenthesised
   pattern, and a parenthesised tuple;
-- `& &x`, `& &T` and `| |`;
+- `& &x`, `& &T` and `| |` (amended 2026-10-17, Phase 4.4, ADR 0043:
+  `| |` now prints as `||`);
 - impl members of mixed kinds keeping their source order;
 - §5.6's separators: one test per token, and a value-less `return` and
   `break` followed by a statement;
@@ -847,6 +853,9 @@ review. Items 1, 2 and 4 correct what Sections 1, 2 and 5 said. Items 5 to
    as `return x = 1`.
 6. `& &x`, `& &T` and `| |` keep their space (§5.3), because `&&` and `||`
    lex as single tokens.
+   **Amended 2026-10-17 (Phase 4.4, ADR 0043):** `& &` alone keeps its space:
+   `||` is now a closure with no parameters where an expression starts,
+   and `| |` prints as `||`.
 7. A parenthesised pattern and the unit pattern get spans over their
    parentheses (§4). This is a parser change: without it, the author's
    pattern parentheses would be lost, and the AST check could not notice.

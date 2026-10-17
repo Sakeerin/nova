@@ -50,14 +50,18 @@ NAME        = IDENT | keyword
   return type: `component A() -> Int` and `component A<T>()` do not parse.
 - `view` is a keyword only where an expression starts and `{` follows it,
   and not in the head of an `if`, `while`, `for` or `match`, where `{`
-  opens the body.
+  opens the body, even inside parentheses there, as a record literal is
+  not: `if f(|| view { … }) {` does not parse, and the view is bound to a
+  name before the `if`.
 - A child is an element or a postfix expression: a name, a call, a method
   call, a field, a literal, a parenthesised expression, a block, or another
   view. An expression with an operator is written in parentheses.
 - An element is a name followed by a trailing block, or by an argument
   list holding at least one named argument, or both. A call with only
   positional arguments and no block, such as `Counter()` or `show(open,
-  || view { … })`, is an ordinary expression.
+  || view { … })`, is an ordinary expression. So a void element with no
+  attributes is written `br([])`: `br()` calls `br` with no arguments, and
+  `br {}` is E0095.
 - Line breaks are skipped, so a child that begins with `(`, `[` or `{`
   would continue the one before; a `;` ends a child, and `nova fmt` writes
   one there, as it does between statements.
