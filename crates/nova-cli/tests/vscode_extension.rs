@@ -37,6 +37,42 @@ fn the_grammar_colours_every_keyword_and_nothing_else() {
     assert_eq!(listed, keywords);
 }
 
+/// `component` and `view` are coloured as keywords only before a name and
+/// `(`, and before `{`: neither is reserved, so `KEYWORDS` lacks both, and
+/// the rule comes before the one for keywords (the 4.4 spec §6).
+#[test]
+fn the_grammar_colours_component_and_view_where_they_are_keywords() {
+    let grammar = json("syntaxes/nova.tmLanguage.json");
+    let includes: Vec<&str> = grammar["patterns"]
+        .as_array()
+        .expect("patterns")
+        .iter()
+        .filter_map(|p| p["include"].as_str())
+        .collect();
+    let at = |name: &str| includes.iter().position(|i| *i == name).unwrap();
+    assert!(at("#function-names") < at("#contextual-keywords"));
+    assert!(at("#contextual-keywords") < at("#keywords"));
+    let rules = grammar["repository"]["contextual-keywords"]["patterns"]
+        .as_array()
+        .expect("contextual keyword rules");
+    assert_eq!(
+        rules[0]["match"],
+        "\\b(component)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()"
+    );
+    assert_eq!(
+        rules[0]["captures"]["1"]["name"],
+        "keyword.other.component.nova"
+    );
+    assert_eq!(
+        rules[0]["captures"]["2"]["name"],
+        "entity.name.function.nova"
+    );
+    assert_eq!(rules[1]["match"], "\\bview(?=\\s*\\{)");
+    assert_eq!(rules[1]["name"], "keyword.other.view.nova");
+    assert!(!nova_lexer::KEYWORDS.contains(&"component"));
+    assert!(!nova_lexer::KEYWORDS.contains(&"view"));
+}
+
 #[test]
 fn the_extension_has_nova_clis_version_and_its_floor() {
     let package = json("package.json");
