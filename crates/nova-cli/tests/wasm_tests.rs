@@ -1853,8 +1853,10 @@ fn ui_the_builder_counter_counts_clicks() {
 /// `show` and `for_each` rebuild their part of the page between their
 /// markers, and a hidden branch's cleanups run (spec 4.3 §6.3). Under
 /// stress, a rebuilt row's listener leaves std/rt's table: after two more
-/// rows, the page holds seven calls, not twelve; and the old rows' handles
-/// are released (§9.3): setting the same rows again leaves as many live.
+/// rows, the page holds eight calls, not thirteen. And the old rows' handles
+/// are released (§9.3): setting the same rows again leaves as many live, and
+/// once no row is left, fewer are live than when the first two were built,
+/// so nothing keeps the rows built first.
 #[test]
 fn ui_show_and_for_each_rebuild_their_part() {
     dom_program("ui_show_for_each", &[]);
@@ -1862,12 +1864,15 @@ fn ui_show_and_for_each_rebuild_their_part() {
     if node().is_none() {
         return;
     }
-    assert_eq!(calls_after_each(&err), [5, 5, 6, 7, 7, 7, 7], "{err}");
+    assert_eq!(calls_after_each(&err), [6, 6, 7, 8, 8, 8, 8, 4], "{err}");
     let handles = handles_released(&err);
-    assert_eq!(handles.len(), 7, "{err}");
+    assert_eq!(handles.len(), 8, "{err}");
     let (_, before) = handles[3];
     let (released, after) = handles[4];
     assert!(released > 0 && after == before, "{err}");
+    let (_, first) = handles[0];
+    let (_, none) = handles[7];
+    assert!(none < first, "{err}");
 }
 
 /// A dynamic class, a `value` property, fixed and dynamic, and `on_input`

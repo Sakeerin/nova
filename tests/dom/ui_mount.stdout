@@ -2,7 +2,11 @@ building
 on_mount: #hello is in the page, reading hi
 the second on_mount
 on_mount of row 2: in the page
+on_mount of the effect's run 1
 row 2 is gone
 on_mount of row 3: in the page
+row 3 is gone
+on_mount of row 4: in the page
+rendered a string
 on_mount outside a mount runs at once
-<body><div id="app"><p id="old">here first</p><div><p id="hello">hi</p><ul><li id="row3">row 3</li></ul></div></div></body>
+<body><div id="app"><p id="old">here first</p><div><p id="hello">hi</p><ul><li id="row4">row 4</li></ul></div></div></body>

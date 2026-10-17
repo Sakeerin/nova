@@ -1,9 +1,11 @@
 // `mount` and `on_mount` (spec 4.3 §5.2, §7.1): a mount puts its nodes after
 // what the element holds; the callbacks a mount registers run once its nodes
 // are in the page, in the order they were added, but not one whose render a
-// `set` during the build disposed; each runs with the owner it was added in,
-// so its cleanup runs when its render goes; one outside any mount runs at
-// once; and mounting into a selector nothing matches panics.
+// `set` during the build disposed, nor one from an effect's earlier run;
+// each runs with the owner it was added in, so its cleanup runs when its
+// render goes; a render that a `render_to_string` rebuilds runs its own; one
+// outside any mount runs at once; and mounting into a selector nothing
+// matches panics.
 
 import dom
 import ui
@@ -26,6 +28,7 @@ fn row(r: Int) -> View {
 
 fn main() {
     let rows = signal([1])
+    let phase = signal(0)
     mount(
         "#app",
         | | {
@@ -38,6 +41,12 @@ fn main() {
                 },
             )
             on_mount(| | println("the second on_mount"))
+            effect(
+                | | {
+                    let p = phase.value()
+                    on_mount(| | println("on_mount of the effect's run ${p}"))
+                },
+            )
             println("building")
             div(
                 [],
@@ -47,6 +56,7 @@ fn main() {
                     dyn_text(
                         | | {
                             rows.set([2])
+                            phase.set(1)
                             ""
                         },
                     ),
@@ -55,6 +65,13 @@ fn main() {
         },
     )
     rows.set([3])
+    let html = render_to_string(
+        | | {
+            on_cleanup(| | rows.set([4]))
+            text("a string")
+        },
+    )
+    println("rendered ${html}")
     on_mount(| | println("on_mount outside a mount runs at once"))
     mount("#nope", | | text("never"))
     println("not reached")

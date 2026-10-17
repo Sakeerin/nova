@@ -23,3 +23,7 @@ parent of 1
 child of 1 sees 1
 parent of 2
 child of 2 sees 2
+the child sees index 0
+the parent hides the child
+a cleanup added after the dispose runs at once
+done

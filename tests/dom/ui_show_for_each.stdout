@@ -1,9 +1,10 @@
-mounted: <div><button id="toggle">toggle</button><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>last</li></ul><button id="more">more</button><button id="again">again</button></div>
+mounted: <div><button id="toggle">toggle</button><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>
 on_mount: the panel is in the page
-toggle: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>last</li></ul><button id="more">more</button><button id="again">again</button></div>
-more: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>last</li></ul><button id="more">more</button><button id="again">again</button></div>
-more: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>row 4</li><li>last</li></ul><button id="more">more</button><button id="again">again</button></div>
-again: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>row 4</li><li>last</li></ul><button id="more">more</button><button id="again">again</button></div>
+toggle: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>
+more: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>
+more: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>row 4</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>
+again: <div><button id="toggle">toggle</button><p id="panel">panel</p><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>row 4</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>
 the panel is gone
-toggle: <div><button id="toggle">toggle</button><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>row 4</li><li>last</li></ul><button id="more">more</button><button id="again">again</button></div>
+toggle: <div><button id="toggle">toggle</button><ul id="list"><li>first</li><li>row 1</li><li>row 2</li><li>row 3</li><li>row 4</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>
 clicked row 2
+none: <div><button id="toggle">toggle</button><ul id="list"><li>first</li><li>last</li></ul><button id="more">more</button><button id="again">again</button><button id="none">none</button></div>

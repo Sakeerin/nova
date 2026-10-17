@@ -41,6 +41,9 @@ but the language 4.3 starts from has:
      inside `batch` or another flush.
    - An effect that is only "check" first brings the memos it read up to
      date, and runs only if one of them ran, so a diamond runs once.
+   - Before a queued effect runs, its owners that are stale run first, from
+     the top down, so a child its parent's run disposes never runs, whatever
+     order a batch's `set`s queued them in.
    - A memo computes when it is made, as a signal needs a value, then again
      only when something reads it after an input changed.
    - `set` notifies every time, since most types have no `==`; a flush that
@@ -50,9 +53,12 @@ but the language 4.3 starts from has:
      cleanups set runs it again; then disposes of what it made, and runs its
      cleanups, each in reverse order. A computation is marked clean before
      that, and a disposed one is marked disposed, so a cleanup that reads it
-     gets its last value; a disposed owner never runs again. `root`'s
-     dispose function, an effect's run and a read that computes a memo are
+     gets its last value; a disposed owner never runs again, and what is
+     made under one is disposed at once. `root`'s dispose function, an
+     effect's run, a read that computes a memo and `render_to_string` are
      each a batch.
+   - A list `std/ui` empties is replaced by a new one, never cleared, since
+     `Vec::clear` and `pop` keep their storage, and what it held with it.
 3. **Views are data.** `View` and `Attr` are sum types the builders make.
    `render_to_string` walks a view into escaped HTML on any target; `mount`
    walks it into DOM nodes on WASM, with an effect for each part that
@@ -95,8 +101,9 @@ but the language 4.3 starts from has:
      `DynProperty`;
    - handlers get the target's `value` as a `String`, not an event;
    - `show` takes a `Signal<Bool>` and has no type parameter;
-   - `Signal<T>`'s fields are reachable, as Nova has no private fields;
-     writing one changes the value without telling anyone.
+   - `Signal<T>`'s fields are reachable, as Nova has no private fields:
+     writing `val` changes the value without telling anyone, and `src`
+     reaches `std/ui`'s own records, which a program must leave alone.
 
 ## Consequences
 

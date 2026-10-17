@@ -2,8 +2,9 @@
 // again and when its owner is disposed, the last added first; a cleanup that
 // sets what its own effect read does not run the effect again; a disposed
 // effect never runs again, though a cleanup sets what it read or the `set`
-// that disposed it queued it too; and `root`'s dispose function, which is a
-// batch.
+// that disposed it queued it too, and before it; and `root`'s dispose
+// function, which is a batch. What is made under an owner already disposed
+// is disposed at once.
 import ui
 
 fn main() {
@@ -84,4 +85,37 @@ fn main() {
         },
     )
     a.set(2)
+
+    // A child queued before its parent still runs after it, so the parent's
+    // run disposes of it first.
+    let open = signal(true)
+    let index = signal(0)
+    effect(
+        | | {
+            if open.value() {
+                effect(| | println("the child sees index ${index.value()}"))
+            } else {
+                println("the parent hides the child")
+            }
+        },
+    )
+    batch(
+        | | {
+            index.set(5)
+            open.set(false)
+        },
+    )
+
+    // An effect made under a disposed owner never runs, and a cleanup added
+    // to one runs at once.
+    let t = signal(1)
+    root(
+        |dispose: fn()| {
+            dispose()
+            effect(| | println("made after the dispose, sees t = ${t.value()}"))
+            on_cleanup(| | println("a cleanup added after the dispose runs at once"))
+        },
+    )
+    t.set(2)
+    println("done")
 }

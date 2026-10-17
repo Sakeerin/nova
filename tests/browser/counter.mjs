@@ -1,6 +1,9 @@
 // The gate's counter in Chromium (spec
 // docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
-// §10.3), run by CI's `browser` job:
+// §10.3), run by CI's `browser` job on 4.2's `tests/dom/counter.nova` and on
+// 4.3's builder counter, `tests/dom/ui_counter.nova`, which has the same ids
+// (spec docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md
+// §9.4):
 //
 //     node tests/browser/counter.mjs <dist> <dir holding node_modules/playwright>
 //

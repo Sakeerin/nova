@@ -141,8 +141,9 @@ and `[View]`, until 4.4's `view { … }`; `dyn_text` is reactive text, and
 `dyn_attr` and `dyn_value` reactive attributes and properties. `View` is
 data, which `mount(selector, f)` builds into the page on WASM and
 `render_to_string(f)` writes as escaped HTML on either target; neither
-inserts raw HTML, and both refuse `innerHTML`, `outerHTML` and `srcdoc`. `show` and `for_each` are in `std/ui`, and each rebuilds its
-whole part each time its signal is set; `show` has no type parameter
+inserts raw HTML, and both refuse `innerHTML`, `outerHTML` and `srcdoc`.
+`show` and `for_each` are in `std/ui`, and each rebuilds its whole part
+each time its signal is set; `show` has no type parameter
 (`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
 §6, §7; ADR 0042).
 
