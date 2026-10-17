@@ -500,8 +500,12 @@ impl<'a> Ctx<'a> {
     }
 
     /// A std module's path under `std/`, as `ui/html` for `$std.ui.html`
-    /// (spec 4.3 §3).
+    /// (spec 4.3 §3), or `None` for one only std sees, as `std/ui`'s
+    /// backend (§7.3).
     fn std_path(&self, m: ModuleId) -> Option<String> {
+        if nova_resolver::STD_INTERNAL.contains(&self.defs.module_name(m)) {
+            return None;
+        }
         Some(self.std_name(m)?.replace('.', "/"))
     }
 

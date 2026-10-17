@@ -2,7 +2,7 @@
 //! build time so the compiler stays one self-contained executable.
 //!
 //! Every `include_str!` path stays inside this package, so `cargo package`
-//! carries all 21 files, and its verification step builds the packaged copy
+//! carries all 23 files, and its verification step builds the packaged copy
 //! on its own (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §3).
 //! `nova-resolver` gives each module its `$std.*` name and its place.
@@ -51,6 +51,14 @@ pub const TIME: &str = include_str!("time/lib.nova");
 pub const UI: &str = include_str!("ui/lib.nova");
 /// `std/ui/html/lib.nova`: the element builders, which a program imports.
 pub const UI_HTML: &str = include_str!("ui/html/lib.nova");
+/// `std/ui/backend/native.nova`, `std/ui`'s backend natively. Not in
+/// [`ALL`]: only std's modules see it (spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+/// §7.3).
+pub const UI_BACKEND_NATIVE: &str = include_str!("ui/backend/native.nova");
+/// `std/ui/backend/wasm.nova`, `std/ui`'s backend on WASM, through
+/// [`DOM`]. Not in [`ALL`].
+pub const UI_BACKEND_WASM: &str = include_str!("ui/backend/wasm.nova");
 /// `std/rt/lib.nova`, the runtime of a WASM build, written in Nova. Not in
 /// [`ALL`]: only a WASM build compiles it, and its few public items are for
 /// std's other modules alone, so it is not documented (spec
@@ -59,7 +67,7 @@ pub const UI_HTML: &str = include_str!("ui/html/lib.nova");
 pub const RT: &str = include_str!("rt/lib.nova");
 
 /// Every documented module, by its directory under `std/`: all but
-/// [`RT`] and [`DOM`].
+/// [`RT`], [`DOM`] and `std/ui`'s backend.
 pub const ALL: [(&str, &str); 19] = [
     ("bytes", BYTES),
     ("collections", COLLECTIONS),
@@ -89,7 +97,7 @@ mod tests {
 
     /// Every `.nova` file under `std/` is embedded, and nothing else:
     /// [`super::ALL`]'s, `std/rt`'s as [`super::RT`], `std/dom`'s as
-    /// [`super::DOM`].
+    /// [`super::DOM`], and `std/ui`'s backend's two sources.
     #[test]
     fn every_std_module_is_embedded() {
         fn walk(dir: &Path, under: &str, out: &mut BTreeSet<String>) {
@@ -118,10 +126,18 @@ mod tests {
         let embedded: BTreeSet<String> = super::ALL
             .iter()
             .map(|(name, _)| format!("{name}/lib.nova"))
-            .chain(["rt/lib.nova", "dom/lib.nova"].map(String::from))
+            .chain(
+                [
+                    "rt/lib.nova",
+                    "dom/lib.nova",
+                    "ui/backend/native.nova",
+                    "ui/backend/wasm.nova",
+                ]
+                .map(String::from),
+            )
             .collect();
         assert_eq!(embedded, on_disk);
-        assert_eq!(on_disk.len(), 21);
+        assert_eq!(on_disk.len(), 23);
     }
 
     /// Each entry carries its own file, not a neighbour's.
@@ -133,7 +149,12 @@ mod tests {
                 .expect("read a std module");
             assert_eq!(source, on_disk, "std/{name}/lib.nova");
         }
-        for (path, source) in [("rt/lib.nova", super::RT), ("dom/lib.nova", super::DOM)] {
+        for (path, source) in [
+            ("rt/lib.nova", super::RT),
+            ("dom/lib.nova", super::DOM),
+            ("ui/backend/native.nova", super::UI_BACKEND_NATIVE),
+            ("ui/backend/wasm.nova", super::UI_BACKEND_WASM),
+        ] {
             let on_disk = std::fs::read_to_string(root.join(path)).expect("read a std module");
             assert_eq!(source, on_disk, "std/{path}");
         }

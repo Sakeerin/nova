@@ -1,0 +1,21 @@
+// The gate of 4.3 (spec
+// docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md
+// §1): 4.2's counter, written with a signal and builder calls. It has 4.2's
+// ids, `#add` and `#count`, so `tests/browser/counter.mjs` clicks either.
+
+import ui
+import ui::html::{button, div, dyn_text, id, on_click, p, text}
+
+fn main() {
+    let count = signal(0)
+    mount(
+        "body",
+        | | div(
+            [],
+            [
+                p([id("count")], [dyn_text(| | "${count.value()}")]),
+                button([id("add"), on_click(| | count.update(|n: Int| n + 1))], [text("add one")]),
+            ],
+        ),
+    )
+}

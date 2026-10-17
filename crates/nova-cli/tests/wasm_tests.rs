@@ -1833,6 +1833,88 @@ mod stress {
     }
 }
 
+/// The gate of 4.3 (spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+/// §1): the counter written with a signal and builder calls, which three
+/// clicks make read 3. Under stress the collector runs after `main` and
+/// after each click, and keeps what the page uses through `std/ui`'s state:
+/// the button's listener, one call, and its handles.
+#[test]
+fn ui_the_builder_counter_counts_clicks() {
+    dom_program("ui_counter", &[]);
+    let err = dom_program("ui_counter", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert_eq!(live_after_each(&err).len(), 4, "{err}");
+    assert_eq!(calls_after_each(&err), [1, 1, 1, 1], "{err}");
+}
+
+/// `show` and `for_each` rebuild their part of the page between their
+/// markers, and a hidden branch's cleanups run (spec 4.3 §6.3). Under
+/// stress, a rebuilt row's listener leaves std/rt's table: after two more
+/// rows, the page holds seven calls, not twelve; and the old rows' handles
+/// are released (§9.3): setting the same rows again leaves as many live.
+#[test]
+fn ui_show_and_for_each_rebuild_their_part() {
+    dom_program("ui_show_for_each", &[]);
+    let err = dom_program("ui_show_for_each", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert_eq!(calls_after_each(&err), [5, 5, 6, 7, 7, 7, 7], "{err}");
+    let handles = handles_released(&err);
+    assert_eq!(handles.len(), 7, "{err}");
+    let (_, before) = handles[3];
+    let (released, after) = handles[4];
+    assert!(released > 0 && after == before, "{err}");
+}
+
+/// A dynamic class, a `value` property, fixed and dynamic, and `on_input`
+/// given what was typed; a handler runs in a batch and reads without
+/// subscribing, even when an effect clicked (spec 4.3 §5.2, §6.2).
+#[test]
+fn ui_attributes_follow_their_signals() {
+    dom_program("ui_attrs", &[]);
+    dom_program("ui_attrs", &STRESS);
+}
+
+/// A mount goes after what its element holds; `on_mount` runs once the
+/// mount's nodes are in the page, in order, but not for a render disposed
+/// first, and at once outside a mount; a selector nothing matches panics
+/// (spec 4.3 §5.2, §7.1).
+#[test]
+fn ui_mount_runs_on_mount_and_panics_without_a_match() {
+    for env in [&[][..], &STRESS[..]] {
+        let Some(a) = dom_run("ui_mount", env) else {
+            return;
+        };
+        let err = stderr(&a.code(134));
+        assert!(
+            err.contains("nova: panic: std/ui: mount: no element matches \"#nope\"\n"),
+            "{err}"
+        );
+    }
+}
+
+/// `mount` checks names as `render_to_string` does, and refuses
+/// `innerHTML` before any node of the view is in the page (spec 4.3 §7.2).
+#[test]
+fn ui_mount_never_inserts_html() {
+    for env in [&[][..], &STRESS[..]] {
+        let Some(a) = dom_run("ui_mount_html", env) else {
+            return;
+        };
+        let err = stderr(&a.code(134));
+        assert!(
+            err.contains(
+                "nova: panic: std/ui: \"innerHTML\" parses HTML, which std/ui does not insert\n"
+            ),
+            "{err}"
+        );
+    }
+}
+
 /// `import ui::html::{div}` checks on both targets; a program's own nested
 /// path is still E0900, `ui::nope` is E0001, and `signal` without an import
 /// is E0001 (spec 4.3 §9.5).

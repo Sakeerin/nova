@@ -1,0 +1,12 @@
+// `mount` checks the names it writes as `render_to_string` does, and refuses
+// a property that parses HTML before any node of its view is in the page
+// (spec 4.3 §7.2).
+
+import ui
+import ui::html::{div, p, text}
+
+fn main() {
+    mount("#app", | | p([], [text("fine")]))
+    mount("#app", | | div([], [p([Property("innerHTML", "<img src=x onerror=alert(1)>")], [])]))
+    println("not reached")
+}

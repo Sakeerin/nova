@@ -4,13 +4,14 @@
 //! It is not in the prelude: a module that uses it imports it, with
 //! `import ui` for every name, or `import ui::{signal, effect}` for some.
 //! `import ui::html` brings the element builders, `div`, `button`, `text` and
-//! the rest, which make the `View`s that `render_to_string` writes as HTML.
+//! the rest, which make the `View`s that `mount` puts into the page and
+//! `render_to_string` writes as HTML.
 //!
 //! `set` runs the effects that read a signal before it returns, each once,
 //! and only after every memo it reads is current. A memo computes when it is
 //! made, then again when it is read after something it read changed. An
-//! effect, a memo and a `root` own the effects and memos made while they
-//! run: running again or being disposed disposes those first,
+//! effect, a memo, a `root`, and each `mount` own the effects and memos made
+//! while they run: running again or being disposed disposes those first,
 //! then runs the cleanups `on_cleanup` added, the last added first.
 //!
 //! The state behind all of this is the thread's, or the page's on WASM, and
@@ -446,6 +447,31 @@ pub fn on_mount(f: fn()) {
     }
 }
 
+// Run the `on_mount` callbacks from `start` on, in order, each with the owner
+// it was added in, so that what it makes is disposed with its render; skip
+// those whose owner is disposed; and drop them.
+fn run_mounted(start: Int) {
+    let waiting = ui().mounted
+    let mut later = Vec::new()
+    let mut i = start
+    while i < waiting.len() {
+        later.push(at(waiting, i))
+        i = i + 1
+    }
+    let mut w = waiting
+    while w.len() > start { let last = w.pop() }
+    let mut j = 0
+    while j < later.len() {
+        let m = at(later, j)
+        let live = match m.owner {
+            Some(o) => !o.disposed
+            None => true
+        }
+        if live { with_context(m.owner, None, m.f) }
+        j = j + 1
+    }
+}
+
 /// Runs `f` with a new owner, which no other owns, and gives `f` the
 /// function that disposes of it, in a `batch`; returns what `f` returns.
 pub fn root<T>(f: fn(fn()) -> T) -> T {
@@ -663,4 +689,118 @@ pub fn render_to_string(f: fn() -> View) -> String {
     )
     s.rendering = s.rendering - 1
     joined(out)
+}
+
+/// Builds `f`'s view into the first element of the page `selector` matches,
+/// after its children, and keeps it up to date. It panics when no element
+/// matches, and natively, where there is no page.
+pub fn mount(selector: String, f: fn() -> View) {
+    let parent = match backend_query(selector) {
+        Some(p) => p
+        None => panic("std/ui: mount: no element matches \"${selector}\"")
+    }
+    let o = new_owner(ROOT, | | {})
+    let mut s = ui()
+    let mut kept = s.roots
+    kept.push(o)
+    let start = s.mounted.len()
+    s.building = s.building + 1
+    with_context(Some(o), None, | | build(f(), parent, None))
+    s.building = s.building - 1
+    run_mounted(start)
+}
+
+// Put `node` into `parent`, before `before` or last.
+fn put(parent: Node, node: Node, before: Option<Node>) {
+    match before {
+        Some(b) => backend_insert_before(parent, node, b)
+        None => backend_append(parent, node)
+    }
+}
+
+// Build `v`'s nodes into `parent`, before `before` or last, with an effect
+// for each part that changes.
+fn build(v: View, parent: Node, before: Option<Node>) {
+    match v {
+        Element(tag, attrs, children) => {
+            check_element(tag, attrs)
+            let el = backend_element(tag)
+            let mut i = 0
+            while i < attrs.len() {
+                build_attr(attrs[i], el)
+                i = i + 1
+            }
+            if !is_void(tag) {
+                let mut j = 0
+                while j < children.len() {
+                    build(children[j], el, None)
+                    j = j + 1
+                }
+            }
+            put(parent, el, before)
+        }
+        Text(t) => put(parent, backend_text(t), before)
+        DynText(f) => {
+            let n = backend_text("")
+            effect(| | backend_set_text(n, f()))
+            put(parent, n, before)
+        }
+        Region(f) => {
+            let start = backend_text("")
+            let end = backend_text("")
+            put(parent, start, before)
+            put(parent, end, before)
+            effect(| | build_region(f, parent, start, end))
+        }
+    }
+}
+
+// A region's render: what `f` gives, read as the effect running this, so
+// that its signals are the region's, built before `end` once the nodes
+// between the markers are removed. Each render has its own owner, which the
+// effect owns, so running again disposes of the last render first: its
+// effects, its handlers, and its `on_mount` callbacks not yet run. An
+// `on_mount` in the render waits for its nodes, and for the outer build's
+// when there is one.
+fn build_region(f: fn() -> [View], parent: Node, start: Node, end: Node) {
+    let mut s = ui()
+    let outer = s.building > 0
+    let begin = s.mounted.len()
+    s.building = s.building + 1
+    let render = new_owner(ROOT, | | {})
+    adopt(render)
+    let views = with_context(Some(render), s.listener, f)
+    let mut done = false
+    while !done {
+        match backend_next_sibling(start) {
+            Some(n) => { if backend_is_same(n, end) { done = true } else { backend_remove(n) } }
+            None => done = true
+        }
+    }
+    with_context(
+        Some(render),
+        None,
+        | | {
+            let mut i = 0
+            while i < views.len() {
+                build(views[i], parent, Some(end))
+                i = i + 1
+            }
+        },
+    )
+    s.building = s.building - 1
+    if !outer { run_mounted(begin) }
+}
+
+fn build_attr(a: Attr, el: Node) {
+    match a {
+        Static(name, value) => backend_set_attr(el, name, value)
+        Dynamic(name, f) => effect(| | backend_set_attr(el, name, f()))
+        Property(name, value) => backend_set_prop(el, name, value)
+        DynProperty(name, f) => effect(| | backend_set_prop(el, name, f()))
+        On(kind, f) => {
+            let stop = backend_listen(el, kind, |v: String| untracked(| | batch(| | f(v))))
+            on_cleanup(stop)
+        }
+    }
 }

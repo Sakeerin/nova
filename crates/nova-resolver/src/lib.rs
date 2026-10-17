@@ -2006,7 +2006,11 @@ pub fn resolve_program_for(
         if IMPORTED_STD.iter().any(|&(_, m)| m == name) {
             continue;
         }
-        let from = if name == STD_INTERNAL { std_start } else { 0 };
+        let from = if STD_INTERNAL.contains(&name) {
+            std_start
+        } else {
+            0
+        };
         import_std_module(&mut definitions, std_exports, mid, from);
     }
 
@@ -2077,7 +2081,8 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 
 /// The embedded standard-library modules, compiled as implicit modules and
 /// glob-imported into every user module, but for `std/ui` and `std/ui/html`,
-/// which a program imports (spec 4.3 §3). Order is significant only in that it
+/// which a program imports, and `std/ui`'s backend, which only std sees
+/// (spec 4.3 §3, §7.3). Order is significant only in that it
 /// fixes module indices; user modules always come first, then these in the
 /// order listed here — `std/core` stays first so its module index is
 /// unchanged from when it was the only embedded module. The sources come
@@ -2086,7 +2091,7 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 /// self-contained executable and `cargo package` keeps the files. Each name
 /// is `$std.*`, not a valid identifier, so it can never collide with a user
 /// module name or be named in an `import`.
-pub const STD_MODULES: [(&str, &str); 18] = [
+pub const STD_MODULES: [(&str, &str); 19] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.io", nova_std::IO),
@@ -2105,6 +2110,7 @@ pub const STD_MODULES: [(&str, &str); 18] = [
     ("$std.process", nova_std::PROCESS),
     ("$std.ui", nova_std::UI),
     ("$std.ui.html", nova_std::UI_HTML),
+    ("$std.ui.backend", nova_std::UI_BACKEND_NATIVE),
 ];
 
 /// What a program is compiled for (spec
@@ -2143,11 +2149,11 @@ impl CompileTarget {
 /// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1, 4.2
 /// §3.2, 4.3 §3): the ten of [`STD_MODULES`] that need no operating
 /// system, in the same order, then `std/dom`, which only an `import`
-/// reaches, then `std/ui` and `std/ui/html`, then `std/rt`, the runtime
-/// written in Nova. Their names are those of
+/// reaches, then `std/ui`'s three, with the backend's WASM source, then
+/// `std/rt`, the runtime written in Nova. Their names are those of
 /// [`STD_MODULES`], so `std/core` keeps its place first, and the same order
 /// gives a name the same winner in std's glob imports.
-pub const WASM_STD_MODULES: [(&str, &str); 14] = [
+pub const WASM_STD_MODULES: [(&str, &str); 15] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.collections", nova_std::COLLECTIONS),
@@ -2161,6 +2167,7 @@ pub const WASM_STD_MODULES: [(&str, &str); 14] = [
     ("$std.dom", nova_std::DOM),
     ("$std.ui", nova_std::UI),
     ("$std.ui.html", nova_std::UI_HTML),
+    ("$std.ui.backend", nova_std::UI_BACKEND_WASM),
     ("$std.rt", nova_std::RT),
 ];
 
@@ -2178,9 +2185,10 @@ pub const IMPORTED_STD: [(&str, &str); 3] = [
 /// std's imported modules, with 4.3's `ui` (spec 4.2 §3.2).
 pub const RESERVED_MODULE_NAMES: [&str; 2] = ["dom", "ui"];
 
-/// The std module whose public names only std's other modules see:
-/// `std/rt`, the runtime, whose functions `std/dom` calls (spec 4.2 §5).
-const STD_INTERNAL: &str = "$std.rt";
+/// The std modules whose public names only std's other modules see:
+/// `std/rt`, the runtime, whose functions `std/dom` calls (spec 4.2 §5),
+/// and `std/ui`'s backend, which has one source per target (spec 4.3 §7.3).
+pub const STD_INTERNAL: [&str; 2] = ["$std.rt", "$std.ui.backend"];
 
 /// `std/test`, seeded only under `nova test`. Kept out of [`STD_MODULES`] so
 /// that array's length does not depend on compilation mode: every consumer
@@ -3541,8 +3549,8 @@ mod tests {
 
     /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1, 4.2
     /// §3.2, 4.3 §3): ten of the native modules, in native's order, then
-    /// `std/dom`, `std/ui`, `std/ui/html` and `std/rt`, after the user's. A
-    /// native build has neither `std/dom` nor `std/rt`.
+    /// `std/dom`, `std/ui`'s three and `std/rt`, after the user's. A native
+    /// build has neither `std/dom` nor `std/rt`.
     #[test]
     fn a_wasm_build_compiles_wasms_std_modules() {
         let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
@@ -3566,6 +3574,7 @@ mod tests {
                 "$std.dom",
                 "$std.ui",
                 "$std.ui.html",
+                "$std.ui.backend",
                 "$std.rt"
             ]
         );
@@ -3665,6 +3674,27 @@ mod tests {
             let codes: Vec<&str> = nope.diagnostics.iter().map(|d| d.code.as_str()).collect();
             assert_eq!(codes, ["E0001"], "{:?}", nope.diagnostics);
             assert_eq!(nope.diagnostics[0].message, "cannot find module `ui::nope`");
+        }
+    }
+
+    /// `std/ui`'s backend is internal: `std/ui` sees its names, and a
+    /// program does not, even one that imports `ui` (spec 4.3 §7.3).
+    #[test]
+    fn uis_backend_is_seen_by_std_alone() {
+        for target in [CompileTarget::Native, CompileTarget::Wasm] {
+            let r = resolve_for(target, "import ui\nfn main() { }\n");
+            assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+            assert!(r
+                .definitions
+                .resolve_value(ModuleId(0), "backend_query")
+                .is_none());
+            let ui = (1..=target.std_modules().len())
+                .find(|&m| r.definitions.module_name(ModuleId(m as u32)) == "$std.ui")
+                .expect("std/ui is compiled");
+            assert!(r
+                .definitions
+                .resolve_value(ModuleId(ui as u32), "backend_query")
+                .is_some());
         }
     }
 
