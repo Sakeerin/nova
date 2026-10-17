@@ -7,7 +7,7 @@
 
 import dom
 import ui
-import ui::html::{button, div, id, li, on_click, p, text, ul}
+import ui::html::{button, div, dyn_text, id, li, on_click, p, text, ul}
 
 fn more(xs: [String]) -> [String] {
     let mut out = [""; xs.len() + 1]
@@ -50,7 +50,10 @@ fn main() {
                         li([], [text("first")]),
                         for_each(
                             rows,
-                            |r: String| li([on_click(| | println("clicked ${r}"))], [text(r)]),
+                            |r: String| li(
+                                [on_click(| | println("clicked ${r}"))],
+                                [dyn_text(| | r)],
+                            ),
                         ),
                         li([], [text("last")]),
                     ],
