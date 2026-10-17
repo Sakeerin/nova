@@ -494,12 +494,27 @@ ADR 0041).
   - §13's unit tests pass on both targets: signal reactivity, effect
     cleanup, and memo memoization.
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`):** by the
+user's decisions of 2026-10-16, builders take two arrays; `set` runs its
+effects before it returns; the runtime keeps the current effect and owner;
+a program writes `import ui` and `import ui::html`; `Signal<T>` has no
+bound and `set` always notifies; `for_each` rebuilds its whole list;
+`mount(selector, f)` and `render_to_string(f)` are the renderers, the
+string one on both targets; and the bundler's pieces move to 4.4. `std/ui`
+reaches the page through a backend with one source per target. The gate
+is `tests/dom/ui_counter.nova` under the fake DOM and in Chromium, and
+`tests/runtime/ui_*.nova` on both targets
+(`docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`; ADR 0042).
+
 ### 4.4 — Component syntax
 - **RFC 0001 and its ADR** (decision 7).
 - **The language:** the lexer, parser, desugaring, type checker, formatter
   and the server's semantic tokens, and the extension's grammar.
 - **`examples/06-counter-spa`** as `60-EXAMPLES.md` §6 writes it, with
   decision 6's import line.
+- **The bundler's pieces 4.3 left** (amended 2026-10-17, branch
+  `claude/loving-archimedes-frtf5q-43`): a user's own `index.html`,
+  `assets/` from `public/`, `manifest.json`, and `wasm-opt`.
 - **Gate:**
   - `06-counter-spa` builds, and its counter responds to clicks in
     Chromium.

@@ -41,6 +41,14 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a listener, a timer or a `fetch` (ADR 0041).
 - **A CI job drives a WASM program in Chromium** through Playwright, which
   only that job installs.
+- **`std/ui`:** signals, effects and memos, with owners that dispose of
+  what they made and run its cleanups, and `batch` and `root`. `set` runs
+  the effects that read a signal before it returns, each once. Views are
+  values the builders of `std/ui/html` make, `div([class("x")],
+  [text("hi")])`, with `show` and `for_each` for parts that change;
+  `mount` keeps one up to date in the page on WASM, and `render_to_string`
+  writes one as escaped HTML on either target. A program imports them with
+  `import ui` and `import ui::html` (ADR 0042).
 
 ### Changed
 
