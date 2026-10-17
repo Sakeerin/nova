@@ -1,0 +1,82 @@
+// Signal reactivity (spec 4.3 §9.2): an effect runs again on `set` and
+// `update`, drops what a branch it no longer takes read, runs once for a
+// `batch` and for an effect's first run, and once for each `set` of a
+// diamond's source; effects run in the order they subscribed.
+import ui
+
+fn main() {
+    // `set` and `update`.
+    let count = signal(1)
+    let runs = signal(0)
+    effect(
+        | | {
+            println("count is ${count.value()}")
+            runs.update(|n: Int| n + 1)
+        },
+    )
+    count.set(2)
+    count.update(|n: Int| n * 10)
+    count.set(20)
+    println("runs: ${runs.value()}")
+
+    // A branch: once `flag` is false, `a` is no longer read.
+    let flag = signal(true)
+    let a = signal("a1")
+    let b = signal("b1")
+    effect(
+        | | {
+            if flag.value() {
+                println("branch a: ${a.value()}")
+            } else {
+                println("branch b: ${b.value()}")
+            }
+        },
+    )
+    a.set("a2")
+    flag.set(false)
+    a.set("a3")
+    b.set("b2")
+
+    // A batch runs the effect once, after it returns.
+    let x = signal(0)
+    let y = signal(0)
+    effect(| | println("sum: ${x.value() + y.value()}"))
+    batch(
+        | | {
+            x.set(1)
+            y.set(2)
+            println("inside the batch")
+        },
+    )
+
+    // A diamond: `d` reads `b` and `c`, which both read `top`.
+    let top = signal(1)
+    let left = memo(| | top.value() + 1)
+    let right = memo(| | top.value() * 2)
+    effect(| | println("diamond: ${left.value()} ${right.value()}"))
+    top.set(5)
+    top.set(6)
+
+    // An effect's first run is a batch: what it sets runs once, after it.
+    let p = signal(0)
+    let q = signal(0)
+    effect(| | println("p + q: ${p.value() + q.value()}"))
+    effect(
+        | | {
+            p.set(1)
+            q.set(2)
+            println("the first run is done")
+        },
+    )
+
+    // Effects run in the order they subscribed, which one that stops
+    // reading the signal leaves as it was.
+    let o = signal(0)
+    let reading = signal(true)
+    effect(| | println("first sees ${o.value()}"))
+    effect(| | { if reading.value() { println("the dropped one sees ${o.value()}") } })
+    effect(| | println("second sees ${o.value()}"))
+    effect(| | println("third sees ${o.value()}"))
+    reading.set(false)
+    o.set(1)
+}

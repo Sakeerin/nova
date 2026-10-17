@@ -11304,3 +11304,60 @@ fn example_05_geometry_runs() {
              total area 9.141592653589793\n",
         );
 }
+
+/// `std/ui`'s programs (spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+/// §9.2): each prints what `30-FRONTEND.md` §13's unit tests check, and runs
+/// the same with `NOVA_GC_STRESS=1` (collect on every allocation), so a part
+/// of the graph only the state's root keeps, freed, shows as wrong output or
+/// a crash.
+#[test]
+fn ui_programs_run_and_survive_gc_stress() {
+    for name in ["ui_signal", "ui_cleanup", "ui_memo", "ui_collect"] {
+        let source = repo_root().join(format!("tests/runtime/{name}.nova"));
+        let expected = std::fs::read_to_string(source.with_extension("stdout"))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+        for stress in [false, true] {
+            let mut cmd = nova();
+            if stress {
+                cmd.env("NOVA_GC_STRESS", "1");
+            }
+            let a = cmd.arg("run").arg(&source).assert().success();
+            let out = String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n");
+            assert_eq!(out, expected, "{name}, stress {stress}");
+        }
+    }
+}
+
+/// `std/ui`'s panics (spec 4.3 §5): `set` on a memo, and an effect that
+/// never settles, each with what the program printed first.
+#[test]
+fn ui_programs_panic_with_their_message() {
+    for (name, out, message) in [
+        (
+            "ui_memo_set",
+            "doubled 2\n",
+            "nova: panic: std/ui: set() on a memo\n",
+        ),
+        (
+            "ui_loop",
+            "",
+            "nova: panic: std/ui: effects did not settle\n",
+        ),
+    ] {
+        let a = nova()
+            .arg("run")
+            .arg(repo_root().join(format!("tests/runtime/{name}.nova")))
+            .assert()
+            .failure();
+        let o = a.get_output();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"),
+            out,
+            "{name}"
+        );
+        let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
+        assert!(err.ends_with(message), "{name}: {err}");
+    }
+}

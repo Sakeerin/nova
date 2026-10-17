@@ -1,0 +1,25 @@
+run 1
+inner of 1
+inner cleanup of 1
+second cleanup of 1
+first cleanup of 1
+run 2
+inner of 2
+disposing
+inner cleanup of 2
+second cleanup of 2
+first cleanup of 2
+root cleanup
+after: no run
+count is 0
+count is 11
+elsewhere sees 0
+outer of 0
+inner of 0 sees 0
+last cleanup of 0
+elsewhere sees 1
+after the second dispose: no run
+parent of 1
+child of 1 sees 1
+parent of 2
+child of 2 sees 2

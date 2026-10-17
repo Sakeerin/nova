@@ -1,0 +1,87 @@
+// Effect cleanup (spec 4.3 §9.2): `on_cleanup` runs before an effect runs
+// again and when its owner is disposed, the last added first; a cleanup that
+// sets what its own effect read does not run the effect again; a disposed
+// effect never runs again, though a cleanup sets what it read or the `set`
+// that disposed it queued it too; and `root`'s dispose function, which is a
+// batch.
+import ui
+
+fn main() {
+    let n = signal(1)
+    let stop = root(
+        |dispose: fn()| {
+            effect(
+                | | {
+                    let v = n.value()
+                    println("run ${v}")
+                    on_cleanup(| | println("first cleanup of ${v}"))
+                    on_cleanup(| | println("second cleanup of ${v}"))
+                    effect(
+                        | | {
+                            println("inner of ${v}")
+                            on_cleanup(| | println("inner cleanup of ${v}"))
+                        },
+                    )
+                },
+            )
+            on_cleanup(| | println("root cleanup"))
+            dispose
+        },
+    )
+    n.set(2)
+    println("disposing")
+    stop()
+    n.set(3)
+    println("after: no run")
+
+    // An effect drops what it read before its cleanups run, so one that sets
+    // what the effect read does not run it again.
+    let count = signal(0)
+    effect(
+        | | {
+            println("count is ${count.value()}")
+            on_cleanup(| | count.update(|c: Int| c + 1))
+        },
+    )
+    count.set(10)
+
+    // A cleanup that sets what its effect read runs nothing of the root
+    // again; what it sets elsewhere runs once the dispose is done.
+    let s = signal(0)
+    let elsewhere = signal(0)
+    effect(| | println("elsewhere sees ${elsewhere.value()}"))
+    let stop_again = root(
+        |dispose: fn()| {
+            effect(
+                | | {
+                    let v = s.value()
+                    println("outer of ${v}")
+                    on_cleanup(| | println("last cleanup of ${v}"))
+                    on_cleanup(
+                        | | {
+                            s.set(-1)
+                            elsewhere.set(1)
+                        },
+                    )
+                    effect(| | println("inner of ${v} sees ${s.value()}"))
+                },
+            )
+            dispose
+        },
+    )
+    stop_again()
+    s.set(5)
+    println("after the second dispose: no run")
+
+    // A child its parent's run disposes does not run, though the same `set`
+    // queued both.
+    let a = signal(1)
+    effect(
+        | | {
+            let v = a.value()
+            println("parent of ${v}")
+            effect(| | println("child of ${v} sees ${a.value()}"))
+        },
+    )
+    a.set(2)
+}

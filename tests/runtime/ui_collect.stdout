@@ -1,0 +1,4 @@
+n=2 doubled=4
+n=3 doubled=6
+n=4 doubled=8
+after dispose: n=4 doubled=8

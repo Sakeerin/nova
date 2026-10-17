@@ -1,0 +1,25 @@
+made: computed 1
+reader one: 4
+reader two: 4
+two readers: computed 1
+reader one: 9
+reader two: 9
+after set: computed 2
+lazy computes
+reader one: 16
+reader two: 16
+reader one: 25
+reader two: 25
+lazy computes
+read: 105
+again: 105
+the memo's child of 1 sees x=0
+the memo's child of 2 sees x=1
+read: 2
+tens computes from 1
+the cleanup of 1 reads 10
+tens computes from 2
+tens: 20
+hundreds computes from 1
+the disposed memo reads 100
+disposed

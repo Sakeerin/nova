@@ -1,0 +1,25 @@
+count is 1
+count is 2
+count is 20
+count is 20
+runs: 4
+branch a: a1
+branch a: a2
+branch b: b1
+branch b: b2
+sum: 0
+inside the batch
+sum: 3
+diamond: 2 2
+diamond: 6 10
+diamond: 7 12
+p + q: 0
+the first run is done
+p + q: 3
+first sees 0
+the dropped one sees 0
+second sees 0
+third sees 0
+first sees 1
+second sees 1
+third sees 1

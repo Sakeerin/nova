@@ -1,0 +1,106 @@
+// Memo memoization (spec 4.3 §9.2): a memo computes once however many read
+// it, and only when it is read after something it read changed. A read that
+// computes it is a batch; a cleanup of its last run that reads it gets the
+// last value and computes nothing; and a disposed memo never computes.
+import ui
+
+fn main() {
+    let base = signal(2)
+    let computed = signal(0)
+    let squared = memo(
+        | | {
+            computed.update(|n: Int| n + 1)
+            base.value() * base.value()
+        },
+    )
+    println("made: computed ${computed.value()}")
+    effect(| | println("reader one: ${squared.value()}"))
+    effect(| | println("reader two: ${squared.value()}"))
+    println("two readers: computed ${computed.value()}")
+    base.set(3)
+    println("after set: computed ${computed.value()}")
+
+    // Nothing reads `lazy`, so a change does not compute it.
+    let lazy = memo(
+        | | {
+            println("lazy computes")
+            base.value() + 100
+        },
+    )
+    base.set(4)
+    base.set(5)
+    println("read: ${lazy.value()}")
+    println("again: ${lazy.value()}")
+
+    // The read that computes a memo is a batch, so a child the run disposes
+    // does not run, though a sibling's cleanup sets what that child read.
+    let x = signal(0)
+    let input = signal(1)
+    let parent = memo(
+        | | {
+            let v = input.value()
+            effect(| | println("the memo's child of ${v} sees x=${x.value()}"))
+            effect(| | on_cleanup(| | x.update(|n: Int| n + 1)))
+            v
+        },
+    )
+    input.set(2)
+    println("read: ${parent.value()}")
+
+    // A memo is clean before its last run is disposed, so a cleanup of that
+    // run that reads it gets the last value and computes nothing.
+    let none: Option<Signal<Int>> = None
+    let itself = signal(none)
+    let n = signal(1)
+    let tens = memo(
+        | | {
+            let v = n.value()
+            println("tens computes from ${v}")
+            on_cleanup(
+                | | {
+                    match itself.value() {
+                        Some(t) => println("the cleanup of ${v} reads ${t.value()}")
+                        None => {}
+                    }
+                },
+            )
+            v * 10
+        },
+    )
+    itself.set(Some(tens))
+    n.set(2)
+    println("tens: ${tens.value()}")
+
+    // Disposing marks a memo first, so a cleanup that reads it after its
+    // input changed gets the last value, and the memo never computes again.
+    let held = signal(none)
+    let m_in = signal(1)
+    let stop = root(
+        |dispose: fn()| {
+            let hundreds = memo(
+                | | {
+                    let v = m_in.value()
+                    println("hundreds computes from ${v}")
+                    on_cleanup(
+                        | | {
+                            match held.value() {
+                                Some(h) => println("the disposed memo reads ${h.value()}")
+                                None => {}
+                            }
+                        },
+                    )
+                    v * 100
+                },
+            )
+            held.set(Some(hundreds))
+            dispose
+        },
+    )
+    batch(
+        | | {
+            m_in.set(2)
+            stop()
+        },
+    )
+    println("disposed")
+}

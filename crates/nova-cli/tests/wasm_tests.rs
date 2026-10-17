@@ -1536,6 +1536,11 @@ mod gate {
         hash,
         hash_diffusion,
         json_traits,
+        // `std/ui`: reactivity, and its state across turns (spec 4.3 §9.2).
+        ui_cleanup,
+        ui_collect,
+        ui_memo,
+        ui_signal,
     );
 
     /// The programs a test of their own in this module checks, by its name.
@@ -1555,6 +1560,8 @@ mod gate {
         "recycled_task_state",
         "task_deadlock",
         "eprint_family",
+        "ui_memo_set",
+        "ui_loop",
     ];
 
     /// `eprint` and `eprintln` write to stderr, as `run_tests.rs` checks
@@ -1680,6 +1687,24 @@ mod gate {
     }
 
     #[test]
+    fn ui_memo_set() {
+        super::gate_panics(
+            "ui_memo_set",
+            "nova: panic: std/ui: set() on a memo",
+            |out| out == "doubled 2\n",
+        );
+    }
+
+    #[test]
+    fn ui_loop() {
+        super::gate_panics(
+            "ui_loop",
+            "nova: panic: std/ui: effects did not settle",
+            str::is_empty,
+        );
+    }
+
+    #[test]
     fn panic_unwrap() {
         super::gate_panics("panic_unwrap", "nova: panic: called get on None", |out| {
             out.contains('7') && !out.contains("unreachable")
@@ -1777,6 +1802,10 @@ mod stress {
         json_stringify_escapes,
         json_parse_strings,
         bytes_api,
+        ui_cleanup,
+        ui_collect,
+        ui_memo,
+        ui_signal,
     );
 
     #[test]

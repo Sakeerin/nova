@@ -1,0 +1,10 @@
+// `set` on a memo panics (spec 4.3 §5.1).
+import ui
+
+fn main() {
+    let a = signal(1)
+    let doubled = memo(| | a.value() * 2)
+    println("doubled ${doubled.value()}")
+    doubled.set(10)
+    println("not reached")
+}

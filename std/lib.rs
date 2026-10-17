@@ -2,7 +2,7 @@
 //! build time so the compiler stays one self-contained executable.
 //!
 //! Every `include_str!` path stays inside this package, so `cargo package`
-//! carries all 19 files, and its verification step builds the packaged copy
+//! carries all 20 files, and its verification step builds the packaged copy
 //! on its own (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §3).
 //! `nova-resolver` gives each module its `$std.*` name and its place.
@@ -47,6 +47,8 @@ pub const TASK: &str = include_str!("task/lib.nova");
 pub const TEST: &str = include_str!("test/lib.nova");
 /// `std/time/lib.nova`.
 pub const TIME: &str = include_str!("time/lib.nova");
+/// `std/ui/lib.nova`: reactivity and views, which a program imports.
+pub const UI: &str = include_str!("ui/lib.nova");
 /// `std/rt/lib.nova`, the runtime of a WASM build, written in Nova. Not in
 /// [`ALL`]: only a WASM build compiles it, and its few public items are for
 /// std's other modules alone, so it is not documented (spec
@@ -55,8 +57,8 @@ pub const TIME: &str = include_str!("time/lib.nova");
 pub const RT: &str = include_str!("rt/lib.nova");
 
 /// Every documented module, by its directory under `std/`: all but
-/// [`RT`].
-pub const ALL: [(&str, &str); 17] = [
+/// [`RT`] and [`DOM`].
+pub const ALL: [(&str, &str); 18] = [
     ("bytes", BYTES),
     ("collections", COLLECTIONS),
     ("core", CORE),
@@ -74,6 +76,7 @@ pub const ALL: [(&str, &str); 17] = [
     ("task", TASK),
     ("test", TEST),
     ("time", TIME),
+    ("ui", UI),
 ];
 
 #[cfg(test)]
@@ -81,30 +84,41 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
 
-    /// Every `std/*/lib.nova` on disk is embedded, and nothing else is:
-    /// [`super::ALL`]'s, `std/rt`'s as [`super::RT`], and `std/dom`'s as
+    /// Every `.nova` file under `std/` is embedded, and nothing else:
+    /// [`super::ALL`]'s, `std/rt`'s as [`super::RT`], `std/dom`'s as
     /// [`super::DOM`].
     #[test]
     fn every_std_module_is_embedded() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let on_disk: BTreeSet<String> = std::fs::read_dir(root)
-            .expect("read std/")
-            .map(|entry| entry.expect("read an entry of std/").path())
-            .filter(|path| path.join("lib.nova").is_file())
-            .map(|path| {
-                path.file_name()
-                    .expect("a directory name")
+        fn walk(dir: &Path, under: &str, out: &mut BTreeSet<String>) {
+            for entry in std::fs::read_dir(dir).expect("read a directory of std/") {
+                let path = entry.expect("read an entry of std/").path();
+                let name = path
+                    .file_name()
+                    .expect("a file name")
                     .to_string_lossy()
-                    .into_owned()
-            })
-            .collect();
+                    .into_owned();
+                let rel = if under.is_empty() {
+                    name
+                } else {
+                    format!("{under}/{name}")
+                };
+                if path.is_dir() {
+                    walk(&path, &rel, out);
+                } else if rel.ends_with(".nova") {
+                    out.insert(rel);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut on_disk = BTreeSet::new();
+        walk(root, "", &mut on_disk);
         let embedded: BTreeSet<String> = super::ALL
             .iter()
-            .map(|(name, _)| name.to_string())
-            .chain(["rt".to_string(), "dom".to_string()])
+            .map(|(name, _)| format!("{name}/lib.nova"))
+            .chain(["rt/lib.nova", "dom/lib.nova"].map(String::from))
             .collect();
         assert_eq!(embedded, on_disk);
-        assert_eq!(on_disk.len(), 19);
+        assert_eq!(on_disk.len(), 20);
     }
 
     /// Each entry carries its own file, not a neighbour's.
@@ -116,8 +130,9 @@ mod tests {
                 .expect("read a std module");
             assert_eq!(source, on_disk, "std/{name}/lib.nova");
         }
-        let rt = std::fs::read_to_string(root.join("rt").join("lib.nova"))
-            .expect("read std/rt/lib.nova");
-        assert_eq!(super::RT, rt, "std/rt/lib.nova");
+        for (path, source) in [("rt/lib.nova", super::RT), ("dom/lib.nova", super::DOM)] {
+            let on_disk = std::fs::read_to_string(root.join(path)).expect("read a std module");
+            assert_eq!(source, on_disk, "std/{path}");
+        }
     }
 }
