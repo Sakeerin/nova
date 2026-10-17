@@ -1,7 +1,7 @@
 # Phase 4.3, "`std/ui`: reactivity and element builders": design
 
 - **Date:** 2026-10-17.
-- **Status:** for the user's review.
+- **Status:** approved by the user on 2026-10-17.
 - **The user's decisions, 2026-10-16:**
   1. Builders take their attributes and their children as two arrays:
      `div([class("counter")], [text("+")])`.
@@ -21,7 +21,9 @@
      `manifest.json`, and `wasm-opt`.
   8. `mount(selector, f)` puts a view into the page on WASM.
      `render_to_string(f)` renders one to HTML, on both targets.
-- **Branch:** `claude/loving-archimedes-frtf5q`.
+- **Branch:** `claude/loving-archimedes-frtf5q-43`, the user's choice on
+  2026-10-17: the earlier branch name still holds 4.2's commits from before
+  their rebase.
 - **Inputs:**
   - `docs/phase-4-plan.md` §3 (decisions 3, 5, 6, 7, 10 and 11) and §4's
     4.3 entry;
