@@ -1,0 +1,217 @@
+//! The element builders: functions that make `std/ui`'s `View`s and
+//! `Attr`s, for `mount` to put into the page or `render_to_string` to write
+//! as HTML.
+//!
+//! It is not in the prelude: `import ui::html` binds every builder, about 60
+//! names, and `import ui::html::{div, text}` binds some. A module that defines
+//! one of the same names, such as `text`, `input` or `label`, gets E0002 from
+//! the first, and should import a list instead.
+//!
+//! An element takes its attributes and its children as two arrays; a void
+//! element, such as `input`, takes no children. `text` is fixed text and
+//! `dyn_text` text read again when the signals it reads change. `type` and
+//! `for` are keywords, so `attr("type", "checkbox")` writes those, and
+//! `element("main", [], [])` writes a `<main>`, which has no builder of its
+//! own: it would clash with a program's `fn main`.
+//!
+//! A list with a class, and the HTML it renders to:
+//!
+//! ```
+//! import ui
+//! import ui::html::{class, li, text, ul}
+//!
+//! let html = render_to_string(| | ul([class("menu")], [li([], [text("a & b")])]))
+//! assert_eq(html, "<ul class=\"menu\"><li>a &amp; b</li></ul>")
+//! ```
+
+import ui
+
+/// The element `tag`, which must be ASCII letters, digits and `-`, starting
+/// with a letter, with `attrs` and `children`.
+pub fn element(tag: String, attrs: [Attr], children: [View]) -> View {
+    Element(tag, attrs, children)
+}
+
+/// A `<div>` element.
+pub fn div(attrs: [Attr], children: [View]) -> View { Element("div", attrs, children) }
+
+/// A `<span>` element.
+pub fn span(attrs: [Attr], children: [View]) -> View { Element("span", attrs, children) }
+
+/// A `<p>` element.
+pub fn p(attrs: [Attr], children: [View]) -> View { Element("p", attrs, children) }
+
+/// A `<a>` element.
+pub fn a(attrs: [Attr], children: [View]) -> View { Element("a", attrs, children) }
+
+/// A `<button>` element.
+pub fn button(attrs: [Attr], children: [View]) -> View { Element("button", attrs, children) }
+
+/// A `<label>` element.
+pub fn label(attrs: [Attr], children: [View]) -> View { Element("label", attrs, children) }
+
+/// A `<form>` element.
+pub fn form(attrs: [Attr], children: [View]) -> View { Element("form", attrs, children) }
+
+/// A `<ul>` element.
+pub fn ul(attrs: [Attr], children: [View]) -> View { Element("ul", attrs, children) }
+
+/// A `<ol>` element.
+pub fn ol(attrs: [Attr], children: [View]) -> View { Element("ol", attrs, children) }
+
+/// A `<li>` element.
+pub fn li(attrs: [Attr], children: [View]) -> View { Element("li", attrs, children) }
+
+/// A `<h1>` element.
+pub fn h1(attrs: [Attr], children: [View]) -> View { Element("h1", attrs, children) }
+
+/// A `<h2>` element.
+pub fn h2(attrs: [Attr], children: [View]) -> View { Element("h2", attrs, children) }
+
+/// A `<h3>` element.
+pub fn h3(attrs: [Attr], children: [View]) -> View { Element("h3", attrs, children) }
+
+/// A `<h4>` element.
+pub fn h4(attrs: [Attr], children: [View]) -> View { Element("h4", attrs, children) }
+
+/// A `<h5>` element.
+pub fn h5(attrs: [Attr], children: [View]) -> View { Element("h5", attrs, children) }
+
+/// A `<h6>` element.
+pub fn h6(attrs: [Attr], children: [View]) -> View { Element("h6", attrs, children) }
+
+/// A `<section>` element.
+pub fn section(attrs: [Attr], children: [View]) -> View { Element("section", attrs, children) }
+
+/// A `<header>` element.
+pub fn header(attrs: [Attr], children: [View]) -> View { Element("header", attrs, children) }
+
+/// A `<footer>` element.
+pub fn footer(attrs: [Attr], children: [View]) -> View { Element("footer", attrs, children) }
+
+/// A `<nav>` element.
+pub fn nav(attrs: [Attr], children: [View]) -> View { Element("nav", attrs, children) }
+
+/// A `<article>` element.
+pub fn article(attrs: [Attr], children: [View]) -> View { Element("article", attrs, children) }
+
+/// A `<strong>` element.
+pub fn strong(attrs: [Attr], children: [View]) -> View { Element("strong", attrs, children) }
+
+/// A `<em>` element.
+pub fn em(attrs: [Attr], children: [View]) -> View { Element("em", attrs, children) }
+
+/// A `<code>` element.
+pub fn code(attrs: [Attr], children: [View]) -> View { Element("code", attrs, children) }
+
+/// A `<pre>` element.
+pub fn pre(attrs: [Attr], children: [View]) -> View { Element("pre", attrs, children) }
+
+/// A `<small>` element.
+pub fn small(attrs: [Attr], children: [View]) -> View { Element("small", attrs, children) }
+
+/// A `<table>` element.
+pub fn table(attrs: [Attr], children: [View]) -> View { Element("table", attrs, children) }
+
+/// A `<thead>` element.
+pub fn thead(attrs: [Attr], children: [View]) -> View { Element("thead", attrs, children) }
+
+/// A `<tbody>` element.
+pub fn tbody(attrs: [Attr], children: [View]) -> View { Element("tbody", attrs, children) }
+
+/// A `<tr>` element.
+pub fn tr(attrs: [Attr], children: [View]) -> View { Element("tr", attrs, children) }
+
+/// A `<th>` element.
+pub fn th(attrs: [Attr], children: [View]) -> View { Element("th", attrs, children) }
+
+/// A `<td>` element.
+pub fn td(attrs: [Attr], children: [View]) -> View { Element("td", attrs, children) }
+
+/// A `<select>` element.
+pub fn select(attrs: [Attr], children: [View]) -> View { Element("select", attrs, children) }
+
+/// A `<option>` element.
+pub fn option(attrs: [Attr], children: [View]) -> View { Element("option", attrs, children) }
+
+/// A `<textarea>` element.
+pub fn textarea(attrs: [Attr], children: [View]) -> View { Element("textarea", attrs, children) }
+
+/// An `<input>` element, which has no children.
+pub fn input(attrs: [Attr]) -> View {
+    let none: [View] = []
+    Element("input", attrs, none)
+}
+
+/// An `<img>` element, which has no children.
+pub fn img(attrs: [Attr]) -> View {
+    let none: [View] = []
+    Element("img", attrs, none)
+}
+
+/// An `<br>` element, which has no children.
+pub fn br(attrs: [Attr]) -> View {
+    let none: [View] = []
+    Element("br", attrs, none)
+}
+
+/// An `<hr>` element, which has no children.
+pub fn hr(attrs: [Attr]) -> View {
+    let none: [View] = []
+    Element("hr", attrs, none)
+}
+
+/// The text `content`, escaped when it is written.
+pub fn text(content: String) -> View { Text(content) }
+
+/// Text that `content` gives, read again each time a signal it read
+/// changes.
+pub fn dyn_text(content: fn() -> String) -> View { DynText(content) }
+
+/// The attribute `name` set to `value`.
+pub fn attr(name: String, value: String) -> Attr { Static(name, value) }
+
+/// The attribute `name`, set to what `value` gives and again each time a
+/// signal it read changes.
+pub fn dyn_attr(name: String, value: fn() -> String) -> Attr { Dynamic(name, value) }
+
+/// The `class` attribute.
+pub fn class(value: String) -> Attr { Static("class", value) }
+
+/// The `id` attribute.
+pub fn id(value: String) -> Attr { Static("id", value) }
+
+/// The `style` attribute.
+pub fn style(value: String) -> Attr { Static("style", value) }
+
+/// The `href` attribute.
+pub fn href(value: String) -> Attr { Static("href", value) }
+
+/// The `src` attribute.
+pub fn src(value: String) -> Attr { Static("src", value) }
+
+/// The `alt` attribute.
+pub fn alt(value: String) -> Attr { Static("alt", value) }
+
+/// The `name` attribute.
+pub fn name(value: String) -> Attr { Static("name", value) }
+
+/// The `placeholder` attribute.
+pub fn placeholder(value: String) -> Attr { Static("placeholder", value) }
+
+/// The `value` property, as an input's text.
+pub fn value(v: String) -> Attr { Property("value", v) }
+
+/// The `value` property, set to what `v` gives and again each time a signal
+/// it read changes.
+pub fn dyn_value(v: fn() -> String) -> Attr { DynProperty("value", v) }
+
+/// Calls `f` on each event of kind `kind`, such as `"click"`.
+pub fn on(kind: String, f: fn()) -> Attr { On(kind, |unused: String| f()) }
+
+/// Calls `f` on each click.
+pub fn on_click(f: fn()) -> Attr { On("click", |unused: String| f()) }
+
+/// Calls `f` with the element's `value` on each `input` event, as a text
+/// field's each keystroke.
+pub fn on_input(f: fn(String)) -> Attr { On("input", f) }

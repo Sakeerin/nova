@@ -2,7 +2,7 @@
 //! build time so the compiler stays one self-contained executable.
 //!
 //! Every `include_str!` path stays inside this package, so `cargo package`
-//! carries all 20 files, and its verification step builds the packaged copy
+//! carries all 21 files, and its verification step builds the packaged copy
 //! on its own (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §3).
 //! `nova-resolver` gives each module its `$std.*` name and its place.
@@ -49,6 +49,8 @@ pub const TEST: &str = include_str!("test/lib.nova");
 pub const TIME: &str = include_str!("time/lib.nova");
 /// `std/ui/lib.nova`: reactivity and views, which a program imports.
 pub const UI: &str = include_str!("ui/lib.nova");
+/// `std/ui/html/lib.nova`: the element builders, which a program imports.
+pub const UI_HTML: &str = include_str!("ui/html/lib.nova");
 /// `std/rt/lib.nova`, the runtime of a WASM build, written in Nova. Not in
 /// [`ALL`]: only a WASM build compiles it, and its few public items are for
 /// std's other modules alone, so it is not documented (spec
@@ -58,7 +60,7 @@ pub const RT: &str = include_str!("rt/lib.nova");
 
 /// Every documented module, by its directory under `std/`: all but
 /// [`RT`] and [`DOM`].
-pub const ALL: [(&str, &str); 18] = [
+pub const ALL: [(&str, &str); 19] = [
     ("bytes", BYTES),
     ("collections", COLLECTIONS),
     ("core", CORE),
@@ -77,6 +79,7 @@ pub const ALL: [(&str, &str); 18] = [
     ("test", TEST),
     ("time", TIME),
     ("ui", UI),
+    ("ui/html", UI_HTML),
 ];
 
 #[cfg(test)]
@@ -118,7 +121,7 @@ mod tests {
             .chain(["rt/lib.nova", "dom/lib.nova"].map(String::from))
             .collect();
         assert_eq!(embedded, on_disk);
-        assert_eq!(on_disk.len(), 20);
+        assert_eq!(on_disk.len(), 21);
     }
 
     /// Each entry carries its own file, not a neighbour's.
