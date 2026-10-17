@@ -25,22 +25,22 @@ fn main() {
     let rows = signal(["row 1", "row 2"])
     mount(
         "#app",
-        | | div(
+        || div(
             [],
             [
-                button([id("toggle"), on_click(| | open.update(|o: Bool| !o))], [text("toggle")]),
+                button([id("toggle"), on_click(|| open.update(|o: Bool| !o))], [text("toggle")]),
                 show(
                     open,
-                    | | {
+                    || {
                         on_mount(
-                            | | {
+                            || {
                                 match query_selector("#panel") {
                                     Some(e) => println("on_mount: the panel is in the page")
                                     None => println("on_mount: the panel is not in the page")
                                 }
                             },
                         )
-                        on_cleanup(| | println("the panel is gone"))
+                        on_cleanup(|| println("the panel is gone"))
                         p([id("panel")], [text("panel")])
                     },
                 ),
@@ -51,23 +51,20 @@ fn main() {
                         for_each(
                             rows,
                             |r: String| li(
-                                [on_click(| | println("clicked ${r}"))],
-                                [dyn_text(| | r)],
+                                [on_click(|| println("clicked ${r}"))],
+                                [dyn_text(|| r)],
                             ),
                         ),
                         li([], [text("last")]),
                     ],
                 ),
-                button([id("more"), on_click(| | rows.update(more))], [text("more")]),
-                button(
-                    [id("again"), on_click(| | rows.update(|xs: [String]| xs))],
-                    [text("again")],
-                ),
+                button([id("more"), on_click(|| rows.update(more))], [text("more")]),
+                button([id("again"), on_click(|| rows.update(|xs: [String]| xs))], [text("again")]),
                 button(
                     [
                         id("none"),
                         on_click(
-                            | | {
+                            || {
                                 let empty: [String] = []
                                 rows.set(empty)
                             },

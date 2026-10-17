@@ -12,6 +12,7 @@ Some(
                         attrs: [],
                         vis: Private,
                         is_async: false,
+                        is_component: false,
                         name: Spanned {
                             value: "main",
                             span: Span {

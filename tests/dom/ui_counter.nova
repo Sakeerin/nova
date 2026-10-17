@@ -10,11 +10,11 @@ fn main() {
     let count = signal(0)
     mount(
         "body",
-        | | div(
+        || div(
             [],
             [
-                p([id("count")], [dyn_text(| | "${count.value()}")]),
-                button([id("add"), on_click(| | count.update(|n: Int| n + 1))], [text("add one")]),
+                p([id("count")], [dyn_text(|| "${count.value()}")]),
+                button([id("add"), on_click(|| count.update(|n: Int| n + 1))], [text("add one")]),
             ],
         ),
     )

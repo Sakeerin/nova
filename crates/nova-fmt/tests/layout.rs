@@ -190,8 +190,8 @@ fn small_forms_keep_their_usual_spacing() {
 #[test]
 fn closures_print_their_parameters_bare_or_typed() {
     assert_formats(
-        "fn main() { let f = |a: Int, b| a + b\n let g = | | 1\n println(\"${f(1, 2)}${g()}\") }\n",
-        "fn main() {\n    let f = |a: Int, b| a + b\n    let g = | | 1\n    println(\"${f(1, 2)}${g()}\")\n}\n",
+        "fn main() { let f = |a: Int, b| a + b\n let g = | | 1\n let h = || -> Int { 2 }\n println(\"${f(1, 2)}${g()}${h()}\") }\n",
+        "fn main() {\n    let f = |a: Int, b| a + b\n    let g = || 1\n    let h = || -> Int { 2 }\n    println(\"${f(1, 2)}${g()}${h()}\")\n}\n",
     );
 }
 
@@ -258,5 +258,36 @@ fn a_header_comment_stays_above_the_second_group() {
     assert_formats(
         "import a\n\n// The project's own.\n\nimport c\nimport b\n",
         "import a\n\n// The project's own.\n\nimport b\nimport c\n",
+    );
+}
+
+/// `component` and `view { … }` (the 4.4 spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`
+/// §5): a component is laid out as a `fn`; a view's children are one per
+/// line; an element's one child stays on its line when the whole fits, and
+/// its arguments break as a call's do.
+#[test]
+fn components_and_views_have_one_layout() {
+    assert_formats(
+        "pub component Counter( start: Int ) { let count = signal(start)\n view { div(class: \"counter\") { text(\"Count: ${count.value()}\") button(on_click: || count.update(|n| n + 1)) { text(\"+\") } } } }\n",
+        "pub component Counter(start: Int) {\n    let count = signal(start)\n    view {\n        div(class: \"counter\") {\n            text(\"Count: ${count.value()}\")\n            button(on_click: || count.update(|n| n + 1)) { text(\"+\") }\n        }\n    }\n}\n",
+    );
+    assert_formats(
+        "component A() { view { p() { } } }\n",
+        "component A() {\n    view {\n        p {}\n    }\n}\n",
+    );
+    assert_stable(
+        "component A() {\n    view {\n        button(\n            on_click: || count.update(|n| n - 1),\n            class: \"a very long class name that goes on and on\",\n            id: \"and-an-id\",\n        ) {\n            text(\"-\")\n        }\n    }\n}\n",
+    );
+    assert_stable("component A() {\n    view {\n        input(type: \"text\", for: \"x\", value: v, on_input: |v: String| println(v))\n    }\n}\n");
+}
+
+/// A child that begins with `(`, `[` or `{` gets `;` before it, as a
+/// statement does, and comments keep their places among children.
+#[test]
+fn view_children_keep_their_separators_and_comments() {
+    assert_formats(
+        "component A() { view { div { text(\"a\") ; (b) // after b\n // before c\n c } } }\n",
+        "component A() {\n    view {\n        div {\n            text(\"a\");\n            (b) // after b\n            // before c\n            c\n        }\n    }\n}\n",
     );
 }

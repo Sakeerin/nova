@@ -15,12 +15,12 @@ import ui::html::{div, dyn_text, id, li, p, text, ul}
 // adds a cleanup that says when the row is gone.
 fn row(r: Int) -> View {
     on_mount(
-        | | {
+        || {
             match query_selector("#row${r}") {
                 Some(e) => println("on_mount of row ${r}: in the page")
                 None => println("on_mount of row ${r}: not in the page")
             }
-            on_cleanup(| | println("row ${r} is gone"))
+            on_cleanup(|| println("row ${r} is gone"))
         },
     )
     li([id("row${r}")], [text("row ${r}")])
@@ -31,20 +31,20 @@ fn main() {
     let phase = signal(0)
     mount(
         "#app",
-        | | {
+        || {
             on_mount(
-                | | {
+                || {
                     match query_selector("#hello") {
                         Some(e) => println("on_mount: #hello is in the page, reading ${e.text()}")
                         None => println("on_mount: #hello is not in the page")
                     }
                 },
             )
-            on_mount(| | println("the second on_mount"))
+            on_mount(|| println("the second on_mount"))
             effect(
-                | | {
+                || {
                     let p = phase.value()
-                    on_mount(| | println("on_mount of the effect's run ${p}"))
+                    on_mount(|| println("on_mount of the effect's run ${p}"))
                 },
             )
             println("building")
@@ -54,7 +54,7 @@ fn main() {
                     p([id("hello")], [text("hi")]),
                     ul([], [for_each(rows, row)]),
                     dyn_text(
-                        | | {
+                        || {
                             rows.set([2])
                             phase.set(1)
                             ""
@@ -66,13 +66,13 @@ fn main() {
     )
     rows.set([3])
     let html = render_to_string(
-        | | {
-            on_cleanup(| | rows.set([4]))
+        || {
+            on_cleanup(|| rows.set([4]))
             text("a string")
         },
     )
     println("rendered ${html}")
-    on_mount(| | println("on_mount outside a mount runs at once"))
-    mount("#nope", | | text("never"))
+    on_mount(|| println("on_mount outside a mount runs at once"))
+    mount("#nope", || text("never"))
     println("not reached")
 }

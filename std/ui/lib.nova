@@ -30,11 +30,11 @@
 //!
 //! let count = signal(1)
 //! let seen = signal(0)
-//! effect(| | seen.set(count.value() * 10))
+//! effect(|| seen.set(count.value() * 10))
 //! count.set(2)
 //! assert_eq(seen.value(), 20)
 //!
-//! let html = render_to_string(| | div([], [text("count: "), dyn_text(| | "${count.value()}")]))
+//! let html = render_to_string(|| div([], [text("count: "), dyn_text(|| "${count.value()}")]))
 //! assert_eq(html, "<div>count: 2</div>")
 //! ```
 
@@ -400,7 +400,7 @@ impl<T> Signal<T> {
     /// computation, which runs again when the value changes.
     pub fn value(self) -> T {
         match self.src.memo {
-            Some(m) => { if m.state != CLEAN { batch(| | refresh(m)) } }
+            Some(m) => { if m.state != CLEAN { batch(|| refresh(m)) } }
             None => {}
         }
         track(self.src)
@@ -437,18 +437,18 @@ pub fn signal<T>(initial: T) -> Signal<T> {
 pub fn effect(f: fn()) {
     let o = new_owner(EFFECT, f)
     adopt(o)
-    if !o.disposed { batch(| | run_owner(o)) }
+    if !o.disposed { batch(|| run_owner(o)) }
 }
 
 /// A signal whose value is `f`'s: `f` runs now, then again when it is read
 /// after a signal it read changed. Its `set` panics.
 pub fn memo<T>(f: fn() -> T) -> Signal<T> {
-    let mut o = new_owner(MEMO, | | {})
+    let mut o = new_owner(MEMO, || {})
     adopt(o)
     let first = with_context(Some(o), Some(o), f)
     let src = Source { id: new_id(), observers: Vec::new(), memo: Some(o) }
     let s = Signal { src: src, val: first }
-    o.run = | | {
+    o.run = || {
         let mut t = s
         t.val = f()
     }
@@ -524,8 +524,8 @@ fn run_mounted(start: Int) {
 /// Runs `f` with a new owner, which no other owns, and gives `f` the
 /// function that disposes of it, in a `batch`; returns what `f` returns.
 pub fn root<T>(f: fn(fn()) -> T) -> T {
-    let o = new_owner(ROOT, | | {})
-    with_context(Some(o), None, | | f(| | batch(| | dispose(o))))
+    let o = new_owner(ROOT, || {})
+    with_context(Some(o), None, || f(|| batch(|| dispose(o))))
 }
 
 /// Runs `f`, and the effects its `set`s queue once it returns, each once.
@@ -570,7 +570,7 @@ fn view_of(f: fn() -> View) -> View { untracked(f) }
 /// again each time `when` is set to true, even when it already was.
 pub fn show(when: Signal<Bool>, then: fn() -> View) -> View {
     Region(
-        | | {
+        || {
             if when.value() {
                 [view_of(then)]
             } else {
@@ -585,13 +585,13 @@ pub fn show(when: Signal<Bool>, then: fn() -> View) -> View {
 /// time `items` changes.
 pub fn for_each<T>(items: Signal<[T]>, render: fn(T) -> View) -> View {
     Region(
-        | | {
+        || {
             let xs = items.value()
             let mut out = [Text(""); xs.len()]
             let mut i = 0
             while i < xs.len() {
                 let x = xs[i]
-                out[i] = view_of(| | render(x))
+                out[i] = view_of(|| render(x))
                 i = i + 1
             }
             out
@@ -731,7 +731,7 @@ fn write_attr(a: Attr, out: Vec<String>) {
 pub fn render_to_string(f: fn() -> View) -> String {
     let out = Vec::new()
     batch(
-        | | {
+        || {
             let mut s = ui()
             s.rendering = s.rendering + 1
             root(
@@ -754,13 +754,13 @@ pub fn mount(selector: String, f: fn() -> View) {
         Some(p) => p
         None => panic("std/ui: mount: no element matches \"${selector}\"")
     }
-    let o = new_owner(ROOT, | | {})
+    let o = new_owner(ROOT, || {})
     let mut s = ui()
     let mut kept = s.roots
     kept.push(o)
     let start = s.mounted.len()
     s.building = s.building + 1
-    with_context(Some(o), None, | | build(f(), parent, None))
+    with_context(Some(o), None, || build(f(), parent, None))
     s.building = s.building - 1
     run_mounted(start)
 }
@@ -797,7 +797,7 @@ fn build(v: View, parent: Node, before: Option<Node>) {
         Text(t) => put(parent, backend_text(t), before)
         DynText(f) => {
             let n = backend_text("")
-            effect(| | backend_set_text(n, f()))
+            effect(|| backend_set_text(n, f()))
             put(parent, n, before)
         }
         Region(f) => {
@@ -805,7 +805,7 @@ fn build(v: View, parent: Node, before: Option<Node>) {
             let end = backend_text("")
             put(parent, start, before)
             put(parent, end, before)
-            effect(| | build_region(f, parent, start, end))
+            effect(|| build_region(f, parent, start, end))
         }
     }
 }
@@ -822,7 +822,7 @@ fn build_region(f: fn() -> [View], parent: Node, start: Node, end: Node) {
     let outer = s.building > 0
     let begin = s.mounted.len()
     s.building = s.building + 1
-    let render = new_owner(ROOT, | | {})
+    let render = new_owner(ROOT, || {})
     adopt(render)
     let views = with_context(Some(render), s.listener, f)
     let mut done = false
@@ -835,7 +835,7 @@ fn build_region(f: fn() -> [View], parent: Node, start: Node, end: Node) {
     with_context(
         Some(render),
         None,
-        | | {
+        || {
             let mut i = 0
             while i < views.len() {
                 build(views[i], parent, Some(end))
@@ -850,11 +850,11 @@ fn build_region(f: fn() -> [View], parent: Node, start: Node, end: Node) {
 fn build_attr(a: Attr, el: Node) {
     match a {
         Static(name, value) => backend_set_attr(el, name, value)
-        Dynamic(name, f) => effect(| | backend_set_attr(el, name, f()))
+        Dynamic(name, f) => effect(|| backend_set_attr(el, name, f()))
         Property(name, value) => backend_set_prop(el, name, value)
-        DynProperty(name, f) => effect(| | backend_set_prop(el, name, f()))
+        DynProperty(name, f) => effect(|| backend_set_prop(el, name, f()))
         On(kind, f) => {
-            let stop = backend_listen(el, kind, |v: String| untracked(| | batch(| | f(v))))
+            let stop = backend_listen(el, kind, |v: String| untracked(|| batch(|| f(v))))
             on_cleanup(stop)
         }
     }

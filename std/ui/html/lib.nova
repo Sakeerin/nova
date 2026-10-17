@@ -20,7 +20,7 @@
 //! import ui
 //! import ui::html::{class, li, text, ul}
 //!
-//! let html = render_to_string(| | ul([class("menu")], [li([], [text("a & b")])]))
+//! let html = render_to_string(|| ul([class("menu")], [li([], [text("a & b")])]))
 //! assert_eq(html, "<ul class=\"menu\"><li>a &amp; b</li></ul>")
 //! ```
 

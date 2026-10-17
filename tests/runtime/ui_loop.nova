@@ -4,6 +4,6 @@ import ui
 
 fn main() {
     let n = signal(0)
-    effect(| | n.set(n.value() + 1))
+    effect(|| n.set(n.value() + 1))
     println("not reached")
 }

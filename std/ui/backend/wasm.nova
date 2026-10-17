@@ -65,6 +65,6 @@ pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() {
             }
         },
     )
-    let stop = | | listener.remove()
+    let stop = || listener.remove()
     stop
 }
