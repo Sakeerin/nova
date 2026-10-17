@@ -3,7 +3,7 @@ import ui
 
 fn main() {
     let a = signal(1)
-    let doubled = memo(| | a.value() * 2)
+    let doubled = memo(|| a.value() * 2)
     println("doubled ${doubled.value()}")
     doubled.set(10)
     println("not reached")

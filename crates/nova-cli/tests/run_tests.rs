@@ -11319,6 +11319,7 @@ fn ui_programs_run_and_survive_gc_stress() {
         "ui_memo",
         "ui_render",
         "ui_collect",
+        "ui_view",
     ] {
         let source = repo_root().join(format!("tests/runtime/{name}.nova"));
         let expected = std::fs::read_to_string(source.with_extension("stdout"))

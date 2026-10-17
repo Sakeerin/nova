@@ -95,7 +95,9 @@ jobs:
   # §10.3, and 4.3's §9.4): the counters `cargo test` drives under the fake
   # DOM, one written with std/dom and one with std/ui, built for WASM and
   # clicked in Chromium through Playwright. Both have the ids `#add` and
-  # `#count`, so one script clicks either. Playwright, pinned, is installed
+  # `#count`, so one script clicks either. And 4.4's gate (§9.4):
+  # `examples/06-counter-spa`, built from its project with its own page,
+  # which `spa.mjs` clicks by its buttons' text. Playwright, pinned, is installed
   # here only, into a scratch directory; nothing in `cargo test` or `nova`
   # installs a package. Ubuntu only: one browser job suffices.
   browser:
@@ -114,6 +116,7 @@ jobs:
         run: |
           target/debug/nova build --target wasm tests/dom/counter.nova -o "$RUNNER_TEMP/counter"
           target/debug/nova build --target wasm tests/dom/ui_counter.nova -o "$RUNNER_TEMP/ui_counter"
+          (cd examples/06-counter-spa && ../../target/debug/nova build --target wasm -o "$RUNNER_TEMP/counter-spa")
       - name: Install Playwright and Chromium
         run: |
           npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
@@ -122,6 +125,7 @@ jobs:
         run: |
           node tests/browser/counter.mjs "$RUNNER_TEMP/counter" "$RUNNER_TEMP/pw"
           node tests/browser/counter.mjs "$RUNNER_TEMP/ui_counter" "$RUNNER_TEMP/pw"
+          node tests/browser/spa.mjs "$RUNNER_TEMP/counter-spa" "$RUNNER_TEMP/pw"
 
   fmt:
     name: Rustfmt

@@ -21,7 +21,7 @@ use crate::source::Source;
 
 /// Tokens that would continue the statement or match arm before them, since
 /// the parser ignores line breaks (spec §5.6).
-const CONTINUES: [Token; 7] = [
+const CONTINUES: [Token; 8] = [
     Token::LParen,
     Token::LBracket,
     Token::LBrace,
@@ -29,6 +29,7 @@ const CONTINUES: [Token; 7] = [
     Token::Star,
     Token::Amp,
     Token::Pipe,
+    Token::PipePipe,
 ];
 
 /// Print `src`'s AST in the canonical layout (spec §6): `\n` line endings

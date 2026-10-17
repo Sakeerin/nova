@@ -12,7 +12,9 @@
 //! `dyn_text` text read again when the signals it reads change. `type` and
 //! `for` are keywords, so `attr("type", "checkbox")` writes those, and
 //! `element("main", [], [])` writes a `<main>`, which has no builder of its
-//! own: it would clash with a program's `fn main`.
+//! own: it would clash with a program's `fn main`. Inside `view { … }`
+//! (RFC 0001), an element takes its attributes by name, `type:` and `for:`
+//! included, and its children in a block.
 //!
 //! A list with a class, and the HTML it renders to:
 //!
@@ -20,7 +22,7 @@
 //! import ui
 //! import ui::html::{class, li, text, ul}
 //!
-//! let html = render_to_string(| | ul([class("menu")], [li([], [text("a & b")])]))
+//! let html = render_to_string(|| ul([class("menu")], [li([], [text("a & b")])]))
 //! assert_eq(html, "<ul class=\"menu\"><li>a &amp; b</li></ul>")
 //! ```
 

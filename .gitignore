@@ -5,6 +5,7 @@
 .env
 .env.local
 /examples/04-todo-cli/todos.json
+/examples/06-counter-spa/dist
 /tools/vscode-nova/node_modules
 /tools/vscode-nova/out
 /tools/vscode-nova/.vscode-test

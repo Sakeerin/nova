@@ -521,6 +521,18 @@ is `tests/dom/ui_counter.nova` under the fake DOM and in Chromium, and
   - It is under 50 KB gzipped.
   - `nova fmt`'s three checks pass on every `.nova` file.
 
+**Amended 2026-10-17 (branch `claude/loving-archimedes-frtf5q-44`):** by the
+user's decisions of 2026-10-17, a signal is read with `count.value()`; an
+element's named arguments are its attributes by name, `value` its property
+and `on_kind` its handler; a text or attribute that is not a literal is
+reactive by itself; `||` is a closure everywhere, and `nova fmt` reformatted
+the repository's `| |`; `--release` runs `wasm-opt` only when it is on
+`PATH`; a view has no `if` or `for`; and a project's `index.html` is at its
+root. The type checker desugars the syntax, which the tree keeps. The gate
+is `06-counter-spa` under the fake DOM and in Chromium, 21 KB gzipped
+(`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`;
+RFC 0001; ADR 0043).
+
 ### 4.5 — The router and `nova dev`
 - **`std/ui/router`:**
   - `Router` and `Route`;

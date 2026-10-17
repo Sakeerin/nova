@@ -130,7 +130,10 @@ pub fn keyword_start(text: &str, name_start: usize) -> Option<usize> {
     let end = back_over_space(name_start);
     let start = back_over_word(end);
     let keyword = &text[start..end];
-    if !matches!(keyword, "fn" | "record" | "type" | "trait" | "const") {
+    if !matches!(
+        keyword,
+        "fn" | "record" | "type" | "trait" | "const" | "component"
+    ) {
         return None;
     }
     if keyword == "fn" {
@@ -229,6 +232,10 @@ mod tests {
             text.find("fn f")
         );
         assert_eq!(keyword_start(text, text.find("x =").unwrap()), None);
+        // A component's keyword, which only an item's place makes one (the
+        // 4.4 spec §3.1).
+        let text = "component Card() {}\n";
+        assert_eq!(keyword_start(text, text.find("Card").unwrap()), Some(0));
     }
 
     #[test]

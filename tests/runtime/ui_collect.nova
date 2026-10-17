@@ -6,10 +6,10 @@ import ui
 async fn main() {
     let log = signal("")
     let n = signal(1)
-    let doubled = memo(| | n.value() * 2)
+    let doubled = memo(|| n.value() * 2)
     let stop = root(
         |dispose: fn()| {
-            effect(| | log.set("n=${n.value()} doubled=${doubled.value()}"))
+            effect(|| log.set("n=${n.value()} doubled=${doubled.value()}"))
             dispose
         },
     )

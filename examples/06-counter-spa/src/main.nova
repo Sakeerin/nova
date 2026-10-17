@@ -1,0 +1,20 @@
+//! The smallest WASM frontend: a counter, written as a component with
+//! `view { … }` (RFC 0001), mounted into the page's `#app`.
+
+import ui
+import ui::html::{button, div}
+
+/// A count, and a button to add one and a button to take one away.
+component Counter() {
+    let count = signal(0)
+
+    view {
+        div(class: "counter") {
+            text("Count: ${count.value()}")
+            button(on_click: || count.update(|n| n + 1)) { text("+") }
+            button(on_click: || count.update(|n| n - 1)) { text("-") }
+        }
+    }
+}
+
+fn main() { mount("#app", Counter) }

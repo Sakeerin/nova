@@ -78,10 +78,7 @@ fn tokens_that_would_merge_keep_a_space() {
     // In an expression `&` takes a postfix operand, so a reference to a
     // reference is written `&(&x)` and keeps its parentheses. A type has no
     // such rule, so `& &T` keeps its space.
-    assert_formats(
-        "fn main() { let f = | | 0\n let r = &(&x) }\n",
-        "fn main() {\n    let f = | | 0\n    let r = &(&x)\n}\n",
-    );
+    assert_stable("fn main() { let r = &(&x) }\n");
     assert_stable("fn f(x: & &Int, y: &mut &Int) {}\n");
 }
 
@@ -142,6 +139,10 @@ fn each_token_that_could_continue_a_statement_keeps_its_semicolon() {
         (
             "fn main() { f(); |x| x }\n",
             "fn main() {\n    f();\n    |x| x\n}\n",
+        ),
+        (
+            "fn main() { f(); || x }\n",
+            "fn main() {\n    f();\n    || x\n}\n",
         ),
     ] {
         assert_formats(input, expected);

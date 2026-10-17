@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use clap::Args;
 use nova_driver::{Outcome, Program, Roots};
 
+use crate::bundle::Bundle;
 use crate::project::{self, Mode};
 
 #[derive(Args)]
@@ -68,7 +69,8 @@ pub struct BuildCmd {
 
     /// Optimizing build via the LLVM backend (emits LLVM IR and compiles it
     /// with a discovered `clang`/`llc`); the default is the fast Cranelift
-    /// backend.
+    /// backend. With `--target wasm`, runs `wasm-opt -Oz` on app.wasm when
+    /// `wasm-opt` is on PATH.
     #[arg(long)]
     release: bool,
 
@@ -129,11 +131,10 @@ pub fn bundle(cmd: BundleCmd) -> Result<()> {
 }
 
 /// `nova build --target wasm`: `dist/` at the project's root, or in the
-/// current directory, unless `-o` names it (spec 4.0 §7).
+/// current directory, unless `-o` names it (spec 4.0 §7), with what the
+/// 4.4 spec's §7 adds: the project's page, `assets/`, `manifest.json`, and
+/// `wasm-opt` under `--release`.
 fn build_wasm(cmd: BuildCmd) -> Result<()> {
-    if cmd.release {
-        anyhow::bail!("`--release` does not apply to `--target wasm`");
-    }
     let mode = project::mode(cmd.file)?;
     project::refuse_library(&mode)?;
     project::sync(&mode)?;
@@ -143,8 +144,12 @@ fn build_wasm(cmd: BuildCmd) -> Result<()> {
         (None, Mode::Project { root, .. }) => root.join("dist"),
         (None, Mode::File(_)) => PathBuf::from("dist"),
     };
+    let bundle = Bundle::of(&mode, &program, cmd.release);
+    bundle.check_output(&output)?;
+    bundle.prepare(&output)?;
     match nova_driver::build_program_wasm(program, &output)? {
         Outcome::Ok(dir) => {
+            bundle.finish(&dir)?;
             println!("built {}", dir.display());
             Ok(())
         }

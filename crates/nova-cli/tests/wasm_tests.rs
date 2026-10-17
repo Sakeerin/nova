@@ -34,14 +34,19 @@ fn nova_in(dir: &Path, args: &[&str]) -> Assert {
         "{}-home",
         dir.file_name().expect("a name").to_string_lossy()
     ));
-    let _ = std::fs::remove_dir_all(&home);
-    nova()
-        .current_dir(dir)
-        .env("NOVA_HOME", &home)
+    nova_at(dir, &home).args(args).assert()
+}
+
+/// `nova` in `dir`, with a fresh `NOVA_HOME` at `home`, no colour and no
+/// backtrace, to be given its arguments.
+fn nova_at(dir: &Path, home: &Path) -> Command {
+    let _ = std::fs::remove_dir_all(home);
+    let mut cmd = nova();
+    cmd.current_dir(dir)
+        .env("NOVA_HOME", home)
         .env("NO_COLOR", "1")
-        .env("RUST_BACKTRACE", "0")
-        .args(args)
-        .assert()
+        .env("RUST_BACKTRACE", "0");
+    cmd
 }
 
 fn stdout(a: &Assert) -> String {
@@ -557,21 +562,371 @@ fn a_project_builds_into_dist_at_its_root() {
     assert!(dir.join("dist").join("app.wasm").is_file());
 }
 
-/// `--release` names the LLVM backend, which WASM does not use.
+/// A program built from a single file gets the generated page, which has
+/// `#app`, no `assets/`, and a manifest named after the file (spec 4.4 §7).
 #[test]
-fn release_does_not_apply_to_wasm() {
-    let dir = fresh("release");
-    write(&dir, &[("main.nova", "fn main() { println(\"hi\") }\n")]);
-    let a = nova_in(
-        &dir,
-        &["build", "--target", "wasm", "--release", "main.nova"],
-    )
-    .failure();
+fn a_single_file_gets_the_generated_page_and_a_manifest() {
+    let dir = fresh("bundle-file");
+    write(&dir, &[("hello.nova", "fn main() { println(\"hi\") }\n")]);
+    nova_in(&dir, &["build", "--target", "wasm", "hello.nova"]).success();
+    let dist = dir.join("dist");
+    let page = std::fs::read_to_string(dist.join("index.html")).expect("index.html");
+    assert!(page.contains("<div id=\"app\"></div>"), "{page}");
+    assert!(!dist.join("assets").exists());
+    let manifest = std::fs::read_to_string(dist.join("manifest.json")).expect("manifest.json");
     assert!(
-        stderr(&a).contains("`--release` does not apply to `--target wasm`"),
+        manifest.starts_with(
+            "{\n  \"name\": \"hello\",\n  \"version\": null,\n  \"release\": false,\n  \"wasm_opt\": false,\n"
+        ),
+        "{manifest}"
+    );
+    assert_eq!(
+        manifest_files(&dist),
+        ["app.js", "app.wasm", "index.html", "package.json"]
+    );
+}
+
+/// The files `dist/manifest.json` lists, each checked against its size.
+fn manifest_files(dist: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(dist.join("manifest.json")).expect("manifest.json");
+    let manifest: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    let files = manifest["files"].as_object().expect("files");
+    for (path, size) in files {
+        let on_disk = std::fs::metadata(dist.join(path))
+            .expect("a listed file")
+            .len();
+        assert_eq!(size.as_u64(), Some(on_disk), "{path}");
+    }
+    files.keys().cloned().collect()
+}
+
+/// A project's own `index.html` is copied, and its `public/` becomes
+/// `assets/`, nested files included; on Unix, a link to a file inside
+/// `public/` is copied as the file, and a link to a directory, or to a file
+/// outside `public/`, is skipped. The manifest lists them all, and is the
+/// same after a second build; a file removed from `public/` is gone from
+/// `assets/` after the next build (spec 4.4 §7, §9.3).
+#[test]
+fn a_projects_own_page_and_public_go_into_dist() {
+    let dir = fresh("bundle-project");
+    let page = "<!doctype html>\n<title>mine</title>\n<div id=\"app\"></div>\n<script type=\"module\">import init from \"./app.js\"; init();</script>\n";
+    write(
+        &dir,
+        &[
+            (
+                "nova.toml",
+                "[package]\nname = \"site\"\nversion = \"1.2.3\"\nedition = \"2026\"\n",
+            ),
+            ("src/main.nova", "fn main() { println(\"hi\") }\n"),
+            ("index.html", page),
+            ("public/style.css", "body {}\n"),
+            ("public/img/logo.txt", "logo"),
+            ("secret.txt", "not public"),
+        ],
+    );
+    #[cfg(unix)]
+    for (target, link) in [
+        ("public", "public/loop"),
+        ("public/img/logo.txt", "public/logo-link.txt"),
+        ("secret.txt", "public/secret-link.txt"),
+    ] {
+        std::os::unix::fs::symlink(dir.join(target), dir.join(link)).expect("a link");
+    }
+    // Links already at names the build writes, symbolic and hard: no write
+    // goes through them.
+    #[cfg(unix)]
+    for (target, link) in [
+        ("index.html", "dist/index.html"),
+        ("secret.txt", "dist/manifest.json"),
+        ("secret.txt", "dist/app.js"),
+    ] {
+        std::fs::create_dir_all(dir.join("dist")).expect("dist");
+        std::os::unix::fs::symlink(dir.join(target), dir.join(link)).expect("a link");
+    }
+    #[cfg(unix)]
+    std::fs::hard_link(dir.join("secret.txt"), dir.join("dist/package.json")).expect("a hard link");
+    nova_in(&dir, &["build", "--target", "wasm"]).success();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("index.html")).unwrap(),
+        page
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("secret.txt")).unwrap(),
+        "not public"
+    );
+    let dist = dir.join("dist");
+    let read = |p: &str| std::fs::read_to_string(dist.join(p)).expect(p);
+    assert_eq!(read("index.html"), page);
+    assert_eq!(read("assets/style.css"), "body {}\n");
+    assert_eq!(read("assets/img/logo.txt"), "logo");
+    assert!(!dist.join("assets/loop").exists());
+    assert!(!dist.join("assets/secret-link.txt").exists());
+    let linked: &[&str] = if cfg!(unix) {
+        &["assets/logo-link.txt"]
+    } else {
+        &[]
+    };
+    for name in linked {
+        assert_eq!(read(name), "logo");
+    }
+    let manifest = read("manifest.json");
+    assert!(
+        manifest.starts_with(
+            "{\n  \"name\": \"site\",\n  \"version\": \"1.2.3\",\n  \"release\": false,\n  \"wasm_opt\": false,\n"
+        ),
+        "{manifest}"
+    );
+    let mut files = vec![
+        "app.js",
+        "app.wasm",
+        "assets/img/logo.txt",
+        "assets/style.css",
+        "index.html",
+        "package.json",
+    ];
+    files.extend(linked);
+    files.sort_unstable();
+    assert_eq!(manifest_files(&dist), files);
+    nova_in(&dir, &["build", "--target", "wasm"]).success();
+    assert_eq!(read("manifest.json"), manifest);
+    std::fs::remove_file(dir.join("public/style.css")).expect("remove a file");
+    nova_in(&dir, &["build", "--target", "wasm"]).success();
+    assert!(!dist.join("assets/style.css").exists());
+    assert!(!read("manifest.json").contains("style.css"));
+}
+
+/// A project with no `public/` leaves an `assets/` already in its output
+/// directory as it is, and its manifest does not list it: a build replaces
+/// `assets/` only when it copies a `public/` into it (spec 4.4 §7).
+#[test]
+fn an_assets_the_build_does_not_write_is_left_alone() {
+    let dir = fresh("bundle-own-assets");
+    write(
+        &dir,
+        &[
+            (
+                "nova.toml",
+                "[package]\nname = \"site\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            ),
+            ("src/main.nova", "fn main() { println(\"hi\") }\n"),
+            ("www/assets/photo.txt", "photo"),
+            ("www/about.html", "about"),
+        ],
+    );
+    nova_in(&dir, &["build", "--target", "wasm", "-o", "www"]).success();
+    let www = dir.join("www");
+    let read = |p: &str| std::fs::read_to_string(www.join(p)).expect(p);
+    assert_eq!(read("assets/photo.txt"), "photo");
+    assert_eq!(read("about.html"), "about");
+    assert_eq!(
+        manifest_files(&www),
+        ["app.js", "app.wasm", "index.html", "package.json"]
+    );
+}
+
+/// An output directory the copies would harm is refused before anything
+/// is written: the project's root, however spelled, one holding it, and one
+/// inside `public/`. The project's page and its own `assets/` stay.
+#[test]
+fn dist_may_not_hold_the_project_or_be_inside_public() {
+    // The project sits one level down, so `..` is this test's own
+    // directory: a build the guard let through writes there, and nowhere
+    // else.
+    let outer = fresh("bundle-refused");
+    let dir = outer.join("site");
+    write(
+        &dir,
+        &[
+            (
+                "nova.toml",
+                "[package]\nname = \"site\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            ),
+            ("src/main.nova", "fn main() { println(\"hi\") }\n"),
+            ("index.html", "mine"),
+            ("public/a.txt", "a"),
+            ("assets/own.txt", "own"),
+        ],
+    );
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("..", dir.join("uplink")).expect("a link");
+    let spellings: &[&str] = if cfg!(unix) {
+        &[".", "..", "nope/..", "src/..", "uplink"]
+    } else {
+        &[".", "..", "nope/..", "src/.."]
+    };
+    for out in spellings {
+        let a = nova_in(&dir, &["build", "--target", "wasm", "-o", out]).failure();
+        assert!(
+            stderr(&a).contains("the output directory holds the project"),
+            "{out}: {}",
+            stderr(&a)
+        );
+    }
+    for built in [
+        outer.join("app.wasm"),
+        outer.join("assets"),
+        dir.join("app.wasm"),
+    ] {
+        assert!(!built.exists(), "{}", built.display());
+    }
+    let a = nova_in(&dir, &["build", "--target", "wasm", "-o", "public/out"]).failure();
+    assert!(stderr(&a).contains("inside `public/`"), "{}", stderr(&a));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("index.html")).unwrap(),
+        "mine"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("assets/own.txt")).unwrap(),
+        "own"
+    );
+    assert!(!dir.join("public/out").exists());
+}
+
+/// A `public/` that is a link leading outside the project is not copied,
+/// and the build says so (spec 4.4 §7: a copy cannot leave the project).
+#[cfg(unix)]
+#[test]
+fn a_public_that_leads_outside_is_not_copied() {
+    let outer = fresh("bundle-public-outside");
+    let dir = outer.join("site");
+    write(
+        &outer,
+        &[
+            (
+                "site/nova.toml",
+                "[package]\nname = \"site\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            ),
+            ("site/src/main.nova", "fn main() { println(\"hi\") }\n"),
+            ("elsewhere/x.txt", "not the project's"),
+        ],
+    );
+    std::os::unix::fs::symlink(outer.join("elsewhere"), dir.join("public")).expect("a link");
+    let a = nova_in(&dir, &["build", "--target", "wasm"]).success();
+    assert!(
+        stderr(&a).contains("public/ leads outside the project; it is not copied"),
         "{}",
         stderr(&a)
     );
+    assert!(!dir.join("dist/assets").exists());
+    assert!(!std::fs::read_to_string(dir.join("dist/manifest.json"))
+        .expect("manifest.json")
+        .contains("x.txt"));
+}
+
+/// A stand-in for `wasm-opt`: it copies its input, the argument after
+/// `-Oz`, to its output, the one after `-o`, and prints its arguments.
+const WASM_OPT: &str = "fn main() { block_on(go()) }
+
+async fn go() {
+    let argv = args()
+    let mut line = \"wasm-opt:\"
+    let mut i = 1
+    while i < argv.len() {
+        match argv.get(i) {
+            Some(a) => line = \"${line} ${a}\"
+            None => {}
+        }
+        i = i + 1
+    }
+    println(line)
+    match argv.get(2) {
+        Some(input) => match argv.get(4) {
+            Some(output) => match read(input).await {
+                Ok(bytes) => {
+                    let _ = write(output, bytes).await
+                }
+                Err(e) => exit(2)
+            }
+            None => exit(2)
+        }
+        None => exit(2)
+    }
+}
+";
+
+/// `--release` runs `wasm-opt -Oz` when it is on `PATH`, says so in one
+/// line when it is not, and fails when it fails (spec 4.4 §7, §9.3).
+#[test]
+fn release_runs_wasm_opt_when_it_is_on_path() {
+    let dir = fresh("release");
+    write(
+        &dir,
+        &[
+            ("main.nova", "fn main() { println(\"hi\") }\n"),
+            ("standin/ok.nova", WASM_OPT),
+            ("standin/bad.nova", "fn main() { exit(3) }\n"),
+        ],
+    );
+    let exe = format!("wasm-opt{}", std::env::consts::EXE_SUFFIX);
+    for (name, bin) in [("ok", "bin-ok"), ("bad", "bin-bad")] {
+        let out = format!("{bin}/{exe}");
+        std::fs::create_dir_all(dir.join(bin)).expect("a bin directory");
+        nova_in(
+            &dir,
+            &["build", &format!("standin/{name}.nova"), "-o", &out],
+        )
+        .success();
+    }
+    let path_with = |bin: &str| {
+        let mut dirs = vec![dir.join(bin)];
+        dirs.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        std::env::join_paths(dirs).expect("a PATH")
+    };
+    let home = dir.with_file_name("nova-wasm-test-release-home");
+    let build = ["build", "--target", "wasm", "--release", "main.nova"];
+
+    // None on PATH: the build says so, and the manifest that none ran.
+    std::fs::create_dir_all(dir.join("bin-none")).expect("an empty directory");
+    let a = nova_at(&dir, &home)
+        .env("PATH", dir.join("bin-none"))
+        .args(build)
+        .assert()
+        .success();
+    assert!(
+        stderr(&a).contains("wasm-opt not found on PATH; app.wasm is not optimized"),
+        "{}",
+        stderr(&a)
+    );
+    let manifest = std::fs::read_to_string(dir.join("dist/manifest.json")).expect("manifest");
+    assert!(
+        manifest.contains("\"release\": true,\n  \"wasm_opt\": false,"),
+        "{manifest}"
+    );
+
+    // The stand-in: run with `-Oz` on `app.wasm`, in `dist/`.
+    let a = nova_at(&dir, &home)
+        .env("PATH", path_with("bin-ok"))
+        .args(build)
+        .assert()
+        .success();
+    assert!(
+        stdout(&a).contains("wasm-opt: -Oz app.wasm -o app.wasm\n"),
+        "{}",
+        stdout(&a)
+    );
+    let manifest = std::fs::read_to_string(dir.join("dist/manifest.json")).expect("manifest");
+    assert!(
+        manifest.contains("\"release\": true,\n  \"wasm_opt\": true,"),
+        "{manifest}"
+    );
+    let wasm = std::fs::read(dir.join("dist/app.wasm")).expect("app.wasm");
+    assert_eq!(&wasm[..4], b"\0asm");
+
+    // One that fails fails the build; without `--release` none runs.
+    let a = nova_at(&dir, &home)
+        .env("PATH", path_with("bin-bad"))
+        .args(build)
+        .assert()
+        .failure();
+    assert!(stderr(&a).contains("wasm-opt failed"), "{}", stderr(&a));
+    let a = nova_at(&dir, &home)
+        .env("PATH", path_with("bin-bad"))
+        .args(["build", "--target", "wasm", "main.nova"])
+        .assert()
+        .success();
+    assert!(!stderr(&a).contains("wasm-opt"), "{}", stderr(&a));
 }
 
 /// The gate: hello world prints under Node what its native build prints
@@ -1543,6 +1898,8 @@ mod gate {
         ui_memo,
         ui_render,
         ui_signal,
+        // `component` and `view { … }` (spec 4.4 §9.2).
+        ui_view,
     );
 
     /// The programs a test of their own in this module checks, by its name.
@@ -1848,6 +2205,82 @@ fn ui_the_builder_counter_counts_clicks() {
     }
     assert_eq!(live_after_each(&err).len(), 4, "{err}");
     assert_eq!(calls_after_each(&err), [1, 1, 1, 1], "{err}");
+}
+
+/// `examples/06-counter-spa`, built from its project into `dir/dist`, with
+/// `NOVA_HOME` beside `dir`.
+fn build_counter_spa(dir: &Path) -> PathBuf {
+    let dist = dir.join("dist");
+    let home = dir.with_file_name(format!(
+        "{}-home",
+        dir.file_name().expect("a name").to_string_lossy()
+    ));
+    nova_at(&repo_root().join("examples/06-counter-spa"), &home)
+        .args(["build", "--target", "wasm", "-o", &dist.to_string_lossy()])
+        .assert()
+        .success();
+    dist
+}
+
+/// The gate of 4.4 (spec
+/// `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`
+/// §9.4): `06-counter-spa` takes its own page, and under the fake DOM `+`
+/// three times and `-` once leave `Count: 2`, as it is and under stress,
+/// where each collection keeps the same handles and the two buttons'
+/// calls.
+#[test]
+fn the_counter_spa_counts_clicks() {
+    let page = std::fs::read_to_string(repo_root().join("examples/06-counter-spa/index.html"))
+        .expect("the example's page");
+    let dir = fresh("counter-spa");
+    let dist = build_counter_spa(&dir);
+    assert_eq!(
+        std::fs::read_to_string(dist.join("index.html")).expect("index.html"),
+        page
+    );
+    if node().is_none() {
+        return;
+    }
+    let tests = repo_root().join("tests/dom");
+    let expected = std::fs::read_to_string(tests.join("counter_spa.stdout"))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    for file in ["fake_dom.mjs", "counter_spa.mjs"] {
+        std::fs::copy(tests.join(file), dir.join(file)).expect("copy the harness");
+    }
+    for env in [&[][..], &STRESS[..]] {
+        let mut node = Command::new("node");
+        let a = node
+            .arg(dir.join("counter_spa.mjs"))
+            .envs(env.iter().copied())
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .success();
+        assert_eq!(stdout(&a), expected, "{}", stderr(&a));
+        if !env.is_empty() {
+            let err = stderr(&a);
+            let calls = calls_after_each(&err);
+            assert!(!calls.is_empty(), "{err}");
+            assert!(calls.iter().all(|&c| c == 2), "{err}");
+        }
+    }
+}
+
+/// The gate's size: `06-counter-spa`'s module and shim are under 50 KB
+/// gzipped, without `wasm-opt` (spec 4.4 §1, §9.4).
+#[test]
+fn the_counter_spa_is_under_50_kb_gzipped() {
+    use std::io::Write;
+    let dist = build_counter_spa(&fresh("counter-spa-size"));
+    let mut total = 0;
+    for name in ["app.wasm", "app.js"] {
+        let bytes = std::fs::read(dist.join(name)).expect("read a dist file");
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(&bytes).expect("compress");
+        total += gz.finish().expect("compress").len();
+    }
+    println!("06-counter-spa: {total} bytes gzipped");
+    assert!(total < 50 * 1024, "{total} bytes gzipped");
 }
 
 /// `show` and `for_each` rebuild their part of the page between their

@@ -1,16 +1,18 @@
 //! Semantic tokens: every name the index records, by what it means (spec
 //! `docs/superpowers/specs/2026-10-10-phase-3-4b-fixes-and-colour-design.md`
-//! §7).
+//! §7), and `component` and `view` where they are keywords (the 4.4 spec
+//! §6).
 
 use lsp_types as lsp;
-use nova_diagnostics::LineIndex;
+use nova_diagnostics::{FileId, LineIndex, Span};
 use nova_driver::Analysis;
+use nova_lexer::Token;
 use nova_resolver::{DefId, DefKind, Definitions, Index, Occurrence, Role, Target};
 
 use crate::analysis::Answer;
 
 /// The token types, in the legend's order (spec §7.1).
-const TYPES: [lsp::SemanticTokenType; 12] = [
+const TYPES: [lsp::SemanticTokenType; 13] = [
     lsp::SemanticTokenType::NAMESPACE,
     lsp::SemanticTokenType::TYPE,
     lsp::SemanticTokenType::STRUCT,
@@ -23,6 +25,7 @@ const TYPES: [lsp::SemanticTokenType; 12] = [
     lsp::SemanticTokenType::ENUM_MEMBER,
     lsp::SemanticTokenType::FUNCTION,
     lsp::SemanticTokenType::METHOD,
+    lsp::SemanticTokenType::KEYWORD,
 ];
 
 const NAMESPACE: u32 = 0;
@@ -37,6 +40,7 @@ const PROPERTY: u32 = 8;
 const ENUM_MEMBER: u32 = 9;
 const FUNCTION: u32 = 10;
 const METHOD: u32 = 11;
+const KEYWORD: u32 = 12;
 
 /// The modifiers' bits, in the legend's order (spec §7.1).
 const DECLARATION: u32 = 1;
@@ -93,7 +97,47 @@ pub fn tokens(answer: &Answer) -> Vec<lsp::SemanticToken> {
         let (ty, mods) = classify(a, defs, index, o);
         spans.push((o.span.start, o.span.end, ty, mods));
     }
+    for (start, end) in keywords(text, answer.file, defs, index) {
+        spans.push((start, end, KEYWORD, 0));
+    }
+    spans.sort_by_key(|s| s.0);
     encode(text, &spans)
+}
+
+/// Where `component` and `view` are keywords in `text` (the 4.4 spec §6),
+/// which the extension's grammar cannot tell: a `component` before the
+/// name a function declares and its `(`, and a `view` before `{` that is
+/// no name the index knows, as it is in an `if` head.
+fn keywords(text: &str, file: FileId, defs: &Definitions, index: &Index) -> Vec<(u32, u32)> {
+    let named = |span: Span| index.occurrences.iter().any(|o| o.span == span);
+    let declares_fn = |span: Span| {
+        index.occurrences.iter().any(|o| {
+            o.span == span
+                && o.role == Role::Declaration
+                && matches!(o.target, Target::Def(id) if matches!(defs.def(id).kind, DefKind::Fn { .. }))
+        })
+    };
+    let (tokens, _) = nova_lexer::lex(text, file);
+    let mut out = Vec::new();
+    for (i, t) in tokens.iter().enumerate() {
+        let Token::Ident(word) = &t.value else {
+            continue;
+        };
+        let next = |k: usize| tokens.get(i + k).map(|n| &n.value);
+        let keyword = match word.as_str() {
+            "component" => {
+                matches!(next(1), Some(Token::Ident(_)))
+                    && matches!(next(2), Some(Token::LParen))
+                    && declares_fn(tokens[i + 1].span)
+            }
+            "view" => matches!(next(1), Some(Token::LBrace)) && !named(t.span),
+            _ => false,
+        };
+        if keyword {
+            out.push((t.span.start, t.span.end));
+        }
+    }
+    out
 }
 
 /// A name's token type and modifiers (spec §7.2).
@@ -220,19 +264,24 @@ mod tests {
             .collect()
     }
 
-    /// The token at the `n`th whole `word` of `text`: its type and modifiers.
+    /// Where the `n`th whole `word` of `text` starts.
     #[track_caller]
-    fn token(found: &Decoded, text: &str, word: &str, n: usize) -> (String, Vec<String>) {
+    fn token_offset(text: &str, word: &str, n: usize) -> usize {
         let ident = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-        let start = text
-            .match_indices(word)
+        text.match_indices(word)
             .map(|(i, _)| i)
             .filter(|&i| {
                 !ident(text[..i].chars().next_back())
                     && !ident(text[i + word.len()..].chars().next())
             })
             .nth(n)
-            .unwrap_or_else(|| panic!("no `{word}` number {n}"));
+            .unwrap_or_else(|| panic!("no `{word}` number {n}"))
+    }
+
+    /// The token at the `n`th whole `word` of `text`: its type and modifiers.
+    #[track_caller]
+    fn token(found: &Decoded, text: &str, word: &str, n: usize) -> (String, Vec<String>) {
+        let start = token_offset(text, word, n);
         found
             .iter()
             .find(|t| t.2 == start)
@@ -306,6 +355,47 @@ mod tests {
         // `self` is the grammar's.
         let at_self = text.find("self").unwrap();
         assert!(found.iter().all(|t| t.2 != at_self), "{found:?}");
+    }
+
+    /// `component` and `view` are keywords where the parser read them as
+    /// such, and names elsewhere; an element's name is its builder, a
+    /// function of std (the 4.4 spec §6).
+    #[test]
+    fn component_and_view_are_keywords_only_where_they_are() {
+        let text = "import ui\nimport ui::html::{div}\n\ncomponent Card() {\n    view {\n        div(class: \"c\") { text(\"hi\") }\n    }\n}\n\nfn main() {\n    let view = true\n    if view {\n        println(render_to_string(Card))\n    }\n    let component = 1\n    let c = component\n    println(\"${c}\")\n}\n";
+        let a = answer("keywords", &[("main.nova", text)]);
+        let found = decoded(text, &tokens(&a));
+        assert_eq!(token(&found, text, "component", 0), of("keyword", &[]));
+        assert_eq!(token(&found, text, "view", 0), of("keyword", &[]));
+        assert_eq!(
+            token(&found, text, "div", 1),
+            of("function", &["defaultLibrary"])
+        );
+        assert_eq!(
+            token(&found, text, "text", 0),
+            of("function", &["defaultLibrary"])
+        );
+        assert_eq!(
+            token(&found, text, "view", 1),
+            of("variable", &["declaration"])
+        );
+        assert_eq!(token(&found, text, "view", 2), of("variable", &[]));
+        assert_eq!(
+            token(&found, text, "component", 1),
+            of("variable", &["declaration"])
+        );
+        // A name before a call, as line breaks are skipped: `component`
+        // then `println(`, which declares nothing.
+        assert_eq!(token(&found, text, "component", 2), of("variable", &[]));
+        // One token per name: the variable's, and no keyword's beside it.
+        for (word, n) in [("view", 2), ("component", 2)] {
+            let at = token_offset(text, word, n);
+            assert_eq!(found.iter().filter(|t| t.2 == at).count(), 1, "{word}");
+        }
+        assert!(
+            found.iter().all(|t| t.2 != text.find("class").unwrap()),
+            "{found:?}"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §5.6,
 //! §6).
 
-use nova_ast::expr::{AssignOp, BinOp, Expr, FieldInit, MatchArm, UnOp};
+use nova_ast::expr::{AssignOp, BinOp, Expr, FieldInit, MatchArm, UnOp, ViewArg, ViewNode};
 use nova_ast::item::Param;
 use nova_ast::ty::Type;
 use nova_ast::{Block, Path, Stmt};
@@ -142,6 +142,7 @@ impl<'s, 't> Printer<'s, 't> {
                 text(format!(" {} ", assign_op(*op))),
                 self.expr(rhs),
             ]),
+            Expr::View(children) => self.view(children, span),
         }
     }
 
@@ -501,8 +502,7 @@ impl<'s, 't> Printer<'s, 't> {
     ) -> Doc {
         let mut parts = Vec::new();
         if params.is_empty() {
-            // `||` is one token, which no closure starts with (spec §5.3).
-            parts.push(text("| |"));
+            parts.push(text("||"));
         } else {
             parts.push(text("|"));
             for (i, p) in params.iter().enumerate() {
@@ -519,6 +519,110 @@ impl<'s, 't> Printer<'s, 't> {
         }
         parts.push(text(" "));
         parts.push(self.body(body));
+        group(concat(parts))
+    }
+
+    /// `view { … }`: each child on its own line, indented (the 4.4 spec
+    /// §5). `span` is the view's, from `view` to its `}`.
+    fn view(&mut self, children: &[Spanned<ViewNode>], span: Span) -> Doc {
+        let open = self
+            .src
+            .find_from(span.start, &Token::LBrace)
+            .unwrap_or(span.start);
+        let lead = self.leading(open);
+        let close = span.end - 1;
+        if children.is_empty() && !self.has_comment_before(close) {
+            return concat(vec![text("view "), lead, text("{}")]);
+        }
+        let body = self.view_children(children, open, close);
+        concat(vec![text("view "), lead, body])
+    }
+
+    /// The `{ … }` of a view or an element, from its `{` at `open` to its
+    /// `}` at `close`, one child per line. A child that would continue the
+    /// one before it gets `;` before it, as a statement does (§5.6).
+    fn view_children(&mut self, children: &[Spanned<ViewNode>], open: u32, close: u32) -> Doc {
+        let after_open = self.trailing(open + 1);
+        let mut v = Vertical::new(open + 1, Blank::Keep);
+        for (i, child) in children.iter().enumerate() {
+            let sep = children
+                .get(i + 1)
+                .filter(|n| CONTINUES.contains(self.src.token_from(n.span.start)))
+                .map(|_| ";");
+            let end = self
+                .src
+                .token_end(child.span.end, &Token::Semicolon)
+                .unwrap_or(child.span.end);
+            self.vertical_item(&mut v, child.span.start, end, sep, |p| p.view_node(child));
+        }
+        let inner = self.vertical_finish(v, close);
+        concat(vec![
+            text("{"),
+            after_open,
+            nest(concat(vec![Doc::HardLine, inner])),
+            Doc::HardLine,
+            text("}"),
+        ])
+    }
+
+    fn view_node(&mut self, n: &Spanned<ViewNode>) -> Doc {
+        match &n.value {
+            ViewNode::Expr(e) => self.expr(e),
+            ViewNode::Element {
+                name,
+                args,
+                children,
+            } => self.element(name, args, children.as_deref(), n.span),
+        }
+    }
+
+    /// An element, `name(args) { … }`, whose span is `span`. Its one child
+    /// may share its line when no comment is inside; its arguments break as
+    /// a call's do (the 4.4 spec §5).
+    fn element(
+        &mut self,
+        name: &Spanned<String>,
+        args: &[ViewArg],
+        children: Option<&[Spanned<ViewNode>]>,
+        span: Span,
+    ) -> Doc {
+        let mut parts = vec![self.name(name)];
+        let mut after = name.span.end;
+        if let Some(last) = args.last() {
+            let end = view_arg_extent(last).1;
+            let close = self.src.find_from(end, &Token::RParen).unwrap_or(end);
+            parts.push(group(self.comma_list(
+                List::PARENS,
+                args,
+                |_, a| view_arg_extent(a),
+                |p, a| match a {
+                    ViewArg::Named { name, value } => {
+                        concat(vec![p.name(name), text(": "), p.expr(value)])
+                    }
+                    ViewArg::Positional(e) => p.expr(e),
+                },
+                close,
+            )));
+            after = close + 1;
+        }
+        if let Some(children) = children {
+            let open = self.src.find_from(after, &Token::LBrace).unwrap_or(after);
+            let close = span.end - 1;
+            parts.push(text(" "));
+            parts.push(self.leading(open));
+            let commented = self.has_comment_before(close);
+            if children.is_empty() && !commented {
+                parts.push(text("{}"));
+            } else if children.len() == 1 && !commented {
+                let d = self.view_node(&children[0]);
+                parts.push(text("{"));
+                parts.push(nest(concat(vec![Doc::Line, d])));
+                parts.push(Doc::Line);
+                parts.push(text("}"));
+            } else {
+                parts.push(self.view_children(children, open, close));
+            }
+        }
         group(concat(parts))
     }
 
@@ -611,6 +715,14 @@ impl<'s, 't> Printer<'s, 't> {
             None => text(keyword),
             Some(v) => concat(vec![text(format!("{keyword} ")), self.expr(v)]),
         }
+    }
+}
+
+/// Where an element's argument starts and ends in the source.
+fn view_arg_extent(a: &ViewArg) -> (u32, u32) {
+    match a {
+        ViewArg::Named { name, value } => (name.span.start, value.span.end),
+        ViewArg::Positional(e) => (e.span.start, e.span.end),
     }
 }
 

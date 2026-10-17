@@ -5,8 +5,7 @@
 // has run, does nothing, though another timer has its entry by then; and a
 // timeout too long for JS, which must not fire at once. Each late line's
 // timer is set by the line before it, and the harness waits until the page
-// says the last has run, so the order holds however slow the machine. (`| |`
-// is a closure with no parameters: `||` comes with 4.4.)
+// says the last has run, so the order holds however slow the machine.
 
 import dom
 
@@ -15,15 +14,15 @@ record Ticks { n: Int, timer: Option<Timer> }
 fn main() {
     // Over 2^31 - 1 ms, which JS would fire at once; the last timeout
     // clears it.
-    let far = set_timeout(3000000000, | | println("far"))
-    let first = set_timeout(1, | | println("timeout 1"))
-    let never = set_timeout(10, | | println("never"))
+    let far = set_timeout(3000000000, || println("far"))
+    let first = set_timeout(1, || println("timeout 1"))
+    let never = set_timeout(10, || println("never"))
     never.clear()
     let mut ticks = Ticks { n: 0, timer: None }
     ticks.timer = Some(
         set_interval(
             40,
-            | | {
+            || {
                 ticks.n = ticks.n + 1
                 println("tick ${ticks.n}")
                 if ticks.n == 3 {
@@ -33,13 +32,13 @@ fn main() {
                     }
                     let _ = set_timeout(
                         20,
-                        | | {
+                        || {
                             // This timeout takes the entry `first` left when
                             // it ran, so clearing `first` now must release
                             // nothing either.
                             let _ = set_timeout(
                                 1,
-                                | | {
+                                || {
                                     println("timeout after the last")
                                     body().set_attribute("data-done", "yes")
                                 },

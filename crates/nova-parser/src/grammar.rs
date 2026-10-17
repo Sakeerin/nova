@@ -5,7 +5,9 @@
 //! (assignment → or → and → … → postfix), matching the spec table exactly.
 
 use nova_ast::{
-    expr::{AssignOp, BinOp, Expr, FieldInit, Literal, MatchArm, StringPart, UnOp},
+    expr::{
+        AssignOp, BinOp, Expr, FieldInit, Literal, MatchArm, StringPart, UnOp, ViewArg, ViewNode,
+    },
     item::{
         AssocTypeBinding, Attribute, ConstDecl, ExternBlock, ExternItem, Function, FunctionSig,
         ImplBlock, Import, ImportKind, Module, Param, Record, RecordField, TraitDecl, TraitItem,
@@ -148,6 +150,9 @@ impl<'a> Parser<'a> {
     /// or a closing delimiter. Used at item level for error recovery.
     fn sync_to_item_boundary(&mut self) {
         while !self.is_at_end() {
+            if self.component_at(self.pos) {
+                break;
+            }
             match self.peek() {
                 Token::Fn
                 | Token::Pub
@@ -234,9 +239,45 @@ impl<'a> Parser<'a> {
             .is_some_and(|t| std::mem::discriminant(&t.value) == std::mem::discriminant(tok))
     }
 
+    /// Whether the tokens at `i` are `component Name (`, where `component` is
+    /// a keyword (RFC 0001); anywhere else it is an identifier.
+    fn component_at(&self, i: usize) -> bool {
+        let at = |k: usize| self.tokens.get(k).map(|t| &t.value);
+        if !(matches!(at(i), Some(Token::Ident(w)) if w == "component")
+            && matches!(at(i + 1), Some(Token::Ident(_)))
+            && matches!(at(i + 2), Some(Token::LParen)))
+        {
+            return false;
+        }
+        // Its parameters' `)`, then its body's `{`, or a `->` that
+        // `parse_component` refuses. Line breaks are skipped, so without
+        // this a statement `component`, a variable, followed by a call
+        // `f(x)` on the next line would read as an item.
+        let mut depth = 0usize;
+        let mut k = i + 2;
+        loop {
+            match at(k) {
+                Some(Token::LParen) => depth += 1,
+                Some(Token::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                None | Some(Token::Eof) => return false,
+                _ => {}
+            }
+            k += 1;
+        }
+        matches!(at(k + 1), Some(Token::LBrace | Token::Arrow))
+    }
+
     /// Whether the token at `i` starts an item that may appear inside a block.
     fn is_item_start_at(&self, i: usize) -> bool {
         let at = |k: usize| self.tokens.get(k).map(|t| &t.value);
+        if self.component_at(i) || (matches!(at(i), Some(Token::Pub)) && self.component_at(i + 1)) {
+            return true;
+        }
         matches!(
             at(i),
             Some(
@@ -356,11 +397,13 @@ impl<'a> Parser<'a> {
     /// §3.2). Only the tokens the failed attempt consumed are read.
     fn note_dropped_item(&mut self, start: usize) {
         let consumed = &self.tokens[start..self.pos.min(self.tokens.len())];
-        let keyword = consumed.iter().position(|t| {
+        let keyword = consumed.iter().enumerate().position(|(k, t)| {
             matches!(
                 t.value,
                 Token::Fn | Token::Record | Token::Type | Token::Trait | Token::Const
-            )
+            ) || (matches!(&t.value, Token::Ident(w) if w == "component")
+                && matches!(consumed.get(k + 1).map(|n| &n.value), Some(Token::Ident(_)))
+                && matches!(consumed.get(k + 2).map(|n| &n.value), Some(Token::LParen)))
         });
         if let Some(k) = keyword {
             if let Some(Token::Ident(name)) = consumed.get(k + 1).map(|t| &t.value) {
@@ -479,6 +522,12 @@ impl<'a> Parser<'a> {
                 e.docs = docs;
                 Item::Extern(e)
             }
+            Token::Ident(_) if self.component_at(self.pos) => {
+                let mut func = self.parse_component(vis)?;
+                func.attrs = attrs;
+                func.docs = docs;
+                Item::Function(func)
+            }
             _ => {
                 let span = self.peek_span();
                 if let Some(first) = docs.first() {
@@ -540,11 +589,44 @@ impl<'a> Parser<'a> {
             attrs: Vec::new(),
             vis,
             is_async,
+            is_component: false,
             name,
             generics,
             params,
             return_ty,
             where_clause,
+            body,
+        })
+    }
+
+    /// `component Name(params) { body }` (RFC 0001): a function returning
+    /// `std/ui`'s `View`, with no type parameters and no written return type.
+    fn parse_component(&mut self, vis: Visibility) -> Option<Function> {
+        self.advance(); // `component`
+        let name = self.parse_ident("component name")?;
+        self.expect(&Token::LParen, "component parameters")?;
+        let params = self.parse_params();
+        self.expect(&Token::RParen, "component parameters")?;
+        if let Some(arrow) = self.eat(&Token::Arrow) {
+            self.errors.push(ParseError::Custom {
+                message: "a component returns a `View`, which it does not write".into(),
+                span: arrow.span,
+            });
+            // The type is read and dropped, so that the body still parses.
+            self.parse_type("return type")?;
+        }
+        let body = self.parse_block("component body")?;
+        Some(Function {
+            docs: Vec::new(),
+            attrs: Vec::new(),
+            vis,
+            is_async: false,
+            is_component: true,
+            name,
+            generics: Vec::new(),
+            params,
+            return_ty: None,
+            where_clause: Vec::new(),
             body,
         })
     }
@@ -1786,8 +1868,18 @@ impl<'a> Parser<'a> {
 
     fn parse_postfix(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
-        let mut expr = self.parse_atom(ctx)?;
+        let expr = self.parse_atom(ctx)?;
+        self.parse_postfix_from(start, expr, ctx)
+    }
 
+    /// The calls, indexes, fields, `.await`s and `?`s after `expr`, which
+    /// began at `start`.
+    fn parse_postfix_from(
+        &mut self,
+        start: Span,
+        mut expr: Spanned<Expr>,
+        ctx: &str,
+    ) -> Option<Spanned<Expr>> {
         loop {
             let cur_span = expr.span;
             match self.peek().clone() {
@@ -2085,8 +2177,20 @@ impl<'a> Parser<'a> {
                 Some(Spanned::new(Expr::Continue, start))
             }
 
-            // Closure: |params| body
-            Token::Pipe => self.parse_closure(ctx),
+            // Closure: |params| body, or `||` with none (RFC 0001).
+            Token::Pipe | Token::PipePipe => self.parse_closure(ctx),
+
+            // `view { … }`, where `view` is a keyword (RFC 0001).
+            Token::Ident(w)
+                if w == "view"
+                    && !self.no_struct_literal
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.value),
+                        Some(Token::LBrace)
+                    ) =>
+            {
+                self.parse_view()
+            }
 
             // Path or record literal
             Token::Ident(_) | Token::SelfLower | Token::SelfUpper => {
@@ -2243,8 +2347,30 @@ impl<'a> Parser<'a> {
 
     fn parse_closure(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
-        self.expect(&Token::Pipe, "closure")?;
         let mut params = Vec::new();
+        if self.eat(&Token::PipePipe).is_none() {
+            self.expect(&Token::Pipe, "closure")?;
+            self.parse_closure_params(&mut params, ctx)?;
+        }
+        let ret = if self.eat(&Token::Arrow).is_some() {
+            Some(self.parse_type(ctx)?)
+        } else {
+            None
+        };
+        let body = self.parse_expr(ctx)?;
+        let span = start.merge(body.span);
+        Some(Spanned::new(
+            Expr::Closure {
+                params,
+                ret,
+                body: Box::new(body),
+            },
+            span,
+        ))
+    }
+
+    /// A closure's parameters, after its `|`, up to and with its closing `|`.
+    fn parse_closure_params(&mut self, params: &mut Vec<Param>, ctx: &str) -> Option<()> {
         while !self.check(&Token::Pipe) && !self.is_at_end() {
             if self.reject_docs() {
                 continue;
@@ -2264,21 +2390,163 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&Token::Pipe, "closure parameters end")?;
-        let ret = if self.eat(&Token::Arrow).is_some() {
-            Some(self.parse_type(ctx)?)
-        } else {
-            None
-        };
-        let body = self.parse_expr(ctx)?;
-        let span = start.merge(body.span);
-        Some(Spanned::new(
-            Expr::Closure {
-                params,
-                ret,
-                body: Box::new(body),
-            },
-            span,
-        ))
+        Some(())
+    }
+
+    /// The span of the token just consumed, or `fallback` at the start.
+    fn prev_span_or(&self, fallback: Span) -> Span {
+        self.tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|s| s.span)
+            .unwrap_or(fallback)
+    }
+
+    /// `view { child* }` (RFC 0001), at `view`.
+    fn parse_view(&mut self) -> Option<Spanned<Expr>> {
+        let start = self.peek_span();
+        self.advance(); // `view`
+        let children = self.parse_view_children()?;
+        let span = start.merge(self.prev_span_or(start));
+        Some(Spanned::new(Expr::View(children), span))
+    }
+
+    /// `{ child* }`, the children of a `view` or an element. A `{` inside is
+    /// an element's or a block's again, whatever context the view is in.
+    fn parse_view_children(&mut self) -> Option<Vec<Spanned<ViewNode>>> {
+        self.expect(&Token::LBrace, "view children")?;
+        let saved = std::mem::replace(&mut self.no_struct_literal, false);
+        let mut children = Vec::new();
+        while !self.check(&Token::RBrace) && !self.is_at_end() {
+            // A `;` may end a child, as one ends a statement, so that the
+            // next can start with `(`, `[` or `{`.
+            if self.reject_docs() || self.eat(&Token::Semicolon).is_some() {
+                continue;
+            }
+            match self.parse_view_child() {
+                Some(child) => children.push(child),
+                None => {
+                    self.no_struct_literal = saved;
+                    return None;
+                }
+            }
+        }
+        self.no_struct_literal = saved;
+        self.expect(&Token::RBrace, "view children")?;
+        Some(children)
+    }
+
+    /// One child of a view: an element, or a postfix expression.
+    fn parse_view_child(&mut self) -> Option<Spanned<ViewNode>> {
+        let start = self.peek_span();
+        if let Token::Ident(name) = self.peek().clone() {
+            let next = self.tokens.get(self.pos + 1).map(|t| t.value.clone());
+            if name != "view" && matches!(next, Some(Token::LBrace)) {
+                let name = Spanned::new(name, start);
+                self.advance();
+                let children = self.parse_view_children()?;
+                let span = start.merge(self.prev_span_or(start));
+                return Some(Spanned::new(
+                    ViewNode::Element {
+                        name,
+                        args: Vec::new(),
+                        children: Some(children),
+                    },
+                    span,
+                ));
+            }
+            if matches!(next, Some(Token::LParen)) {
+                let name = Spanned::new(name, start);
+                self.advance(); // the name
+                self.advance(); // `(`
+                let args = self.parse_view_args()?;
+                let named = args.iter().any(|a| matches!(a, ViewArg::Named { .. }));
+                if self.check(&Token::LBrace) {
+                    let children = self.parse_view_children()?;
+                    let span = start.merge(self.prev_span_or(start));
+                    return Some(Spanned::new(
+                        ViewNode::Element {
+                            name,
+                            args,
+                            children: Some(children),
+                        },
+                        span,
+                    ));
+                }
+                let span = start.merge(self.prev_span_or(start));
+                if named {
+                    return Some(Spanned::new(
+                        ViewNode::Element {
+                            name,
+                            args,
+                            children: None,
+                        },
+                        span,
+                    ));
+                }
+                // Positional arguments alone and no block: an ordinary call.
+                let args = args
+                    .into_iter()
+                    .map(|a| match a {
+                        ViewArg::Positional(e) => e,
+                        ViewArg::Named { value, .. } => value,
+                    })
+                    .collect();
+                let callee = Spanned::new(Expr::Path(Path::single(name.clone())), name.span);
+                let call = Spanned::new(
+                    Expr::Call {
+                        callee: Box::new(callee),
+                        args,
+                    },
+                    span,
+                );
+                let expr = self.parse_postfix_from(start, call, "view child")?;
+                let span = expr.span;
+                return Some(Spanned::new(ViewNode::Expr(expr), span));
+            }
+        }
+        let expr = self.parse_postfix("view child")?;
+        let span = expr.span;
+        Some(Spanned::new(ViewNode::Expr(expr), span))
+    }
+
+    /// An element's arguments, after its `(`, up to and with its `)`:
+    /// `name: value` or an expression, separated by commas.
+    fn parse_view_args(&mut self) -> Option<Vec<ViewArg>> {
+        let mut args = Vec::new();
+        while !self.check(&Token::RParen) && !self.is_at_end() {
+            let colon_next = matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.value),
+                Some(Token::Colon)
+            );
+            if let (Some(word), true) = (self.arg_name(), colon_next) {
+                let name = Spanned::new(word, self.peek_span());
+                self.advance(); // the name
+                self.advance(); // `:`
+                let value = self.parse_expr("element argument")?;
+                args.push(ViewArg::Named { name, value });
+            } else {
+                args.push(ViewArg::Positional(self.parse_expr("element argument")?));
+            }
+            if self.eat(&Token::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen, "element arguments")?;
+        Some(args)
+    }
+
+    /// The word at the cursor, if it can name an element's argument: an
+    /// identifier, or a keyword such as `type` or `for`.
+    fn arg_name(&self) -> Option<String> {
+        match self.peek() {
+            Token::Ident(w) => Some(w.clone()),
+            other => {
+                let word = other.description().trim_matches('`');
+                nova_lexer::KEYWORDS
+                    .contains(&word)
+                    .then(|| word.to_string())
+            }
+        }
     }
 
     fn parse_record_literal(&mut self, path: Path, start: Span) -> Option<Spanned<Expr>> {

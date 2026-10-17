@@ -120,6 +120,37 @@ pub enum Expr {
 
     /// A string with interpolated expressions: `"Hello, ${name}!"`.
     StringInterp(Vec<StringPart>),
+
+    /// `view { … }`: a tree of elements, text and views, which the type
+    /// checker desugars into `std/ui`'s calls (RFC 0001). It holds the
+    /// children as written; the type checker requires exactly one.
+    View(Vec<Spanned<ViewNode>>),
+}
+
+/// A child of `view { … }` (RFC 0001).
+#[derive(Debug, Clone)]
+pub enum ViewNode {
+    /// `name(args) { children }`: an element, built by the function `name`.
+    /// `children` is `None` when no trailing block follows.
+    Element {
+        name: Spanned<String>,
+        args: Vec<ViewArg>,
+        children: Option<Vec<Spanned<ViewNode>>>,
+    },
+    /// Any other child: `text(e)`, or an expression whose value is a `View`.
+    Expr(Spanned<Expr>),
+}
+
+/// An argument of an element in `view { … }`.
+#[derive(Debug, Clone)]
+pub enum ViewArg {
+    /// `name: value`, an attribute, a property or an event's handler.
+    Named {
+        name: Spanned<String>,
+        value: Spanned<Expr>,
+    },
+    /// An `Attr` expression, used as it is.
+    Positional(Spanned<Expr>),
 }
 
 /// A segment of a string-interpolation expression.

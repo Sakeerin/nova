@@ -4,7 +4,7 @@ import ui
 import ui::html::{element, text}
 
 fn main() {
-    println(render_to_string(| | element("my-tag", [], [text("fine")])))
-    println(render_to_string(| | element("p onclick=x", [], [])))
+    println(render_to_string(|| element("my-tag", [], [text("fine")])))
+    println(render_to_string(|| element("p onclick=x", [], [])))
     println("not reached")
 }
