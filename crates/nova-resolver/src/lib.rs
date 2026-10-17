@@ -899,6 +899,22 @@ builtins! {
     /// after flushing stdout, and never returns. Runtime symbol
     /// `nova_rt_process_exit`. Std-only.
     ProcessExit,
+    /// `ui_state_present() -> Bool` — whether `std/ui` has stored its state
+    /// for this thread, or this page (spec
+    /// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
+    /// §4). Runtime symbol `nova_rt_ui_state_present`; on WASM, `std/rt`'s
+    /// `rt_ui_state_present`. Std-only.
+    UiStatePresent,
+    /// `ui_state_load<T>() -> T` — the state [`Builtin::UiStateStore`]
+    /// stored. `T` is the caller's first type parameter, as for
+    /// [`Builtin::TaskOutput`]; `std/ui` calls it with its own record.
+    /// Runtime symbol `nova_rt_ui_state_load`. Std-only.
+    UiStateLoad,
+    /// `ui_state_store<T>(state: T)` — keep `state`, a record, for the
+    /// thread or the page: natively a collector root from then on, on WASM
+    /// in `std/rt`'s state word 104, which the collector marks. Runtime
+    /// symbol `nova_rt_ui_state_store`. Std-only.
+    UiStateStore,
     /// `mem_load8(addr: Int) -> Int` — the byte at `addr`, zero-extended.
     /// `std/rt`, the runtime of a WASM build, reads memory through this and
     /// the eight builtins after it (spec
@@ -1046,6 +1062,9 @@ impl Builtin {
             Builtin::ProcessArgCount => "process_arg_count",
             Builtin::ProcessArg => "process_arg",
             Builtin::ProcessExit => "process_exit",
+            Builtin::UiStatePresent => "ui_state_present",
+            Builtin::UiStateLoad => "ui_state_load",
+            Builtin::UiStateStore => "ui_state_store",
             Builtin::MemLoad8 => "mem_load8",
             Builtin::MemStore8 => "mem_store8",
             Builtin::MemLoad64 => "mem_load64",
@@ -1086,7 +1105,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 81] = [
+    pub const STD_ONLY: [Builtin; 84] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1168,6 +1187,9 @@ impl Builtin {
         Builtin::ProcessArgCount,
         Builtin::ProcessArg,
         Builtin::ProcessExit,
+        Builtin::UiStatePresent,
+        Builtin::UiStateLoad,
+        Builtin::UiStateStore,
     ];
 
     /// Builtins seeded into an std module's scope only when the target is
