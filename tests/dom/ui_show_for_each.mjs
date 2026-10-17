@@ -1,5 +1,5 @@
-// Toggle the panel on and off, add rows, set the same rows again, and click
-// a row, a turn apart, printing the page after each.
+// Toggle the panel on and off, add rows, set the same rows again, click a
+// row, and remove every row, a turn apart, printing the page after each.
 import { install } from "./fake_dom.mjs";
 install();
 const app = document.createElement("div");
@@ -17,3 +17,6 @@ for (const step of ["toggle", "more", "more", "again", "toggle"]) {
 }
 document.querySelectorAll("#list li")[2].click();
 await turn();
+document.getElementById("none").click();
+await turn();
+show("none");

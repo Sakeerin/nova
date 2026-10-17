@@ -17,7 +17,10 @@
 //! The state behind all of this is the thread's, or the page's on WASM, and
 //! lives as long as it does. A value read from a signal is the signal's own:
 //! changing a record read from one changes the signal without telling
-//! anyone, and `set` or `update` is how to tell.
+//! anyone, and `set` or `update` is how to tell. A `Signal`'s fields are
+//! reachable, as every record's are: its `val` is the value, written without
+//! telling anyone, and its `src` holds `std/ui`'s own records, which a
+//! program must leave alone.
 //!
 //! A signal, an effect that reads it, and a view rendered to HTML:
 //!
@@ -68,6 +71,9 @@ record Owner {
     kind: Int,
     state: Int,
     disposed: Bool,
+    // The owner that made it, and how many times it has run.
+    parent: Option<Owner>,
+    runs: Int,
     // What a computation runs: for a memo, it also stores the value.
     run: fn(),
     // What it owns: what it made on its last run, and its cleanups.
@@ -87,9 +93,10 @@ record Source {
     memo: Option<Owner>,
 }
 
-// An `on_mount` callback waiting for its nodes, and the owner it was added
-// in, which is disposed when its nodes are gone before they were in the page.
-record Mounted { owner: Option<Owner>, f: fn() }
+// An `on_mount` callback waiting for its nodes, the owner it was added in,
+// and that owner's run then: when the owner is disposed or has run again,
+// its nodes are gone before they were in the page.
+record Mounted { owner: Option<Owner>, run: Int, f: fn() }
 
 // The state of the thread's or the page's reactivity (spec §4): what is
 // running and who owns what it makes, the effects waiting to run, and the
@@ -147,6 +154,8 @@ fn new_owner(kind: Int, run: fn()) -> Owner {
         kind: kind,
         state: CLEAN,
         disposed: false,
+        parent: None,
+        runs: 0,
         run: run,
         children: Vec::new(),
         cleanups: Vec::new(),
@@ -163,12 +172,19 @@ fn at<T>(v: Vec<T>, i: Int) -> T {
     }
 }
 
-// Make `o` a child of the current owner, if there is one.
+// Make `o` a child of the current owner, if there is one. Made under an
+// owner already disposed, `o` is disposed too, and never runs.
 fn adopt(o: Owner) {
     match ui().owner {
         Some(p) => {
-            let mut kids = p.children
-            kids.push(o)
+            let mut m = o
+            m.parent = Some(p)
+            if p.disposed {
+                m.disposed = true
+            } else {
+                let mut kids = p.children
+                kids.push(o)
+            }
         }
         None => {}
     }
@@ -190,10 +206,11 @@ fn with_context<T>(owner: Option<Owner>, listener: Option<Owner>, f: fn() -> T) 
 // Run `f` with no listener: what it reads subscribes nothing.
 fn untracked<T>(f: fn() -> T) -> T { with_context(ui().owner, None, f) }
 
-// Subscribe the current listener to `src`, once.
+// Subscribe the current listener to `src`, once, unless it is disposed.
 fn track(src: Source) {
     match ui().listener {
         Some(l) => {
+            if l.disposed { return }
             let mut i = 0
             while i < l.sources.len() {
                 if at(l.sources, i).id == src.id { return }
@@ -248,12 +265,35 @@ fn flush() {
         if !o.disposed && o.state != CLEAN {
             runs = runs + 1
             if runs > SETTLE { panic("std/ui: effects did not settle") }
-            refresh(o)
+            run_top(o)
         }
     }
-    let mut q = s.queue
-    q.clear()
+    s.queue = Vec::new()
     s.flushing = false
+}
+
+// Bring queued effect `o` up to date after its owners: an owner that is
+// stale runs first, from the top down, and may dispose of `o`, which then
+// does not run. So a child never runs with inputs its parent's next run
+// would not give it, whatever order a batch's `set`s queued them in.
+fn run_top(o: Owner) {
+    let mut stale = Vec::new()
+    let mut up = Some(o)
+    let mut done = false
+    while !done {
+        match up {
+            Some(x) => {
+                if x.state != CLEAN { stale.push(x) }
+                up = x.parent
+            }
+            None => done = true
+        }
+    }
+    let mut i = stale.len() - 1
+    while i >= 0 {
+        refresh(at(stale, i))
+        i = i - 1
+    }
 }
 
 // Bring `o` up to date: a "check" first brings the memos it read up to
@@ -285,6 +325,7 @@ fn refresh(o: Owner) {
 fn run_owner(o: Owner) {
     let mut m = o
     m.state = CLEAN
+    m.runs = o.runs + 1
     clean(o)
     let f = o.run
     with_context(Some(o), Some(o), f)
@@ -296,37 +337,29 @@ fn run_owner(o: Owner) {
     }
 }
 
-// The elements of `v`, which is emptied, so that what runs while they are
-// used can neither add to them nor take them away.
-fn drain<T>(v: Vec<T>) -> Vec<T> {
-    let mut out = Vec::new()
-    let mut i = 0
-    while i < v.len() {
-        out.push(at(v, i))
-        i = i + 1
-    }
-    let mut w = v
-    w.clear()
-    out
-}
-
 // Drop `o`'s subscriptions, so that nothing its cleanups set runs it again;
 // then dispose of what it owns, last made first, and run its cleanups, last
-// added first.
+// added first. Each list is replaced by a new one before it is walked, so
+// that what runs meanwhile can neither add to it nor take from it, and so
+// that nothing keeps what it held: `Vec::clear` would keep its storage.
 fn clean(o: Owner) {
-    let read = drain(o.sources)
+    let mut m = o
+    let read = o.sources
+    m.sources = Vec::new()
     let mut k = 0
     while k < read.len() {
         drop_observer(at(read, k), o.id)
         k = k + 1
     }
-    let kids = drain(o.children)
+    let kids = o.children
+    m.children = Vec::new()
     let mut i = kids.len() - 1
     while i >= 0 {
         dispose(at(kids, i))
         i = i - 1
     }
-    let ups = drain(o.cleanups)
+    let ups = o.cleanups
+    m.cleanups = Vec::new()
     let mut j = ups.len() - 1
     while j >= 0 {
         let f = at(ups, j)
@@ -342,18 +375,21 @@ fn dispose(o: Owner) {
     clean(o)
 }
 
-// Take the computation `id` out of `src`'s observers, keeping their order.
+// Take the computation `id` out of `src`'s observers, keeping their order,
+// into a new list, so that the old one keeps nothing.
 fn drop_observer(src: Source, id: Int) {
-    let mut obs = src.observers
-    let n = obs.len()
+    let obs = src.observers
+    let mut kept = Vec::new()
     let mut i = 0
-    while i < n && at(obs, i).id != id { i = i + 1 }
-    if i == n { return }
-    while i + 1 < n {
-        obs.set(i, at(obs, i + 1))
+    while i < obs.len() {
+        let x = at(obs, i)
+        if x.id != id { kept.push(x) }
         i = i + 1
     }
-    let last = obs.pop()
+    if kept.len() < obs.len() {
+        let mut m = src
+        m.observers = kept
+    }
 }
 
 /// A value that effects and memos read, and run again when it changes.
@@ -396,11 +432,12 @@ pub fn signal<T>(initial: T) -> Signal<T> {
 }
 
 /// Runs `f` now, and again each time a signal it read on its last run
-/// changes. The current owner owns it.
+/// changes. The current owner owns it; made under an owner already
+/// disposed, it never runs.
 pub fn effect(f: fn()) {
     let o = new_owner(EFFECT, f)
     adopt(o)
-    batch(| | run_owner(o))
+    if !o.disposed { batch(| | run_owner(o)) }
 }
 
 /// A signal whose value is `f`'s: `f` runs now, then again when it is read
@@ -420,12 +457,17 @@ pub fn memo<T>(f: fn() -> T) -> Signal<T> {
 }
 
 /// Adds `f` to the current owner's cleanups: it runs when the owner runs
-/// again or is disposed. Outside an owner it never runs.
+/// again or is disposed, and at once when the owner is disposed already.
+/// Outside an owner it never runs.
 pub fn on_cleanup(f: fn()) {
     match ui().owner {
         Some(o) => {
-            let mut ups = o.cleanups
-            ups.push(f)
+            if o.disposed {
+                with_context(None, None, f)
+            } else {
+                let mut ups = o.cleanups
+                ups.push(f)
+            }
         }
         None => {}
     }
@@ -435,13 +477,18 @@ pub fn on_cleanup(f: fn()) {
 /// `show` or `for_each` render, that is building, or at once when none is.
 /// It runs untracked, with the owner it was added in, which owns what it
 /// makes. It never runs under `render_to_string`, nor when its render is
-/// disposed before its nodes are in the page.
+/// disposed, or the effect that added it runs again, before its nodes are in
+/// the page.
 pub fn on_mount(f: fn()) {
     let s = ui()
     if s.rendering > 0 { return }
     if s.building > 0 {
+        let run = match s.owner {
+            Some(o) => o.runs
+            None => 0
+        }
         let mut waiting = s.mounted
-        waiting.push(Mounted { owner: s.owner, f: f })
+        waiting.push(Mounted { owner: s.owner, run: run, f: f })
     } else {
         untracked(f)
     }
@@ -449,22 +496,24 @@ pub fn on_mount(f: fn()) {
 
 // Run the `on_mount` callbacks from `start` on, in order, each with the owner
 // it was added in, so that what it makes is disposed with its render; skip
-// those whose owner is disposed; and drop them.
+// those whose owner is disposed or has run since; and drop them, keeping the
+// rest in a new list, so that the old one keeps nothing.
 fn run_mounted(start: Int) {
-    let waiting = ui().mounted
+    let mut s = ui()
+    let waiting = s.mounted
+    let mut kept = Vec::new()
     let mut later = Vec::new()
-    let mut i = start
+    let mut i = 0
     while i < waiting.len() {
-        later.push(at(waiting, i))
+        if i < start { kept.push(at(waiting, i)) } else { later.push(at(waiting, i)) }
         i = i + 1
     }
-    let mut w = waiting
-    while w.len() > start { let last = w.pop() }
+    s.mounted = kept
     let mut j = 0
     while j < later.len() {
         let m = at(later, j)
         let live = match m.owner {
-            Some(o) => !o.disposed
+            Some(o) => !o.disposed && o.runs == m.run
             None => true
         }
         if live { with_context(m.owner, None, m.f) }
@@ -676,18 +725,24 @@ fn write_attr(a: Attr, out: Vec<String>) {
 
 /// `f`'s view as HTML. `f` runs in a new owner, which is disposed once the
 /// HTML is written; text and attributes are read once, handlers are left
-/// out, and `on_mount` never runs. Text and attribute values are escaped.
+/// out, and `on_mount` never runs. Text and attribute values are escaped,
+/// the text of a `script` or `style` element too. It is a batch: what its
+/// `set`s run, such as a region `mount` built, runs once it is done.
 pub fn render_to_string(f: fn() -> View) -> String {
-    let mut s = ui()
-    s.rendering = s.rendering + 1
     let out = Vec::new()
-    root(
-        |dispose: fn()| {
-            write_view(f(), out)
-            dispose()
+    batch(
+        | | {
+            let mut s = ui()
+            s.rendering = s.rendering + 1
+            root(
+                |dispose: fn()| {
+                    write_view(f(), out)
+                    dispose()
+                },
+            )
+            s.rendering = s.rendering - 1
         },
     )
-    s.rendering = s.rendering - 1
     joined(out)
 }
 

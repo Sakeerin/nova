@@ -2,7 +2,8 @@
 // branch when its signal becomes true and disposes of it, running its
 // cleanups, when it becomes false; `for_each` builds its rows again each
 // time its list is set, the same list too, between its markers, leaving the
-// nodes around it as they are.
+// nodes around it as they are; and once no row is left, nothing keeps the
+// rows built first.
 
 import dom
 import ui
@@ -58,6 +59,18 @@ fn main() {
                 button(
                     [id("again"), on_click(| | rows.update(|xs: [String]| xs))],
                     [text("again")],
+                ),
+                button(
+                    [
+                        id("none"),
+                        on_click(
+                            | | {
+                                let empty: [String] = []
+                                rows.set(empty)
+                            },
+                        ),
+                    ],
+                    [text("none")],
                 ),
             ],
         ),
