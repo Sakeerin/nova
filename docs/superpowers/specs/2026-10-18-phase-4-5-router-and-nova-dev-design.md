@@ -1,7 +1,7 @@
 # Phase 4.5, "The router and `nova dev`": design
 
 - **Date:** 2026-10-18.
-- **Status:** draft, for the user's approval.
+- **Status:** approved by the user on 2026-10-18.
 - **The user's decisions, 2026-10-18:**
   1. **The router keeps `30-FRONTEND.md` §6's names:** `component
      Router(routes: [Route])` and `record Route { path, component }`. A
