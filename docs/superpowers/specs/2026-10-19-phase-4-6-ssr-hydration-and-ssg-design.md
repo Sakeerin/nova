@@ -426,8 +426,8 @@ pub async fn serve(site: Site) -> Result<(), IoError>
 - **`page_with(location, data, f)`** renders `f(data)` the same way. Its
   `data` is `stringify(data.to_json())`, made safe for a `script`
   element:
-  - `<`, `>` and `&` are written `<`, `>` and `&`;
-  - U+2028 and U+2029 are written ` ` and ` `.
+  - `<`, `>` and `&` are written `\u003c`, `\u003e` and `\u0026`;
+  - U+2028 and U+2029 are written `\u2028` and `\u2029`.
 
   These characters only occur inside JSON strings, so the escaped text
   parses back to the same value.
