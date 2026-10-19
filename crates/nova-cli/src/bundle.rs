@@ -55,17 +55,7 @@ impl Bundle {
     /// would overwrite and whose `assets/` a build replaces, or one inside
     /// `public/`, which would copy itself into itself.
     pub fn check_output(&self, out: &Path) -> Result<()> {
-        let Some(root) = &self.root else {
-            return Ok(());
-        };
-        let out = resolved(out);
-        if resolved(root).starts_with(&out) {
-            bail!("the output directory holds the project; name another with `-o`");
-        }
-        if out.starts_with(resolved(&root.join("public"))) {
-            bail!("the output directory is inside `public/`; name another with `-o`");
-        }
-        Ok(())
+        check_output_for(self.root.as_deref(), out)
     }
 
     /// Before the compiler writes `out`: a link at a name the build writes,
@@ -144,6 +134,25 @@ impl Bundle {
             files.join(",\n"),
         )
     }
+}
+
+/// [`Bundle::check_output`] for a program whose project's root is `root`,
+/// or for a single file with `None`, before there is a program: `nova dev`
+/// refuses an output directory before its first build (the 4.5 spec
+/// `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+/// §4.1).
+pub fn check_output_for(root: Option<&Path>, out: &Path) -> Result<()> {
+    let Some(root) = root else {
+        return Ok(());
+    };
+    let out = resolved(out);
+    if resolved(root).starts_with(&out) {
+        bail!("the output directory holds the project; name another with `-o`");
+    }
+    if out.starts_with(resolved(&root.join("public"))) {
+        bail!("the output directory is inside `public/`; name another with `-o`");
+    }
+    Ok(())
 }
 
 /// `s` as a JSON string.
@@ -257,7 +266,7 @@ fn remove(path: &Path) -> Result<()> {
 /// equal before either is created: `nope/..` is the current directory, as
 /// `create_dir_all` and every write through it find. Windows takes each
 /// `..` away by the text first, before it looks at the disk.
-fn resolved(path: &Path) -> PathBuf {
+pub fn resolved(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let start = std::env::current_dir().unwrap_or_default();
     let whole = if path.is_absolute() {

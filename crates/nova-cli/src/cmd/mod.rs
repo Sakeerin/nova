@@ -1,6 +1,7 @@
 //! CLI subcommand implementations.
 
 pub mod deps;
+pub mod dev;
 pub mod doc;
 pub mod fetch;
 pub mod fmt;
