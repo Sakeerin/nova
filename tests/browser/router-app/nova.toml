@@ -1,0 +1,5 @@
+[package]
+name = "router-app"
+version = "0.1.0"
+edition = "2026"
+description = "A HistoryRouter app that tests/browser/router.mjs drives under nova dev"
