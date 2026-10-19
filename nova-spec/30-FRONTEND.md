@@ -245,6 +245,33 @@ pub fn use_query() -> Map<String, String>
 
 Hash-based routing by default; HTML5 history API via flag.
 
+**Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):** 4.5
+builds `std/ui/router`, which a program imports with `import ui::router`,
+on both targets. The flag is a second name: `Router(routes)` routes by the
+hash, `#/posts/1`, and `HistoryRouter(routes)` by the path, `/posts/1`,
+through the history API; natively the location is `/`. A route's path is
+split at `/` into literals, matched with their case, and `:name`
+parameters, which `use_params()` reads; a path whose only piece is `*`
+matches every location; patterns and locations are percent-decoded alike,
+and the first route that matches is shown. A router is a `memo` of the
+matched route feeding a `for_each`, which builds the component untracked,
+again on every change of location, so `use_params` and `use_query` are not
+reactive. `navigate(to)` sets the hash or pushes the history, then the
+location to the one the page reports, which never holds a `#fragment`, and
+panics with no router; a link to the current location adds no history
+entry. Links are `link(to: "/posts/1") { … }`, a builder whose `to` becomes
+an `href` (`#/posts/1`, `/posts/1`, a leading run of `/` and `\` as one
+`/`, or `to` as written with no router) beside `data-nova-link`; each
+router listens for clicks on the window, and the one mounted last
+navigates on a plain one, which `std/dom`'s new `Event.modified()` tells
+apart, leaving any other to the browser. The router's state is behind
+three std-only builtins, `router_state_present`, `_load` and `_store`, and
+a page has one router, the one mounted last. The router's listeners run
+batched and untracked through `std/ui`'s public API, and `std/ui` does not
+change
+(`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+§3; ADR 0044).
+
 ---
 
 ## 7. Bundler (`nova-bundler`)
@@ -350,6 +377,26 @@ Hydration: client downloads WASM, attaches to existing DOM, replays effects.
 
 Built using `axum` (Rust) for the dev server backend.
 
+**Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):** 4.5
+builds `nova dev [FILE] [--port <PORT>] [--open] [-o <DIR>]`, as ADR 0038
+scoped it, and it is the `nova dev` of §7's list. It builds into `dist/` as
+`nova build --target wasm` does, each build a full one in a child process
+with `NO_COLOR=1`, whose stderr is the overlay's text; it polls the
+sources' times and sizes every 200 ms; and it serves on `127.0.0.1`, port
+3000 by default, from an HTTP/1.1 server on `std::net` with a thread per
+connection, not `axum`. A good build reloads the page through Server-Sent
+Events, `/__nova/events`, which a script the server adds to each page
+listens to; a failed one shows `<div id="nova-dev-overlay">` over the page
+until a good build. There is no HMR, so the page's state starts again on
+each reload; there are no source maps; and a browser opens only with
+`--open`. A path with no file whose last piece has no `.` is answered with
+the page, so a `HistoryRouter` page can be reloaded, with the generated
+page, which loads `/app.js` by its absolute path, or a page of the
+project's own that does the same; a path that leaves
+`dist/` is `403`, and so is a request whose `Host` is not the server's own
+(`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+§4; ADR 0044).
+
 ---
 
 ## 9. JS Interop
@@ -450,3 +497,19 @@ those that do not panic under each target's collector stress too;
 it is and under stress, and in Chromium by the `browser` job
 (`tests/browser/spa.mjs`); its `app.wasm` and `app.js` are under 50 KB
 gzipped (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §9).
+
+**Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):** the
+E2E tests run against `nova dev`. CI's `browser` job drives
+`06-counter-spa` under it in Chromium (`tests/browser/dev.mjs`): it counts,
+an edit reloads it, a page that missed a build reloads when it connects, a
+type error shows the overlay, and the fix takes it away. The same job
+drives `tests/browser/router-app`, a `HistoryRouter` app
+(`tests/browser/router.mjs`), through links, the back button, a reload at
+`/posts/2`, a path only `*` matches, and a query.
+`tests/runtime/ui_router.nova` matches paths and queries on both targets;
+`tests/dom/router_hash.nova` and `router_history.nova` route in each mode
+under the fake DOM, as they are and under stress, and `router_two.nova`
+leaves a click to the browser once its router is not the one mounted last;
+and
+`crates/nova-cli/tests/dev_tests.rs` speaks HTTP to `nova dev`
+(`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md` §5).

@@ -657,6 +657,18 @@ a `nova.toml` and a README. The gate is `nova build --target wasm` and
 clicks in Chromium, since `nova dev` comes with 4.5; its `app.wasm` and
 `app.js` are 21 KB gzipped (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §8; ADR 0043).
 
+**Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):** the
+gate is now `nova dev`, as written above, but `nova dev` opens a browser
+only with `--open`. CI's `browser` job starts `nova dev --port 0` in a copy of
+`examples/06-counter-spa` and, through Playwright, clicks `+` and `-`;
+edits `Count:` to `Clicks:` and sees the page reload with the change;
+writes a type error and sees the overlay with the checker's message; and
+restores the file and sees the overlay go and the page count again
+(`tests/browser/dev.mjs`). The README runs the example with `nova dev`. Its
+`app.wasm` and `app.js` are still 21 KB gzipped, by `flate2` at level 9
+as `wasm_tests.rs` measures them
+(`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md` §5.4; ADR 0044).
+
 ---
 
 ## 7. `07-fullstack-blog` (Phase 4 gate)

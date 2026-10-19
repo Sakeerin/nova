@@ -61,9 +61,31 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nova build --target wasm` finishes the bundle:** a project's own
   `index.html` is copied into `dist/`, `public/` becomes `assets/`, and
   `manifest.json` lists what was built; `--release` runs `wasm-opt -Oz`
-  when it is on `PATH`. The generated page has `<div id="app"></div>`.
+  when it is on `PATH`. The generated page has `<div id="app"></div>`,
+  and loads `/app.js` by its absolute path.
 - **`examples/06-counter-spa`**, the smallest WASM frontend, 21 KB
   gzipped.
+- **`std/ui/router`:** `Router(routes)` shows the component of the first
+  `Route` whose path matches the URL's hash, `#/posts/1`, and
+  `HistoryRouter(routes)` the one matching its path, `/posts/1`, through
+  the history API. A path holds `:name` parameters, which `use_params()`
+  reads, and the route `*` matches every location; `use_query()` reads the
+  query, and `navigate(to)` goes to a path. `link(to: "/posts/1") { … }` is
+  an `<a>` whose plain click goes to its route without loading the page; a
+  click with a modifier key or another button, or on a link with a
+  `target`, is the browser's. A program imports it with `import
+  ui::router`; natively the location is `/` (ADR 0044).
+- **`nova dev`** builds a program into `dist/`, as `nova build --target
+  wasm` does, and serves it on `127.0.0.1`, on port 3000 or the one
+  `--port` names, printing its URL; `--open` opens a browser. When a source
+  changes, it builds again and reloads the page, or shows the build's
+  errors over it until a good build. A path with no file and no `.` in its
+  last piece gets the page, so a `HistoryRouter` page can be reloaded,
+  with the generated page or a page of the project's own that loads
+  `/app.js` by its absolute path; a path that leaves `dist/`, or a request
+  whose `Host` is not the server's, is refused (ADR 0044).
+- **`Event.modified()`** in `std/dom`: whether Ctrl, Meta, Shift or Alt was
+  down, or a mouse button other than the main one was pressed.
 
 ### Changed
 
@@ -76,6 +98,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`nova build --target wasm --release` builds** where it was refused.
 - **A record named `view` can no longer be written as a literal**, as
   `view {` where an expression starts begins a view (ADR 0043).
+- **`examples/06-counter-spa`'s README runs it with `nova dev`**, where it
+  built it and served `dist/` with another server.
 
 ## [0.3.2] - 2026-10-14
 
