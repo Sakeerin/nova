@@ -4275,6 +4275,9 @@ impl<'a> Checker<'a> {
             | Builtin::UiStatePresent
             | Builtin::UiStateLoad
             | Builtin::UiStateStore
+            | Builtin::RouterStatePresent
+            | Builtin::RouterStateLoad
+            | Builtin::RouterStateStore
             | Builtin::MemLoad8
             | Builtin::MemStore8
             | Builtin::MemLoad64
@@ -8153,6 +8156,9 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::UiStatePresent => (vec![], Ty::Bool),
         Builtin::UiStateLoad => (vec![], Ty::Param(0)),
         Builtin::UiStateStore => (vec![Ty::Param(0)], Ty::Unit),
+        Builtin::RouterStatePresent => (vec![], Ty::Bool),
+        Builtin::RouterStateLoad => (vec![], Ty::Param(0)),
+        Builtin::RouterStateStore => (vec![Ty::Param(0)], Ty::Unit),
         Builtin::MemLoad8 | Builtin::MemLoad64 => (vec![Ty::Int], Ty::Int),
         Builtin::MemStore8 | Builtin::MemStore64 => (vec![Ty::Int, Ty::Int], Ty::Unit),
         Builtin::MemCopy | Builtin::MemFill => (vec![Ty::Int, Ty::Int, Ty::Int], Ty::Unit),
@@ -16392,6 +16398,18 @@ mod tests {
                 Builtin::UiStateStore => (
                     (vec![Ty::Param(0)], Ty::Unit),
                     "`ui_state_store(state)` in `std/ui`'s `store_state`",
+                ),
+                Builtin::RouterStatePresent => (
+                    (vec![], Ty::Bool),
+                    "`router_state_present()` in `std/ui/router`'s `routing`",
+                ),
+                Builtin::RouterStateLoad => (
+                    (vec![], Ty::Param(0)),
+                    "`router_state_load()` in `std/ui/router`'s `load_routing`",
+                ),
+                Builtin::RouterStateStore => (
+                    (vec![Ty::Param(0)], Ty::Unit),
+                    "`router_state_store(state)` in `std/ui/router`'s `store_routing`",
                 ),
                 Builtin::MemLoad8 | Builtin::MemLoad64 => (
                     (vec![Ty::Int], Ty::Int),

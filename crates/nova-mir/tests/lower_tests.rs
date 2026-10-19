@@ -2091,16 +2091,39 @@ fn a_std_extern_js_block_is_wasms_alone() {
 /// generic wrappers give the builtins their type, as `std/ui`'s do.
 #[test]
 fn the_ui_state_builtins_lower_to_the_runtime_or_std_rt() {
+    use nova_mir::RtFunc::{UiStateLoad, UiStatePresent, UiStateStore};
+    state_builtins_lower("ui", [UiStatePresent, UiStateLoad, UiStateStore]);
+}
+
+/// `std/ui/router`'s state builtins (spec
+/// `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+/// §3.5) lower as `std/ui`'s do: to the runtime natively, to `std/rt` on
+/// WASM.
+#[test]
+fn the_router_state_builtins_lower_to_the_runtime_or_std_rt() {
+    use nova_mir::RtFunc::{RouterStateLoad, RouterStatePresent, RouterStateStore};
+    state_builtins_lower(
+        "router",
+        [RouterStatePresent, RouterStateLoad, RouterStateStore],
+    );
+}
+
+/// The state builtins `<kind>_state_present`, `_load` and `_store`, called
+/// from a stand-in std module, are the runtime calls `rts` natively, and
+/// calls of `std/rt`'s `rt_<kind>_state_*` on WASM.
+fn state_builtins_lower(kind: &str, rts: [nova_mir::RtFunc; 3]) {
     use nova_resolver::{resolve_program_for, CompileTarget, Def, DefKind, ModuleSource};
 
-    let stub = "record LowerTestsState { n: Int }\n\
-                fn lower_tests_load<T>() -> T { ui_state_load() }\n\
-                fn lower_tests_store<T>(s: T) { ui_state_store(s) }\n\
-                pub fn lower_tests_state() -> Int {\n\
-                    if !ui_state_present() { lower_tests_store(LowerTestsState { n: 7 }) }\n\
-                    let s: LowerTestsState = lower_tests_load()\n\
-                    s.n\n\
-                }\n";
+    let stub = format!(
+        "record LowerTestsState {{ n: Int }}\n\
+         fn lower_tests_load<T>() -> T {{ {kind}_state_load() }}\n\
+         fn lower_tests_store<T>(s: T) {{ {kind}_state_store(s) }}\n\
+         pub fn lower_tests_state() -> Int {{\n\
+             if !{kind}_state_present() {{ lower_tests_store(LowerTestsState {{ n: 7 }}) }}\n\
+             let s: LowerTestsState = lower_tests_load()\n\
+             s.n\n\
+         }}\n"
+    );
     let lower = |target: CompileTarget| {
         let (tokens, _) = lex(
             "fn main() { println(\"${lower_tests_state()}\") }",
@@ -2114,7 +2137,7 @@ fn the_ui_state_builtins_lower_to_the_runtime_or_std_rt() {
             target,
             &sources,
             &std_files,
-            Some((("$test.ui_stub", stub), FileId::DUMMY)),
+            Some((("$test.state_stub", stub.as_str()), FileId::DUMMY)),
         );
         assert!(
             resolved.diagnostics.is_empty(),
@@ -2140,33 +2163,27 @@ fn the_ui_state_builtins_lower_to_the_runtime_or_std_rt() {
         nova_mir::lower_module_with(&checked.module, &nova_mir::Options { runtime })
             .expect("lowers")
     };
-    use nova_mir::RtFunc::{UiStateLoad, UiStatePresent, UiStateStore};
+    let [present, load, store] = rts;
     let native = lower(CompileTarget::Native);
     assert_eq!(
-        count_rt(&stmts_of(&native, "lower_tests_state"), UiStatePresent),
+        count_rt(&stmts_of(&native, "lower_tests_state"), present),
         1
     );
-    assert_eq!(
-        count_rt(&stmts_of(&native, "lower_tests_load"), UiStateLoad),
-        1
-    );
-    assert_eq!(
-        count_rt(&stmts_of(&native, "lower_tests_store"), UiStateStore),
-        1
-    );
+    assert_eq!(count_rt(&stmts_of(&native, "lower_tests_load"), load), 1);
+    assert_eq!(count_rt(&stmts_of(&native, "lower_tests_store"), store), 1);
     let wasm = lower(CompileTarget::Wasm);
     for (f, rt) in [
-        ("lower_tests_state", "rt_ui_state_present."),
-        ("lower_tests_load", "rt_ui_state_load."),
-        ("lower_tests_store", "rt_ui_state_store."),
+        ("lower_tests_state", format!("rt_{kind}_state_present.")),
+        ("lower_tests_load", format!("rt_{kind}_state_load.")),
+        ("lower_tests_store", format!("rt_{kind}_state_store.")),
     ] {
         let stmts = stmts_of(&wasm, f);
-        for want in [UiStatePresent, UiStateLoad, UiStateStore] {
+        for want in rts {
             assert_eq!(count_rt(&stmts, want), 0, "{f}");
         }
         assert!(
             stmts.iter().any(
-                |s| matches!(s, nova_mir::Stmt::Call { callee, .. } if callee.starts_with(rt))
+                |s| matches!(s, nova_mir::Stmt::Call { callee, .. } if callee.starts_with(&rt))
             ),
             "{f} calls {rt}"
         );

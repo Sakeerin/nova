@@ -915,6 +915,24 @@ builtins! {
     /// in `std/rt`'s state word 104, which the collector marks. Runtime
     /// symbol `nova_rt_ui_state_store`. Std-only.
     UiStateStore,
+    /// `router_state_present() -> Bool` — whether `std/ui/router` has stored
+    /// its state for this thread, or this page (spec
+    /// `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+    /// §3.5), as [`Builtin::UiStatePresent`] is for `std/ui`. Runtime symbol
+    /// `nova_rt_router_state_present`; on WASM, `std/rt`'s
+    /// `rt_router_state_present`. Std-only.
+    RouterStatePresent,
+    /// `router_state_load<T>() -> T` — the state
+    /// [`Builtin::RouterStateStore`] stored. `T` is the caller's first type
+    /// parameter, as for [`Builtin::UiStateLoad`]; `std/ui/router` calls it
+    /// with its own record. Runtime symbol `nova_rt_router_state_load`.
+    /// Std-only.
+    RouterStateLoad,
+    /// `router_state_store<T>(state: T)` — keep `state`, a record, for the
+    /// thread or the page: natively a second collector root beside
+    /// `std/ui`'s, on WASM in `std/rt`'s state word 112, which the collector
+    /// marks. Runtime symbol `nova_rt_router_state_store`. Std-only.
+    RouterStateStore,
     /// `mem_load8(addr: Int) -> Int` — the byte at `addr`, zero-extended.
     /// `std/rt`, the runtime of a WASM build, reads memory through this and
     /// the eight builtins after it (spec
@@ -1065,6 +1083,9 @@ impl Builtin {
             Builtin::UiStatePresent => "ui_state_present",
             Builtin::UiStateLoad => "ui_state_load",
             Builtin::UiStateStore => "ui_state_store",
+            Builtin::RouterStatePresent => "router_state_present",
+            Builtin::RouterStateLoad => "router_state_load",
+            Builtin::RouterStateStore => "router_state_store",
             Builtin::MemLoad8 => "mem_load8",
             Builtin::MemStore8 => "mem_store8",
             Builtin::MemLoad64 => "mem_load64",
@@ -1105,7 +1126,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 84] = [
+    pub const STD_ONLY: [Builtin; 87] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1190,6 +1211,9 @@ impl Builtin {
         Builtin::UiStatePresent,
         Builtin::UiStateLoad,
         Builtin::UiStateStore,
+        Builtin::RouterStatePresent,
+        Builtin::RouterStateLoad,
+        Builtin::RouterStateStore,
     ];
 
     /// Builtins seeded into an std module's scope only when the target is
@@ -3839,6 +3863,46 @@ mod tests {
                 Builtin::STD_ONLY.contains(&b),
                 "{b:?} must be invisible to user code"
             );
+        }
+    }
+
+    /// `std/ui`'s and `std/ui/router`'s state builtins are std's alone, each
+    /// pinned by name as the net builtins are (spec
+    /// `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+    /// §3.5, §5.2): on either target, a program's module cannot name them,
+    /// and `std/ui`'s can.
+    #[test]
+    fn the_state_builtins_are_std_only() {
+        for target in [CompileTarget::Native, CompileTarget::Wasm] {
+            let r = resolve_for(target, "fn main() { }\n");
+            assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+            let ui = (1..=target.std_modules().len())
+                .find(|&m| r.definitions.module_name(ModuleId(m as u32)) == "$std.ui")
+                .expect("std/ui is compiled");
+            for b in [
+                Builtin::UiStatePresent,
+                Builtin::UiStateLoad,
+                Builtin::UiStateStore,
+                Builtin::RouterStatePresent,
+                Builtin::RouterStateLoad,
+                Builtin::RouterStateStore,
+            ] {
+                assert!(
+                    Builtin::STD_ONLY.contains(&b),
+                    "{b:?} must be invisible to user code"
+                );
+                assert!(
+                    r.definitions.resolve_value(ModuleId(0), b.name()).is_none(),
+                    "{b:?} resolves in a program's module"
+                );
+                assert!(
+                    matches!(
+                        r.definitions.resolve_value(ModuleId(ui as u32), b.name()),
+                        Some(Res::Builtin(seen)) if seen == b
+                    ),
+                    "{b:?} must resolve inside std/ui"
+                );
+            }
         }
     }
 
