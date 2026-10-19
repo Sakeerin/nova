@@ -38,6 +38,19 @@ await click("params");
 const encoded = history.length;
 await click("same");
 console.log(`the same place written decoded: ${history.length - encoded} more entries`);
+// A delimiter written percent-encoded is not the delimiter: each of these
+// goes elsewhere, and pushes an entry.
+for (const [from, to] of [
+  ["slashed", "encoded-slash"],
+  ["amp", "encoded-amp"],
+]) {
+  await click(from);
+  show(from);
+  const before = history.length;
+  await click(to);
+  show(to);
+  console.log(`${to} after ${from}: ${history.length - before} more entries`);
+}
 await click("frag");
 show(`a fragment, ${location.hash}`);
 await click("frag-query");
@@ -48,6 +61,8 @@ for (const modifiers of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true 
 }
 console.log("a link with target");
 await click("blank");
+console.log("a link with download");
+await click("download");
 console.log("a plain <a>");
 await click("plain");
 show("left to the browser");

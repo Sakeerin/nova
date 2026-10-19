@@ -11,6 +11,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How long any wait may take.
@@ -85,12 +86,48 @@ fn home(dir: &Path) -> PathBuf {
     ))
 }
 
+/// A child's stderr, gathered by a thread of its own.
+struct Stderr {
+    gathered: Arc<Mutex<String>>,
+    /// The thread, which ends when the child's stderr does, at its exit.
+    reader: Option<JoinHandle<()>>,
+}
+
+impl Stderr {
+    /// What has been gathered so far.
+    fn so_far(&self) -> String {
+        self.gathered.lock().unwrap().replace("\r\n", "\n")
+    }
+
+    /// All of it, for a child that has exited: once the thread has read to
+    /// the end.
+    fn all(&mut self) -> String {
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.join();
+        }
+        self.so_far()
+    }
+
+    /// What has been gathered, once `done` holds of it or [`LIMIT`] has
+    /// passed, for a child that is still running.
+    fn once(&self, done: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + LIMIT;
+        loop {
+            let text = self.so_far();
+            if done(&text) || Instant::now() >= deadline {
+                return text;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
 /// `nova dev ARGS` in `dir`, with `NOVA_HOME` beside it and no backtrace;
 /// its stdout's lines arrive on a channel, and its stderr is gathered, each
 /// on a thread of its own, so neither pipe fills. It runs with a terminal
 /// that asks for colour and without `NO_COLOR`, so only `nova dev`'s own
 /// `NO_COLOR` keeps colour out of a build's errors.
-fn spawn(dir: &Path, args: &[&str]) -> (Child, mpsc::Receiver<String>, Arc<Mutex<String>>) {
+fn spawn(dir: &Path, args: &[&str]) -> (Child, mpsc::Receiver<String>, Stderr) {
     let mut child = nova()
         .arg("dev")
         .args(args)
@@ -117,7 +154,7 @@ fn spawn(dir: &Path, args: &[&str]) -> (Child, mpsc::Receiver<String>, Arc<Mutex
     });
     let gathered = Arc::new(Mutex::new(String::new()));
     let into = Arc::clone(&gathered);
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut chunk = [0u8; 4096];
         while let Ok(n) = stderr.read(&mut chunk) {
             if n == 0 {
@@ -128,14 +165,18 @@ fn spawn(dir: &Path, args: &[&str]) -> (Child, mpsc::Receiver<String>, Arc<Mutex
                 .push_str(&String::from_utf8_lossy(&chunk[..n]));
         }
     });
-    (child, lines, gathered)
+    let stderr = Stderr {
+        gathered,
+        reader: Some(reader),
+    };
+    (child, lines, stderr)
 }
 
 /// A running `nova dev`, killed when dropped.
 struct Dev {
     child: Child,
     port: u16,
-    stderr: Arc<Mutex<String>>,
+    stderr: Stderr,
 }
 
 impl Dev {
@@ -162,15 +203,10 @@ impl Dev {
         dev
     }
 
-    fn stderr(&self) -> String {
-        self.stderr.lock().unwrap().replace("\r\n", "\n")
-    }
-
     fn fail(&mut self, why: &str) -> ! {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        std::thread::sleep(Duration::from_millis(200));
-        panic!("{why}; nova dev's stderr: {:?}", self.stderr());
+        panic!("{why}; nova dev's stderr: {:?}", self.stderr.all());
     }
 
     /// GET `path` from the server, with its own `Host`.
@@ -545,9 +581,14 @@ fn the_event_stream_reloads_and_reports_errors() {
     assert_eq!(late.expect("reload"), id(4));
     assert_eq!(tag_id(&dev.get("/").text()), id(4));
 
-    let stderr = dev.stderr();
+    // Each build's line is written before its event is sent, but read by
+    // another thread: wait for them.
+    let builds = |text: &str| text.matches("rebuilt in ").count();
+    let stderr = dev
+        .stderr
+        .once(|text| text.contains(CHECKER_SAYS) && builds(text) >= 3);
     assert!(stderr.contains(CHECKER_SAYS), "{stderr}");
-    assert_eq!(stderr.matches("rebuilt in ").count(), 3, "{stderr}");
+    assert_eq!(builds(&stderr), 3, "{stderr}");
 }
 
 /// Before the first good build (spec §4.4): with no `dist/`, `/` is the
@@ -586,10 +627,9 @@ fn a_second_server_on_the_same_port_fails() {
     let dir = project("port", MAIN);
     let first = Dev::start(&dir);
     let port = first.port.to_string();
-    let (mut second, _lines, stderr) = spawn(&dir, &["--port", &port]);
+    let (mut second, _lines, mut stderr) = spawn(&dir, &["--port", &port]);
     let status = exit_of(&mut second);
-    std::thread::sleep(Duration::from_millis(200));
-    let stderr = stderr.lock().unwrap().replace("\r\n", "\n");
+    let stderr = stderr.all();
     assert_eq!(status.code(), Some(1), "{stderr}");
     assert_eq!(
         stderr,
@@ -605,10 +645,9 @@ fn a_second_server_on_the_same_port_fails() {
 #[test]
 fn it_refuses_what_build_refuses() {
     let dir = project("refusals", MAIN);
-    let (mut child, _lines, stderr) = spawn(&dir, &["--port", "0", "-o", "."]);
+    let (mut child, _lines, mut stderr) = spawn(&dir, &["--port", "0", "-o", "."]);
     let status = exit_of(&mut child);
-    std::thread::sleep(Duration::from_millis(200));
-    let text = stderr.lock().unwrap().clone();
+    let text = stderr.all();
     assert!(!status.success());
     assert!(
         text.contains("the output directory holds the project"),
@@ -621,10 +660,9 @@ fn it_refuses_what_build_refuses() {
         lib.join("src").join("lib.nova"),
     )
     .expect("make it a library");
-    let (mut child, _lines, stderr) = spawn(&lib, &["--port", "0"]);
+    let (mut child, _lines, mut stderr) = spawn(&lib, &["--port", "0"]);
     let status = exit_of(&mut child);
-    std::thread::sleep(Duration::from_millis(200));
-    let text = stderr.lock().unwrap().clone();
+    let text = stderr.all();
     assert!(!status.success());
     assert!(text.contains("`dev-app` is a library"), "{text}");
 }

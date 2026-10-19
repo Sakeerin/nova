@@ -12,7 +12,9 @@ port 3000, changed by `--port`; builds into `dist/`; each rebuild a child
 process; and a browser test of the router are the user's decisions of
 2026-10-18. That the generated page loads `/app.js` by its absolute path is
 the user's decision 9, of the same day, made after the prototype's
-fact-check.
+fact-check; that a link's `to` is always made a path within the app, with
+or without a router, is the user's decision 10, of 2026-10-19, made after
+the review.
 
 ## Context
 
@@ -81,9 +83,14 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
    `popstate` listener sets the location only when it differs, so that
    `hashchange` does not build the route twice, however the browser
    re-encodes the hash. In history mode a `to` that is the location
-   already, once its fragment is dropped and both are percent-decoded,
-   replaces the current history entry instead of pushing one, so a second
-   click on the same link adds no entry; in hash mode, setting the hash it
+   already replaces the current history entry instead of pushing one, so a
+   second click on the same link adds no entry: once its fragment is
+   dropped, it has the same pieces of the path and the same parts of the
+   query, in order, each piece and each part's name and value
+   percent-decoded on its own, so `/posts/café` is the location
+   `/posts/caf%C3%A9`. A delimiter written percent-encoded is not the
+   delimiter, so `/a%2Fb` is not `/a/b`, nor `?q=a%26b` `?q=a&b`, and going
+   from one to the other pushes an entry. In hash mode, setting the hash it
    already has adds none, as a browser does nothing for the same hash.
 4. **Handlers run through `std/ui`'s public API.** Each listener the router
    adds runs its function as `batch(|| root(|d| { f(); d() }))`: batched,
@@ -92,36 +99,48 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
    change, so `import ui` binds no new name.
 5. **Links.** `link(attrs, children)` is a builder of an element's shape,
    so a view writes `link(to: "/posts/1") { … }`. Its `to`, fixed or
-   reactive, becomes an `href` computed when the link is built, from the
-   router mounted then: `#/posts/1` under `Router`, `/posts/1` under
-   `HistoryRouter`, with one `/` before `to`, and `to` as written with no
-   router. A leading run of `/` and `\` becomes that one `/`, in an `href`
-   and in `navigate` alike, so `link(to: "//posts/8")` is
-   `href="/posts/8"` or `href="#/posts/8"`, never a protocol-relative URL
-   naming another host, which a plain click would also hand to `pushState`,
-   which throws. A menu before `Router(…)` in the same view thus
-   gets the router's form. The `<a>` also gets `data-nova-link`, which
+   reactive, becomes an `href` that is always a path within the app:
+   `#/posts/1` under `Router`, and `/posts/1` under `HistoryRouter` and
+   with no router, with one `/` before `to` (the user's decision 10). Every
+   tab, LF and CR is dropped first, as a URL's parser deletes them before
+   it reads a URL, then a leading run of `/` and `\` becomes that one `/`,
+   in an `href` and in `navigate` alike, so `link(to: "//posts/8")` is
+   `href="/posts/8"` or `href="#/posts/8"`, and `/\t/evil.example/x` is
+   `/evil.example/x`: never a protocol-relative URL naming another host,
+   which a Ctrl-click or a middle click would follow there, and which a
+   plain click would hand to `pushState`, which throws. The `href` follows
+   the router mounted last: it reads a signal in the router's state, set
+   when a router makes itself the one mounted last and when a router's
+   disposal leaves none, so a link built before any router mounts, as a
+   menu beside `show(cond, || Router(routes))` or before `Router(…)` in the
+   same view, takes the router's form while it is shown and loses it once
+   it is hidden. A signal has no owner, so the state makes it when it is
+   first asked for. The `<a>` also gets `data-nova-link`, which
    `render_to_string` writes as `data-nova-link=""`. A link with no `to`
    panics. Each router listens for `click` on the window: the nearest `<a>`
    with `data-nova-link` at or above the target, clicked with the main
-   button and no Ctrl, Meta, Shift or Alt, and with no `target` attribute,
-   has its default prevented and its `href` navigated to, less a leading
-   `#` in hash mode. Only the router mounted last acts on such a click: the
-   backend prevents the default only when the router's `take` returns
-   true, which it does when its router is the one mounted
-   last; so a router still on the page after a later one was disposed,
-   which leaves none mounted last, leaves the click to the browser. Any
-   other click is the browser's. `std/dom` gains `Event.modified()`, which
-   tells such a click apart.
+   button and no Ctrl, Meta, Shift or Alt, and with no `target` and no
+   `download` attribute, has its default prevented and its `href` navigated
+   to, less a leading `#` in hash mode. Only the router mounted last acts on
+   such a click: the backend prevents the default only when the router's
+   `take` returns true, which it does when its router is the one mounted
+   last, and prevents it before it calls the router's `go`, so a panic on
+   the way cannot hand a taken click back to the browser; a router still on
+   the page after a later one was disposed, which leaves none mounted last,
+   leaves the click to the browser. Any other click is the browser's, a
+   link with `download` included, whose click saves its target. `std/dom`
+   gains `Event.modified()`, which tells such a click apart.
 6. **The router's state is behind three std-only builtins,**
    `router_state_present`, `_load` and `_store`, made as `ui_state_*` are:
    natively a second collector root for the thread, on WASM `std/rt`'s
    state word 112, which the collector marks. It holds the router mounted
    last, with its mode and location, the parameters of the route being
-   built, and the next router's number. A page has one router: a router
-   mounted later takes over `navigate`, `use_params` and `use_query`. A
-   router's listeners are removed when its owner is disposed, and the state
-   is cleared then unless a later router has taken over. `std/ui`'s backend
+   built, the next router's number, and the signal every link's `href`
+   reads, set each time the router mounted last changes. A page has one
+   router: a router mounted later takes over `navigate`, `use_params` and
+   `use_query`. A router's listeners are removed when its owner is
+   disposed, and the state is cleared then unless a later router has taken
+   over. `std/ui`'s backend
    gains `backend_location`; `backend_go` and `backend_replace`, which
    return the location the page reports afterwards; `backend_on_location`;
    and `backend_on_link_click`, whose `take` returns whether it takes the
@@ -133,7 +152,12 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
    directory that holds the project or lies inside `public/`, and a package
    in nova's cache. It binds `127.0.0.1:<port>`, 3000 by default, `0`
    letting the system choose; a port in use prints `nova dev: port <port>
-   is in use; choose another with --port` and exits with status 1. It
+   is in use; choose another with --port` and exits with status 1. Before
+   it binds a port other than `0`, it connects to `127.0.0.1:<port>`,
+   waiting 200 ms at most, and a connection made is a port in use too: on
+   macOS, `SO_REUSEADDR`, which std sets on Unix, lets `127.0.0.1:<port>`
+   bind beside a listener on `0.0.0.0:<port>`. A refusal or no answer in
+   time leaves the port free. It
    builds once, prints `nova dev: serving http://127.0.0.1:<port>/` on
    stdout, and with `--open` runs `xdg-open`, `open` or `cmd /c start`, a
    failure of which is a note.
@@ -144,7 +168,8 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
    then `rebuilt in <ms> ms`, the first build included, and sends `reload`;
    a failed one prints the child's stderr and sends `error` with it, and
    leaves the previous build in `dist/`. One build runs at a time, and a
-   change seen during one starts another after it. A panic in the compiler
+   change seen during one starts one more after it, however many writes it
+   was. A panic in the compiler
    cannot stop the server, and the driver does not change. The watcher
    polls times and sizes every 200 ms: for a project, every `.nova` file
    under its root, skipping directories named `target` or beginning with
@@ -164,7 +189,8 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
      and it ends at its first empty line;
    - no `Host`, or one that is not `127.0.0.1:<port>` or
      `localhost:<port>`, is `403`, against DNS rebinding, before the method
-     is looked at;
+     is looked at; on port 80, which a browser leaves out of `Host`,
+     `127.0.0.1` and `localhost` alone name the server too;
    - a method other than `GET` and `HEAD` is `405`;
    - a target not starting with `/`, bad percent-encoding, and a path that
      does not decode to UTF-8 are `400`;
@@ -175,11 +201,18 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
    A path ending in `/` names that directory's `index.html`; a file is
    served with its type by extension, `application/wasm` included, and
    `.mjs` as `text/javascript` as `.js` is; a directory is never listed. A
-   path that names no file, whose last piece has no `.`, gets the output
-   directory's `index.html`, so a `HistoryRouter` page can be reloaded,
-   with the generated page or one that loads `/app.js` by its absolute path
-   (decision 11); a directory without `index.html` falls back the
-   same way, by the last piece of the URL. While the output directory has
+   path that does not end in `/` and names a directory inside the output
+   directory that holds an `index.html`, itself inside once links are
+   resolved, is `307 Temporary Redirect`, which a browser does not keep,
+   with an empty body: its `Location` is `/`, then each piece of the path
+   as written, still percent-encoded, that is neither empty nor `.`, each
+   followed by `/`, then the target's query, so `/docs` and `//docs` go to
+   `/docs/`, `/docs?x=1` to `/docs/?x=1`, and no `Location` begins with
+   `//`. A path that names no file, whose last piece has no `.`, gets the
+   output directory's `index.html`, so a `HistoryRouter` page can be
+   reloaded, with the generated page or one that loads `/app.js` by its
+   absolute path (decision 11); a directory without `index.html` falls back
+   the same way, by the last piece of the URL. While the output directory has
    no `index.html`, the server's own page answers `/` and those paths
    alike, so the first build's errors show. Any other missing file is
    `404`. `/__nova/reload.js` and `/__nova/events` are the server's own.
@@ -241,19 +274,28 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
 - **The router's listeners** are wrapped in `batch` and `root` by the
   router, through `std/ui`'s public API, rather than run untracked by the
   backend; the location listener compares before it sets (decisions 3, 4).
-- **A link's `href`** is computed when the link is built, one `/` is put
-  before `to` under a router, a leading run of `/` and `\` collapsed into
-  it, and `render_to_string` writes `data-nova-link=""` (decision 5).
+- **A link's `href`** follows the router mounted last, through a signal
+  in the router's state, where spec §3.3 read it once. It is a path within
+  the app with a router and without one: one `/` is put before `to`, every
+  tab, LF and CR dropped and a leading run of `/` and `\` collapsed into
+  it. Spec §3.3 kept `to` as written with no router; the user's decision
+  10 departs from it, since an `href` must never name another host, as
+  `//evil.example/x` or `/\t/evil.example/x` as written would, for a
+  Ctrl-click, a middle click or a click while no router is mounted to
+  follow. `render_to_string` writes `data-nova-link=""` (decision 5).
 - **The location** is read back after going: `backend_go` returns the
   location the page reports, where spec §3.6 has it return nothing, so a
   hash the browser re-encodes builds its route once; it never holds a
   `#fragment`; and in history mode a `to` that is the location already
-  replaces the entry through a fifth backend function, `backend_replace`
+  replaces the entry through a fifth backend function, `backend_replace`,
+  comparing the pieces of the path and the parts of the query, each
+  decoded on its own, so that an encoded delimiter is not the delimiter
   (decisions 1, 3, 6).
 - **`backend_on_link_click`'s `take` returns whether it takes the
   click,** where spec §3.6 has `fn(String)`, and the default is prevented
-  only then, so a router that is not the one mounted last leaves the click
-  to the browser (decision 5).
+  only then, and before the router's `go` runs, so a router that is not the
+  one mounted last leaves the click to the browser. A link with `download`
+  is the browser's, as one with `target` is (decision 5).
 - **Matching:** `/*` is the wildcard as `*` is, patterns are percent-decoded
   as locations are, empty query parts are skipped, and only the router
   mounted last acts on a link's click (decisions 2, 5).
@@ -263,11 +305,15 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
   it, where spec §4.6 applies the project's rules; and `nova dev` refuses a
   package in nova's cache, as `nova build` does (decisions 7, 8).
 - **The server:** its own page answers history paths too, a directory
-  without `index.html` falls back by the last piece, `HEAD /__nova/events`
-  gets the stream's head with `Connection: close`, `.mjs` is
-  `text/javascript`, a head's lines may end in a bare LF, and the refusals
-  of decision 9 beyond the spec's, with the `Host` check before the method
-  check (decision 9).
+  without `index.html` falls back by the last piece, and one with an
+  `index.html` named without its last `/` is a `307` to its path with one;
+  `HEAD /__nova/events` gets the stream's head with `Connection: close`,
+  `.mjs` is `text/javascript`, a head's lines may end in a bare LF, a
+  `Host` without a port names the server on port 80, and the refusals of
+  decision 9 beyond the spec's, with the `Host` check before the method
+  check (decision 9). Before it binds a port, `nova dev` probes it with a
+  connection, which finds a listener on `0.0.0.0` that the bind does not
+  on macOS (decision 7).
 - **The generated page** loads `/app.js`, where 4.0's loaded `./app.js`,
   so the user's decision 3, a page in history mode reloaded under
   `nova dev`, holds for it (decision 11).
@@ -292,6 +338,8 @@ reload over Server-Sent Events. The repository 4.5 starts from has:
   one tick.
 - **A page of another site** can still send requests to `127.0.0.1` without
   reading the answers; `nova dev` changes nothing on a `GET`.
+- **A page-wide `<base target=…>` is not looked at:** a plain click on a
+  link under one is still taken, and stays in the page.
 - **No crate is added,** and `Cargo.lock` does not change.
 
 ## What is left out

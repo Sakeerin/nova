@@ -4,9 +4,12 @@
 // and after a second click on it, which replaces that entry; after
 // `navigate` with a query, after the back button's `popstate`, at a path only
 // `*` matches, with a percent-encoded parameter, and at a link's path and
-// query that carry a `#fragment`, which the location drops; then the
-// clicks left to the browser: one with a modifier key or another button, on
-// a link with `target`, and on a plain `<a>`. A click inside a link's child
+// query that carry a `#fragment`, which the location drops; a link to
+// another location that decodes to the same text, as `/posts/a%2Fb` to
+// `/posts/a/b`, which pushes an entry, as going to the current location
+// written another way does not; then the clicks left to the browser: one
+// with a modifier key or another button, on a link with `target` or with
+// `download`, and on a plain `<a>`. A click inside a link's child
 // navigates. A route's parameters are its render's alone: a handler reads
 // none. Once the router's owner is disposed, a link's click is the
 // browser's again, and `navigate` panics.
@@ -69,7 +72,12 @@ fn main() {
                     link(id: "frag", to: "/posts/6#sec") { text("Post 6") }
                     link(id: "frag-query", to: "/search?q=frag#x") { text("Search frag") }
                     link(to: "/posts/8") { strong(id: "inner") { text("Post 8") } }
+                    link(id: "slashed", to: "/posts/a/b") { text("A, b") }
+                    link(id: "encoded-slash", to: "/posts/a%2Fb") { text("A/b") }
+                    link(id: "amp", to: "/search?q=a&b=c") { text("A and b") }
+                    link(id: "encoded-amp", to: "/search?q=a%26b=c") { text("A&b") }
                     link(id: "blank", to: "/posts/9", target: "_blank") { text("Post 9") }
+                    link(id: "download", to: "/posts/10", download: "") { text("Post 10") }
                     a(id: "plain", href: "/posts/5") { text("Post 5") }
                     button(id: "search", on_click: || navigate("/search?q=nova+router&page=2")) {
                         text("Search")

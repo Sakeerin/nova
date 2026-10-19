@@ -5,10 +5,12 @@
 // `navigate`: empty pieces dropped, literals matched with their case, `:name`
 // parameters percent-decoded or kept as written, the first route that
 // matches shown, `*` matching everything, queries split and decoded, and a
-// `#fragment` dropped before either. Then a link's `href`, fixed and
-// reactive; a leading run of `/` and `\` that is one `/` under either
-// router, in an `href` and in `navigate`; and a router that takes over from
-// another and outlives its disposal.
+// `#fragment` dropped before either. Then a link's `href`: with no router,
+// `to` made a path within the app, `//evil.example/x` as `/evil.example/x`;
+// fixed and reactive; built before the router in the same render; a leading
+// run of `/` and `\` that is one `/` under either router, in an `href` and
+// in `navigate`; and a router that takes over from another and outlives its
+// disposal.
 import ui
 import ui::html::{attr, dyn_attr, id, p, text}
 import ui::router::{HistoryRouter, Route, Router, link, navigate, use_params, use_query}
@@ -191,9 +193,12 @@ fn main() {
             "/q?a=1#x&b=2",
         ],
     )
-    // With no router: nothing to read, and a link's `href` is its `to`.
+    // With no router: nothing to read, and a link's `href` is its `to` made a
+    // path within the app, as `HistoryRouter` makes it, so that none names
+    // another host.
     println("no router: ${use_params().len()} params, ${use_query().len()} keys")
     println(render_to_string(|| link([id("l"), attr("to", "posts/1")], [text("one")])))
+    println(render_to_string(|| link([attr("to", "//evil.example/x")], [text("away")])))
     // Under a router, a fixed and a reactive `to`, written without its `/`.
     let n = signal(2)
     println(
@@ -206,6 +211,17 @@ fn main() {
                 let fixed = link([attr("to", "posts/1")], [text("one")])
                 let moving = link([dyn_attr("to", || "posts/${n.value()}")], [text("two")])
                 p([], [fixed, moving, router])
+            },
+        ),
+    )
+    // A link built before the router, in the same render, takes its `#`.
+    println(
+        render_to_string(
+            || {
+                let early = link([attr("to", "posts/3")], [text("early")])
+                let router = Router(routes)
+                navigate("/")
+                p([], [early, router])
             },
         ),
     )

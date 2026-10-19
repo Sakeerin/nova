@@ -2404,10 +2404,13 @@ fn ui_mount_never_inserts_html() {
 /// once, though the hash holds them percent-encoded; to `/posts/6#sec`,
 /// whose second `#` starts a fragment the location drops; and a
 /// percent-encoded parameter, from a `to` with no `/`. The menu's links,
-/// made before the router, have its `#`. Under stress the collector runs
-/// after each step and keeps the router's state, at std/rt's word 112, and
-/// its two window listeners with the four buttons' handlers: six calls
-/// throughout.
+/// built beside a `show` of the router before it shows, have rooted paths
+/// until it shows, its `#` while it is shown, and rooted paths again once
+/// it is hidden, when a link's click is the browser's. Under stress the
+/// collector runs after each step and keeps the router's state, at std/rt's
+/// word 112, and the five buttons' handlers: five calls before the router
+/// shows, seven with its two window listeners while it is shown, and five
+/// once it is hidden.
 #[test]
 fn router_routes_by_the_hash() {
     dom_program("router_hash", &[]);
@@ -2416,8 +2419,17 @@ fn router_routes_by_the_hash() {
         return;
     }
     let calls = calls_after_each(&err);
-    assert!(!calls.is_empty(), "{err}");
-    assert!(calls.iter().all(|&c| c == 6), "{err}");
+    let shown = calls
+        .iter()
+        .position(|&c| c != 5)
+        .expect("a collection with the router shown");
+    assert!(shown > 0, "{err}");
+    let hidden = shown
+        + calls[shown..]
+            .iter()
+            .position(|&c| c != 7)
+            .expect("a collection once the router is hidden");
+    assert!(calls[hidden..].iter().all(|&c| c == 5), "{err}");
 }
 
 /// Two routers on a page (spec 4.5 §3.1, §3.3): the router mounted later
@@ -2448,12 +2460,13 @@ fn a_router_not_mounted_last_leaves_a_click_to_the_browser() {
 /// the hash, through `pushState` and `popstate`; then the clicks left to the
 /// browser, their default not prevented and the page as it was: a link's
 /// click with each modifier key and with another button, a link with a
-/// `target`, and a plain `<a>`. A click on a link's child navigates. A
-/// handler reads no route's parameters, and `navigate` to the current
-/// location written decoded adds no entry. Once the router's owner is
-/// disposed, a link's click is the browser's, and `navigate` panics. Under
-/// stress the router's two listeners leave std/rt's table then: seven calls
-/// become five.
+/// `target` or a `download`, and a plain `<a>`. A click on a link's child
+/// navigates. A handler reads no route's parameters, and `navigate` to the
+/// current location written decoded adds no entry, while a link to
+/// `/posts/a%2Fb` from `/posts/a/b`, or to `?q=a%26b=c` from `?q=a&b=c`,
+/// adds one. Once the router's owner is disposed, a link's click is the
+/// browser's, and `navigate` panics. Under stress the router's two
+/// listeners leave std/rt's table then: seven calls become five.
 #[test]
 fn router_routes_by_the_history_api() {
     for env in [&[][..], &STRESS[..]] {

@@ -79,8 +79,9 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wasm` does, and serves it on `127.0.0.1`, on port 3000 or the one
   `--port` names, printing its URL; `--open` opens a browser. When a source
   changes, it builds again and reloads the page, or shows the build's
-  errors over it until a good build. A path with no file and no `.` in its
-  last piece gets the page, so a `HistoryRouter` page can be reloaded,
+  errors over it until a good build. A path with no `.` in its last piece
+  that names no file, nor a directory with an `index.html`, gets the page,
+  so a `HistoryRouter` page can be reloaded,
   with the generated page or a page of the project's own that loads
   `/app.js` by its absolute path; a path that leaves `dist/`, or a request
   whose `Host` is not the server's, is refused (ADR 0044).

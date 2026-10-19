@@ -118,6 +118,9 @@ pub enum Target {
     /// The server's own page, when the page is asked for and the output
     /// directory has no `index.html`.
     OwnPage,
+    /// A directory with an `index.html`, named without its last `/`: a
+    /// redirect to this path, which ends in `/`.
+    Redirect(String),
     /// A refusal or a miss: `400`, `403` or `404`.
     Status(u16),
 }
@@ -126,7 +129,12 @@ pub enum Target {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Answer {
     Status(u16),
-    Body { kind: &'static str, body: Vec<u8> },
+    Body {
+        kind: &'static str,
+        body: Vec<u8>,
+    },
+    /// `307 Temporary Redirect` to this path.
+    Redirect(String),
     Events,
 }
 
@@ -187,6 +195,7 @@ impl Server {
                 // Removed since it was found, by a build or by hand.
                 Err(_) => Answer::Status(404),
             },
+            Target::Redirect(location) => Answer::Redirect(location),
             Target::Status(status) => Answer::Status(status),
         }
     }
@@ -282,14 +291,18 @@ pub fn parse_head(head: &[u8]) -> Option<Request> {
 
 /// Whether `host` names the server: `127.0.0.1:<port>` or
 /// `localhost:<port>`, so that a page of another site cannot read it through
-/// a name of its own that resolves to `127.0.0.1` (DNS rebinding).
+/// a name of its own that resolves to `127.0.0.1` (DNS rebinding). On port
+/// 80, which a browser leaves out of `Host`, `127.0.0.1` and `localhost`
+/// alone name it too.
 pub fn host_allowed(host: Option<&str>, port: u16) -> bool {
     let Some(host) = host else {
         return false;
     };
-    [format!("127.0.0.1:{port}"), format!("localhost:{port}")]
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(host.trim()))
+    let host = host.trim();
+    ["127.0.0.1", "localhost"].iter().any(|name| {
+        host.eq_ignore_ascii_case(&format!("{name}:{port}"))
+            || (port == 80 && host.eq_ignore_ascii_case(name))
+    })
 }
 
 /// What `target`, a request's target, names in `dist` (spec §4.4). A path
@@ -302,6 +315,8 @@ pub fn host_allowed(host: Option<&str>, port: u16) -> bool {
 /// - under `/__nova/`, it is the server's own, never a file;
 /// - a path ending in `/` names that directory's `index.html`;
 /// - a file is `403` when it lies outside `dist` once links are resolved;
+/// - a directory inside `dist` that holds an `index.html`, named without its
+///   last `/`, is a redirect to its path with one, as `/docs` to `/docs/`;
 /// - a path that names no file, whose last piece has no `.`, is the page,
 ///   for a router in history mode; any other is `404`.
 pub fn locate(dist: &Path, target: &str) -> Target {
@@ -349,9 +364,39 @@ pub fn locate(dist: &Path, target: &str) -> Target {
             path: real,
             kind: content_type(&file),
         },
+        Ok(real) if !decoded.ends_with('/') && holds_index(&real, &dist) => {
+            Target::Redirect(slashed(target, path))
+        }
         // Missing, or a directory, which is never listed.
         _ => fallback(Some(&dist), page),
     }
+}
+
+/// Whether `dir`, resolved, is a directory that holds an `index.html` which
+/// lies inside `dist`, resolved, once links are resolved.
+fn holds_index(dir: &Path, dist: &Path) -> bool {
+    dir.is_dir()
+        && dir
+            .join("index.html")
+            .canonicalize()
+            .is_ok_and(|real| real.starts_with(dist) && real.is_file())
+}
+
+/// Where a redirect for the directory `target` names goes: `/`, then each
+/// piece of `path`, its path as written, that is neither empty nor `.`,
+/// each followed by `/`, then `target`'s query. Built from those pieces
+/// alone, it never begins with `//`, so it never names another host.
+fn slashed(target: &str, path: &str) -> String {
+    let mut location = String::from("/");
+    for piece in path.split('/').filter(|p| !p.is_empty() && *p != ".") {
+        location.push_str(piece);
+        location.push('/');
+    }
+    let rest = &target[path.len()..];
+    if rest.starts_with('?') {
+        location.push_str(rest.split('#').next().unwrap_or_default());
+    }
+    location
 }
 
 /// A path that names no file: the page when `page`, the output directory's
@@ -451,6 +496,7 @@ pub fn inject(page: &[u8], id: &str) -> Vec<u8> {
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        307 => "Temporary Redirect",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
@@ -460,14 +506,20 @@ fn reason(status: u16) -> &'static str {
 }
 
 /// `answer` as an HTTP/1.1 response that closes its connection, with no body
-/// for a `HEAD`. A refusal's body is its status in words.
+/// for a `HEAD`. A refusal's body is its status in words; a redirect's is
+/// empty.
 fn write_answer(stream: &mut impl Write, answer: &Answer, head_only: bool) -> std::io::Result<()> {
     let refusal;
+    let mut location = String::new();
     let (status, kind, body) = match answer {
         Answer::Body { kind, body } => (200, *kind, body.as_slice()),
         Answer::Status(status) => {
             refusal = format!("{status} {}\n", reason(*status));
             (*status, TEXT, refusal.as_bytes())
+        }
+        Answer::Redirect(to) => {
+            location = format!("Location: {to}\r\n");
+            (307, TEXT, &[][..])
         }
         // A `HEAD` of the event stream: its head, which says the connection
         // closes, as it then does.
@@ -483,7 +535,7 @@ fn write_answer(stream: &mut impl Write, answer: &Answer, head_only: bool) -> st
     };
     let head = format!(
         "HTTP/1.1 {status} {}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n\
-         Cache-Control: no-store\r\n{allow}Connection: close\r\n\r\n",
+         Cache-Control: no-store\r\n{allow}{location}Connection: close\r\n\r\n",
         reason(status),
         body.len(),
     );
@@ -726,6 +778,46 @@ mod tests {
         assert_eq!(locate(&dist, "/app.js/"), Target::Status(404));
     }
 
+    /// A directory with an `index.html`, named without its last `/`, is a
+    /// redirect to its path with one, built from the pieces as written, so
+    /// that the page's relative links resolve inside it; a directory without
+    /// one falls back to the page.
+    #[test]
+    fn a_directory_with_an_index_html_redirects_to_its_path_with_a_slash() {
+        let dist = dist("redirects");
+        let to = |path: &str| Target::Redirect(path.to_string());
+        assert_eq!(locate(&dist, "/docs"), to("/docs/"));
+        assert_eq!(locate(&dist, "/docs?x=1"), to("/docs/?x=1"));
+        assert_eq!(locate(&dist, "/docs?x=1#top"), to("/docs/?x=1"));
+        assert_eq!(locate(&dist, "/docs#top"), to("/docs/"));
+        assert_eq!(locate(&dist, "//docs"), to("/docs/"));
+        assert_eq!(locate(&dist, "/./docs/."), to("/docs/"));
+        assert_eq!(locate(&dist, "/%64ocs"), to("/%64ocs/"));
+        assert_eq!(locate(&dist, "/."), to("/"));
+        std::fs::create_dir_all(dist.join("docs").join("api")).expect("a directory");
+        std::fs::write(dist.join("docs").join("api").join("index.html"), "api").expect("a file");
+        assert_eq!(locate(&dist, "/docs//api"), to("/docs/api/"));
+        // With its `/`, the directory's page; without an `index.html`, the
+        // fallback, as before.
+        assert_eq!(locate(&dist, "/docs/"), file(&dist, "docs/index.html"));
+        let page = file(&dist, "index.html");
+        assert_eq!(locate(&dist, "/assets"), page);
+        assert_eq!(locate(&dist, "/assets?x=1"), page);
+    }
+
+    /// A directory whose `index.html` is a link out of the output directory
+    /// is no redirect: it falls back, and the fallback's page is the output
+    /// directory's own.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_whose_index_html_leaves_the_directory_is_no_redirect() {
+        let dist = dist("redirect-out");
+        std::fs::create_dir_all(dist.join("leaky")).expect("a directory");
+        let outside = dist.with_file_name("secret.txt");
+        std::os::unix::fs::symlink(outside, dist.join("leaky").join("index.html")).expect("a link");
+        assert_eq!(locate(&dist, "/leaky"), file(&dist, "index.html"));
+    }
+
     #[test]
     fn the_servers_own_page_stands_in_for_a_missing_index_html() {
         let dist = dist("own-page");
@@ -840,6 +932,28 @@ mod tests {
             Some("[::1]:4321"),
         ] {
             assert!(!host_allowed(host, 4321), "{host:?}");
+        }
+    }
+
+    /// On port 80 a browser leaves the port out of `Host`, so the name alone
+    /// names the server there, and only there.
+    #[test]
+    fn on_port_80_the_host_may_leave_the_port_out() {
+        for host in [
+            "127.0.0.1",
+            "localhost",
+            "LOCALHOST",
+            " 127.0.0.1 ",
+            "127.0.0.1:80",
+        ] {
+            assert!(host_allowed(Some(host), 80), "{host:?}");
+        }
+        for host in ["evil.example", "127.0.0.1:81", "localhost:8080", ""] {
+            assert!(!host_allowed(Some(host), 80), "{host:?}");
+        }
+        for port in [81, 443, 8080] {
+            assert!(!host_allowed(Some("127.0.0.1"), port), "{port}");
+            assert!(!host_allowed(Some("localhost"), port), "{port}");
         }
     }
 
@@ -1016,6 +1130,14 @@ mod tests {
             server.answer(&get("GET", "/__nova/events", host)),
             Answer::Events
         );
+        assert_eq!(
+            server.answer(&get("GET", "/docs?x=1", host)),
+            Answer::Redirect("/docs/?x=1".to_string())
+        );
+        assert_eq!(
+            server.answer(&get("HEAD", "/docs", host)),
+            Answer::Redirect("/docs/".to_string())
+        );
         std::fs::remove_file(server.dist.join("index.html")).expect("remove the page");
         let Answer::Body { body, .. } = server.answer(&get("GET", "/", host)) else {
             panic!("the server's own page");
@@ -1096,6 +1218,28 @@ mod tests {
         let refused = String::from_utf8(refused).unwrap();
         assert!(refused.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"));
         assert!(refused.contains("\r\nAllow: GET, HEAD\r\n"), "{refused}");
+    }
+
+    /// A redirect is `307`, so that a browser does not keep it, with its
+    /// `Location`, no body for `GET` or `HEAD`, and the head every answer
+    /// has.
+    #[test]
+    fn a_redirect_has_its_location_and_no_body() {
+        let answer = Answer::Redirect("/docs/?x=1".to_string());
+        for head_only in [false, true] {
+            let mut wire = Vec::new();
+            write_answer(&mut wire, &answer, head_only).unwrap();
+            let wire = String::from_utf8(wire).unwrap();
+            assert!(
+                wire.starts_with("HTTP/1.1 307 Temporary Redirect\r\n"),
+                "{wire}"
+            );
+            assert!(wire.contains("\r\nLocation: /docs/?x=1\r\n"), "{wire}");
+            assert!(wire.contains("\r\nContent-Length: 0\r\n"), "{wire}");
+            assert!(wire.contains("\r\nCache-Control: no-store\r\n"), "{wire}");
+            assert!(wire.contains("\r\nConnection: close\r\n"), "{wire}");
+            assert!(wire.ends_with("\r\n\r\n"), "{wire}");
+        }
     }
 
     /// A `HEAD` of the event stream gets the stream's head, which says the

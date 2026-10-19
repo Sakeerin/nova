@@ -3,10 +3,12 @@
 // §3, §5.2): what shows at `/`, after a link's click, after `navigate` with
 // a query, after the back button, at a path only `*` matches, after
 // `navigate` to a path the browser writes percent-encoded (`café`, a space),
-// and with a percent-encoded parameter. The menu's links are made before the
-// router, and take its `#` all the same. Each route's component says when it
-// is built, so a navigation that built it twice would show: one whose
-// `hashchange` found the encoded hash unlike the location `navigate` set.
+// and with a percent-encoded parameter. The menu's links are built beside a
+// `show` of the router, before it shows: their `href`s are rooted paths
+// until it shows, take its `#` while it is shown, and are rooted paths again
+// once it is hidden. Each route's component says when it is built, so a
+// navigation that built it twice would show: one whose `hashchange` found
+// the encoded hash unlike the location `navigate` set.
 
 import ui
 import ui::html::{button, div, id, nav, p, text}
@@ -70,12 +72,14 @@ fn main() {
         Route { path: "/search", component: Search },
         Route { path: "*", component: NotFound },
     ]
+    let routed = signal(false)
     mount(
         "#app",
         || view {
             div {
                 Menu()
-                div(id: "page") { Router(routes) }
+                button(id: "toggle", on_click: || routed.update(|on: Bool| !on)) { text("Router") }
+                div(id: "page") { show(routed, || Router(routes)) }
             }
         },
     )

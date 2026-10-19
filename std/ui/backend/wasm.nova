@@ -111,14 +111,17 @@ pub fn backend_on_location(history: Bool, f: fn()) -> fn() {
 /// click is left to the browser. The default is prevented before `go` runs,
 /// so a panic in `go` cannot hand the click back. The link is the nearest
 /// `<a>` with `data-nova-link` at or above the click's target; a plain click
-/// is the main button with no modifier key, on a link with no `target`.
+/// is the main button with no modifier key, on a link with no `target` and
+/// no `download`, whose click is the browser's to open elsewhere or to save.
+/// A page-wide `<base target>` is not looked at.
 pub fn backend_on_link_click(take: fn() -> Bool, go: fn(String)) -> fn() {
     let mut listener = window_add_event_listener(
         "click",
         |e: Event| {
             match nova_link(e.target()) {
                 Some(a) => {
-                    if !e.modified() && a.attribute("target").is_none() && take() {
+                    let plain = !e.modified() && a.attribute("target").is_none()
+                    if plain && a.attribute("download").is_none() && take() {
                         e.prevent_default()
                         go(a.attribute("href").unwrap_or(""))
                     }

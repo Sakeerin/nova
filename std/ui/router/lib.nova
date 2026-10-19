@@ -5,8 +5,10 @@
 //! `import ui::router::{Route, Router, link}` for some names, or
 //! `import ui::router` for all. `Router` routes by the address's hash, as
 //! `#/posts/1`; `HistoryRouter` routes by its path, as `/posts/1`, through
-//! the history API, and needs a server that answers every path with the
-//! page, as `nova dev` does.
+//! the history API, and needs a server that answers each of the app's paths
+//! with the page. `nova dev` answers with the page a path whose last piece
+//! has no `.` and that names no file in the output directory, nor a
+//! directory there that holds an `index.html`.
 //!
 //! A router shows the component of the first `Route` whose path matches the
 //! location, and shows it again each time the location changes: a `link`
@@ -77,9 +79,16 @@ pub record Route {
 record Active { id: Int, history: Bool, location: Signal<String> }
 
 // The router's state for the thread or the page (spec §3.5): the router
-// mounted last, the parameters of the route being built while it is, and
-// the next router's number.
-record Routing { active: Option<Active>, params: Option<Map<String, String>>, next_id: Int }
+// mounted last, the parameters of the route being built while it is, the
+// next router's number, and a signal set each time the router mounted last
+// changes, which every link's `href` reads. A signal has no owner, so the
+// state can make it whenever it is first asked for.
+record Routing {
+    active: Option<Active>,
+    params: Option<Map<String, String>>,
+    next_id: Int,
+    changes: Signal<Int>,
+}
 
 // A route that matched: its component and the parameters its pattern took.
 record Matched { component: fn() -> View, params: Map<String, String> }
@@ -90,9 +99,16 @@ fn store_routing<T>(state: T) { router_state_store(state) }
 
 // The state, made the first time it is asked for.
 fn routing() -> Routing {
-    if !router_state_present() { store_routing(Routing { active: None, params: None, next_id: 1 }) }
+    if !router_state_present() {
+        store_routing(Routing { active: None, params: None, next_id: 1, changes: signal(0) })
+    }
     load_routing()
 }
+
+// Tell the links built so far that the router mounted last has changed:
+// each reads its `href` again, so a menu built beside a router that a
+// `show` mounts later, or unmounts, follows it.
+fn changed(s: Routing) { s.changes.update(|n: Int| n + 1) }
 
 // Whether the router numbered `id` is the one mounted last.
 fn is_active(id: Int) -> Bool {
@@ -131,12 +147,14 @@ pub component Router(routes: [Route]) { routed(false, routes) }
 /// and query, as `/posts/1?tab=2`, through the history API, and shows it
 /// again each time the location changes, as `Router` does.
 ///
-/// A link's `href` is the path itself, so a server must answer every path
-/// with the page, as `nova dev` does, for the page to be reloaded. The
-/// page `nova build --target wasm` generates loads `/app.js` by its
-/// absolute path, so it can be; a project's own `index.html` must load
-/// `/app.js` by the absolute path too, since under `/posts/1` a relative
-/// `./app.js` would be `/posts/app.js`.
+/// A link's `href` is the path itself, so for the page to be reloaded
+/// there a server must answer the path with the page. `nova dev` does when
+/// the path's last piece has no `.` and it names no file in the output
+/// directory, nor a directory there that holds an `index.html`. The page
+/// `nova build --target wasm` generates loads `/app.js` by its absolute
+/// path, so it can be; a project's own `index.html` must load `/app.js` by
+/// the absolute path too, since under `/posts/1` a relative `./app.js` would
+/// be `/posts/app.js`.
 ///
 /// ```
 /// import ui
@@ -161,6 +179,7 @@ fn routed(history: Bool, routes: [Route]) -> View {
     s.next_id = id + 1
     let location = signal(located(history))
     s.active = Some(Active { id: id, history: history, location: location })
+    changed(s)
     // `navigate` sets the location itself, to what the page reports, before
     // the `hashchange` it causes, which then finds it unchanged and builds
     // nothing again.
@@ -197,6 +216,7 @@ fn routed(history: Bool, routes: [Route]) -> View {
                 let mut s = routing()
                 s.active = None
                 s.params = None
+                changed(s)
             }
         },
     )
@@ -294,10 +314,67 @@ fn unfragmented(location: String) -> String {
     }
 }
 
-// Whether going to `path` stays at `at`, a router's location: the same once
-// `path`'s fragment is dropped and both are percent-decoded, since the page
-// reports `/posts/café` as `/posts/caf%C3%A9`.
-fn same_location(path: String, at: String) -> Bool { decoded(unfragmented(path)) == decoded(at) }
+// Whether going to `path` stays at `at`, a router's location: the same
+// pieces of the path and the same parts of the query, in order, once
+// `path`'s fragment is dropped. Each piece, and each part's name and value,
+// is percent-decoded on its own, since the page reports `/posts/café` as
+// `/posts/caf%C3%A9`; a delimiter written encoded stays apart from one
+// written plain, so `/a%2Fb` is not `/a/b`, nor `?q=a%26b` `?q=a&b`.
+fn same_location(path: String, at: String) -> Bool {
+    let mine = parts_of(unfragmented(path))
+    let theirs = parts_of(at)
+    if mine.len() != theirs.len() { return false }
+    let mut i = 0
+    while i < mine.len() {
+        if mine.get(i).unwrap_or("") != theirs.get(i).unwrap_or("") { return false }
+        i = i + 1
+    }
+    true
+}
+
+// What `same_location` compares of `location`: each piece of its path, split
+// at `/` with the empty ones kept, as `p` and the piece decoded; then, when it
+// has a `?`, a `?`, and for each part of the query, split at `&`, `n` and its
+// name decoded, and when the part has a `=`, `v` and its value decoded. The
+// letter in front keeps a piece, a name and a value apart, so two lists are
+// the same only when their pieces, names and values are.
+fn parts_of(location: String) -> Vec<String> {
+    let mut out = Vec::new()
+    let mut path = location
+    let mut query = ""
+    let mut queried = false
+    match location.index_of("?") {
+        Some(at) => {
+            path = location.slice(0, at)
+            query = location.slice(at + 1, location.len())
+            queried = true
+        }
+        None => {}
+    }
+    let pieces = path.split("/")
+    let mut i = 0
+    while i < pieces.len() {
+        out.push("p${decoded(pieces[i])}")
+        i = i + 1
+    }
+    if queried {
+        out.push("?")
+        let parts = query.split("&")
+        let mut j = 0
+        while j < parts.len() {
+            let part = parts[j]
+            match part.index_of("=") {
+                Some(eq) => {
+                    out.push("n${decoded(part.slice(0, eq))}")
+                    out.push("v${decoded(part.slice(eq + 1, part.len()))}")
+                }
+                None => out.push("n${decoded(part)}")
+            }
+            j = j + 1
+        }
+    }
+    out
+}
 
 /// The parameters of the route being shown, by name: `{"id": "1"}` for the
 /// route `/posts/:id` at `/posts/1`, each percent-decoded. It reads them
@@ -375,16 +452,20 @@ pub fn use_query() -> Map<String, String> {
 
 /// An `<a>` that goes to a route without loading the page. Its `to`
 /// attribute, fixed or reactive, is the path, and becomes its `href`:
-/// `#/posts/1` under `Router`, `/posts/1` under `HistoryRouter`, with one
-/// `/` in front as `navigate` puts it, so `//posts/1` is `/posts/1` too,
-/// and `to` as written with no router. It also gets `data-nova-link`, by
-/// which the router finds it; its other attributes are the `<a>`'s.
+/// `#/posts/1` under `Router`, and `/posts/1` under `HistoryRouter` and with
+/// no router, with one `/` in front as `navigate` puts it, so `//posts/1` is
+/// `/posts/1` too, and no `href` names another host. The `href` follows the
+/// router mounted last, so a link built before a router, or beside one that
+/// is mounted or unmounted later, takes the router's form. It also gets
+/// `data-nova-link`, by which the router finds it; its other attributes are
+/// the `<a>`'s.
 ///
 /// A plain click navigates; a click with a modifier key or another button,
-/// or on a link with a `target`, is the browser's, so a link still opens in
-/// a new tab. In a view it is `link(to: "/posts/1") { text("…") }`, and
-/// outside one `link([attr("to", "/posts/1")], [text("…")])`. A link with no
-/// `to` panics.
+/// or on a link with a `target` or a `download`, is the browser's, so a link
+/// still opens in a new tab, or downloads. In a view it is
+/// `link(to: "/posts/1") { text("…") }`, and outside one
+/// `link([attr("to", "/posts/1")], [text("…")])`. A link with no `to`
+/// panics.
 ///
 /// ```
 /// import ui
@@ -427,12 +508,17 @@ pub fn link(attrs: [Attr], children: [View]) -> View {
     Element("a", out, children)
 }
 
-// A link's `href` for `to`, read when the link is built, so that one made
-// before its router, as a menu before the routes, has the router's.
+// A link's `href` for `to`: read when the link is built, and again each time
+// the router mounted last changes, so that one made before its router, as a
+// menu before the routes or beside a `show` of them, has the router's. With
+// no router it is the path `HistoryRouter` gives, never `to` as written,
+// which could name another host.
 fn href_of(to: String) -> String {
-    match routing().active {
+    let s = routing()
+    let _ = s.changes.value()
+    match s.active {
         Some(a) => if a.history { rooted(to) } else { "#${rooted(to)}" }
-        None => to
+        None => rooted(to)
     }
 }
 

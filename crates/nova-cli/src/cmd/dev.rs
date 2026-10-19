@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -43,6 +43,9 @@ pub struct DevCmd {
 /// How often the watcher reads the sources' times and sizes (spec §4.6).
 const POLL: Duration = Duration::from_millis(200);
 
+/// How long the probe of a port waits for a listener to answer.
+const PROBE: Duration = Duration::from_millis(200);
+
 pub fn run(cmd: DevCmd) -> Result<()> {
     // What `nova build --target wasm` refuses, refused before anything is
     // bound or built (spec §4.1, §4.2).
@@ -58,15 +61,15 @@ pub fn run(cmd: DevCmd) -> Result<()> {
     };
     bundle::check_output_for(root, &out)?;
 
+    // A listener on `0.0.0.0:<port>` does not stop the bind on macOS, where
+    // `SO_REUSEADDR`, which std sets on Unix, lets `127.0.0.1:<port>` bind
+    // beside it; a connection it answers shows it.
+    if cmd.port != 0 && in_use(cmd.port) {
+        port_in_use(cmd.port);
+    }
     let listener = match TcpListener::bind(("127.0.0.1", cmd.port)) {
         Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!(
-                "nova dev: port {} is in use; choose another with --port",
-                cmd.port
-            );
-            std::process::exit(1);
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => port_in_use(cmd.port),
         Err(e) => return Err(e).with_context(|| format!("binding 127.0.0.1:{}", cmd.port)),
     };
     let port = listener
@@ -83,7 +86,7 @@ pub fn run(cmd: DevCmd) -> Result<()> {
     let watched = Watched::of(&mode, &out);
     // Read before the first build, so that an edit made during it starts
     // another.
-    let mut seen = watched.snapshot();
+    let seen = watched.snapshot();
     builder.build();
 
     let url = format!("http://127.0.0.1:{port}/");
@@ -93,10 +96,7 @@ pub fn run(cmd: DevCmd) -> Result<()> {
         open(&url);
     }
 
-    std::thread::spawn(move || loop {
-        seen = watched.changed(&seen);
-        builder.build();
-    });
+    std::thread::spawn(move || watch(seen, || watched.poll(), || builder.build()));
     server::serve(
         listener,
         Server {
@@ -106,6 +106,31 @@ pub fn run(cmd: DevCmd) -> Result<()> {
         },
     );
     Ok(())
+}
+
+/// Whether something answers a connection to `127.0.0.1:<port>` within
+/// 200 ms. A refusal or no answer in time means the port is free.
+fn in_use(port: u16) -> bool {
+    TcpStream::connect_timeout(&SocketAddr::from(([127, 0, 0, 1], port)), PROBE).is_ok()
+}
+
+/// The message for a port in use, and status 1 (spec §4.1).
+fn port_in_use(port: u16) -> ! {
+    eprintln!("nova dev: port {port} is in use; choose another with --port");
+    std::process::exit(1);
+}
+
+/// The watcher's loop (spec §4.3, §4.6): waits until `poll` gives a
+/// snapshot that differs from `seen` and has settled, builds, and waits
+/// again from that snapshot, read before the build began. So a change made
+/// during a build starts one more build after it, and a burst of changes
+/// during one build starts one, not one each. It returns when `poll` gives
+/// `None`, which the watcher's poll never does; a test's does, to stop it.
+fn watch<T: PartialEq>(mut seen: T, mut poll: impl FnMut() -> Option<T>, mut build: impl FnMut()) {
+    while let Some(now) = settled(&seen, &mut poll) {
+        build();
+        seen = now;
+    }
 }
 
 /// Runs the builds, one at a time, each in a child process (spec §4.3).
@@ -234,29 +259,26 @@ impl Watched {
         seen
     }
 
-    /// Polls every 200 ms until a file is added, removed or changed since
-    /// `seen`, then until one more poll sees nothing new: what that last
-    /// poll read.
-    fn changed(&self, seen: &Snapshot) -> Snapshot {
-        settled(seen, || {
-            std::thread::sleep(POLL);
-            self.snapshot()
-        })
+    /// A snapshot 200 ms from now: one poll of the watcher, which always
+    /// gives one.
+    fn poll(&self) -> Option<Snapshot> {
+        std::thread::sleep(POLL);
+        Some(self.snapshot())
     }
 }
 
 /// What `poll` returns once it differs from `seen` and one more poll
 /// returns the same, so that an editor that writes twice starts one build
-/// (spec §4.6).
-fn settled<T: PartialEq>(seen: &T, mut poll: impl FnMut() -> T) -> T {
-    let mut now = poll();
+/// (spec §4.6); `None` as soon as `poll` gives `None`.
+fn settled<T: PartialEq>(seen: &T, mut poll: impl FnMut() -> Option<T>) -> Option<T> {
+    let mut now = poll()?;
     while now == *seen {
-        now = poll();
+        now = poll()?;
     }
     loop {
-        let next = poll();
+        let next = poll()?;
         if next == now {
-            return now;
+            return Some(now);
         }
         now = next;
     }
@@ -480,15 +502,16 @@ mod tests {
             target_dir: dir.join("target"),
         };
         let watched = Watched::of(&mode, &dir.join("dist"));
+        let changed = |seen: &Snapshot| settled(seen, || watched.poll()).expect("a snapshot");
         let first = watched.snapshot();
         std::fs::write(dir.join("src/main.nova"), "longer").unwrap();
-        let second = watched.changed(&first);
+        let second = changed(&first);
         assert_ne!(first, second);
         std::fs::write(dir.join("src/more.nova"), "x").unwrap();
-        let third = watched.changed(&second);
+        let third = changed(&second);
         assert_eq!(third.len(), 3);
         std::fs::remove_file(dir.join("src/more.nova")).unwrap();
-        let fourth = watched.changed(&third);
+        let fourth = changed(&third);
         assert_eq!(fourth, second);
         // The output directory changing is no change.
         std::fs::create_dir_all(dir.join("dist")).unwrap();
@@ -527,9 +550,81 @@ mod tests {
         let mut taken = 0;
         let settled = settled(&0, || {
             taken += 1;
-            polls.next().expect("a poll")
+            Some(polls.next().expect("a poll"))
         });
-        assert_eq!((settled, taken), (3, 6));
+        assert_eq!((settled, taken), (Some(3), 6));
+    }
+
+    /// A program's sources as the watcher's loop sees them: a version that
+    /// each write bumps, some writes made while a build runs and some at
+    /// given polls, and a stop after 50 polls.
+    struct Sources {
+        version: u32,
+        polls: usize,
+        /// The versions each build saw, in order.
+        built: Vec<u32>,
+    }
+
+    /// Runs the watcher's loop from `seen`, 0, over sources at version 1,
+    /// with `writes_during(n)` writes during build `n`, from 1, and one
+    /// write at each poll in `writes_at`: the versions each build saw.
+    fn builds(writes_during: impl Fn(usize) -> u32, writes_at: &[usize]) -> Vec<u32> {
+        let sources = std::cell::RefCell::new(Sources {
+            version: 1,
+            polls: 0,
+            built: Vec::new(),
+        });
+        watch(
+            0,
+            || {
+                let mut s = sources.borrow_mut();
+                s.polls += 1;
+                if s.polls > 50 {
+                    return None;
+                }
+                if writes_at.contains(&s.polls) {
+                    s.version += 1;
+                }
+                Some(s.version)
+            },
+            || {
+                let mut s = sources.borrow_mut();
+                let version = s.version;
+                s.built.push(version);
+                let n = s.built.len();
+                s.version += writes_during(n);
+            },
+        );
+        sources.into_inner().built
+    }
+
+    /// A change seen while a build runs starts exactly one more build after
+    /// it, from what it wrote; none starts nothing more.
+    #[test]
+    fn a_change_during_a_build_starts_one_more_build() {
+        assert_eq!(builds(|_| 0, &[]), [1]);
+        assert_eq!(builds(|n| u32::from(n == 1), &[]), [1, 2]);
+    }
+
+    /// A burst of writes during one build, which goes on over the first
+    /// polls after it, starts one more build, not one per write.
+    #[test]
+    fn a_burst_during_a_build_starts_one_more_build() {
+        assert_eq!(builds(|n| if n == 1 { 3 } else { 0 }, &[]), [1, 4]);
+        // The first build runs after polls 1 and 2; polls 3 and 4 see more
+        // writes.
+        assert_eq!(builds(|n| if n == 1 { 3 } else { 0 }, &[3, 4]), [1, 6]);
+    }
+
+    /// A port with a listener on `127.0.0.1` is in use; once the listener is
+    /// gone, it is not.
+    #[test]
+    fn a_port_with_a_listener_is_in_use() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a listener");
+        let port = listener.local_addr().expect("its address").port();
+        assert!(in_use(port));
+        drop(listener);
+        assert!(!in_use(port));
     }
 
     #[test]

@@ -1,5 +1,6 @@
+hrefs before the router shows: / /posts/7 /posts/caf%C3%A9
 built Home
-hrefs: #/ #/posts/7 #/posts/caf%C3%A9
+hrefs with the router shown: #/ #/posts/7 #/posts/caf%C3%A9
 at /: (no hash) <p>home</p>
 built Post with id 7
 click: prevented=true
@@ -28,3 +29,7 @@ built Home
 click: prevented=true
 home: #/ <p>home</p>
 history: 8 entries
+click: prevented=false
+hrefs once the router is hidden: / /posts/7 /posts/caf%C3%A9
+click: prevented=false
+a link with no router: #/, nothing routed
