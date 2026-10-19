@@ -80,6 +80,19 @@ and refuses `--release`
 (`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md` §3.1; ADR
 0039).
 
+**Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):** `nova
+dev [FILE] [--port <PORT>] [--open] [-o <DIR>]` exists, without HMR. It
+takes `FILE` and `-o`, and refuses what `nova build --target wasm` refuses;
+builds into `dist/` as that does; prints `nova dev: serving
+http://127.0.0.1:<port>/`, on port 3000 unless `--port` names another, `0`
+letting the system choose; and opens a browser only with `--open`. When a
+source changes, it builds again in a child process and reloads the page
+over Server-Sent Events, or shows the build's errors over the page until a
+good build. A taken port stops it with `nova dev: port <port> is in use;
+choose another with --port` and status 1
+(`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+§4; ADR 0044).
+
 ### 1.2 Project Template (`nova new`)
 
 ```

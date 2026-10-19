@@ -545,6 +545,21 @@ RFC 0001; ADR 0043).
   - editing its source reloads the page with the change;
   - a type error shows the overlay.
 
+**Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):** by the
+user's decisions of 2026-10-18, the router keeps §6's names: `Router(routes)`
+routes by the hash and `HistoryRouter(routes)` by the history API, a path
+holds `:name` parameters, the route `*` matches what no route before it
+does, and `link` makes the links. `nova dev` prints its URL and opens a
+browser only with `--open`; its port is 3000, or `--port`; it builds into
+`dist/`, each rebuild in a child process whose stderr is the overlay's
+text. The router's state is behind three std-only builtins, and a page has
+one router. The gate is `06-counter-spa` under `nova dev` in Chromium, as
+above, and the type error's fix takes the overlay away; a second browser
+test drives a `HistoryRouter` app under `nova dev` through links, the back
+button and a reload
+(`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`;
+ADR 0044).
+
 ### 4.6 — SSR, hydration and SSG
 - **SSR:** the string backend renders a whole app, escaping all text.
 - **Hydration**, and `nova build --ssr` and `--ssg` (decision 10).

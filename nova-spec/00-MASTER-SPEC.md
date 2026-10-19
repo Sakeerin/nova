@@ -84,6 +84,9 @@ These are NOT up for debate. If a tradeoff appears mid-implementation, prefer th
 - **SSR/SSG:** built-in flags on `nova build`
 - **Bundler:** built-in (`nova bundle`)
 - **HMR:** built-in (`nova dev`)
+  **Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):**
+  `nova dev` reloads the page on a change, live reload with no HMR, by the
+  user's decision of 2026-10-14 (ADRs 0038 and 0044).
 
 ### 1.9 Versioning & Stability
 - **Pre-1.0:** breaking changes allowed in minor versions, RFC required
@@ -674,6 +677,10 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
 5. `std/ui/html/` — element builders
 6. `std/ui/router/` — client router
 7. `nova dev` — dev server with HMR
+   **Amended 2026-10-18 (branch `claude/loving-archimedes-frtf5q-45`):**
+   live reload, no HMR: a change rebuilds the program and reloads the page,
+   whose state starts again, by the user's decision of 2026-10-14 (ADRs
+   0038 and 0044).
 8. SSR: render to string in native runtime, hydrate in WASM
 9. SSG: compile-time route enumeration
 
