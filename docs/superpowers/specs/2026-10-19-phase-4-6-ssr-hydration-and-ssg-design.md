@@ -1,7 +1,7 @@
 # Phase 4.6, "SSR, hydration and SSG": design
 
 - **Date:** 2026-10-19.
-- **Status:** draft, for the user's approval.
+- **Status:** approved by the user on 2026-10-19.
 - **The user's decisions, 2026-10-19:**
   1. **Two entries, one project.** `src/main.nova` is the client, built
      for WASM, which hydrates. `src/server.nova` is the server, built
