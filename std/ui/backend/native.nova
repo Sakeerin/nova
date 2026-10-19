@@ -46,3 +46,24 @@ pub fn backend_is_same(a: Node, b: Node) -> Bool { no_page() }
 /// Calls `f` with the target's `value` on each event of kind `kind`, until
 /// the function returned is called.
 pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() { no_page() }
+
+/// The router's location: natively always `/` (spec
+/// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+/// §3.6, §3.7).
+pub fn backend_location(history: Bool) -> String { "/" }
+
+/// Goes to `to`: natively there is no history, so nothing, and the
+/// location is then `to` as written.
+pub fn backend_go(history: Bool, to: String) -> String { to }
+
+/// Replaces the current history entry with `to`: natively there is none,
+/// so nothing, and the location is then `to` as written.
+pub fn backend_replace(to: String) -> String { to }
+
+/// Calls `f` each time the location changes: natively it never does, so
+/// this listens for nothing, and the function returned does nothing.
+pub fn backend_on_location(history: Bool, f: fn()) -> fn() { || {} }
+
+/// For a plain click on a link, `go` with its `href` when `take()` is true:
+/// natively there are no clicks, so this listens for nothing.
+pub fn backend_on_link_click(take: fn() -> Bool, go: fn(String)) -> fn() { || {} }

@@ -1,0 +1,9 @@
+hrefs: #/posts/7 #/posts/8
+at /: (no hash) first [<p>home</p>] second [<p>home</p>]
+click: prevented=true
+both mounted: #/posts/7 first [<p>post 7</p>] second [<p>post 7</p>]
+click: prevented=false
+the later disposed: #/posts/7 first [<p>post 7</p>] second []
+click: prevented=false
+left to the browser: #/posts/7 first [<p>post 7</p>] second []
+history: 2 entries

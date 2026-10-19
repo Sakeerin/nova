@@ -68,3 +68,86 @@ pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() {
     let stop = || listener.remove()
     stop
 }
+
+/// The router's location (spec
+/// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+/// §3.1, §3.6): the path and query of the page's address under `history`,
+/// and otherwise its fragment without the `#`, `/` when it has none.
+pub fn backend_location(history: Bool) -> String {
+    if history { return "${location_pathname()}${location_search()}" }
+    let hash = location_hash()
+    if hash == "" || hash == "#" { "/" } else { hash.slice(1, hash.len()) }
+}
+
+/// Goes to `to`: a new history entry for it under `history`, and otherwise
+/// the fragment `#` and `to`. Returns the location the page reports then,
+/// as `backend_location` reads it: the browser writes the address its own
+/// way, as `#/posts/caf%C3%A9` for `#/posts/café`.
+pub fn backend_go(history: Bool, to: String) -> String {
+    if history { history_push(to) } else { set_location_hash("#${to}") }
+    backend_location(history)
+}
+
+/// Replaces the current history entry with `to`, a path and query, adding
+/// none. Returns the location the page reports then, as `backend_go` does.
+pub fn backend_replace(to: String) -> String {
+    history_replace(to)
+    backend_location(true)
+}
+
+/// Calls `f` each time the location changes under the back and forward
+/// buttons, or a fragment typed in: on `popstate` under `history`, and on
+/// `hashchange` otherwise, until the function returned is called.
+pub fn backend_on_location(history: Bool, f: fn()) -> fn() {
+    let kind = if history { "popstate" } else { "hashchange" }
+    let mut listener = window_add_event_listener(kind, |e: Event| f())
+    let stop = || listener.remove()
+    stop
+}
+
+/// For a plain click on a link, until the function returned is called
+/// (spec §3.3): when `take()` is true, prevents the click's default, so the
+/// page is not loaded, then calls `go` with the link's `href`; any other
+/// click is left to the browser. The default is prevented before `go` runs,
+/// so a panic in `go` cannot hand the click back. The link is the nearest
+/// `<a>` with `data-nova-link` at or above the click's target; a plain click
+/// is the main button with no modifier key, on a link with no `target`.
+pub fn backend_on_link_click(take: fn() -> Bool, go: fn(String)) -> fn() {
+    let mut listener = window_add_event_listener(
+        "click",
+        |e: Event| {
+            match nova_link(e.target()) {
+                Some(a) => {
+                    if !e.modified() && a.attribute("target").is_none() && take() {
+                        e.prevent_default()
+                        go(a.attribute("href").unwrap_or(""))
+                    }
+                }
+                None => {}
+            }
+        },
+    )
+    let stop = || listener.remove()
+    stop
+}
+
+// The nearest `<a>` with `data-nova-link` at or above `at`.
+fn nova_link(at: Option<Element>) -> Option<Element> {
+    let mut node = at
+    let mut found = None
+    let mut done = false
+    while !done {
+        match node {
+            Some(n) => {
+                if n.tag() == "a" && n.attribute("data-nova-link").is_some() {
+                    found = Some(n)
+                    done = true
+                } else {
+                    node = n.parent()
+                }
+            }
+            None => done = true
+        }
+    }
+    found
+}

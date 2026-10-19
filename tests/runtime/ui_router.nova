@@ -1,0 +1,245 @@
+// `std/ui/router`'s paths, queries and state (spec
+// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+// §3.2 to §3.5, §3.7). Natively the location is `/`, and `navigate` sets the
+// router's location alone, so each line renders a router after a
+// `navigate`: empty pieces dropped, literals matched with their case, `:name`
+// parameters percent-decoded or kept as written, the first route that
+// matches shown, `*` matching everything, queries split and decoded, and a
+// `#fragment` dropped before either. Then a link's `href`, fixed and
+// reactive; a leading run of `/` and `\` that is one `/` under either
+// router, in an `href` and in `navigate`; and a router that takes over from
+// another and outlives its disposal.
+import ui
+import ui::html::{attr, dyn_attr, id, p, text}
+import ui::router::{HistoryRouter, Route, Router, link, navigate, use_params, use_query}
+
+component Root() {
+    view {
+        p { text("root") }
+    }
+}
+
+component Posts() {
+    view {
+        p { text("posts") }
+    }
+}
+
+component Post() {
+    let id = use_params().get("id").unwrap_or("?")
+    view {
+        p { text("post [${id}]") }
+    }
+}
+
+component Comment() {
+    let params = use_params()
+    let id = params.get("id").unwrap_or("?")
+    let c = params.get("c").unwrap_or("?")
+    view {
+        p { text("comment ${c} of ${id}, ${params.len()} params") }
+    }
+}
+
+component Exact() {
+    view {
+        p { text("exact") }
+    }
+}
+
+component Ab() {
+    view {
+        p { text("a then b") }
+    }
+}
+
+component Ax() {
+    let x = use_params().get("x").unwrap_or("?")
+    view {
+        p { text("a then ${x}") }
+    }
+}
+
+component Everything() {
+    view {
+        p { text("everything") }
+    }
+}
+
+// How many keys the query has, and those of them this program asks about,
+// each as `'key'=[value]`.
+component Query() {
+    let q = use_query()
+    let mut shown = ""
+    let keys = ["a", "b", "flag", "a b", ""]
+    let mut i = 0
+    while i < keys.len() {
+        match q.get(keys[i]) {
+            Some(v) => shown = "${shown} '${keys[i]}'=[${v}]"
+            None => {}
+        }
+        i = i + 1
+    }
+    view {
+        p { text("${q.len()} keys:${shown}") }
+    }
+}
+
+// `routes` rendered after `navigate(to)`.
+fn at(routes: [Route], to: String) -> String {
+    render_to_string(
+        || {
+            let router = Router(routes)
+            navigate(to)
+            router
+        },
+    )
+}
+
+// A link to `to` and `routes` rendered after `navigate(to)`, under
+// `Router`, then under `HistoryRouter`.
+fn by_both(routes: [Route], to: String) -> String {
+    let hash = render_to_string(
+        || {
+            let router = Router(routes)
+            navigate(to)
+            p([], [link([attr("to", to)], [text("a")]), router])
+        },
+    )
+    let history = render_to_string(
+        || {
+            let router = HistoryRouter(routes)
+            navigate(to)
+            p([], [link([attr("to", to)], [text("a")]), router])
+        },
+    )
+    "${hash} ${history}"
+}
+
+// Each of `tos`, after `label`, and `routes` rendered there.
+fn each(label: String, routes: [Route], tos: [String]) {
+    let mut i = 0
+    while i < tos.len() {
+        println("${label}${tos[i]}: ${at(routes, tos[i])}")
+        i = i + 1
+    }
+}
+
+fn main() {
+    let routes = [
+        Route { path: "/", component: Root },
+        Route { path: "/posts", component: Posts },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "posts/:id/comments/:c/", component: Comment },
+        Route { path: "/Exact", component: Exact },
+        Route { path: "/a/b", component: Ab },
+        Route { path: "/a/:x", component: Ax },
+    ]
+    each(
+        "",
+        routes,
+        [
+            "/",
+            "",
+            "//",
+            "/posts/",
+            "posts",
+            "/posts//7",
+            "/posts/7?x=1",
+            "/posts/7/comments/3",
+            "/posts/7/8",
+            "/exact",
+            "/Exact",
+            "/a/b",
+            "/a/c",
+            "/posts/caf%C3%A9",
+            "/posts/a%2Fb",
+            "/posts/a%2fb",
+            "/posts/a%20b%3F",
+            "/posts/100%",
+            "/posts/%zz",
+            "/posts/%FF",
+            "/posts/a+b",
+            "/posts/6#sec",
+            "/posts/6#a/b?c=d",
+        ],
+    )
+    let catch_all = [
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "*", component: Everything },
+        Route { path: "/", component: Root },
+    ]
+    each("* ", catch_all, ["/", "/posts/1", "/posts/1/2"])
+    let queries = [Route { path: "/q", component: Query }]
+    each(
+        "",
+        queries,
+        [
+            "/q",
+            "/q?",
+            "/q?a=1&b=2",
+            "/q?a=1&a=2",
+            "/q?flag",
+            "/q?a=x+y%21",
+            "/q?a+b=c",
+            "/q?=v",
+            "/q?a=1&&b=2&",
+            "/q?a=%zz",
+            "/q?a=b=c",
+            "/q?a=1?b=2",
+            "/q?a=1#x",
+            "/q?a=1#x&b=2",
+        ],
+    )
+    // With no router: nothing to read, and a link's `href` is its `to`.
+    println("no router: ${use_params().len()} params, ${use_query().len()} keys")
+    println(render_to_string(|| link([id("l"), attr("to", "posts/1")], [text("one")])))
+    // Under a router, a fixed and a reactive `to`, written without its `/`.
+    let n = signal(2)
+    println(
+        render_to_string(
+            || {
+                let router = Router(routes)
+                // On WASM, the location is the page's, which the
+                // navigations above changed.
+                navigate("/")
+                let fixed = link([attr("to", "posts/1")], [text("one")])
+                let moving = link([dyn_attr("to", || "posts/${n.value()}")], [text("two")])
+                p([], [fixed, moving, router])
+            },
+        ),
+    )
+    // No `href` and no history entry names another host.
+    let hosts = ["//posts/8", "/\\posts/8", "\\//\\posts/8"]
+    let mut h = 0
+    while h < hosts.len() {
+        println("${hosts[h]}: ${by_both(routes, hosts[h])}")
+        h = h + 1
+    }
+    // Nor with a tab, LF or CR in its leading run, which a URL's parser
+    // deletes: `/\t/posts/8` would be `//posts/8`.
+    let spaced = ["/\t/posts/8", "\t//posts/8", "/\n/posts/8", "/\r\\posts/8"]
+    let mut s = 0
+    while s < spaced.len() {
+        println("spaced ${s}: ${by_both(routes, spaced[s])}")
+        s = s + 1
+    }
+    // A router made later takes over; disposing of the first leaves it.
+    root(
+        |dispose_first: fn()| {
+            let first = Router(routes)
+            root(
+                |dispose_second: fn()| {
+                    let second = HistoryRouter(routes)
+                    dispose_first()
+                    navigate("/q?a=taken")
+                    let href = render_to_string(|| link([attr("to", "x")], []))
+                    println("after the first's disposal: ${use_query().len()} keys, ${href}")
+                    dispose_second()
+                    let none = render_to_string(|| link([attr("to", "x")], []))
+                    println("after the second's: ${use_query().len()} keys, ${none}")
+                },
+            )
+        },
+    )
+}

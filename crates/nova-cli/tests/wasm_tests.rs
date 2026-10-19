@@ -510,7 +510,9 @@ fn build_for_wasm_writes_dist() {
     assert_eq!(stdout(&a), "built dist\n");
     let dist = dir.join("dist");
     let page = std::fs::read_to_string(dist.join("index.html")).expect("index.html");
-    assert!(page.contains("import init from \"./app.js\";"), "{page}");
+    // By its absolute path, so a `HistoryRouter` page reloads under any path
+    // (the user's decision of 2026-10-18; ADR 0044).
+    assert!(page.contains("import init from \"/app.js\";"), "{page}");
     let js = std::fs::read_to_string(dist.join("app.js")).expect("app.js");
     assert!(js.contains("export default async function init("), "{js}");
     let wasm = std::fs::read(dist.join("app.wasm")).expect("app.wasm");
@@ -1922,6 +1924,8 @@ mod gate {
         "ui_memo_set",
         "ui_loop",
         "ui_render_bad_name",
+        "ui_router",
+        "ui_router_no_to",
     ];
 
     /// `eprint` and `eprintln` write to stderr, as `run_tests.rs` checks
@@ -2071,6 +2075,50 @@ mod gate {
             "nova: panic: std/ui: \"p onclick=x\" is not a tag name",
             |out| out == "<my-tag>fine</my-tag>\n",
         );
+    }
+
+    /// A link with no `to` panics before it needs a page (spec 4.5 §3.3).
+    #[test]
+    fn ui_router_no_to() {
+        super::gate_panics(
+            "ui_router_no_to",
+            "nova: panic: link: no `to` attribute",
+            |out| out == "<a href=\"/fine\" data-nova-link=\"\">fine</a>\n",
+        );
+    }
+
+    /// `std/ui/router`'s paths and queries (spec 4.5 §3.2 to §3.5): a
+    /// router reads the page's location on WASM, so the program runs under
+    /// the fake DOM, at `http://localhost/`, whose location is `/` as the
+    /// native one is, and prints what it prints natively, as it is and under
+    /// stress.
+    #[test]
+    fn ui_router() {
+        let Some(_) = super::node() else { return };
+        let tests = super::repo_root().join("tests");
+        let source = tests.join("runtime/ui_router.nova");
+        let expected = std::fs::read_to_string(source.with_extension("stdout"))
+            .expect("the expected output")
+            .replace("\r\n", "\n");
+        let dir = super::fresh("gate-ui_router");
+        std::fs::copy(tests.join("dom/fake_dom.mjs"), dir.join("fake_dom.mjs"))
+            .expect("copy the fake DOM");
+        std::fs::write(
+            dir.join("run.mjs"),
+            "import { install } from \"./fake_dom.mjs\";\ninstall();\n\
+             const { default: init } = await import(\"./dist/app.js\");\nawait init();\n",
+        )
+        .expect("the harness");
+        super::build_wasm(&dir, &source);
+        for env in [&[][..], &super::STRESS[..]] {
+            let a = super::Command::new("node")
+                .arg(dir.join("run.mjs"))
+                .envs(env.iter().copied())
+                .timeout(std::time::Duration::from_secs(60))
+                .assert()
+                .success();
+            assert_eq!(super::stdout(&a), expected, "{}", super::stderr(&a));
+        }
     }
 
     #[test]
@@ -2344,6 +2392,86 @@ fn ui_mount_never_inserts_html() {
             ),
             "{err}"
         );
+    }
+}
+
+/// The router by the hash (spec
+/// `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
+/// §3, §5.2): the root route at `/`; a link's click, its default prevented,
+/// that builds its route once though the `hashchange` it causes comes a turn
+/// later; `navigate` with a query; the back button; a typed hash only `*`
+/// matches; `navigate` to `/posts/café` and to `/posts/a b`, each built
+/// once, though the hash holds them percent-encoded; to `/posts/6#sec`,
+/// whose second `#` starts a fragment the location drops; and a
+/// percent-encoded parameter, from a `to` with no `/`. The menu's links,
+/// made before the router, have its `#`. Under stress the collector runs
+/// after each step and keeps the router's state, at std/rt's word 112, and
+/// its two window listeners with the four buttons' handlers: six calls
+/// throughout.
+#[test]
+fn router_routes_by_the_hash() {
+    dom_program("router_hash", &[]);
+    let err = dom_program("router_hash", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    let calls = calls_after_each(&err);
+    assert!(!calls.is_empty(), "{err}");
+    assert!(calls.iter().all(|&c| c == 6), "{err}");
+}
+
+/// Two routers on a page (spec 4.5 §3.1, §3.3): the router mounted later
+/// takes a link's click, its default prevented, and both show the route;
+/// once the later one is disposed, no router is the one mounted last, and
+/// the earlier one, still listening, leaves a link's click to the browser:
+/// its default is not prevented, and the router does not navigate (the fake
+/// DOM follows no link, so the page stays as it was). Under stress the
+/// collector keeps both routers' window listeners and the button's handler,
+/// five calls, until the later router's two leave std/rt's table: three.
+#[test]
+fn a_router_not_mounted_last_leaves_a_click_to_the_browser() {
+    dom_program("router_two", &[]);
+    let err = dom_program("router_two", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    let calls = calls_after_each(&err);
+    let disposed = calls
+        .iter()
+        .position(|&c| c != 5)
+        .expect("a collection after the disposal");
+    assert!(disposed > 0, "{err}");
+    assert!(calls[disposed..].iter().all(|&c| c == 3), "{err}");
+}
+
+/// The router by the history API (spec 4.5 §3, §5.2): the same steps as by
+/// the hash, through `pushState` and `popstate`; then the clicks left to the
+/// browser, their default not prevented and the page as it was: a link's
+/// click with each modifier key and with another button, a link with a
+/// `target`, and a plain `<a>`. A click on a link's child navigates. A
+/// handler reads no route's parameters, and `navigate` to the current
+/// location written decoded adds no entry. Once the router's owner is
+/// disposed, a link's click is the browser's, and `navigate` panics. Under
+/// stress the router's two listeners leave std/rt's table then: seven calls
+/// become five.
+#[test]
+fn router_routes_by_the_history_api() {
+    for env in [&[][..], &STRESS[..]] {
+        let Some(a) = dom_run("router_history", env) else {
+            return;
+        };
+        let err = stderr(&a.code(134));
+        assert!(
+            err.contains("nova: panic: navigate: no router is mounted\n"),
+            "{err}"
+        );
+        if !env.is_empty() {
+            let calls = calls_after_each(&err);
+            let (last, before) = calls.split_last().expect("collections");
+            assert_eq!(*last, 5, "{err}");
+            assert!(!before.is_empty(), "{err}");
+            assert!(before.iter().all(|&c| c == 7), "{err}");
+        }
     }
 }
 

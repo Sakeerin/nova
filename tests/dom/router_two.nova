@@ -1,0 +1,48 @@
+// Two routers on one page under the fake DOM (spec
+// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+// §3.1, §3.3; ADR 0044): the router mounted later takes a link's click,
+// which the earlier one, also listening, leaves alone. Once the later one is
+// disposed, no router is the one mounted last, so the earlier one, still on
+// the page, leaves a link's click to the browser: its default is not
+// prevented, and the router does not navigate. (The fake DOM performs no
+// default, so the page stays as it was; a browser follows the link.)
+
+import ui
+import ui::html::{button, div, id, p, text}
+import ui::router::{Route, Router, link, use_params}
+
+component Home() {
+    view {
+        p { text("home") }
+    }
+}
+
+component Post() {
+    let id = match use_params().get("id") {
+        Some(id) => id
+        None => "?"
+    }
+    view {
+        p { text("post ${id}") }
+    }
+}
+
+fn main() {
+    let routes = [
+        Route { path: "/", component: Home },
+        Route { path: "/posts/:id", component: Post },
+    ]
+    let later = signal(true)
+    mount(
+        "#app",
+        || view {
+            div {
+                div(id: "first") { Router(routes) }
+                div(id: "second") { show(later, || Router(routes)) }
+                link(id: "post", to: "/posts/7") { text("Post 7") }
+                link(id: "other", to: "/posts/8") { text("Post 8") }
+                button(id: "dispose", on_click: || later.set(false)) { text("Dispose") }
+            }
+        },
+    )
+}

@@ -1,0 +1,52 @@
+/: <p>root</p>
+: <p>root</p>
+//: <p>root</p>
+/posts/: <p>posts</p>
+posts: <p>posts</p>
+/posts//7: <p>post [7]</p>
+/posts/7?x=1: <p>post [7]</p>
+/posts/7/comments/3: <p>comment 3 of 7, 2 params</p>
+/posts/7/8: 
+/exact: 
+/Exact: <p>exact</p>
+/a/b: <p>a then b</p>
+/a/c: <p>a then c</p>
+/posts/caf%C3%A9: <p>post [café]</p>
+/posts/a%2Fb: <p>post [a/b]</p>
+/posts/a%2fb: <p>post [a/b]</p>
+/posts/a%20b%3F: <p>post [a b?]</p>
+/posts/100%: <p>post [100%]</p>
+/posts/%zz: <p>post [%zz]</p>
+/posts/%FF: <p>post [%FF]</p>
+/posts/a+b: <p>post [a+b]</p>
+/posts/6#sec: <p>post [6]</p>
+/posts/6#a/b?c=d: <p>post [6]</p>
+* /: <p>everything</p>
+* /posts/1: <p>post [1]</p>
+* /posts/1/2: <p>everything</p>
+/q: <p>0 keys:</p>
+/q?: <p>0 keys:</p>
+/q?a=1&b=2: <p>2 keys: 'a'=[1] 'b'=[2]</p>
+/q?a=1&a=2: <p>1 keys: 'a'=[2]</p>
+/q?flag: <p>1 keys: 'flag'=[]</p>
+/q?a=x+y%21: <p>1 keys: 'a'=[x y!]</p>
+/q?a+b=c: <p>1 keys: 'a b'=[c]</p>
+/q?=v: <p>1 keys: ''=[v]</p>
+/q?a=1&&b=2&: <p>2 keys: 'a'=[1] 'b'=[2]</p>
+/q?a=%zz: <p>1 keys: 'a'=[%zz]</p>
+/q?a=b=c: <p>1 keys: 'a'=[b=c]</p>
+/q?a=1?b=2: <p>1 keys: 'a'=[1?b=2]</p>
+/q?a=1#x: <p>1 keys: 'a'=[1]</p>
+/q?a=1#x&b=2: <p>1 keys: 'a'=[1]</p>
+no router: 0 params, 0 keys
+<a id="l" href="posts/1" data-nova-link="">one</a>
+<p><a href="#/posts/1" data-nova-link="">one</a><a href="#/posts/2" data-nova-link="">two</a><p>root</p></p>
+//posts/8: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+/\posts/8: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+\//\posts/8: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+spaced 0: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+spaced 1: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+spaced 2: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+spaced 3: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
+after the first's disposal: 1 keys, <a href="/x" data-nova-link=""></a>
+after the second's: 0 keys, <a href="x" data-nova-link=""></a>

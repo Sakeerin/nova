@@ -18,6 +18,13 @@ class FakeEvent {
     this.bubbles = init.bubbles === true;
     this.cancelable = init.cancelable === true;
     this.key = init.key;
+    // A mouse event's modifier keys and button: none, and the main one,
+    // unless `init` says otherwise.
+    this.ctrlKey = init.ctrlKey === true;
+    this.metaKey = init.metaKey === true;
+    this.shiftKey = init.shiftKey === true;
+    this.altKey = init.altKey === true;
+    this.button = init.button ?? 0;
     this.target = null;
     this.currentTarget = null;
     this.defaultPrevented = false;
@@ -232,8 +239,10 @@ class FakeElement extends FakeNode {
     if (v) this.setAttribute("disabled", "");
     else this.removeAttribute("disabled");
   }
-  click() {
-    this.dispatchEvent(new FakeEvent("click", { bubbles: true, cancelable: true }));
+  // A click, plain or with `modifiers`, such as `{ ctrlKey: true }` or
+  // `{ button: 1 }`. It has no default action: a link is not followed.
+  click(modifiers = {}) {
+    this.dispatchEvent(new FakeEvent("click", { ...modifiers, bubbles: true, cancelable: true }));
   }
   querySelectorAll(selector) {
     const matches = compile(selector);
@@ -342,6 +351,12 @@ function later(target, type) {
   setTimeout(() => target.dispatchEvent(new FakeEvent(type)), 0);
 }
 
+// The address is a WHATWG `URL`, which percent-encodes as a browser does:
+// setting `hash` encodes the fragment percent-encode set (C0 controls, space,
+// `"`, `<`, `>`, `` ` `` and every code point above U+007E, as UTF-8), so
+// `#/posts/café` reads back as `#/posts/caf%C3%A9`; and `pushState`'s URL,
+// parsed against the address, has its path and query encoded by the path and
+// query sets, so `/posts/a b?q=é` reads back as `/posts/a%20b?q=%C3%A9`.
 class FakeLocation {
   constructor(win, url) {
     this.win = win;
