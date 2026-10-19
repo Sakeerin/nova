@@ -99,7 +99,7 @@ pub mod signal;
 pub mod task;
 /// The monotonic clock behind `std/time`.
 mod time;
-/// The state of `std/ui`, kept for the thread.
+/// The state of `std/ui` and of `std/ui/router`, kept for the thread.
 mod ui;
 
 /// A Nova string value: immutable UTF-8, `{ len, ptr }`.
@@ -1254,6 +1254,18 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_ui_state_store",
             ui::nova_rt_ui_state_store as *const u8,
+        ),
+        (
+            "nova_rt_router_state_present",
+            ui::nova_rt_router_state_present as *const u8,
+        ),
+        (
+            "nova_rt_router_state_load",
+            ui::nova_rt_router_state_load as *const u8,
+        ),
+        (
+            "nova_rt_router_state_store",
+            ui::nova_rt_router_state_store as *const u8,
         ),
     ]
 }

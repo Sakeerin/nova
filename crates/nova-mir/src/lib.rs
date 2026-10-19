@@ -537,6 +537,14 @@ rt_funcs! {
     UiStateLoad,
     /// `(ptr state) -> unit` — keep `state`, a collector root from then on.
     UiStateStore,
+    /// `() -> i8` — whether `std/ui/router` has stored its state for this
+    /// thread (`crates/nova-runtime/src/ui.rs`; spec 4.5 §3.5).
+    RouterStatePresent,
+    /// `() -> ptr` — the router's state stored, a record.
+    RouterStateLoad,
+    /// `(ptr state) -> unit` — keep the router's `state`, a second collector
+    /// root from then on.
+    RouterStateStore,
 }
 
 impl RtFunc {
@@ -640,6 +648,9 @@ impl RtFunc {
             RtFunc::UiStatePresent => "nova_rt_ui_state_present",
             RtFunc::UiStateLoad => "nova_rt_ui_state_load",
             RtFunc::UiStateStore => "nova_rt_ui_state_store",
+            RtFunc::RouterStatePresent => "nova_rt_router_state_present",
+            RtFunc::RouterStateLoad => "nova_rt_router_state_load",
+            RtFunc::RouterStateStore => "nova_rt_router_state_store",
         }
     }
 
@@ -833,6 +844,9 @@ impl RtFunc {
             RtFunc::UiStatePresent => (vec![], MirTy::I8),
             RtFunc::UiStateLoad => (vec![], MirTy::Ptr),
             RtFunc::UiStateStore => (vec![MirTy::Ptr], MirTy::Unit),
+            RtFunc::RouterStatePresent => (vec![], MirTy::I8),
+            RtFunc::RouterStateLoad => (vec![], MirTy::Ptr),
+            RtFunc::RouterStateStore => (vec![MirTy::Ptr], MirTy::Unit),
         }
     }
 }
@@ -950,6 +964,9 @@ impl RtFunc {
             RtFunc::UiStatePresent => WasmRuntime::Nova("rt_ui_state_present"),
             RtFunc::UiStateLoad => WasmRuntime::Nova("rt_ui_state_load"),
             RtFunc::UiStateStore => WasmRuntime::Nova("rt_ui_state_store"),
+            RtFunc::RouterStatePresent => WasmRuntime::Nova("rt_router_state_present"),
+            RtFunc::RouterStateLoad => WasmRuntime::Nova("rt_router_state_load"),
+            RtFunc::RouterStateStore => WasmRuntime::Nova("rt_router_state_store"),
             RtFunc::TestSelector
             | RtFunc::FsReadToString
             | RtFunc::FsWriteString
