@@ -139,11 +139,7 @@ fn build_wasm(cmd: BuildCmd) -> Result<()> {
     project::refuse_library(&mode)?;
     project::sync(&mode)?;
     let program = project::program_to_run(&mode)?;
-    let output = match (cmd.output, &mode) {
-        (Some(output), _) => output,
-        (None, Mode::Project { root, .. }) => root.join("dist"),
-        (None, Mode::File(_)) => PathBuf::from("dist"),
-    };
+    let output = wasm_output(cmd.output, &mode);
     let bundle = Bundle::of(&mode, &program, cmd.release);
     bundle.check_output(&output)?;
     bundle.prepare(&output)?;
@@ -157,6 +153,17 @@ fn build_wasm(cmd: BuildCmd) -> Result<()> {
             "could not compile due to {errors} previous error{}",
             if errors == 1 { "" } else { "s" }
         ),
+    }
+}
+
+/// The directory `nova build --target wasm` writes, which `nova dev` builds
+/// into and serves: `output` when `-o` names it, or `dist/` at the
+/// project's root, or in the current directory.
+pub fn wasm_output(output: Option<PathBuf>, mode: &Mode) -> PathBuf {
+    match (output, mode) {
+        (Some(output), _) => output,
+        (None, Mode::Project { root, .. }) => root.join("dist"),
+        (None, Mode::File(_)) => PathBuf::from("dist"),
     }
 }
 

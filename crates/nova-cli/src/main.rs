@@ -1,7 +1,7 @@
 //! The `nova` command-line tool.
 //!
-//! Dispatches to subcommands: parse, run, build, check, test, fmt, doc, lsp,
-//! new, init, fetch, update, package, publish, login and version. Phase 0
+//! Dispatches to subcommands: parse, run, build, dev, check, test, fmt, doc,
+//! lsp, new, init, fetch, update, package, publish, login and version. Phase 0
 //! implemented `nova
 //! parse`, Phase 1 `nova run` (Cranelift JIT) and `nova check`, Phase 3.0
 //! the project commands (spec
@@ -12,11 +12,14 @@
 //! `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md`),
 //! Phase 3.3b the package index (spec
 //! `docs/superpowers/specs/2026-10-09-phase-3-3b-index-and-publishing-design.md`),
-//! and Phase 3.5a `nova doc` (spec
-//! `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`).
+//! Phase 3.5a `nova doc` (spec
+//! `docs/superpowers/specs/2026-10-11-phase-3-5a-the-documentation-site-design.md`),
+//! and Phase 4.5 `nova dev` (spec
+//! `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`).
 
 mod bundle;
 mod cmd;
+mod dev;
 mod embedded;
 mod project;
 mod template;
@@ -46,6 +49,9 @@ enum Command {
     Build(cmd::run::BuildCmd),
     /// Compile a Nova program to a page in dist/: `build --target wasm`.
     Bundle(cmd::run::BundleCmd),
+    /// Build a page into dist/ and serve it on 127.0.0.1, building it again
+    /// and reloading the page when a source changes.
+    Dev(cmd::dev::DevCmd),
     /// Type-check a Nova program without running it.
     Check(cmd::run::CheckCmd),
     /// Compile and run `@test` functions, one process per test.
@@ -107,6 +113,7 @@ fn main() -> Result<()> {
         Command::Run(cmd) => cmd::run::run(cmd),
         Command::Build(cmd) => cmd::run::build(cmd),
         Command::Bundle(cmd) => cmd::run::bundle(cmd),
+        Command::Dev(cmd) => cmd::dev::run(cmd),
         Command::Check(cmd) => cmd::run::check(cmd),
         Command::Test(cmd) => cmd::test::run(cmd),
         // Its exit code says more than success or failure (spec §7.2).
