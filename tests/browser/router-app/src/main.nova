@@ -1,0 +1,80 @@
+//! The router's browser test (spec
+//! docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+//! §5.4): a `HistoryRouter` over a home page, a post by its id, a search
+//! page that reads its query, and a page for any other path, with links
+//! between them. `tests/browser/router.mjs` runs it under `nova dev`, with
+//! no `index.html` of its own: the generated page loads `/app.js` by its
+//! absolute path, so a reload at `/posts/2` finds it.
+
+import ui
+import ui::html::{div, h1, nav, p, text}
+import ui::router::{HistoryRouter, Route, link, use_params, use_query}
+
+/// The links every page shows.
+fn links() -> View {
+    view {
+        nav {
+            link(id: "home", to: "/") { text("Home") }
+            link(id: "post", to: "/posts/2") { text("Post 2") }
+            link(id: "search", to: "/search?q=nova+router&page=3") { text("Search") }
+        }
+    }
+}
+
+component Home() {
+    view {
+        div {
+            links()
+            h1(id: "title") { text("Home") }
+        }
+    }
+}
+
+component Post() {
+    let id = match use_params().get("id") {
+        Some(id) => id
+        None => "?"
+    }
+    view {
+        div {
+            links()
+            h1(id: "title") { text("Post ${id}") }
+        }
+    }
+}
+
+component Search() {
+    let query = use_query()
+    let words = query.get("q").unwrap_or("")
+    let page = query.get("page").unwrap_or("1")
+    view {
+        div {
+            links()
+            h1(id: "title") { text("Search for ${words}, page ${page}") }
+        }
+    }
+}
+
+component NotFound() {
+    view {
+        div {
+            links()
+            h1(id: "title") { text("Not found") }
+            p { text("No route matches this path.") }
+        }
+    }
+}
+
+fn main() {
+    mount(
+        "#app",
+        || HistoryRouter(
+            [
+                Route { path: "/", component: Home },
+                Route { path: "/posts/:id", component: Post },
+                Route { path: "/search", component: Search },
+                Route { path: "*", component: NotFound },
+            ],
+        ),
+    )
+}

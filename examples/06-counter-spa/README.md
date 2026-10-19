@@ -16,12 +16,19 @@ The smallest WASM frontend: a counter written as a component.
 
 ```bash
 cd examples/06-counter-spa
-nova build --target wasm
-cd dist && python3 -m http.server 8000
+nova dev
 ```
 
-Then open `http://localhost:8000/` in a browser. Any static server works,
-as long as it serves `app.wasm` as `application/wasm`.
+`nova dev` builds the page into `dist/`, prints
+`nova dev: serving http://127.0.0.1:3000/`, and serves it there; open that
+URL in a browser, or start it with `--open`. Each time `src/main.nova`
+changes, it builds again and reloads the page; when the build fails, its
+errors show over the page until a good build replaces them. `--port`
+chooses another port, and Ctrl-C stops it.
+
+To build once instead, `nova build --target wasm` writes the same `dist/`,
+which any static server can serve, as long as it serves `app.wasm` as
+`application/wasm`.
 
 ## Expected output
 
@@ -39,3 +46,7 @@ away: three clicks of `+` and one of `-` leave `Count: 2`.
 - `cargo test` clicks it under a fake DOM, and CI's `browser` job in
   Chromium (`tests/browser/spa.mjs`); the 4.4 spec is
   `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`.
+- The same job runs it under `nova dev` (`tests/browser/dev.mjs`): it
+  counts, an edit reloads it, and a type error shows the overlay until the
+  fix; the 4.5 spec is
+  `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`.

@@ -97,9 +97,14 @@ jobs:
   # clicked in Chromium through Playwright. Both have the ids `#add` and
   # `#count`, so one script clicks either. And 4.4's gate (§9.4):
   # `examples/06-counter-spa`, built from its project with its own page,
-  # which `spa.mjs` clicks by its buttons' text. Playwright, pinned, is installed
-  # here only, into a scratch directory; nothing in `cargo test` or `nova`
-  # installs a package. Ubuntu only: one browser job suffices.
+  # which `spa.mjs` clicks by its buttons' text. And 4.5's gate (spec
+  # docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+  # §5.4): `dev.mjs` runs `06-counter-spa` under `nova dev`, edits it, breaks
+  # it and fixes it; `router.mjs` drives `tests/browser/router-app`, in
+  # history mode, under `nova dev`. Each copies its project into
+  # `$RUNNER_TEMP` and kills `nova dev` at the end. Playwright, pinned, is
+  # installed here only, into a scratch directory; nothing in `cargo test` or
+  # `nova` installs a package. Ubuntu only: one browser job suffices.
   browser:
     name: Browser (Chromium)
     runs-on: ubuntu-latest
@@ -126,6 +131,10 @@ jobs:
           node tests/browser/counter.mjs "$RUNNER_TEMP/counter" "$RUNNER_TEMP/pw"
           node tests/browser/counter.mjs "$RUNNER_TEMP/ui_counter" "$RUNNER_TEMP/pw"
           node tests/browser/spa.mjs "$RUNNER_TEMP/counter-spa" "$RUNNER_TEMP/pw"
+      - name: nova dev and the router in Chromium
+        run: |
+          node tests/browser/dev.mjs target/debug/nova "$RUNNER_TEMP/dev" "$RUNNER_TEMP/pw"
+          node tests/browser/router.mjs target/debug/nova "$RUNNER_TEMP/router" "$RUNNER_TEMP/pw"
 
   fmt:
     name: Rustfmt
