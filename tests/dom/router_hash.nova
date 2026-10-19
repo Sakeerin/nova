@@ -1,0 +1,82 @@
+// The router in hash mode under the fake DOM (spec
+// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+// §3, §5.2): what shows at `/`, after a link's click, after `navigate` with
+// a query, after the back button, at a path only `*` matches, after
+// `navigate` to a path the browser writes percent-encoded (`café`, a space),
+// and with a percent-encoded parameter. The menu's links are made before the
+// router, and take its `#` all the same. Each route's component says when it
+// is built, so a navigation that built it twice would show: one whose
+// `hashchange` found the encoded hash unlike the location `navigate` set.
+
+import ui
+import ui::html::{button, div, id, nav, p, text}
+import ui::router::{Route, Router, link, navigate, use_params, use_query}
+
+component Home() {
+    println("built Home")
+    view {
+        p { text("home") }
+    }
+}
+
+component Post() {
+    let id = match use_params().get("id") {
+        Some(id) => id
+        None => "?"
+    }
+    println("built Post with id ${id}")
+    view {
+        p { text("post ${id}") }
+    }
+}
+
+component Search() {
+    let query = use_query()
+    let words = query.get("q").unwrap_or("")
+    let page = query.get("page").unwrap_or("1")
+    println("built Search with ${query.len()} keys, params ${use_params().len()}")
+    view {
+        p { text("search for ${words}, page ${page}") }
+    }
+}
+
+component NotFound() {
+    println("built NotFound")
+    view {
+        p { text("not found") }
+    }
+}
+
+component Menu() {
+    view {
+        nav {
+            link(id: "home", to: "/") { text("Home") }
+            link(id: "post", to: "/posts/7") { text("Post 7") }
+            link(id: "cafe", to: "posts/caf%C3%A9") { text("Café") }
+            button(id: "search", on_click: || navigate("/search?q=nova+router&page=2")) {
+                text("Search")
+            }
+            button(id: "accent", on_click: || navigate("/posts/café")) { text("Café") }
+            button(id: "space", on_click: || navigate("/posts/a b")) { text("A b") }
+            button(id: "fragment", on_click: || navigate("/posts/6#sec")) { text("Post 6") }
+        }
+    }
+}
+
+fn main() {
+    let routes = [
+        Route { path: "/", component: Home },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "/search", component: Search },
+        Route { path: "*", component: NotFound },
+    ]
+    mount(
+        "#app",
+        || view {
+            div {
+                Menu()
+                div(id: "page") { Router(routes) }
+            }
+        },
+    )
+}

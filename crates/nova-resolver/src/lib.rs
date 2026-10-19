@@ -2104,18 +2104,19 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 }
 
 /// The embedded standard-library modules, compiled as implicit modules and
-/// glob-imported into every user module, but for `std/ui` and `std/ui/html`,
-/// which a program imports, and `std/ui`'s backend, which only std sees
-/// (spec 4.3 §3, §7.3). Order is significant only in that it
-/// fixes module indices; user modules always come first, then these in the
-/// order listed here — `std/core` stays first so its module index is
-/// unchanged from when it was the only embedded module. The sources come
+/// glob-imported into every user module, but for `std/ui`, `std/ui/html`
+/// and `std/ui/router`, which a program imports, and `std/ui`'s backend,
+/// which only std sees (spec 4.3 §3, §7.3; 4.5 §3). Order is significant
+/// only in that it fixes module indices; user modules always come first,
+/// then these in the order listed here — `std/core` stays first so its
+/// module index is unchanged from when it was the only embedded module.
+/// The sources come
 /// from the `nova-std` crate, which embeds `std/` at build time through
 /// paths inside its own package, so the compiler stays a single
 /// self-contained executable and `cargo package` keeps the files. Each name
 /// is `$std.*`, not a valid identifier, so it can never collide with a user
 /// module name or be named in an `import`.
-pub const STD_MODULES: [(&str, &str); 19] = [
+pub const STD_MODULES: [(&str, &str); 20] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.io", nova_std::IO),
@@ -2135,6 +2136,7 @@ pub const STD_MODULES: [(&str, &str); 19] = [
     ("$std.ui", nova_std::UI),
     ("$std.ui.html", nova_std::UI_HTML),
     ("$std.ui.backend", nova_std::UI_BACKEND_NATIVE),
+    ("$std.ui.router", nova_std::UI_ROUTER),
 ];
 
 /// What a program is compiled for (spec
@@ -2171,13 +2173,13 @@ impl CompileTarget {
 }
 
 /// The std modules a WASM build compiles (spec 4.0 §3.2, 4.1 §3.1, 4.2
-/// §3.2, 4.3 §3): the ten of [`STD_MODULES`] that need no operating
+/// §3.2, 4.3 §3, 4.5 §3): the ten of [`STD_MODULES`] that need no operating
 /// system, in the same order, then `std/dom`, which only an `import`
-/// reaches, then `std/ui`'s three, with the backend's WASM source, then
+/// reaches, then `std/ui`'s four, with the backend's WASM source, then
 /// `std/rt`, the runtime written in Nova. Their names are those of
 /// [`STD_MODULES`], so `std/core` keeps its place first, and the same order
 /// gives a name the same winner in std's glob imports.
-pub const WASM_STD_MODULES: [(&str, &str); 15] = [
+pub const WASM_STD_MODULES: [(&str, &str); 16] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.collections", nova_std::COLLECTIONS),
@@ -2192,17 +2194,19 @@ pub const WASM_STD_MODULES: [(&str, &str); 15] = [
     ("$std.ui", nova_std::UI),
     ("$std.ui.html", nova_std::UI_HTML),
     ("$std.ui.backend", nova_std::UI_BACKEND_WASM),
+    ("$std.ui.router", nova_std::UI_ROUTER),
     ("$std.rt", nova_std::RT),
 ];
 
 /// The std modules a program imports by name instead of finding in its
 /// prelude, by the name an `import` writes, and the module's own name
 /// (spec `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
-/// §3.2).
-pub const IMPORTED_STD: [(&str, &str); 3] = [
+/// §3.2; 4.5 §3).
+pub const IMPORTED_STD: [(&str, &str); 4] = [
     ("dom", "$std.dom"),
     ("ui", "$std.ui"),
     ("ui::html", "$std.ui.html"),
+    ("ui::router", "$std.ui.router"),
 ];
 
 /// The names a project's module or a dependency may not take: those of
@@ -3572,9 +3576,9 @@ mod tests {
     }
 
     /// A WASM build compiles its own std (spec 4.0 §3.2, 4.1 §3.1, 4.2
-    /// §3.2, 4.3 §3): ten of the native modules, in native's order, then
-    /// `std/dom`, `std/ui`'s three and `std/rt`, after the user's. A native
-    /// build has neither `std/dom` nor `std/rt`.
+    /// §3.2, 4.3 §3, 4.5 §3): ten of the native modules, in native's order,
+    /// then `std/dom`, `std/ui`'s four and `std/rt`, after the user's. A
+    /// native build has neither `std/dom` nor `std/rt`.
     #[test]
     fn a_wasm_build_compiles_wasms_std_modules() {
         let wasm = resolve_for(CompileTarget::Wasm, "fn main() { }\n");
@@ -3599,6 +3603,7 @@ mod tests {
                 "$std.ui",
                 "$std.ui.html",
                 "$std.ui.backend",
+                "$std.ui.router",
                 "$std.rt"
             ]
         );
@@ -3672,12 +3677,27 @@ mod tests {
         }
     }
 
-    /// A nested import path names a std module, as `ui::html` does; any
-    /// other is E0900 still, and one under std's name that names nothing is
-    /// E0001 (spec 4.3 §3).
+    /// A nested import path names a std module, as `ui::html` and
+    /// `ui::router` do; any other is E0900 still, and one under std's name
+    /// that names nothing is E0001 (spec 4.3 §3, 4.5 §3).
     #[test]
     fn a_nested_import_path_names_only_stds_modules() {
         for target in [CompileTarget::Native, CompileTarget::Wasm] {
+            let routed = resolve_for(target, "import ui::router::{link}\nfn main() { }\n");
+            assert!(routed.diagnostics.is_empty(), "{:?}", routed.diagnostics);
+            assert!(routed
+                .definitions
+                .resolve_value(ModuleId(0), "link")
+                .is_some());
+            assert!(routed
+                .definitions
+                .resolve_value(ModuleId(0), "navigate")
+                .is_none());
+            let bare = resolve_for(target, "import ui\nfn main() { }\n");
+            assert!(bare
+                .definitions
+                .resolve_value(ModuleId(0), "link")
+                .is_none());
             let listed = resolve_for(target, "import ui::html::{div}\nfn main() { }\n");
             assert!(listed.diagnostics.is_empty(), "{:?}", listed.diagnostics);
             assert!(listed
@@ -3870,15 +3890,15 @@ mod tests {
     /// pinned by name as the net builtins are (spec
     /// `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
     /// §3.5, §5.2): on either target, a program's module cannot name them,
-    /// and `std/ui`'s can.
+    /// and `std/ui/router`'s can.
     #[test]
     fn the_state_builtins_are_std_only() {
         for target in [CompileTarget::Native, CompileTarget::Wasm] {
             let r = resolve_for(target, "fn main() { }\n");
             assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
-            let ui = (1..=target.std_modules().len())
-                .find(|&m| r.definitions.module_name(ModuleId(m as u32)) == "$std.ui")
-                .expect("std/ui is compiled");
+            let router = (1..=target.std_modules().len())
+                .find(|&m| r.definitions.module_name(ModuleId(m as u32)) == "$std.ui.router")
+                .expect("std/ui/router is compiled");
             for b in [
                 Builtin::UiStatePresent,
                 Builtin::UiStateLoad,
@@ -3897,10 +3917,10 @@ mod tests {
                 );
                 assert!(
                     matches!(
-                        r.definitions.resolve_value(ModuleId(ui as u32), b.name()),
+                        r.definitions.resolve_value(ModuleId(router as u32), b.name()),
                         Some(Res::Builtin(seen)) if seen == b
                     ),
-                    "{b:?} must resolve inside std/ui"
+                    "{b:?} must resolve inside std/ui/router"
                 );
             }
         }

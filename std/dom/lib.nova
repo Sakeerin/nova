@@ -52,6 +52,7 @@ extern "js" {
     fn dom_event_kind(event: Int) -> String
     fn dom_event_target(event: Int) -> Int
     fn dom_event_key(event: Int) -> String
+    fn dom_event_modified(event: Int) -> Bool
     fn dom_prevent_default(event: Int)
     fn dom_stop_propagation(event: Int)
     fn dom_set_timeout(ms: Int, entry: Int) -> Int
@@ -402,6 +403,11 @@ impl Event {
     /// The key of a keyboard event, such as `"Enter"`, or `""` for any other
     /// event.
     pub fn key(self) -> String { dom_event_key(rt_handle_id(self.box)) }
+
+    /// Whether Ctrl, Meta, Shift or Alt was down, or a mouse button other
+    /// than the main one was pressed: a click a browser opens in a new tab
+    /// or window, for one. `false` for an event with neither.
+    pub fn modified(self) -> Bool { dom_event_modified(rt_handle_id(self.box)) }
 
     /// Stops the browser's own action for the event, such as following a
     /// link.

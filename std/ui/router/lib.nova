@@ -1,0 +1,586 @@
+//! Routing: the component a page shows for its address, and links that go
+//! from one address to another without loading the page.
+//!
+//! It is not in the prelude: a module imports it, with
+//! `import ui::router::{Route, Router, link}` for some names, or
+//! `import ui::router` for all. `Router` routes by the address's hash, as
+//! `#/posts/1`; `HistoryRouter` routes by its path, as `/posts/1`, through
+//! the history API, and needs a server that answers every path with the
+//! page, as `nova dev` does.
+//!
+//! A router shows the component of the first `Route` whose path matches the
+//! location, and shows it again each time the location changes: a `link`
+//! clicked, `navigate` called, or the back and forward buttons. A route's
+//! path holds `:name` parameters, which `use_params` reads, and the route
+//! `"*"` matches every location, so a last one catches what no other
+//! matches. There is one router per page: the last one made is the one
+//! `navigate`, `use_params` and `use_query` speak to.
+//!
+//! Natively, where there is no address, the location is `/`, so
+//! `render_to_string` writes the root route:
+//!
+//! ```
+//! import ui
+//! import ui::html::{h1, p, text}
+//! import ui::router::{Route, Router, link}
+//!
+//! component Home() {
+//!     view {
+//!         h1 {
+//!             text("Posts")
+//!             link(to: "/posts/1") { text("The first post") }
+//!         }
+//!     }
+//! }
+//!
+//! component NotFound() { view { p { text("Nothing here") } } }
+//!
+//! fn main() {
+//!     let routes = [
+//!         Route { path: "/", component: Home },
+//!         Route { path: "*", component: NotFound },
+//!     ]
+//!     assert_eq(
+//!         render_to_string(|| Router(routes)),
+//!         "<h1>Posts<a href=\"#/posts/1\" data-nova-link=\"\">The first post</a></h1>",
+//!     )
+//! }
+//! ```
+
+// The design (spec
+// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+// §3). A router is a memo of the route that matches its location, a signal,
+// and a `for_each` over that memo's one match or none, which builds the
+// match's component again each time the location is set. Its state lives
+// behind three std-only builtins, as `std/ui`'s does, so that `navigate`,
+// `use_params` and `use_query` reach the router mounted last. The page is
+// reached through `std/ui`'s backend: natively the location is `/`, and
+// nothing is listened for.
+
+import ui
+
+/// A route: a path pattern and the component it shows.
+///
+/// The pattern is split at `/` into pieces, as a location is. A piece
+/// `:name` matches any one piece of the location, and makes it the
+/// parameter `name`; any other piece matches the same text, case included.
+/// The pattern `"*"` matches every location.
+pub record Route {
+    /// The pattern, such as `"/"`, `"/posts/:id"` or `"*"`.
+    pub path: String,
+    /// The component shown when the pattern matches.
+    pub component: fn() -> View,
+}
+
+// The router mounted last: its number, its mode, and its location, which
+// never holds a `#fragment`.
+record Active { id: Int, history: Bool, location: Signal<String> }
+
+// The router's state for the thread or the page (spec §3.5): the router
+// mounted last, the parameters of the route being built while it is, and
+// the next router's number.
+record Routing { active: Option<Active>, params: Option<Map<String, String>>, next_id: Int }
+
+// A route that matched: its component and the parameters its pattern took.
+record Matched { component: fn() -> View, params: Map<String, String> }
+
+fn load_routing<T>() -> T { router_state_load() }
+
+fn store_routing<T>(state: T) { router_state_store(state) }
+
+// The state, made the first time it is asked for.
+fn routing() -> Routing {
+    if !router_state_present() { store_routing(Routing { active: None, params: None, next_id: 1 }) }
+    load_routing()
+}
+
+// Whether the router numbered `id` is the one mounted last.
+fn is_active(id: Int) -> Bool {
+    match routing().active {
+        Some(a) => a.id == id
+        None => false
+    }
+}
+
+/// Shows the component of the first route that matches the address's hash,
+/// as `#/posts/1`, and shows it again each time the hash changes. With no
+/// hash, the location is `/`; when no route matches, it shows nothing.
+///
+/// The component is built again on every change of location, even to the
+/// same route, so its own state starts again. A plain click on a `link`
+/// goes to its route without loading the page. The router stops listening
+/// when its owner is disposed.
+///
+/// A router whose routes match nothing shows nothing:
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{Route, Router}
+///
+/// component About() { view { p { text("About") } } }
+///
+/// fn main() {
+///     let html = render_to_string(|| Router([Route { path: "/about", component: About }]))
+///     assert_eq(html, "")
+/// }
+/// ```
+pub component Router(routes: [Route]) { routed(false, routes) }
+
+/// Shows the component of the first route that matches the address's path
+/// and query, as `/posts/1?tab=2`, through the history API, and shows it
+/// again each time the location changes, as `Router` does.
+///
+/// A link's `href` is the path itself, so a server must answer every path
+/// with the page, as `nova dev` does, for the page to be reloaded. The
+/// page `nova build --target wasm` generates loads `/app.js` by its
+/// absolute path, so it can be; a project's own `index.html` must load
+/// `/app.js` by the absolute path too, since under `/posts/1` a relative
+/// `./app.js` would be `/posts/app.js`.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{HistoryRouter, Route, link}
+///
+/// component Home() { view { p { link(to: "/posts/1") { text("The first post") } } } }
+///
+/// fn main() {
+///     let html = render_to_string(|| HistoryRouter([Route { path: "/", component: Home }]))
+///     assert_eq(html, "<p><a href=\"/posts/1\" data-nova-link=\"\">The first post</a></p>")
+/// }
+/// ```
+pub component HistoryRouter(routes: [Route]) { routed(true, routes) }
+
+// A router of either mode: it takes over the state, listens for the
+// location and for links' clicks until its owner is disposed, and shows the
+// route that matches.
+fn routed(history: Bool, routes: [Route]) -> View {
+    let mut s = routing()
+    let id = s.next_id
+    s.next_id = id + 1
+    let location = signal(located(history))
+    s.active = Some(Active { id: id, history: history, location: location })
+    // `navigate` sets the location itself, to what the page reports, before
+    // the `hashchange` it causes, which then finds it unchanged and builds
+    // nothing again.
+    let stop_location = backend_on_location(
+        history,
+        || handled(
+            || {
+                let at = located(history)
+                if at != location.val { location.set(at) }
+            },
+        ),
+    )
+    // Only the router mounted last takes a link's click; for any other, the
+    // click is the browser's. A click taken stays taken: its default is
+    // prevented before the router goes, so a panic on the way cannot hand it
+    // back to the browser.
+    let stop_clicks = backend_on_link_click(
+        || is_active(id),
+        |href: String| handled(
+            || {
+                if !history && href.starts_with("#") {
+                    navigate(href.slice(1, href.len()))
+                } else {
+                    navigate(href)
+                }
+            },
+        ),
+    )
+    on_cleanup(
+        || {
+            stop_location()
+            stop_clicks()
+            if is_active(id) {
+                let mut s = routing()
+                s.active = None
+                s.params = None
+            }
+        },
+    )
+    let shown = memo(|| matching(routes, location.value()))
+    for_each(shown, |m: Matched| rendered(m))
+}
+
+// Run a listener's `f` as `std/ui` runs a handler: in a batch, and with no
+// listener, so that nothing it reads subscribes the effect running when the
+// event came. `root` is how `std/ui`'s public API runs a function with no
+// listener; its owner, which `f` gives nothing to own, is disposed at once.
+fn handled(f: fn()) {
+    batch(
+        || root(
+            |dispose: fn()| {
+                f()
+                dispose()
+            },
+        ),
+    )
+}
+
+// The component of `m`, built with `m`'s parameters for `use_params`.
+fn rendered(m: Matched) -> View {
+    let mut s = routing()
+    let was = s.params
+    s.params = Some(m.params)
+    let component = m.component
+    let v = component()
+    s.params = was
+    v
+}
+
+/// Goes to `to`, a path within the app such as `/posts/1?tab=2`; a `to`
+/// that does not begin with `/` gets one in front, and a leading run of `/`
+/// and `\` becomes one `/`. Under `Router` it sets the hash to `#` and `to`,
+/// under `HistoryRouter` it adds a history entry, or replaces the current
+/// one when `to` is the location already, and then the router shows the
+/// route at once. The router's location is then the one the page reports,
+/// as the browser writes it (`/posts/café` as `/posts/caf%C3%A9`), less any
+/// `#fragment`. Natively there is no history, and only the router's location
+/// changes.
+///
+/// It panics when no router is mounted.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{Route, Router, navigate}
+///
+/// component Home() { view { p { text("Home") } } }
+///
+/// component About() { view { p { text("About") } } }
+///
+/// fn main() {
+///     let routes = [
+///         Route { path: "/", component: Home },
+///         Route { path: "/about", component: About },
+///     ]
+///     let html = render_to_string(
+///         || {
+///             let router = Router(routes)
+///             navigate("about")
+///             router
+///         },
+///     )
+///     assert_eq(html, "<p>About</p>")
+/// }
+/// ```
+pub fn navigate(to: String) {
+    let a = match routing().active {
+        Some(a) => a
+        None => panic("navigate: no router is mounted")
+    }
+    let path = rooted(to)
+    let at = if a.history && same_location(path, a.location.val) {
+        backend_replace(path)
+    } else {
+        backend_go(a.history, path)
+    }
+    a.location.set(unfragmented(at))
+}
+
+// The page's location, less any `#fragment`.
+fn located(history: Bool) -> String { unfragmented(backend_location(history)) }
+
+// `location` before its first `#`: a router's location never holds a
+// fragment. One reaches it in hash mode as a second `#`, through
+// `navigate`, a `link` or a typed hash, and natively through `navigate`;
+// in history mode the page reports the path and query alone.
+fn unfragmented(location: String) -> String {
+    match location.index_of("#") {
+        Some(at) => location.slice(0, at)
+        None => location
+    }
+}
+
+// Whether going to `path` stays at `at`, a router's location: the same once
+// `path`'s fragment is dropped and both are percent-decoded, since the page
+// reports `/posts/café` as `/posts/caf%C3%A9`.
+fn same_location(path: String, at: String) -> Bool { decoded(unfragmented(path)) == decoded(at) }
+
+/// The parameters of the route being shown, by name: `{"id": "1"}` for the
+/// route `/posts/:id` at `/posts/1`, each percent-decoded. It reads them
+/// while the router builds that route's component, and is empty at any
+/// other time, or with no router. It is not reactive, and need not be: each
+/// change of location builds the component again.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{Route, Router, navigate, use_params}
+///
+/// component Post() {
+///     let id = match use_params().get("id") {
+///         Some(id) => id
+///         None => "?"
+///     }
+///     view { p { text("Post ${id}") } }
+/// }
+///
+/// fn main() {
+///     let html = render_to_string(
+///         || {
+///             let router = Router([Route { path: "/posts/:id", component: Post }])
+///             navigate("/posts/a%20b")
+///             router
+///         },
+///     )
+///     assert_eq(html, "<p>Post a b</p>")
+///     assert_eq(use_params().len(), 0)
+/// }
+/// ```
+pub fn use_params() -> Map<String, String> {
+    match routing().params {
+        Some(params) => params
+        None => Map::new()
+    }
+}
+
+/// The query of the current location, by key: `{"tab": "2"}` for
+/// `?tab=2`. A part with no `=` has the value `""`, `+` is a space, both
+/// halves are percent-decoded, and of a key given twice the last value
+/// wins. It is empty with no router, and is not reactive, as `use_params`
+/// is not.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{Route, Router, navigate, use_query}
+///
+/// component Search() {
+///     let query = use_query()
+///     let words = query.get("q").unwrap_or("")
+///     let page = query.get("page").unwrap_or("1")
+///     view { p { text("${words} on page ${page}") } }
+/// }
+///
+/// fn main() {
+///     let html = render_to_string(
+///         || {
+///             let router = Router([Route { path: "/search", component: Search }])
+///             navigate("/search?q=nova+lang&page=1&page=2")
+///             router
+///         },
+///     )
+///     assert_eq(html, "<p>nova lang on page 2</p>")
+/// }
+/// ```
+pub fn use_query() -> Map<String, String> {
+    match routing().active {
+        Some(a) => query_of(a.location.val)
+        None => Map::new()
+    }
+}
+
+/// An `<a>` that goes to a route without loading the page. Its `to`
+/// attribute, fixed or reactive, is the path, and becomes its `href`:
+/// `#/posts/1` under `Router`, `/posts/1` under `HistoryRouter`, with one
+/// `/` in front as `navigate` puts it, so `//posts/1` is `/posts/1` too,
+/// and `to` as written with no router. It also gets `data-nova-link`, by
+/// which the router finds it; its other attributes are the `<a>`'s.
+///
+/// A plain click navigates; a click with a modifier key or another button,
+/// or on a link with a `target`, is the browser's, so a link still opens in
+/// a new tab. In a view it is `link(to: "/posts/1") { text("…") }`, and
+/// outside one `link([attr("to", "/posts/1")], [text("…")])`. A link with no
+/// `to` panics.
+///
+/// ```
+/// import ui
+/// import ui::html::{attr, class, text}
+/// import ui::router::{link}
+///
+/// let html = render_to_string(|| link([attr("to", "/about"), class("nav")], [text("About")]))
+/// assert_eq(html, "<a href=\"/about\" class=\"nav\" data-nova-link=\"\">About</a>")
+/// ```
+pub fn link(attrs: [Attr], children: [View]) -> View {
+    let mut out = [Static("data-nova-link", ""); attrs.len() + 1]
+    let mut found = false
+    let mut i = 0
+    while i < attrs.len() {
+        let a = attrs[i]
+        out[i] = match a {
+            Static(name, to) => {
+                if name == "to" {
+                    found = true
+                    Dynamic("href", || href_of(to))
+                } else {
+                    a
+                }
+            }
+            Dynamic(name, to) => {
+                if name == "to" {
+                    found = true
+                    Dynamic("href", || href_of(to()))
+                } else {
+                    a
+                }
+            }
+            Property(name, value) => a
+            DynProperty(name, value) => a
+            On(kind, f) => a
+        }
+        i = i + 1
+    }
+    if !found { panic("link: no `to` attribute") }
+    Element("a", out, children)
+}
+
+// A link's `href` for `to`, read when the link is built, so that one made
+// before its router, as a menu before the routes, has the router's.
+fn href_of(to: String) -> String {
+    match routing().active {
+        Some(a) => if a.history { rooted(to) } else { "#${rooted(to)}" }
+        None => to
+    }
+}
+
+// `to` with one `/` in front: a leading run of `/` and `\` becomes one `/`,
+// and a `to` with neither gets one, so that no `href` or history entry is a
+// URL of another host, as `//posts/8` and `/\posts/8` would be. A URL's
+// parser deletes every tab, LF and CR before it reads it, so they go first:
+// `/\t/posts/8` would otherwise be `//posts/8` to a browser.
+fn rooted(to: String) -> String {
+    let tabless = "".join(to.split("\t"))
+    let lineless = "".join(tabless.split("\n"))
+    let plain = "".join(lineless.split("\r"))
+    let cs = plain.chars()
+    let mut i = 0
+    while i < cs.len() && (cs[i] == '/' || cs[i] == '\\') { i = i + 1 }
+    if i == 1 && cs[0] == '/' { return plain }
+    "/${plain.slice(i, cs.len())}"
+}
+
+// The routes that match `location`: the first that does, or none.
+fn matching(routes: [Route], location: String) -> [Matched] {
+    let path = match location.index_of("?") {
+        Some(at) => location.slice(0, at)
+        None => location
+    }
+    let pieces = pieces_of(path)
+    let mut i = 0
+    while i < routes.len() {
+        let r = routes[i]
+        match params_of(pieces_of(r.path), pieces) {
+            Some(params) => return [Matched { component: r.component, params: params }]
+            None => {}
+        }
+        i = i + 1
+    }
+    let none: [Matched] = []
+    none
+}
+
+// The parameters `pattern` takes from `pieces`, or `None` when it does not
+// match them.
+fn params_of(pattern: [String], pieces: [String]) -> Option<Map<String, String>> {
+    let mut params: Map<String, String> = Map::new()
+    if pattern.len() == 1 && pattern[0] == "*" { return Some(params) }
+    if pattern.len() != pieces.len() { return None }
+    let mut i = 0
+    while i < pattern.len() {
+        let p = pattern[i]
+        if p.starts_with(":") {
+            let _ = params.insert(p.slice(1, p.len()), pieces[i])
+        } else if p != pieces[i] {
+            return None
+        }
+        i = i + 1
+    }
+    Some(params)
+}
+
+// The pieces of `path`: split at `/`, with the empty ones dropped, each
+// percent-decoded, or kept as written when it does not decode.
+fn pieces_of(path: String) -> [String] {
+    let parts = path.split("/")
+    let mut n = 0
+    let mut i = 0
+    while i < parts.len() {
+        if parts[i] != "" { n = n + 1 }
+        i = i + 1
+    }
+    let mut out = [""; n]
+    let mut k = 0
+    let mut j = 0
+    while j < parts.len() {
+        if parts[j] != "" {
+            out[k] = decoded(parts[j])
+            k = k + 1
+        }
+        j = j + 1
+    }
+    out
+}
+
+// The query of `location`, after its first `?`: `&`-separated parts, each
+// `key=value` or a `key` whose value is `""`, both halves decoded with `+`
+// as a space. An empty part is skipped, and a key's last value wins.
+fn query_of(location: String) -> Map<String, String> {
+    let mut out: Map<String, String> = Map::new()
+    let at = match location.index_of("?") {
+        Some(at) => at
+        None => return out
+    }
+    let parts = location.slice(at + 1, location.len()).split("&")
+    let mut i = 0
+    while i < parts.len() {
+        let part = parts[i]
+        if part != "" {
+            let mut key = part
+            let mut value = ""
+            match part.index_of("=") {
+                Some(eq) => {
+                    key = part.slice(0, eq)
+                    value = part.slice(eq + 1, part.len())
+                }
+                None => {}
+            }
+            let _ = out.insert(query_decoded(key), query_decoded(value))
+        }
+        i = i + 1
+    }
+    out
+}
+
+// A half of a query's part: `+` is a space, then percent-decoding.
+fn query_decoded(text: String) -> String { decoded(" ".join(text.split("+"))) }
+
+// `text` percent-decoded as UTF-8, or as written when a `%` is not followed
+// by two hex digits or the bytes are not UTF-8.
+fn decoded(text: String) -> String {
+    if !text.contains("%") { return text }
+    let bs = bytes_from_string(text).to_ints()
+    let mut out = [0; bs.len()]
+    let mut n = 0
+    let mut i = 0
+    while i < bs.len() {
+        if bs[i] == 37 {
+            if i + 2 >= bs.len() { return text }
+            let hi = hex_digit(bs[i + 1])
+            let lo = hex_digit(bs[i + 2])
+            if hi < 0 || lo < 0 { return text }
+            out[n] = hi * 16 + lo
+            i = i + 3
+        } else {
+            out[n] = bs[i]
+            i = i + 1
+        }
+        n = n + 1
+    }
+    bytes_from_ints(out).slice(0, n).to_string().unwrap_or(text)
+}
+
+// The value of the hex digit whose ASCII code is `b`, or -1.
+fn hex_digit(b: Int) -> Int {
+    if b >= 48 && b <= 57 {
+        b - 48
+    } else if b >= 65 && b <= 70 {
+        b - 55
+    } else if b >= 97 && b <= 102 {
+        b - 87
+    } else {
+        -1
+    }
+}

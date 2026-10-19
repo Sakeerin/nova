@@ -1,0 +1,12 @@
+// A link with no `to` attribute panics (spec
+// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+// §3.3), after one with a `to` renders: a class named `to`, or an `href`,
+// is not one.
+import ui
+import ui::html::{attr, class, text}
+import ui::router::{link}
+
+fn main() {
+    println(render_to_string(|| link([attr("to", "/fine")], [text("fine")])))
+    println(render_to_string(|| link([class("to"), attr("href", "/x")], [text("no to")])))
+}

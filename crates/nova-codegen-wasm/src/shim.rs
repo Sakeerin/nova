@@ -5,7 +5,9 @@
 
 use anyhow::{bail, Result};
 
-/// The page `dist/` holds: it loads `app.js` as a module and calls `init`.
+/// The page `dist/` holds: it loads `/app.js` as a module, by its absolute
+/// path, and calls `init`, so that a page in history mode served at
+/// `/posts/1` still finds it (the user's decision of 2026-10-18; ADR 0044).
 pub const INDEX_HTML: &str = include_str!("shim/index.html");
 
 /// `dist/package.json`: `app.js` is an ES module, whatever a
@@ -133,6 +135,9 @@ fn js_function(name: &str) -> Option<&'static str> {
             "(ev) => { const t = object(ev).target; return t === window ? 0n : handle(t); }"
         }
         "dom_event_key" => "(ev) => string(object(ev).key ?? \"\")",
+        "dom_event_modified" => {
+            "(ev) => { const e = object(ev); return e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || (e.button ?? 0) !== 0 ? 1 : 0; }"
+        }
         "dom_prevent_default" => "(ev) => { object(ev).preventDefault(); }",
         "dom_stop_propagation" => "(ev) => { object(ev).stopPropagation(); }",
         "dom_click" => "(el) => { object(el).click(); }",

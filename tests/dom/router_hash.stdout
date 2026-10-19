@@ -1,0 +1,30 @@
+built Home
+hrefs: #/ #/posts/7 #/posts/caf%C3%A9
+at /: (no hash) <p>home</p>
+built Post with id 7
+click: prevented=true
+link clicked: #/posts/7 <p>post 7</p>
+a turn later: #/posts/7 <p>post 7</p>
+built Search with 2 keys, params 0
+click: prevented=false
+navigated: #/search?q=nova+router&page=2 <p>search for nova router, page 2</p>
+built Post with id 7
+back: #/posts/7 <p>post 7</p>
+built NotFound
+typed: #/no/such/page <p>not found</p>
+built Post with id café
+click: prevented=false
+café: #/posts/caf%C3%A9 <p>post café</p>
+built Post with id a b
+click: prevented=false
+a space: #/posts/a%20b <p>post a b</p>
+built Post with id 6
+click: prevented=false
+a second #: #/posts/6#sec <p>post 6</p>
+built Post with id café
+click: prevented=true
+encoded: #/posts/caf%C3%A9 <p>post café</p>
+built Home
+click: prevented=true
+home: #/ <p>home</p>
+history: 8 entries

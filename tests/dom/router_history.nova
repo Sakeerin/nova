@@ -1,0 +1,93 @@
+// The router in history mode under the fake DOM (spec
+// docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md
+// §3, §5.2): what shows at `/`, after a link's click, which pushes its path,
+// and after a second click on it, which replaces that entry; after
+// `navigate` with a query, after the back button's `popstate`, at a path only
+// `*` matches, with a percent-encoded parameter, and at a link's path and
+// query that carry a `#fragment`, which the location drops; then the
+// clicks left to the browser: one with a modifier key or another button, on
+// a link with `target`, and on a plain `<a>`. A click inside a link's child
+// navigates. A route's parameters are its render's alone: a handler reads
+// none. Once the router's owner is disposed, a link's click is the
+// browser's again, and `navigate` panics.
+
+import ui
+import ui::html::{a, button, div, id, nav, p, strong, text}
+import ui::router::{HistoryRouter, Route, link, navigate, use_params, use_query}
+
+component Home() {
+    println("built Home")
+    view {
+        p { text("home") }
+    }
+}
+
+component Post() {
+    let id = match use_params().get("id") {
+        Some(id) => id
+        None => "?"
+    }
+    println("built Post with id ${id}")
+    view {
+        p { text("post ${id}") }
+    }
+}
+
+component Search() {
+    let query = use_query()
+    let words = query.get("q").unwrap_or("")
+    let page = query.get("page").unwrap_or("1")
+    println("built Search with ${query.len()} keys, params ${use_params().len()}")
+    view {
+        p { text("search for ${words}, page ${page}") }
+    }
+}
+
+component NotFound() {
+    println("built NotFound")
+    view {
+        p { text("not found") }
+    }
+}
+
+fn main() {
+    let routes = [
+        Route { path: "/", component: Home },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "/search", component: Search },
+        Route { path: "*", component: NotFound },
+    ]
+    let routed = signal(true)
+    mount(
+        "#app",
+        || view {
+            div {
+                nav {
+                    link(id: "home", to: "/") { text("Home") }
+                    link(id: "post", to: "/posts/7") { text("Post 7") }
+                    link(id: "cafe", to: "/posts/caf%C3%A9") { text("Café") }
+                    link(id: "frag", to: "/posts/6#sec") { text("Post 6") }
+                    link(id: "frag-query", to: "/search?q=frag#x") { text("Search frag") }
+                    link(to: "/posts/8") { strong(id: "inner") { text("Post 8") } }
+                    link(id: "blank", to: "/posts/9", target: "_blank") { text("Post 9") }
+                    a(id: "plain", href: "/posts/5") { text("Post 5") }
+                    button(id: "search", on_click: || navigate("/search?q=nova+router&page=2")) {
+                        text("Search")
+                    }
+                    button(id: "elsewhere", on_click: || navigate("no/such/page")) {
+                        text("Elsewhere")
+                    }
+                    button(
+                        id: "params",
+                        on_click: || println("outside a render: ${use_params().len()} params"),
+                    ) {
+                        text("Params")
+                    }
+                    button(id: "same", on_click: || navigate("/posts/café")) { text("Café again") }
+                    button(id: "unmount", on_click: || routed.set(false)) { text("Unmount") }
+                }
+                div(id: "page") { show(routed, || HistoryRouter(routes)) }
+            }
+        },
+    )
+}

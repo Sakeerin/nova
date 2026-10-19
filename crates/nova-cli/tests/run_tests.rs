@@ -11307,7 +11307,8 @@ fn example_05_geometry_runs() {
 
 /// `std/ui`'s programs (spec
 /// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
-/// §9.2): each prints what `30-FRONTEND.md` §13's unit tests check, and runs
+/// §9.2), and `std/ui/router`'s paths and queries (spec 4.5 §3.2 to §3.5):
+/// each prints what `30-FRONTEND.md` §13's unit tests check, and runs
 /// the same with `NOVA_GC_STRESS=1` (collect on every allocation), so a part
 /// of the graph only the state's root keeps, freed, shows as wrong output or
 /// a crash.
@@ -11320,6 +11321,7 @@ fn ui_programs_run_and_survive_gc_stress() {
         "ui_render",
         "ui_collect",
         "ui_view",
+        "ui_router",
     ] {
         let source = repo_root().join(format!("tests/runtime/{name}.nova"));
         let expected = std::fs::read_to_string(source.with_extension("stdout"))
@@ -11338,8 +11340,8 @@ fn ui_programs_run_and_survive_gc_stress() {
 }
 
 /// `std/ui`'s panics (spec 4.3 §5, §6.1): `set` on a memo, an effect that
-/// never settles, and a name that is not a tag's, each with what the
-/// program printed first.
+/// never settles, a name that is not a tag's, and a link with no `to` (spec
+/// 4.5 §3.3), each with what the program printed first.
 #[test]
 fn ui_programs_panic_with_their_message() {
     for (name, out, message) in [
@@ -11357,6 +11359,11 @@ fn ui_programs_panic_with_their_message() {
             "ui_render_bad_name",
             "<my-tag>fine</my-tag>\n",
             "nova: panic: std/ui: \"p onclick=x\" is not a tag name\n",
+        ),
+        (
+            "ui_router_no_to",
+            "<a href=\"/fine\" data-nova-link=\"\">fine</a>\n",
+            "nova: panic: link: no `to` attribute\n",
         ),
     ] {
         let a = nova()
