@@ -39,8 +39,10 @@ posts: <p>posts</p>
 /q?a=1#x: <p>1 keys: 'a'=[1]</p>
 /q?a=1#x&b=2: <p>1 keys: 'a'=[1]</p>
 no router: 0 params, 0 keys
-<a id="l" href="posts/1" data-nova-link="">one</a>
+<a id="l" href="/posts/1" data-nova-link="">one</a>
+<a href="/evil.example/x" data-nova-link="">away</a>
 <p><a href="#/posts/1" data-nova-link="">one</a><a href="#/posts/2" data-nova-link="">two</a><p>root</p></p>
+<p><a href="#/posts/3" data-nova-link="">early</a><p>root</p></p>
 //posts/8: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
 /\posts/8: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
 \//\posts/8: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
@@ -49,4 +51,4 @@ spaced 1: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><
 spaced 2: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
 spaced 3: <p><a href="#/posts/8" data-nova-link="">a</a><p>post [8]</p></p> <p><a href="/posts/8" data-nova-link="">a</a><p>post [8]</p></p>
 after the first's disposal: 1 keys, <a href="/x" data-nova-link=""></a>
-after the second's: 0 keys, <a href="x" data-nova-link=""></a>
+after the second's: 0 keys, <a href="/x" data-nova-link=""></a>

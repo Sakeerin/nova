@@ -260,8 +260,9 @@ reactive. `navigate(to)` sets the hash or pushes the history, then the
 location to the one the page reports, which never holds a `#fragment`, and
 panics with no router; a link to the current location adds no history
 entry. Links are `link(to: "/posts/1") { … }`, a builder whose `to` becomes
-an `href` (`#/posts/1`, `/posts/1`, a leading run of `/` and `\` as one
-`/`, or `to` as written with no router) beside `data-nova-link`; each
+an `href` (`#/posts/1` under `Router`, `/posts/1` under `HistoryRouter` and
+with no router, a leading run of `/` and `\` as one `/`) beside
+`data-nova-link`; each
 router listens for clicks on the window, and the one mounted last
 navigates on a plain one, which `std/dom`'s new `Event.modified()` tells
 apart, leaving any other to the browser. The router's state is behind
@@ -389,8 +390,9 @@ Events, `/__nova/events`, which a script the server adds to each page
 listens to; a failed one shows `<div id="nova-dev-overlay">` over the page
 until a good build. There is no HMR, so the page's state starts again on
 each reload; there are no source maps; and a browser opens only with
-`--open`. A path with no file whose last piece has no `.` is answered with
-the page, so a `HistoryRouter` page can be reloaded, with the generated
+`--open`. A path whose last piece has no `.` and that names no file, nor a
+directory with an `index.html`, is answered with the page, so a
+`HistoryRouter` page can be reloaded, with the generated
 page, which loads `/app.js` by its absolute path, or a page of the
 project's own that does the same; a path that leaves
 `dist/` is `403`, and so is a request whose `Host` is not the server's own

@@ -1,5 +1,5 @@
 built Home
-hrefs: / /posts/7 /posts/caf%C3%A9 /posts/6#sec /search?q=frag#x /posts/8 /posts/9 /posts/5
+hrefs: / /posts/7 /posts/caf%C3%A9 /posts/6#sec /search?q=frag#x /posts/8 /posts/a/b /posts/a%2Fb /search?q=a&b=c /search?q=a%26b=c /posts/9 /posts/10 /posts/5
 at /: / <p>home</p>
 built Post with id 7
 click: prevented=true
@@ -24,6 +24,20 @@ click: prevented=false
 built Post with id café
 click: prevented=false
 the same place written decoded: 0 more entries
+built NotFound
+click: prevented=true
+slashed: /posts/a/b <p>not found</p>
+built Post with id a/b
+click: prevented=true
+encoded-slash: /posts/a%2Fb <p>post a/b</p>
+encoded-slash after slashed: 1 more entries
+built Search with 2 keys, params 0
+click: prevented=true
+amp: /search?q=a&b=c <p>search for a, page 1</p>
+built Search with 1 keys, params 0
+click: prevented=true
+encoded-amp: /search?q=a%26b=c <p>search for a&amp;b=c, page 1</p>
+encoded-amp after amp: 1 more entries
 built Post with id 6
 click: prevented=true
 a fragment, #sec: /posts/6 <p>post 6</p>
@@ -42,13 +56,15 @@ modifiers: {"button":1}
 click: prevented=false
 a link with target
 click: prevented=false
+a link with download
+click: prevented=false
 a plain <a>
 click: prevented=false
 left to the browser: /search?q=frag <p>search for frag, page 1</p>
 built Post with id 8
 click: prevented=true
 inner clicked: /posts/8 <p>post 8</p>
-history: 7 entries
+history: 11 entries
 click: prevented=false
 unmounted: /posts/8 
 click: prevented=false
