@@ -1,0 +1,126 @@
+// `std/ui/router`'s functions for a server (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §5). `with_location` renders a router at `/posts/1` and at `/q?a=1`,
+// under either router, with a link's `href` its router's; it drops a
+// `#fragment`, nests, returns its function's value, and restores the
+// location after, which is then `/` natively and under the fake DOM. Then
+// `found` for static routes, a route with a parameter, the catch-all as `*`
+// and as `/*`, and no match, a `#fragment` left out as `with_location`
+// leaves it; and `static_paths` with repeats, parameters and the catch-all.
+import ui
+import ui::html::{div, p, text}
+import ui::router::{
+    HistoryRouter,
+    Route,
+    Router,
+    found,
+    link,
+    static_paths,
+    use_params,
+    use_query,
+    with_location,
+}
+
+component Home() {
+    view {
+        p { text("home") }
+    }
+}
+
+component Post() {
+    let id = use_params().get("id").unwrap_or("?")
+    view {
+        div {
+            p { text("post ${id}") }
+            link(to: "/posts/${id}/edit") { text("edit") }
+        }
+    }
+}
+
+component Query() {
+    let a = use_query().get("a").unwrap_or("?")
+    view {
+        p { text("query a=${a}") }
+    }
+}
+
+component Missing() {
+    view {
+        p { text("missing") }
+    }
+}
+
+fn routes() -> [Route] {
+    [
+        Route { path: "/", component: Home },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "/q", component: Query },
+        Route { path: "*", component: Missing },
+    ]
+}
+
+// The history router's page at `location`.
+fn at(location: String) -> String {
+    with_location(location, || render_to_string(|| HistoryRouter(routes())))
+}
+
+// The history router's page where nothing sets the location.
+fn here() -> String { render_to_string(|| HistoryRouter(routes())) }
+
+fn main() {
+    println("/posts/1: ${at("/posts/1")}")
+    println("/q?a=1: ${at("/q?a=1")}")
+    println("/nowhere: ${at("/nowhere")}")
+    println("/posts/3#top: ${at("/posts/3#top")}")
+    let hashed = with_location("/posts/2", || render_to_string(|| Router(routes())))
+    println("hash router at /posts/2: ${hashed}")
+    let nested = with_location(
+        "/posts/1",
+        || {
+            let inner = at("/q?a=2")
+            "${inner}, then ${here()}"
+        },
+    )
+    println("nested: ${nested}")
+    println("restored: ${here()}")
+    println("a value: ${with_location("/x", || 6 * 7)}")
+
+    let rs = routes()
+    let locations = [
+        "/",
+        "/posts/1",
+        "/posts/a%20b?x=2",
+        "/q?a=1",
+        "/q#top",
+        "/q?a=1#top",
+        "/posts",
+        "/posts/1/2",
+        "/nowhere",
+    ]
+    let mut i = 0
+    while i < locations.len() {
+        println("found ${locations[i]}: ${found(rs, locations[i])}")
+        i = i + 1
+    }
+    let none: [Route] = []
+    println("found with no routes: ${found(none, "/")}")
+    println("found with no match: ${found([Route { path: "/a", component: Home }], "/b")}")
+    let rooted_star = [Route { path: "/*", component: Missing }]
+    println("found under /*: ${found(rooted_star, "/a")}")
+    let after = [Route { path: "*", component: Missing }, Route { path: "/a", component: Home }]
+    println("found after a catch-all: ${found(after, "/a")}")
+
+    let many = [
+        Route { path: "/", component: Home },
+        Route { path: "/about", component: Home },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "/about", component: Missing },
+        Route { path: "/docs/intro", component: Home },
+        Route { path: "/:lang/docs", component: Home },
+        Route { path: "/*", component: Missing },
+        Route { path: "/", component: Missing },
+        Route { path: "*", component: Missing },
+    ]
+    println("static paths: ${", ".join(static_paths(many))}")
+    println("static paths of none: [${", ".join(static_paths(none))}]")
+}

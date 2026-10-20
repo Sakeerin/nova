@@ -1928,6 +1928,7 @@ mod gate {
         "ui_render_bad_name",
         "ui_router",
         "ui_router_no_to",
+        "ui_router_server",
     ];
 
     /// `eprint` and `eprintln` write to stderr, as `run_tests.rs` checks
@@ -2096,13 +2097,26 @@ mod gate {
     /// stress.
     #[test]
     fn ui_router() {
+        router_program("ui_router");
+    }
+
+    /// The router's functions for a server (spec 4.6 §5, §9.2): on WASM too,
+    /// under the fake DOM, as `ui_router` runs.
+    #[test]
+    fn ui_router_server() {
+        router_program("ui_router_server");
+    }
+
+    /// `tests/runtime/<name>.nova` under the fake DOM, as it is and under
+    /// stress, printing what it prints natively.
+    fn router_program(name: &str) {
         let Some(_) = super::node() else { return };
         let tests = super::repo_root().join("tests");
-        let source = tests.join("runtime/ui_router.nova");
+        let source = tests.join(format!("runtime/{name}.nova"));
         let expected = std::fs::read_to_string(source.with_extension("stdout"))
             .expect("the expected output")
             .replace("\r\n", "\n");
-        let dir = super::fresh("gate-ui_router");
+        let dir = super::fresh(&format!("gate-{name}"));
         std::fs::copy(tests.join("dom/fake_dom.mjs"), dir.join("fake_dom.mjs"))
             .expect("copy the fake DOM");
         std::fs::write(
@@ -2746,6 +2760,7 @@ const LEFT_OUT: &[(&str, &str)] = &[
     ("http_offsets", "std/http"),
     ("http_partial", "std/http"),
     ("http_serialise", "std/http"),
+    ("http_listen_on", "std/http, std/net, std/process"),
     ("http_server_dispatch", "std/http"),
     ("io_broken_stderr", "std/io"),
     ("io_broken_stdout", "std/io"),

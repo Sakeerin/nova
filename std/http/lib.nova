@@ -2,10 +2,11 @@
 //! and a router that serves GET routes.
 //!
 //! `Server` is the simple way in: give it a handler for each path with `get`,
-//! then `listen` on an address. A handler is a plain function from a
-//! `Request` to a `Response`, so it cannot await anything. `read_request`,
-//! `write_response` and `parse_request_head` are the parts underneath, for
-//! serving a `std/net` `TcpStream` yourself. There is no HTTP client. Every
+//! and one for every other `GET` with `fallback`, then `listen` on an
+//! address, or `listen_on` a listener already bound. A handler is a plain
+//! function from a `Request` to a `Response`, so it cannot await anything.
+//! `read_request`, `write_response` and `parse_request_head` are the parts
+//! underneath, for serving a `std/net` `TcpStream` yourself. There is no HTTP client. Every
 //! module sees these names without an import, and a module's own definition
 //! of one of them shadows the one here.
 //!
@@ -1000,15 +1001,17 @@ const SERVER_TICK_MS: Int = 100
 // dropped at this deadline, so a shutdown always finishes.
 const SERVER_REQUEST_MS: Int = 10000
 
-// A routing table and nothing else. Build one with `Server::new()` and `get`,
-// then `listen`.
+// A routing table, and the handler of a `GET` no route matches. Build one
+// with `Server::new()`, `get` and `fallback`, then `listen` or `listen_on`.
 /// A router that serves GET routes over HTTP/1.1.
 ///
 /// Build one with `Server::new()` and a call to `get` for each route, then
-/// serve it with `listen`. A request goes to the handler of the route whose
-/// path equals the request's target exactly, query string included; any
-/// other target, and any method but `GET`, gets `Response::not_found()`.
-pub record Server { routes: Vec<Route> }
+/// serve it with `listen`, or `listen_on` a listener already bound. A request
+/// goes to the handler of the route whose path equals the request's target
+/// exactly, query string included; any other `GET` goes to the `fallback`
+/// handler, when there is one; and any other request, any method but `GET`
+/// included, gets `Response::not_found()`.
+pub record Server { routes: Vec<Route>, unmatched: Option<fn(Request) -> Response> }
 
 // One GET route: an exact path, and the handler that answers it.
 record Route { path: String, handler: fn(Request) -> Response }
@@ -1018,8 +1021,8 @@ record Route { path: String, handler: fn(Request) -> Response }
 record InFlight { req: Request, rest: Bytes }
 
 impl Server {
-    /// Returns a server with no routes.
-    pub fn new() -> Server { Server { routes: Vec::new() } }
+    /// Returns a server with no routes and no fallback.
+    pub fn new() -> Server { Server { routes: Vec::new(), unmatched: None } }
 
     // Adds a GET route. Takes `self` rather than `mut self`, and returns
     // `Server` rather than section 6's `Self`: a `mut self` call on the
@@ -1048,15 +1051,46 @@ impl Server {
             i = i + 1
         }
         rs.push(Route { path: path, handler: handler })
-        Server { routes: rs }
+        Server { routes: rs, unmatched: self.unmatched }
+    }
+
+    // Sets the fallback. Like `get`, it takes `self` and returns a new
+    // server, so `self` keeps its own; the route table is shared between the
+    // two, which is safe since `get` copies it before it adds a route.
+    /// Returns a copy of this server whose `handler` answers each `GET`
+    /// request no route matches, in place of `Response::not_found()`.
+    ///
+    /// `self` is left unchanged, and calls chain with `get`'s in any order:
+    /// a route still answers its own path. A second `fallback` replaces the
+    /// first. Any method but `GET` still gets `not_found`.
+    ///
+    /// ```
+    /// let app = Server::new()
+    ///     .get("/", |_| Response::text(200, "home"))
+    ///     .fallback(|r: Request| Response::text(404, "no page at ${r.path}"))
+    /// let get = |path: String| Request {
+    ///     method: Get,
+    ///     path: path,
+    ///     headers: Map::new(),
+    ///     body: bytes_from_string(""),
+    /// }
+    /// assert_eq(app.dispatch(get("/")).body.to_string().unwrap(), "home")
+    /// let missing = app.dispatch(get("/nope?x=1"))
+    /// assert_eq(missing.status, 404)
+    /// assert_eq(missing.body.to_string().unwrap(), "no page at /nope?x=1")
+    /// ```
+    pub fn fallback(self, handler: fn(Request) -> Response) -> Server {
+        Server { routes: self.routes, unmatched: Some(handler) }
     }
 
     // The response to `req`: the handler of the GET route whose path equals
-    // `req.path` exactly, or `Response::not_found()` for any other path or
-    // method. Socket-free, so a test can call it directly.
+    // `req.path` exactly, else the fallback's for a GET, or
+    // `Response::not_found()` for any other path or method. Socket-free, so a
+    // test can call it directly.
     /// Returns the response to `req`: what the handler of the route whose
-    /// path equals `req.path` returns, or `Response::not_found()` if there is
-    /// none.
+    /// path equals `req.path` returns, or if there is none what the
+    /// `fallback` handler returns, or `Response::not_found()` if there is no
+    /// fallback either.
     ///
     /// Only a `GET` request reaches a handler; any other method, `HEAD`
     /// included, gets `not_found`. It touches no connection, so a test can
@@ -1079,7 +1113,10 @@ impl Server {
                     }
                     i = i + 1
                 }
-                Response::not_found()
+                match self.unmatched {
+                    Some(h) => h(req)
+                    None => Response::not_found()
+                }
             }
             _ => Response::not_found()
         }
@@ -1144,6 +1181,28 @@ impl Server {
             Ok(l) => l
             Err(e) => return Err(e)
         }
+        self.listen_on(l).await
+    }
+
+    // `listen`'s loop, on a listener the caller bound: so a program can bind
+    // port 0 and print the port it got, then serve it (spec
+    // docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+    // §8.3). `listen` binds, then calls it. The signal handler is installed
+    // here too, for a caller that did not install it before its own `bind`;
+    // a second install is a no-op.
+    /// Serves HTTP on `listener`, already bound with `std/net`'s `bind`, until
+    /// the process is asked to stop, as `listen` does on the address it binds.
+    ///
+    /// A program binds first when it must know the address before serving,
+    /// such as the port the system chose for port 0, which `local_port`
+    /// reads. Everything else is as `listen` says: the connections, the
+    /// limits, the stop on SIGTERM or SIGINT, after which the listener is
+    /// closed and it returns `Ok(())`, and an `IoError` if accepting a
+    /// connection fails. A signal that arrives between the `bind` and this
+    /// call ends the program, unless something has already called `listen`
+    /// or `listen_on`.
+    pub async fn listen_on(self, l: TcpListener) -> Result<(), IoError> {
+        let _ = shutdown_requested()
         // The flag is checked on every turn, not only when an accept times
         // out: under steady traffic the timeout arm may never run. The accept
         // is polled under `timeout` because a bare one never returns without a

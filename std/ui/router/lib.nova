@@ -18,8 +18,11 @@
 //! matches. There is one router per page: the last one made is the one
 //! `navigate`, `use_params` and `use_query` speak to.
 //!
-//! Natively, where there is no address, the location is `/`, so
-//! `render_to_string` writes the root route:
+//! A server renders the page at another location with `with_location`,
+//! answers `404` where `found` says only the catch-all serves the location,
+//! and pre-renders the `static_paths`. Natively, where there is no address,
+//! the location is otherwise `/`, so `render_to_string` writes the root
+//! route:
 //!
 //! ```
 //! import ui
@@ -80,14 +83,18 @@ record Active { id: Int, history: Bool, location: Signal<String> }
 
 // The router's state for the thread or the page (spec §3.5): the router
 // mounted last, the parameters of the route being built while it is, the
-// next router's number, and a signal set each time the router mounted last
-// changes, which every link's `href` reads. A signal has no owner, so the
-// state can make it whenever it is first asked for.
+// next router's number, a signal set each time the router mounted last
+// changes, which every link's `href` reads, and the location a router made
+// inside `with_location` starts at (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §5). A signal has no owner, so the state can make it whenever it is first
+// asked for.
 record Routing {
     active: Option<Active>,
     params: Option<Map<String, String>>,
     next_id: Int,
     changes: Signal<Int>,
+    location: Option<String>,
 }
 
 // A route that matched: its component and the parameters its pattern took.
@@ -100,7 +107,9 @@ fn store_routing<T>(state: T) { router_state_store(state) }
 // The state, made the first time it is asked for.
 fn routing() -> Routing {
     if !router_state_present() {
-        store_routing(Routing { active: None, params: None, next_id: 1, changes: signal(0) })
+        store_routing(
+            Routing { active: None, params: None, next_id: 1, changes: signal(0), location: None },
+        )
     }
     load_routing()
 }
@@ -177,7 +186,7 @@ fn routed(history: Bool, routes: [Route]) -> View {
     let mut s = routing()
     let id = s.next_id
     s.next_id = id + 1
-    let location = signal(located(history))
+    let location = signal(starting(history))
     s.active = Some(Active { id: id, history: history, location: location })
     changed(s)
     // `navigate` sets the location itself, to what the page reports, before
@@ -302,6 +311,15 @@ pub fn navigate(to: String) {
 
 // The page's location, less any `#fragment`.
 fn located(history: Bool) -> String { unfragmented(backend_location(history)) }
+
+// The location a router made now starts at: the one `with_location` gives,
+// or else the page's, either less any `#fragment`.
+fn starting(history: Bool) -> String {
+    match routing().location {
+        Some(at) => unfragmented(at)
+        None => located(history)
+    }
+}
 
 // `location` before its first `#`: a router's location never holds a
 // fragment. One reaches it in hash mode as a second `#`, through
@@ -450,6 +468,127 @@ pub fn use_query() -> Map<String, String> {
     }
 }
 
+/// Runs `f` so that a router made inside it starts at `location`, a path
+/// and its query as a request's target writes them, such as `/posts/1?tab=2`,
+/// rather than at the page's address. The previous location is restored once
+/// `f` returns, so calls nest. It is how a server renders the page at a
+/// path, natively, where the page's location is always `/`; on WASM it
+/// applies too. A router made inside it reads the page's address again each
+/// time that changes, as any router does.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{HistoryRouter, Route, use_params, with_location}
+///
+/// component Post() {
+///     let id = use_params().get("id").unwrap_or("?")
+///     view { p { text("Post ${id}") } }
+/// }
+///
+/// fn main() {
+///     let routes = [Route { path: "/posts/:id", component: Post }]
+///     let html = with_location("/posts/1", || render_to_string(|| HistoryRouter(routes)))
+///     assert_eq(html, "<p>Post 1</p>")
+///     // Outside it, a router starts at the page's location: natively `/`,
+///     // which no route matches.
+///     assert_eq(render_to_string(|| HistoryRouter(routes)), "")
+/// }
+/// ```
+pub fn with_location<T>(location: String, f: fn() -> T) -> T {
+    let mut s = routing()
+    let was = s.location
+    s.location = Some(location)
+    let out = f()
+    s.location = was
+    out
+}
+
+/// Whether a route other than the catch-all serves `location`, a path and
+/// its query: true when the first route that matches it, as a router picks
+/// it, is not `"*"` (nor `"/*"`), even when its pattern has parameters, and
+/// false when only the catch-all matches, or no route does. A `#fragment` is
+/// left out, as `with_location` leaves it out. A server answers `404` with
+/// the page when it is false.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{Route, found}
+///
+/// component Page() { view { p { text("A page") } } }
+///
+/// fn main() {
+///     let routes = [
+///         Route { path: "/", component: Page },
+///         Route { path: "/posts/:id", component: Page },
+///         Route { path: "*", component: Page },
+///     ]
+///     assert(found(routes, "/"), "a static route")
+///     assert(found(routes, "/posts/1?tab=2"), "a route with a parameter")
+///     assert(found(routes, "/#top"), "a fragment")
+///     assert(!found(routes, "/nowhere"), "only the catch-all")
+///     assert(!found([Route { path: "/", component: Page }], "/about"), "no route")
+/// }
+/// ```
+pub fn found(routes: [Route], location: String) -> Bool {
+    match first_match(routes, unfragmented(location)) {
+        Some(hit) => !catch_all(pieces_of(hit.route.path))
+        None => false
+    }
+}
+
+/// The paths of the static routes, which a site can render ahead of time:
+/// those with no `:name` piece that are not the catch-all, in order, each as
+/// written, and each once. `nova build --ssg` writes a page for each.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{Route, static_paths}
+///
+/// component Page() { view { p { text("A page") } } }
+///
+/// fn main() {
+///     let routes = [
+///         Route { path: "/", component: Page },
+///         Route { path: "/about", component: Page },
+///         Route { path: "/posts/:id", component: Page },
+///         Route { path: "/about", component: Page },
+///         Route { path: "*", component: Page },
+///     ]
+///     assert_eq(", ".join(static_paths(routes)), "/, /about")
+/// }
+/// ```
+pub fn static_paths(routes: [Route]) -> [String] {
+    let mut kept = Vec::new()
+    let mut i = 0
+    while i < routes.len() {
+        let path = routes[i].path
+        let pattern = pieces_of(path)
+        let mut fixed = !catch_all(pattern)
+        let mut k = 0
+        while k < pattern.len() {
+            if pattern[k].starts_with(":") { fixed = false }
+            k = k + 1
+        }
+        let mut j = 0
+        while j < kept.len() {
+            if kept.get(j).unwrap_or("") == path { fixed = false }
+            j = j + 1
+        }
+        if fixed { kept.push(path) }
+        i = i + 1
+    }
+    let mut out = [""; kept.len()]
+    let mut n = 0
+    while n < kept.len() {
+        out[n] = kept.get(n).unwrap_or("")
+        n = n + 1
+    }
+    out
+}
+
 /// An `<a>` that goes to a route without loading the page. Its `to`
 /// attribute, fixed or reactive, is the path, and becomes its `href`:
 /// `#/posts/1` under `Router`, and `/posts/1` under `HistoryRouter` and with
@@ -540,6 +679,20 @@ fn rooted(to: String) -> String {
 
 // The routes that match `location`: the first that does, or none.
 fn matching(routes: [Route], location: String) -> [Matched] {
+    match first_match(routes, location) {
+        Some(hit) => [Matched { component: hit.route.component, params: hit.params }]
+        None => {
+            let none: [Matched] = []
+            none
+        }
+    }
+}
+
+// A route that matched a location, and the parameters its pattern took.
+record Hit { route: Route, params: Map<String, String> }
+
+// The first route that matches `location`, a path and its query, or `None`.
+fn first_match(routes: [Route], location: String) -> Option<Hit> {
     let path = match location.index_of("?") {
         Some(at) => location.slice(0, at)
         None => location
@@ -549,20 +702,22 @@ fn matching(routes: [Route], location: String) -> [Matched] {
     while i < routes.len() {
         let r = routes[i]
         match params_of(pieces_of(r.path), pieces) {
-            Some(params) => return [Matched { component: r.component, params: params }]
+            Some(params) => return Some(Hit { route: r, params: params })
             None => {}
         }
         i = i + 1
     }
-    let none: [Matched] = []
-    none
+    None
 }
+
+// Whether `pattern`, a route's pieces, is the catch-all's: `"*"`, or `"/*"`.
+fn catch_all(pattern: [String]) -> Bool { pattern.len() == 1 && pattern[0] == "*" }
 
 // The parameters `pattern` takes from `pieces`, or `None` when it does not
 // match them.
 fn params_of(pattern: [String], pieces: [String]) -> Option<Map<String, String>> {
     let mut params: Map<String, String> = Map::new()
-    if pattern.len() == 1 && pattern[0] == "*" { return Some(params) }
+    if catch_all(pattern) { return Some(params) }
     if pattern.len() != pieces.len() { return None }
     let mut i = 0
     while i < pattern.len() {
