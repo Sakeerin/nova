@@ -1,0 +1,8 @@
+//! The client: it hydrates the page the server rendered, with the server's
+//! data, which it reads from the `nova-data` after the page's root; or, on a
+//! page with no data, as `nova dev` serves, with no title and no names.
+
+import app::{App, Data}
+import ui
+
+fn main() { hydrate_with("#app", Data { title: "", names: [] }, App) }

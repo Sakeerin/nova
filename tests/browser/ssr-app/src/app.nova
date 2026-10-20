@@ -1,0 +1,163 @@
+//! What the client, `main.nova`, and the server, `server.nova`, share (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §1, §9.5): the server's data, the routes, and the app. The app shows the
+//! data's title and names, a `for_each` over them, then links, then the
+//! route the location matches: a home page with a counter and a `show`, an
+//! about page, a post by its id, and a page for any other path.
+//!
+//! `tests/browser/ssr.mjs` builds it with `nova build --ssg`, serves it with
+//! its server, and serves the statically generated pages with a server of
+//! its own; in each case the client hydrates the HTML in place. The root's
+//! `data-state` reads `server` in the HTML and `hydrated` once the client's
+//! `on_mount` has run, which happens after hydration's walk: the script
+//! waits for that.
+
+import ui
+import ui::html::{button, div, h1, h2, li, nav, p, ul}
+import ui::router::{HistoryRouter, Route, link, use_params}
+
+/// The server's data, which reaches the client as JSON. The title holds
+/// what a `script` element's text must not, `</script>`, `<!--` and `&`,
+/// so the page's escaping is tested in the browser.
+pub record Data { title: String, names: [String] }
+
+impl ToJson for Data {
+    fn to_json(self) -> JsonValue {
+        let mut names = [Null; self.names.len()]
+        let mut i = 0
+        while i < self.names.len() {
+            names[i] = self.names[i].to_json()
+            i = i + 1
+        }
+        let mut fields: Map<String, JsonValue> = Map::new()
+        fields.insert("title", self.title.to_json())
+        fields.insert("names", Array(names))
+        Object(fields)
+    }
+}
+
+// The string `v` holds, or an error naming `what`.
+fn string_in(v: Option<JsonValue>, what: String) -> Result<String, JsonError> {
+    match v {
+        Some(x) => String::from_json(x)
+        None => Err(JsonError { msg: "expected ${what}", at: 0 })
+    }
+}
+
+impl FromJson for Data {
+    fn from_json(v: JsonValue) -> Result<Data, JsonError> {
+        let fields = match v {
+            Object(m) => m
+            _ => return Err(JsonError { msg: "expected an object", at: 0 })
+        }
+        let title = match string_in(fields.get("title"), "a title") {
+            Ok(t) => t
+            Err(e) => return Err(e)
+        }
+        let list = match fields.get("names") {
+            Some(x) => {
+                match x {
+                    Array(xs) => xs
+                    _ => return Err(JsonError { msg: "expected names", at: 0 })
+                }
+            }
+            None => return Err(JsonError { msg: "expected names", at: 0 })
+        }
+        let mut names = [""; list.len()]
+        let mut i = 0
+        while i < list.len() {
+            names[i] = match string_in(Some(list[i]), "a name") {
+                Ok(name) => name
+                Err(e) => return Err(e)
+            }
+            i = i + 1
+        }
+        Ok(Data { title: title, names: names })
+    }
+}
+
+/// The data the server renders every page with.
+pub fn data() -> Data {
+    Data { title: "Guests </script><!-- & friends", names: ["Ada", "Grace", "Katherine"] }
+}
+
+/// The home page: a counter, and a `show` that a button hides and shows.
+component Home() {
+    let count = signal(0)
+    let open = signal(true)
+    view {
+        div {
+            h2(id: "page") { text("Home") }
+            p(id: "count") { text("Clicked ${count.value()} times") }
+            button(id: "add", on_click: || count.update(|n| n + 1)) { text("+") }
+            button(id: "toggle", on_click: || open.update(|o| !o)) { text("Toggle") }
+            show(
+                open,
+                || view {
+                    p(id: "details") { text("Details") }
+                },
+            )
+        }
+    }
+}
+
+component About() {
+    view {
+        div {
+            h2(id: "page") { text("About") }
+            p { text("A page rendered ahead of time.") }
+        }
+    }
+}
+
+/// A post by its id, a route with a parameter, which SSG skips.
+component Post() {
+    let id = use_params().get("id").unwrap_or("?")
+    view {
+        div { h2(id: "page") { text("Post ${id}") } }
+    }
+}
+
+component NotFound() {
+    view {
+        div {
+            h2(id: "page") { text("Not found") }
+            p { text("No route matches this path.") }
+        }
+    }
+}
+
+/// The routes: two static ones, one with a parameter, and the catch-all.
+pub fn routes() -> [Route] {
+    [
+        Route { path: "/", component: Home },
+        Route { path: "/about", component: About },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "*", component: NotFound },
+    ]
+}
+
+/// The app: the data's title and names, the links, then the route.
+pub component App(data: Data) {
+    let state = signal("server")
+    on_mount(|| state.set("hydrated"))
+    view {
+        div(id: "root", data_state: state.value()) {
+            h1(id: "title") { text(data.title) }
+            ul(id: "names") {
+                for_each(
+                    signal(data.names),
+                    |name: String| view {
+                        li { text(name) }
+                    },
+                )
+            }
+            nav {
+                link(id: "home", to: "/") { text("Home") }
+                link(id: "about", to: "/about") { text("About") }
+                link(id: "post", to: "/posts/2") { text("Post 2") }
+            }
+            HistoryRouter(routes())
+        }
+    }
+}
