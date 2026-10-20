@@ -1,0 +1,5 @@
+[package]
+name = "ssr-app"
+version = "0.1.0"
+edition = "2026"
+description = "A project with a client and a server, which tests/browser/ssr.mjs builds with --ssg, serves and hydrates in Chromium"

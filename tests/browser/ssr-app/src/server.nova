@@ -1,0 +1,29 @@
+//! The server: it serves `dist/` on the address its first argument names,
+//! or on `127.0.0.1:0`, a port the system chooses, rendering each page with
+//! the data; given `--ssg <dir>`, as `nova build --ssg` runs it, it writes
+//! the static pages into `<dir>` instead. When `serve` fails, it prints the
+//! error and exits with status 1, so a refused page fails the build.
+
+import app::{App, data, routes}
+import ui
+import ui::ssr::{Page, Site, page_with, serve}
+
+fn render(location: String) -> Page { page_with(location, data(), App) }
+
+// The address to bind: the first argument, unless it is a flag such as
+// `--ssg`, or else `127.0.0.1:0`.
+fn address() -> String {
+    let given = args().get(1).unwrap_or("--")
+    if given.starts_with("--") { "127.0.0.1:0" } else { given }
+}
+
+async fn main() {
+    let site = Site { address: address(), dist: "dist", routes: routes(), render: render }
+    match serve(site).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln(e.message)
+            exit(1)
+        }
+    }
+}

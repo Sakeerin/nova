@@ -102,9 +102,15 @@ jobs:
   # §5.4): `dev.mjs` runs `06-counter-spa` under `nova dev`, edits it, breaks
   # it and fixes it; `router.mjs` drives `tests/browser/router-app`, in
   # history mode, under `nova dev`. Each copies its project into
-  # `$RUNNER_TEMP` and kills `nova dev` at the end. Playwright, pinned, is
-  # installed here only, into a scratch directory; nothing in `cargo test` or
-  # `nova` installs a package. Ubuntu only: one browser job suffices.
+  # `$RUNNER_TEMP` and kills `nova dev` at the end. And 4.6's gate (spec
+  # docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+  # §9.5): `ssr.mjs` builds `tests/browser/ssr-app` with `nova build --ssg`
+  # in `$RUNNER_TEMP`, starts its server on port 0, and checks that a
+  # server-rendered page, and a page SSG wrote, served by a static server,
+  # hydrate in place: the server's nodes stay, and a click updates them. It
+  # kills the server at the end. Playwright, pinned, is installed here only,
+  # into a scratch directory; nothing in `cargo test` or `nova` installs a
+  # package. Ubuntu only: one browser job suffices.
   browser:
     name: Browser (Chromium)
     runs-on: ubuntu-latest
@@ -115,8 +121,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: cargo build -p nova-cli
-        run: cargo build --locked -p nova-cli
+      # `nova-runtime` too: cargo leaves `libnova_runtime.a` in
+      # `target/debug/`, beside `nova`, only when the runtime is a package
+      # the build names; as `nova-cli`'s dependency it stays in `deps/`. A
+      # debug `nova` carries no runtime, and finds it there, to link the
+      # native server `ssr.mjs` builds with `nova build --ssg`.
+      - name: cargo build -p nova-cli -p nova-runtime
+        run: cargo build --locked -p nova-cli -p nova-runtime
       - name: Build the counters for WASM
         run: |
           target/debug/nova build --target wasm tests/dom/counter.nova -o "$RUNNER_TEMP/counter"
@@ -135,6 +146,8 @@ jobs:
         run: |
           node tests/browser/dev.mjs target/debug/nova "$RUNNER_TEMP/dev" "$RUNNER_TEMP/pw"
           node tests/browser/router.mjs target/debug/nova "$RUNNER_TEMP/router" "$RUNNER_TEMP/pw"
+      - name: SSR and SSG in Chromium
+        run: node tests/browser/ssr.mjs target/debug/nova "$RUNNER_TEMP/ssr" "$RUNNER_TEMP/pw"
 
   fmt:
     name: Rustfmt
