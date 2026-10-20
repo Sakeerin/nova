@@ -1,0 +1,46 @@
+//! The client's side of `tests/dom/hydrate_mismatch.mjs` (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §4.3): it hydrates each root with a view other than the server's, so each
+//! reports its first difference and builds the view again.
+
+import ui
+import view::{
+    comment_client,
+    end_client,
+    joined_client,
+    missing_client,
+    nothing_client,
+    over_client,
+    region_client,
+    root_client,
+    separator_client,
+    stops_client,
+    tag_client,
+    text_client,
+}
+
+fn main() {
+    // The walk's cleanups run when it is disposed, and its `on_mount`
+    // callbacks never; the build's run once it is done.
+    hydrate(
+        "#tag",
+        || {
+            on_cleanup(|| println("tag: a cleanup ran"))
+            on_mount(|| println("tag: on_mount ran"))
+            tag_client()
+        },
+    )
+    hydrate("#text", text_client)
+    hydrate("#region", region_client)
+    hydrate("#end", end_client)
+    hydrate("#missing", missing_client)
+    hydrate("#nothing", nothing_client)
+    hydrate("#over", over_client)
+    hydrate("#separator", separator_client)
+    hydrate("#joined", joined_client)
+    hydrate("#root", root_client)
+    hydrate("#comment", comment_client)
+    let n = signal(0)
+    hydrate("#stops", || stops_client(n))
+    println("hydrated")
+}

@@ -1,0 +1,69 @@
+// `render_hydratable` (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §3, §9.2): nested regions, empty regions, empty texts between others,
+// texts side by side in an element and in a region, and a carriage return in
+// text and in an attribute; each line then `render_to_string` of the same
+// view, which is as it was, with its carriage returns shown as `\r`.
+import ui
+import ui::html::{attr, div, dyn_text, li, p, span, text, ul}
+
+// `s` with each carriage return written `\r`, to print it.
+fn shown(s: String) -> String {
+    let cs = s.chars()
+    let mut parts = [""; cs.len()]
+    let mut i = 0
+    while i < cs.len() {
+        parts[i] = if cs[i] == '\r' { "\\r" } else { "${cs[i]}" }
+        i = i + 1
+    }
+    "".join(parts)
+}
+
+// Both renders of `f`.
+fn both(f: fn() -> View) {
+    println(render_hydratable(f))
+    println(shown(render_to_string(f)))
+}
+
+fn main() {
+    // Nested regions: a `show` holding a `for_each`, and a `for_each` whose
+    // items hold a `show`.
+    let open = signal(true)
+    let items = signal(["a", "b"])
+    both(|| div([], [show(open, || ul([], [for_each(items, |s: String| li([], [text(s)]))]))]))
+    both(
+        || ul(
+            [],
+            [for_each(items, |s: String| li([], [text(s), show(open, || span([], [text("!")]))]))],
+        ),
+    )
+
+    // Empty regions: a hidden `show`, and a `for_each` over nothing, beside
+    // text.
+    open.set(false)
+    let none: [String] = []
+    items.set(none)
+    both(|| div([], [show(open, || p([], [text("hidden")])), text("x")]))
+    both(|| ul([], [text("before"), for_each(items, |s: String| li([], [text(s)])), text("after")]))
+
+    // Empty texts between other texts, and alone.
+    both(|| p([], [text("a"), text(""), text("b")]))
+    both(|| p([], [text(""), dyn_text(|| ""), text("")]))
+    both(|| p([], [text("")]))
+    both(|| p([], [dyn_text(|| ""), span([], [text("s")]), text("")]))
+
+    // Texts side by side in an element, fixed and dynamic, and in a region,
+    // where the marker parts a text from the region's own.
+    let n = signal(2)
+    both(|| div([], [text("count: "), dyn_text(|| "${n.value()}"), text(" times")]))
+    both(|| div([], [text("x"), span([], [text("y")]), text("z")]))
+    items.set(["one", "two", "three"])
+    both(|| p([], [text("["), for_each(items, |s: String| text(s)), text("]")]))
+    open.set(true)
+    both(|| p([], [show(open, || text("a")), show(open, || text("b"))]))
+
+    // A carriage return, alone and before a line feed, in text and in an
+    // attribute; escaping as before.
+    both(|| p([attr("title", "one\rtwo\r\n<\"&\">")], [text("a\rb\r\nc & <d>")]))
+    both(|| p([], [dyn_text(|| "\r"), text("<!--|-->")]))
+}

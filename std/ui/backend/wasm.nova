@@ -53,6 +53,44 @@ pub fn backend_next_sibling(node: Node) -> Option<Node> { wrap(node.el.next_sibl
 /// Whether two nodes are one.
 pub fn backend_is_same(a: Node, b: Node) -> Bool { a.el.is_same(b.el) }
 
+/// The node's first child (spec
+/// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+/// §8.2).
+pub fn backend_first_child(node: Node) -> Option<Node> { wrap(node.el.first_child()) }
+
+/// The node's kind: its name in lower case, as `"div"`, `"#text"` or
+/// `"#comment"`.
+pub fn backend_kind(node: Node) -> String { node.el.tag() }
+
+/// The node's text: a text node's or a comment's own, or the text of
+/// everything in an element.
+pub fn backend_text_of(node: Node) -> String { node.el.text() }
+
+/// Writes `message` to the console as an error.
+pub fn backend_report(message: String) { console_error(message) }
+
+/// The server's data for the page whose root is `root`: the text of the
+/// root's next element, when it is a `<script type="application/json"
+/// id="nova-data">`, as `ui::ssr` writes it just after the root; or `None`
+/// (spec docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+/// §8.2). An element with that id elsewhere, such as in the root's view, is
+/// not the data.
+pub fn backend_data(root: Node) -> Option<String> {
+    let mut at = root.el.next_sibling()
+    while at.is_some() {
+        let e = at.unwrap()
+        let kind = e.tag()
+        if !kind.starts_with("#") {
+            let named = e.attribute("id").unwrap_or("") == "nova-data"
+            let json = e.attribute("type").unwrap_or("") == "application/json"
+            if kind == "script" && named && json { return Some(e.text()) }
+            return None
+        }
+        at = e.next_sibling()
+    }
+    None
+}
+
 /// Calls `f` with the target's `value` on each event of kind `kind`, until
 /// the function returned is called.
 pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() {

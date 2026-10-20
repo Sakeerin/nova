@@ -1,0 +1,43 @@
+//! The server's side of `tests/dom/hydrate.mjs`: for each root of the page,
+//! a line of its id and the HTML `render_hydratable` writes for its view,
+//! two of them rendered with the guests the client falls back on, and a
+//! line `nova-data` and the guests as JSON, made safe for a `script`
+//! element as the spec writes it (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §6.2).
+
+import ui
+import view::{Guests, counter, fallback, guests, listed, lists, texts}
+
+// `json` with `<`, `>` and `&` written as escapes, which only JSON strings
+// hold, so that a `script` element holds it whole.
+fn safe(json: String) -> String {
+    let cs = json.chars()
+    let mut parts = [""; cs.len()]
+    let mut i = 0
+    while i < cs.len() {
+        let c = cs[i]
+        parts[i] = if c == '<' {
+            "\\u003c"
+        } else if c == '>' {
+            "\\u003e"
+        } else if c == '&' {
+            "\\u0026"
+        } else {
+            "${c}"
+        }
+        i = i + 1
+    }
+    "".join(parts)
+}
+
+fn main() {
+    let g = Guests { title: "Guests </script> & <b>friends</b>", names: ["Ada", "Grace"] }
+    println("counter ${render_hydratable(counter)}")
+    println("lists ${render_hydratable(lists)}")
+    println("texts ${render_hydratable(texts)}")
+    println("data ${render_hydratable(|| guests(g))}")
+    println("filled ${render_hydratable(|| listed(fallback()))}")
+    println("decoy ${render_hydratable(|| listed(fallback()))}")
+    println("nova-data ${safe(stringify(g.to_json()))}")
+}

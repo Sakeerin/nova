@@ -166,6 +166,7 @@ fn js_function(name: &str) -> Option<&'static str> {
         "dom_fetch_status" => "(t) => BigInt(object(t).status)",
         "dom_fetch_ok" => "(t) => (object(t).ok ? 1 : 0)",
         "dom_fetch_body" => "(t) => string(object(t).body)",
+        "dom_console_error" => "(s) => { console.error(text(s)); }",
         _ => return None,
     })
 }

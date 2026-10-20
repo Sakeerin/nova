@@ -1902,6 +1902,8 @@ mod gate {
         ui_signal,
         // `component` and `view { … }` (spec 4.4 §9.2).
         ui_view,
+        // `render_hydratable` (spec 4.6 §9.2).
+        ui_hydratable,
     );
 
     /// The programs a test of their own in this module checks, by its name.
@@ -2224,6 +2226,7 @@ mod stress {
         ui_memo,
         ui_render,
         ui_signal,
+        ui_hydratable,
     );
 
     #[test]
@@ -2391,6 +2394,197 @@ fn ui_mount_never_inserts_html() {
                 "nova: panic: std/ui: \"innerHTML\" parses HTML, which std/ui does not insert\n"
             ),
             "{err}"
+        );
+    }
+}
+
+/// A hydration test of `tests/dom/` (spec
+/// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+/// §9.3), the pair end to end: the project `tests/dom/<name>/` has a server,
+/// `src/server.nova`, which, run natively from the project, prints a line
+/// per root of the page, its id and the HTML `render_hydratable` writes for
+/// it; and a client, `src/main.nova`, which, built for WASM, hydrates those
+/// roots. The harness, `<name>.mjs`, reads the server's output from
+/// `server.txt` beside it, puts each root's HTML into the page through the
+/// fake DOM's parser, runs the client with `env` set, and drives and prints
+/// the page. Its stdout is `<name>.stdout`. Returns its stderr.
+fn hydration_program(name: &str, env: &[(&str, &str)]) -> String {
+    let Some(mut node) = node() else {
+        return String::new();
+    };
+    let tests = repo_root().join("tests/dom");
+    let project = tests.join(name);
+    let expected = std::fs::read_to_string(tests.join(format!("{name}.stdout")))
+        .expect("the expected output")
+        .replace("\r\n", "\n");
+    let kind = if env.is_empty() {
+        "hydrate"
+    } else {
+        "hydrate-stress"
+    };
+    let dir = fresh(&format!("{kind}-{name}"));
+    let home = dir.join("nova-home");
+    let server = nova_at(&project, &home)
+        .args(["run", "src/server.nova"])
+        .assert()
+        .success();
+    std::fs::write(dir.join("server.txt"), stdout(&server)).expect("write the server's output");
+    let dist = dir.join("dist");
+    nova_at(&project, &home)
+        .args(["build", "--target", "wasm", "-o", &dist.to_string_lossy()])
+        .assert()
+        .success();
+    for file in ["fake_dom.mjs".to_string(), format!("{name}.mjs")] {
+        std::fs::copy(tests.join(&file), dir.join(&file)).expect("copy the harness");
+    }
+    let a = node
+        .arg(dir.join(format!("{name}.mjs")))
+        .envs(env.iter().copied())
+        .timeout(std::time::Duration::from_secs(60))
+        .assert()
+        .success();
+    assert_eq!(stdout(&a), expected, "{}", stderr(&a));
+    stderr(&a)
+}
+
+/// Hydration in place (spec 4.6 §4.1, §4.2): each root keeps the server's
+/// nodes, as the same objects and in order, and gains only the empty texts
+/// the server could not write. `on_mount` runs once the walk has added the
+/// handlers, so the click it makes counts. Clicks update the adopted nodes,
+/// a dynamic attribute and a property; an adopted row's handler runs; `show`
+/// and `for_each` build again between the server's markers, nested regions
+/// too; texts side by side, empty ones and a carriage return are adopted,
+/// and the dynamic one writes to its own node; `hydrate_with` reads the
+/// server's data, escaped for a `script` element, from the `script` after
+/// its root, past whitespace and a comment, though the view holds an
+/// element whose id is `nova-data` too; with no data after its root,
+/// `hydrate_with` walks a root the server filled with its fallback, and
+/// builds its fallback's view into an empty one (the user's decision 13,
+/// ADR 0045), as it does when the first element after the root holds other
+/// guests as JSON but is a `div` with the data's id and type, or a `script`
+/// with its id and no type, or a `p`, the data's `script` coming only after
+/// it; and a root with nothing, or only whitespace, a form feed among it,
+/// gets the view built, the whitespace removed first, with no report. Under
+/// stress the collector keeps the adopted nodes' seven handlers, and the
+/// rebuilt rows' three listeners replace the adopted rows' two: eight calls.
+#[test]
+fn hydrate_adopts_the_servers_nodes() {
+    hydration_program("hydrate", &[]);
+    let err = hydration_program("hydrate", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    assert_eq!(calls_after_each(&err), [7, 7, 7, 7, 7, 8, 8, 8, 8], "{err}");
+}
+
+/// A mismatch (spec 4.6 §4.3): for each root, the first difference, in the
+/// spec's words, reported with `console.error`: another tag, another text
+/// (each side clipped to 40 characters), a missing region, its end, a
+/// missing node, a node left over in an element and in the root, a missing
+/// separator, or one where the client has no text, and a comment that is no
+/// marker, which a server written by hand can write. Then the root
+/// holds the client's view, built afresh, and none of the server's nodes.
+/// The walk's cleanups run; its `on_mount` callbacks never do; and its
+/// effects and handlers stop: a click on the server's button, which the walk
+/// had adopted, does nothing, and the count's effect runs once for a click
+/// on the client's. Under stress, the client's button's call is the only
+/// one left in std/rt's table.
+#[test]
+fn hydrate_reports_a_mismatch_and_builds_again() {
+    hydration_program("hydrate_mismatch", &[]);
+    let err = hydration_program("hydrate_mismatch", &STRESS);
+    if node().is_none() {
+        return;
+    }
+    let calls = calls_after_each(&err);
+    assert!(!calls.is_empty(), "{err}");
+    assert!(calls.iter().all(|&c| c == 1), "{err}");
+}
+
+/// `hydrate` and `hydrate_with` panic (spec 4.6 §4.1): when no element
+/// matches, as `mount` does, naming the function; and when the data's JSON,
+/// in the `nova-data` script after the root, does not parse, or its
+/// `from_json` refuses it. A page with no data is no panic: `hydrate_with`
+/// uses its fallback (the user's decision 13, ADR 0045), as
+/// `hydrate_adopts_the_servers_nodes` checks.
+#[test]
+fn hydrate_panics_without_its_root_or_on_data_that_does_not_parse() {
+    let Some(_) = node() else { return };
+    let dir = fresh("hydrate-panics");
+    std::fs::copy(
+        repo_root().join("tests/dom/fake_dom.mjs"),
+        dir.join("fake_dom.mjs"),
+    )
+    .expect("copy the fake DOM");
+    for (name, call, data, message) in [
+        (
+            "root",
+            "hydrate(\"#nope\", | | text(\"x\"))",
+            None,
+            "std/ui: hydrate: no element matches \"#nope\"",
+        ),
+        (
+            "root_with",
+            "hydrate_with(\"#nope\", \"none\", |s: String| text(s))",
+            Some("\"x\""),
+            "std/ui: hydrate_with: no element matches \"#nope\"",
+        ),
+        (
+            "bad_json",
+            "hydrate_with(\"#app\", \"none\", |s: String| text(s))",
+            Some("[\"x\","),
+            "std/ui: hydrate_with: the page's data does not parse: expected a value",
+        ),
+        (
+            "bad_value",
+            "hydrate_with(\"#app\", \"none\", |s: String| text(s))",
+            Some("7"),
+            "std/ui: hydrate_with: the page's data does not parse: expected a string",
+        ),
+    ] {
+        let data = match data {
+            Some(json) => format!(
+                "const data = document.createElement(\"script\");\n\
+                 data.setAttribute(\"type\", \"application/json\");\n\
+                 data.setAttribute(\"id\", \"nova-data\");\n\
+                 data.textContent = {json:?};\n\
+                 document.body.appendChild(data);\n"
+            ),
+            None => String::new(),
+        };
+        write(
+            &dir,
+            &[
+                (
+                    &format!("{name}/main.nova"),
+                    &format!(
+                        "import ui\nimport ui::html::{{text}}\n\nfn main() {{\n    {call}\n    println(\"not reached\")\n}}\n"
+                    ),
+                ),
+                (
+                    &format!("{name}/run.mjs"),
+                    &format!(
+                        "import {{ install }} from \"../fake_dom.mjs\";\ninstall();\n\
+                         const app = document.createElement(\"div\");\n\
+                         app.setAttribute(\"id\", \"app\");\n\
+                         app.innerHTML = \"x\";\n\
+                         document.body.appendChild(app);\n{data}\
+                         const {{ default: init }} = await import(\"./dist/app.js\");\nawait init();\n"
+                    ),
+                ),
+            ],
+        );
+        build_wasm(&dir.join(name), Path::new("main.nova"));
+        let a = Command::new("node")
+            .arg(dir.join(name).join("run.mjs"))
+            .timeout(std::time::Duration::from_secs(60))
+            .assert()
+            .code(134);
+        assert_eq!(stdout(&a), "", "{name}");
+        let err = stderr(&a);
+        assert!(
+            err.contains(&format!("nova: panic: {message}\n")),
+            "{name}: {err}"
         );
     }
 }

@@ -5,7 +5,9 @@
 //! `import ui` for every name, or `import ui::{signal, effect}` for some.
 //! `import ui::html` brings the element builders, `div`, `button`, `text` and
 //! the rest, which make the `View`s that `mount` puts into the page and
-//! `render_to_string` writes as HTML.
+//! `render_to_string` writes as HTML. A server writes a view with
+//! `render_hydratable`, and its client, a WASM build of the same view,
+//! adopts that HTML with `hydrate`.
 //!
 //! `set` runs the effects that read a signal before it returns, each once,
 //! and only after every memo it reads is current. A memo computes when it is
@@ -473,8 +475,9 @@ pub fn on_cleanup(f: fn()) {
     }
 }
 
-/// Runs `f` once its nodes are in the page: after the `mount`, or the
-/// `show` or `for_each` render, that is building, or at once when none is.
+/// Runs `f` once its nodes are in the page: after the `mount` or the
+/// `hydrate`, or the `show` or `for_each` render, that is building, or at
+/// once when none is.
 /// It runs untracked, with the owner it was added in, which owns what it
 /// makes. It never runs under `render_to_string`, nor when its render is
 /// disposed, or the effect that added it runs again, before its nodes are in
@@ -647,8 +650,10 @@ fn check_element(tag: String, attrs: [Attr]) {
 // The elements written with no closing tag and no children.
 fn is_void(tag: String) -> Bool { tag == "input" || tag == "img" || tag == "br" || tag == "hr" }
 
-// `text` with `&`, `<` and `>` escaped, and `"` too in an attribute.
-fn escape(text: String, attribute: Bool) -> String {
+// `text` with `&`, `<` and `>` escaped, and `"` too in an attribute; with
+// `marks`, a carriage return too, which the browser's parser would turn
+// into a line feed.
+fn escape(text: String, attribute: Bool, marks: Bool) -> String {
     let cs = text.chars()
     let mut parts = Vec::new()
     let mut i = 0
@@ -662,6 +667,8 @@ fn escape(text: String, attribute: Bool) -> String {
             parts.push("&gt;")
         } else if attribute && c == '"' {
             parts.push("&quot;")
+        } else if marks && c == '\r' {
+            parts.push("&#13;")
         } else {
             parts.push("${c}")
         }
@@ -680,8 +687,20 @@ fn joined(parts: Vec<String>) -> String {
     "".join(all)
 }
 
-// Write `v` as HTML into `out`.
-fn write_view(v: View, out: Vec<String>) {
+// Whether `v` is text, fixed or dynamic.
+fn is_text(v: View) -> Bool {
+    match v {
+        Text(t) => true
+        DynText(f) => true
+        _ => false
+    }
+}
+
+// Write `v` as HTML into `out`. With `marks`, as `render_hydratable` writes
+// it (spec docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §3): a region between `<!--[-->` and `<!--]-->`, and a carriage return as
+// `&#13;`.
+fn write_view(v: View, out: Vec<String>, marks: Bool) {
     let mut o = out
     match v {
         Element(tag, attrs, children) => {
@@ -689,46 +708,54 @@ fn write_view(v: View, out: Vec<String>) {
             o.push("<${tag}")
             let mut i = 0
             while i < attrs.len() {
-                write_attr(attrs[i], out)
+                write_attr(attrs[i], out, marks)
                 i = i + 1
             }
             o.push(">")
             if !is_void(tag) {
-                write_views(children, out)
+                write_views(children, out, marks)
                 o.push("</${tag}>")
             }
         }
-        Text(t) => o.push(escape(t, false))
-        DynText(f) => o.push(escape(f(), false))
-        Region(f) => write_views(f(), out)
+        Text(t) => o.push(escape(t, false, marks))
+        DynText(f) => o.push(escape(f(), false, marks))
+        Region(f) => {
+            if marks { o.push("<!--[-->") }
+            write_views(f(), out, marks)
+            if marks { o.push("<!--]-->") }
+        }
     }
 }
 
-fn write_views(views: [View], out: Vec<String>) {
+// Write `views`, siblings, into `out`; with `marks`, `<!--|-->` between two
+// texts side by side, so that the browser's parse keeps them apart.
+fn write_views(views: [View], out: Vec<String>, marks: Bool) {
+    let mut o = out
+    let mut after_text = false
     let mut i = 0
     while i < views.len() {
-        write_view(views[i], out)
+        let text = is_text(views[i])
+        if marks && after_text && text { o.push("<!--|-->") }
+        write_view(views[i], out, marks)
+        after_text = text
         i = i + 1
     }
 }
 
-fn write_attr(a: Attr, out: Vec<String>) {
+fn write_attr(a: Attr, out: Vec<String>, marks: Bool) {
     let mut o = out
     match a {
-        Static(name, value) => o.push(" ${name}=\"${escape(value, true)}\"")
-        Dynamic(name, f) => o.push(" ${name}=\"${escape(f(), true)}\"")
-        Property(name, value) => o.push(" ${name}=\"${escape(value, true)}\"")
-        DynProperty(name, f) => o.push(" ${name}=\"${escape(f(), true)}\"")
+        Static(name, value) => o.push(" ${name}=\"${escape(value, true, marks)}\"")
+        Dynamic(name, f) => o.push(" ${name}=\"${escape(f(), true, marks)}\"")
+        Property(name, value) => o.push(" ${name}=\"${escape(value, true, marks)}\"")
+        DynProperty(name, f) => o.push(" ${name}=\"${escape(f(), true, marks)}\"")
         On(kind, f) => {}
     }
 }
 
-/// `f`'s view as HTML. `f` runs in a new owner, which is disposed once the
-/// HTML is written; text and attributes are read once, handlers are left
-/// out, and `on_mount` never runs. Text and attribute values are escaped,
-/// the text of a `script` or `style` element too. It is a batch: what its
-/// `set`s run, such as a region `mount` built, runs once it is done.
-pub fn render_to_string(f: fn() -> View) -> String {
+// `f`'s view as HTML, written with `marks` or without, as the two renderers
+// write it.
+fn render(f: fn() -> View, marks: Bool) -> String {
     let out = Vec::new()
     batch(
         || {
@@ -736,7 +763,7 @@ pub fn render_to_string(f: fn() -> View) -> String {
             s.rendering = s.rendering + 1
             root(
                 |dispose: fn()| {
-                    write_view(f(), out)
+                    write_view(f(), out, marks)
                     dispose()
                 },
             )
@@ -745,6 +772,38 @@ pub fn render_to_string(f: fn() -> View) -> String {
     )
     joined(out)
 }
+
+/// `f`'s view as HTML. `f` runs in a new owner, which is disposed once the
+/// HTML is written; text and attributes are read once, handlers are left
+/// out, and `on_mount` never runs. Text and attribute values are escaped,
+/// the text of a `script` or `style` element too. It is a batch: what its
+/// `set`s run, such as a region `mount` built, runs once it is done.
+pub fn render_to_string(f: fn() -> View) -> String { render(f, false) }
+
+/// `f`'s view as HTML for `hydrate` to adopt in the page: what
+/// `render_to_string` writes, with three additions, so that the browser's
+/// parse of it has each node `mount` would build. A `show` or a `for_each`
+/// is written between the comments `<!--[-->` and `<!--]-->`. Two texts side
+/// by side, among an element's children or a region's views, are separated
+/// by `<!--|-->`; an empty text still writes nothing, but keeps its
+/// separators. And a carriage return, in text or in an attribute's value, is
+/// written `&#13;`, since the browser's parser turns a raw one into a line
+/// feed. No marker can come from a program's text, which is escaped.
+///
+/// A server writes it into the page, and the client hydrates the same view:
+///
+/// ```
+/// import ui
+/// import ui::html::{div, dyn_text, li, text, ul}
+///
+/// let items = signal(["a", "b"])
+/// let list = || ul([], [for_each(items, |s: String| li([], [text(s)]))])
+/// let html = render_hydratable(|| div([], [text("count: "), dyn_text(|| "2"), list()]))
+/// assert_eq(html, "<div>count: <!--|-->2<ul><!--[--><li>a</li><li>b</li><!--]--></ul></div>")
+/// // A carriage return, which `render_to_string` writes as it is.
+/// assert_eq(render_hydratable(|| text("a\rb")), "a&#13;b")
+/// ```
+pub fn render_hydratable(f: fn() -> View) -> String { render(f, true) }
 
 /// Builds `f`'s view into the first element of the page `selector` matches,
 /// after its children, and keeps it up to date. It panics when no element
@@ -759,6 +818,158 @@ pub fn mount(selector: String, f: fn() -> View) {
     let mut kept = s.roots
     kept.push(o)
     let start = s.mounted.len()
+    s.building = s.building + 1
+    with_context(Some(o), None, || build(f(), parent, None))
+    s.building = s.building - 1
+    run_mounted(start)
+}
+
+/// Adopts the HTML `render_hydratable` wrote for the same view into the
+/// first element of the page `selector` matches, and keeps it up to date:
+/// the server's nodes stay in the page, and the effects and handlers `mount`
+/// would give its own nodes start on them. `on_mount` callbacks run once
+/// that is done. The server writes `render_hydratable(App)` into the page's
+/// root, and the client, a WASM build of the same `App`, calls
+/// `hydrate("#app", App)`.
+///
+/// It walks `f()`'s view against the root's nodes in order: an element must
+/// have the view's tag, and a text its text; attributes are not compared. At
+/// the first difference, it writes `nova: hydration mismatch: expected …,
+/// found …; building the view again` with `console.error`, disposes of what
+/// it began, removes the root's children, and builds the view there as
+/// `mount` does, calling `f` again. A root with no child, or only
+/// whitespace, as a page served without the server's HTML has, gets the view
+/// built the same way, with no report: its whitespace is removed first. It
+/// panics when no element matches, and natively, where there is no page.
+///
+/// What a server writes for a view, which `hydrate("#app", app)` then adopts
+/// in the page, the button's handler added and the count's text followed:
+///
+/// ```
+/// import ui
+/// import ui::html::{button, div, dyn_text, on_click, text}
+///
+/// let count = signal(2)
+/// let add = on_click(|| count.update(|n: Int| n + 1))
+/// let app = || div([], [text("count: "), dyn_text(|| "${count.value()}"), button([add], [text("+")])])
+/// assert_eq(render_hydratable(app), "<div>count: <!--|-->2<button>+</button></div>")
+/// ```
+pub fn hydrate(selector: String, f: fn() -> View) { hydrate_into(root_of("hydrate", selector), f) }
+
+/// `hydrate` for a view of the server's data. The data is the JSON text of
+/// the `<script type="application/json" id="nova-data">` the server wrote
+/// just after the root: the root's next element, when it is a `script` with
+/// that `id` and that `type`. An element of the view with the id `nova-data`
+/// is never the data. `hydrate_with` makes a `T` of that text with
+/// `T::from_json`, and hydrates `f` of it, the view the server rendered with
+/// `render_hydratable`. When the page holds no data from the server, as
+/// under `nova dev`, it uses `fallback` instead, as `hydrate` would: an
+/// empty root gets `f(fallback)`'s view built, and a root the server filled
+/// is walked with it. It panics when the data's text does not parse, or
+/// `from_json` refuses it, and as `hydrate` does.
+///
+/// The server renders the view of a value, and writes the value beside it:
+///
+/// ```
+/// import ui
+/// import ui::html::{li, text, ul}
+///
+/// fn names(xs: [String]) -> View { ul([], [for_each(signal(xs), |s: String| li([], [text(s)]))]) }
+///
+/// fn main() {
+///     let data = ["Ada", "Grace"]
+///     let html = render_hydratable(|| names(data))
+///     assert_eq(html, "<ul><!--[--><li>Ada</li><li>Grace</li><!--]--></ul>")
+///     // The page holds the HTML, and after its root the data as JSON,
+///     // escaped, in its `nova-data`. The client calls
+///     // `hydrate_with("#app", none, names)`, where `none` is an empty
+///     // `[String]`: a page with no data, as `nova dev` serves, shows an
+///     // empty list.
+///     let none: [String] = []
+///     assert_eq(render_hydratable(|| names(none)), "<ul><!--[--><!--]--></ul>")
+/// }
+/// ```
+pub fn hydrate_with<T: FromJson>(selector: String, fallback: T, f: fn(T) -> View) {
+    let parent = root_of("hydrate_with", selector)
+    let data = match backend_data(parent) {
+        Some(text) => {
+            match parse(text) {
+                Ok(v) => {
+                    match T::from_json(v) {
+                        Ok(d) => d
+                        Err(e) => {
+                            panic("std/ui: hydrate_with: the page's data does not parse: ${e.msg}")
+                        }
+                    }
+                }
+                Err(e) => panic("std/ui: hydrate_with: the page's data does not parse: ${e.msg}")
+            }
+        }
+        None => fallback
+    }
+    hydrate_into(parent, || f(data))
+}
+
+// The first element `selector` matches, the root of `name`'s call, which
+// panics, naming the function, when none does.
+fn root_of(name: String, selector: String) -> Node {
+    match backend_query(selector) {
+        Some(p) => p
+        None => panic("std/ui: ${name}: no element matches \"${selector}\"")
+    }
+}
+
+// `hydrate` into `parent` (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §4). The walk has a root owner, kept as `mount` keeps one; on a mismatch
+// it is disposed and dropped, the root emptied, and the view built afresh
+// under a new one. A blank root is emptied too, so the view is not built
+// after its whitespace. `on_mount` callbacks wait for the walk, or the
+// build, and those the disposed owner queued never run.
+fn hydrate_into(parent: Node, f: fn() -> View) {
+    let mut s = ui()
+    let start = s.mounted.len()
+    if !blank(parent) {
+        let o = new_owner(ROOT, || {})
+        let mut kept = s.roots
+        kept.push(o)
+        let w = Walk { failed: false, message: "" }
+        s.building = s.building + 1
+        with_context(
+            Some(o),
+            None,
+            || {
+                let c = Cursor { parent: parent, at: backend_first_child(parent) }
+                walk_view(f(), false, w, c)
+                left_over(w, c)
+            },
+        )
+        s.building = s.building - 1
+        if !w.failed {
+            run_mounted(start)
+            return
+        }
+        backend_report("nova: hydration mismatch: ${w.message}; building the view again")
+        batch(|| dispose(o))
+        let mut live = Vec::new()
+        let mut i = 0
+        while i < s.roots.len() {
+            let r = at(s.roots, i)
+            if r.id != o.id { live.push(r) }
+            i = i + 1
+        }
+        s.roots = live
+    }
+    let mut emptied = false
+    while !emptied {
+        match backend_first_child(parent) {
+            Some(n) => backend_remove(n)
+            None => emptied = true
+        }
+    }
+    let o = new_owner(ROOT, || {})
+    let mut kept = s.roots
+    kept.push(o)
     s.building = s.building + 1
     with_context(Some(o), None, || build(f(), parent, None))
     s.building = s.building - 1
@@ -858,4 +1069,254 @@ fn build_attr(a: Attr, el: Node) {
             on_cleanup(stop)
         }
     }
+}
+
+// Hydration's walk (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §4.2, §4.3): a cursor steps through the server's nodes in the order
+// `build` would make them, and each view adopts the nodes it would have
+// built, with the effects and handlers `build` would give them. The first
+// difference is kept in the walk, which stops there.
+
+// A walk, and its first difference.
+record Walk { failed: Bool, message: String }
+
+// Where a walk is among `parent`'s children: at a node, or past the last.
+record Cursor { parent: Node, at: Option<Node> }
+
+// What the walk found for an effect: a dynamic text's node, and the text
+// its first run read; or a region's end marker.
+record Found { node: Option<Node>, text: String }
+
+// Whether `node` holds nothing to adopt: no child, or only text that is
+// all whitespace, as HTML reads it.
+fn blank(node: Node) -> Bool {
+    let mut child = backend_first_child(node)
+    let mut done = false
+    while !done {
+        match child {
+            Some(n) => {
+                if backend_kind(n) != "#text" { return false }
+                let cs = backend_text_of(n).chars()
+                let mut i = 0
+                while i < cs.len() {
+                    let c = cs[i]
+                    let space = c == ' ' || c == '\t' || c == '\n' || c == '\r'
+                    if !space && "${c}" != "\u{c}" { return false }
+                    i = i + 1
+                }
+                child = backend_next_sibling(n)
+            }
+            None => done = true
+        }
+    }
+    true
+}
+
+// Step `c` to the next node.
+fn advance(c: Cursor) {
+    let mut m = c
+    m.at = match c.at {
+        Some(n) => backend_next_sibling(n)
+        None => None
+    }
+}
+
+// Whether `node` is the comment `<!--${data}-->`.
+fn is_marker(node: Node, data: String) -> Bool {
+    backend_kind(node) == "#comment" && backend_text_of(node) == data
+}
+
+// At most the first 40 characters of `t`.
+fn clipped(t: String) -> String { if t.len() > 40 { t.slice(0, 40) } else { t } }
+
+// What the walk found at `here`, as a mismatch names it. A separator stands
+// for the text after it, which the server wrote there.
+fn found(here: Option<Node>) -> String {
+    match here {
+        Some(n) => {
+            let kind = backend_kind(n)
+            if kind == "#text" { return "text \"${clipped(backend_text_of(n))}\"" }
+            if kind != "#comment" { return "<${kind}>" }
+            let data = backend_text_of(n)
+            if data == "[" { return "a region" }
+            if data == "]" { return "the end of a region" }
+            if data != "|" { return "a comment" }
+            match backend_next_sibling(n) {
+                Some(next) => {
+                    if backend_kind(next) == "#text" {
+                        return "text \"${clipped(backend_text_of(next))}\""
+                    }
+                }
+                None => {}
+            }
+            "text \"\""
+        }
+        None => "nothing"
+    }
+}
+
+// Stop the walk at `c`, which is not `expected`.
+fn missed(w: Walk, expected: String, c: Cursor) {
+    let mut m = w
+    m.failed = true
+    m.message = "expected ${expected}, found ${found(c.at)}"
+}
+
+// After the views of an element or of the root, no node may be left.
+fn left_over(w: Walk, c: Cursor) { if !w.failed && c.at.is_some() { missed(w, "nothing", c) } }
+
+fn walk_views(views: [View], w: Walk, c: Cursor) {
+    let mut after_text = false
+    let mut i = 0
+    while i < views.len() && !w.failed {
+        let text = is_text(views[i])
+        walk_view(views[i], after_text && text, w, c)
+        after_text = text
+        i = i + 1
+    }
+}
+
+// Walk `v` at `c`, adopting its nodes. `joined` says a text came just before
+// it and it is text too, so the separator `render_hydratable` wrote between
+// them comes first.
+fn walk_view(v: View, joined: Bool, w: Walk, c: Cursor) {
+    match v {
+        Element(tag, attrs, children) => {
+            check_element(tag, attrs)
+            let name = tag.to_lower()
+            match c.at {
+                Some(el) => {
+                    if backend_kind(el) == name {
+                        advance(c)
+                        let mut i = 0
+                        while i < attrs.len() {
+                            adopt_attr(attrs[i], el)
+                            i = i + 1
+                        }
+                        if !is_void(tag) {
+                            let inner = Cursor { parent: el, at: backend_first_child(el) }
+                            walk_views(children, w, inner)
+                            left_over(w, inner)
+                        }
+                        return
+                    }
+                }
+                None => {}
+            }
+            missed(w, "<${name}>", c)
+        }
+        Text(t) => { let _ = adopt_text(t, joined, w, c) }
+        DynText(f) => {
+            let got = Found { node: None, text: "" }
+            effect(
+                || {
+                    let t = f()
+                    let mut m = got
+                    match got.node {
+                        Some(n) => backend_set_text(n, t)
+                        None => m.text = t
+                    }
+                },
+            )
+            let mut m = got
+            m.node = adopt_text(got.text, joined, w, c)
+        }
+        Region(f) => {
+            match c.at {
+                Some(start) => {
+                    if is_marker(start, "[") {
+                        advance(c)
+                        let end = Found { node: None, text: "" }
+                        effect(
+                            || {
+                                match end.node {
+                                    Some(e) => build_region(f, c.parent, start, e)
+                                    None => adopt_region(f, w, c, end)
+                                }
+                            },
+                        )
+                        return
+                    }
+                }
+                None => {}
+            }
+            missed(w, "a region", c)
+        }
+    }
+}
+
+// An attribute of an adopted element: the HTML carried a fixed one, and a
+// property as an attribute, so that is set; dynamic ones get their effects,
+// whose first run writes them again, and handlers are added, as `build`
+// does.
+fn adopt_attr(a: Attr, el: Node) {
+    match a {
+        Static(name, value) => {}
+        _ => build_attr(a, el)
+    }
+}
+
+// The node of a text view whose text is `t`: past the separator `joined`
+// asks for, the text node at `c`, which must hold `t`; or, where there is
+// none and `t` is empty, a new empty one put there, since an empty text
+// writes nothing. `None` once the walk stops.
+fn adopt_text(t: String, joined: Bool, w: Walk, c: Cursor) -> Option<Node> {
+    let expected = "text \"${clipped(t)}\""
+    if joined {
+        let separated = match c.at {
+            Some(n) => is_marker(n, "|")
+            None => false
+        }
+        if !separated {
+            missed(w, expected, c)
+            return None
+        }
+        advance(c)
+    }
+    match c.at {
+        Some(n) => {
+            if backend_kind(n) == "#text" {
+                if backend_text_of(n) != t {
+                    missed(w, expected, c)
+                    return None
+                }
+                advance(c)
+                return Some(n)
+            }
+        }
+        None => {}
+    }
+    if t != "" {
+        missed(w, expected, c)
+        return None
+    }
+    let n = backend_text("")
+    put(c.parent, n, c.at)
+    Some(n)
+}
+
+// A region's first run under hydration, as `build_region`'s with a walk for
+// a build: its views, read as the effect running this, walked under a
+// render of their own from the node after its `<!--[-->`; then its
+// `<!--]-->`, which `end` keeps for the later runs, which build before it as
+// under `mount`.
+fn adopt_region(f: fn() -> [View], w: Walk, c: Cursor, end: Found) {
+    let render = new_owner(ROOT, || {})
+    adopt(render)
+    let views = with_context(Some(render), ui().listener, f)
+    with_context(Some(render), None, || walk_views(views, w, c))
+    if w.failed { return }
+    match c.at {
+        Some(n) => {
+            if is_marker(n, "]") {
+                advance(c)
+                let mut m = end
+                m.node = Some(n)
+                return
+            }
+        }
+        None => {}
+    }
+    missed(w, "the end of a region", c)
 }

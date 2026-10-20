@@ -43,6 +43,21 @@ pub fn backend_next_sibling(node: Node) -> Option<Node> { no_page() }
 /// Whether two nodes are one.
 pub fn backend_is_same(a: Node, b: Node) -> Bool { no_page() }
 
+/// The node's first child.
+pub fn backend_first_child(node: Node) -> Option<Node> { no_page() }
+
+/// The node's kind: its name in lower case.
+pub fn backend_kind(node: Node) -> String { no_page() }
+
+/// The node's text.
+pub fn backend_text_of(node: Node) -> String { no_page() }
+
+/// Writes `message` to the console as an error.
+pub fn backend_report(message: String) { no_page() }
+
+/// The server's data: the text of the `nova-data` script after `root`.
+pub fn backend_data(root: Node) -> Option<String> { no_page() }
+
 /// Calls `f` with the target's `value` on each event of kind `kind`, until
 /// the function returned is called.
 pub fn backend_listen(node: Node, kind: String, f: fn(String)) -> fn() { no_page() }

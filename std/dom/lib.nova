@@ -1,6 +1,6 @@
 //! The browser's page, from a program built for WASM: its elements and
 //! text, their attributes and properties, events, the location and history,
-//! timers, and `fetch`.
+//! timers, `fetch`, and the console.
 //!
 //! It is not in the prelude: a module that uses it imports it, with
 //! `import dom` for every name, or `import dom::{Element, create_element}`
@@ -73,9 +73,10 @@ extern "js" {
     fn dom_fetch_status(token: Int) -> Int
     fn dom_fetch_ok(token: Int) -> Bool
     fn dom_fetch_body(token: Int) -> String
+    fn dom_console_error(message: String)
 }
 
-/// A node of the page: an element, or a text node.
+/// A node of the page: an element, a text node, or a comment.
 ///
 /// Each value holds a handle to the JS object, which a collection releases
 /// once no value holds it. A value built by hand panics when used, unless its
@@ -259,6 +260,10 @@ pub fn history_replace(url: String) { dom_history_replace(url) }
 /// Goes back one history entry: a `popstate` event on the window follows.
 pub fn history_back() { dom_history_back() }
 
+/// Writes `message` to the browser's console as an error, as
+/// `console.error` does.
+pub fn console_error(message: String) { dom_console_error(message) }
+
 /// The page's `<body>`.
 pub fn body() -> Element { node(dom_body()) }
 
@@ -281,7 +286,7 @@ pub fn element_by_id(id: String) -> Option<Element> { maybe_node(dom_element_by_
 
 impl Element {
     /// The node's name in lower case: `"div"` for a `<div>`, `"#text"` for
-    /// a text node.
+    /// a text node, `"#comment"` for a comment.
     pub fn tag(self) -> String { dom_tag(handle_of(self)) }
 
     /// Sets the attribute `name` to `value`.

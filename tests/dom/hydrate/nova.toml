@@ -1,0 +1,5 @@
+[package]
+name = "hydrate"
+version = "0.1.0"
+edition = "2026"
+description = "Views a native server renders and a WASM client hydrates, which wasm_tests.rs runs under the fake DOM"

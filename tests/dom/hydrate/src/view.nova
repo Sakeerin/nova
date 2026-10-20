@@ -1,0 +1,203 @@
+//! The views `server.nova` renders natively and `main.nova` hydrates under
+//! the fake DOM (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §9.3), one for each root of the page.
+
+import ui
+import ui::html::{
+    attr,
+    button,
+    div,
+    dyn_attr,
+    dyn_text,
+    h2,
+    id,
+    input,
+    li,
+    on_click,
+    p,
+    span,
+    text,
+    textarea,
+    ul,
+}
+
+/// A count, its label and its number side by side, a button that adds one,
+/// a class and an input's value that follow the count, and a textarea whose
+/// value is a fixed property: the server can only write it as an attribute,
+/// which a textarea ignores, so hydration must set it.
+pub fn counter() -> View {
+    let count = signal(0)
+    div(
+        [dyn_attr("class", || if count.value() % 2 == 0 { "even" } else { "odd" })],
+        [
+            p([], [text("Count: "), dyn_text(|| "${count.value()}")]),
+            button([id("inc"), on_click(|| count.update(|n: Int| n + 1))], [text("+")]),
+            input([attr("type", "text"), DynProperty("value", || "${count.value()}")]),
+            textarea([id("note"), Property("value", "a fixed note")], []),
+        ],
+    )
+}
+
+// `xs`, and `x` after them.
+fn plus(xs: [String], x: String) -> [String] {
+    let mut out = [x; xs.len() + 1]
+    let mut i = 0
+    while i < xs.len() {
+        out[i] = xs[i]
+        i = i + 1
+    }
+    out
+}
+
+/// A `show` and a `for_each` whose rows hold a `show` each, between fixed
+/// rows, and a `for_each` of nothing, with buttons that change them.
+pub fn lists() -> View {
+    let open = signal(true)
+    let rows = signal(["row 1", "row 2"])
+    let none: [String] = []
+    div(
+        [],
+        [
+            button([id("toggle"), on_click(|| open.update(|o: Bool| !o))], [text("toggle")]),
+            button(
+                [
+                    id("more"),
+                    on_click(|| rows.update(|xs: [String]| plus(xs, "row ${xs.len() + 1}"))),
+                ],
+                [text("more")],
+            ),
+            show(open, || p([id("panel")], [text("panel")])),
+            ul(
+                [id("rows")],
+                [
+                    li([], [text("first")]),
+                    for_each(
+                        rows,
+                        |r: String| li(
+                            [on_click(|| println("clicked ${r}"))],
+                            [text(r), show(open, || span([], [text("!")]))],
+                        ),
+                    ),
+                    li([], [text("last")]),
+                ],
+            ),
+            ul([id("none")], [for_each(signal(none), |r: String| li([], [text(r)]))]),
+        ],
+    )
+}
+
+/// Texts side by side, fixed and dynamic, with empty ones among them and
+/// alone; texts in a region; a carriage return; and a button that changes
+/// the dynamic text.
+pub fn texts() -> View {
+    let word = signal("world")
+    div(
+        [],
+        [
+            p([id("greeting")], [text("Hello, "), dyn_text(|| word.value()), text(""), text("!")]),
+            p([id("alone")], [text("")]),
+            p([id("around")], [dyn_text(|| ""), span([], [text("s")]), text("")]),
+            p(
+                [id("listed")],
+                [text("["), for_each(signal(["x", "y"]), |s: String| text(s)), text("]")],
+            ),
+            p([id("cr")], [text("a\rb")]),
+            button([id("word"), on_click(|| word.set("there"))], [text("word")]),
+        ],
+    )
+}
+
+/// The data the server hands the client: a title, which holds what JSON in
+/// a page must escape, and names.
+pub record Guests { title: String, names: [String] }
+
+impl ToJson for Guests {
+    fn to_json(self) -> JsonValue {
+        let mut names = [Null; self.names.len()]
+        let mut i = 0
+        while i < self.names.len() {
+            names[i] = self.names[i].to_json()
+            i = i + 1
+        }
+        let mut fields: Map<String, JsonValue> = Map::new()
+        fields.insert("title", self.title.to_json())
+        fields.insert("names", Array(names))
+        Object(fields)
+    }
+}
+
+// The string `v` holds, or `""` when it holds none.
+fn string_of(v: Option<JsonValue>) -> String {
+    match v {
+        Some(x) => {
+            match String::from_json(x) {
+                Ok(s) => s
+                Err(e) => ""
+            }
+        }
+        None => ""
+    }
+}
+
+impl FromJson for Guests {
+    fn from_json(v: JsonValue) -> Result<Guests, JsonError> {
+        let fields = match v {
+            Object(m) => m
+            _ => return Err(JsonError { msg: "expected an object", at: 0 })
+        }
+        let list = match fields.get("names") {
+            Some(x) => {
+                match x {
+                    Array(xs) => xs
+                    _ => return Err(JsonError { msg: "expected names", at: 0 })
+                }
+            }
+            None => return Err(JsonError { msg: "expected names", at: 0 })
+        }
+        let mut names = [""; list.len()]
+        let mut i = 0
+        while i < list.len() {
+            names[i] = string_of(Some(list[i]))
+            i = i + 1
+        }
+        Ok(Guests { title: string_of(fields.get("title")), names: names })
+    }
+}
+
+/// The server's data, the title and a list of names, with a button that adds
+/// one. Its paragraph's id is `nova-data`, as the data's own `script` is,
+/// and `hydrate_with` reads the data from the `script` all the same.
+pub fn guests(g: Guests) -> View {
+    let names = signal(g.names)
+    div(
+        [],
+        [
+            h2([], [text(g.title)]),
+            p([id("nova-data")], [text("not the data")]),
+            ul([], [for_each(names, |n: String| li([], [text(n)]))]),
+            button(
+                [id("guest"), on_click(|| names.update(|xs: [String]| plus(xs, "Hedy")))],
+                [text("guest")],
+            ),
+        ],
+    )
+}
+
+/// The guests `hydrate_with` falls back on where the page holds no data from
+/// the server.
+pub fn fallback() -> Guests { Guests { title: "No data", names: ["Hedy"] } }
+
+/// The guests' title and names, with no handler.
+pub fn listed(g: Guests) -> View {
+    div(
+        [],
+        [
+            h2([], [text(g.title)]),
+            ul([], [for_each(signal(g.names), |n: String| li([], [text(n)]))]),
+        ],
+    )
+}
+
+/// What the client builds where the server wrote nothing.
+pub fn fresh() -> View { p([], [text("built"), text(""), dyn_text(|| "here")]) }

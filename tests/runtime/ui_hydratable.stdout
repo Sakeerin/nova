@@ -1,0 +1,32 @@
+<div><!--[--><ul><!--[--><li>a</li><li>b</li><!--]--></ul><!--]--></div>
+<div><ul><li>a</li><li>b</li></ul></div>
+<ul><!--[--><li>a<!--[--><span>!</span><!--]--></li><li>b<!--[--><span>!</span><!--]--></li><!--]--></ul>
+<ul><li>a<span>!</span></li><li>b<span>!</span></li></ul>
+<div><!--[--><!--]-->x</div>
+<div>x</div>
+<ul>before<!--[--><!--]-->after</ul>
+<ul>beforeafter</ul>
+<p>a<!--|--><!--|-->b</p>
+<p>ab</p>
+<p><!--|--><!--|--></p>
+<p></p>
+<p></p>
+<p></p>
+<p><span>s</span></p>
+<p><span>s</span></p>
+<div>count: <!--|-->2<!--|--> times</div>
+<div>count: 2 times</div>
+<div>x<span>y</span>z</div>
+<div>x<span>y</span>z</div>
+<p>[<!--[-->one<!--|-->two<!--|-->three<!--]-->]</p>
+<p>[onetwothree]</p>
+<p><!--[-->a<!--]--><!--[-->b<!--]--></p>
+<p>ab</p>
+<p title="one&#13;two&#13;
+&lt;&quot;&amp;&quot;&gt;">a&#13;b&#13;
+c &amp; &lt;d&gt;</p>
+<p title="one\rtwo\r
+&lt;&quot;&amp;&quot;&gt;">a\rb\r
+c &amp; &lt;d&gt;</p>
+<p>&#13;<!--|-->&lt;!--|--&gt;</p>
+<p>\r&lt;!--|--&gt;</p>

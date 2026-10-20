@@ -1,0 +1,44 @@
+//! The client's side of `tests/dom/hydrate.mjs` (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §4, §9.3): it hydrates each root the server rendered, the guests with
+//! the server's data, and two with no data after it with the guests it falls
+//! back on, one of them followed by a `div` with the data's id and type; and
+//! the roots the server left empty: three with those guests, one of them
+//! followed by a `script` with the data's id and no type, one by a `p` and
+//! then the data's `script`, and three, one blank and one holding a form
+//! feed, with a fresh view.
+
+import dom
+import ui
+import view::{counter, fallback, fresh, guests, listed, lists, texts}
+
+fn main() {
+    // `on_mount` runs once the walk has given the button its handler, so its
+    // click counts.
+    hydrate(
+        "#counter",
+        || {
+            on_mount(
+                || {
+                    match query_selector("#inc") {
+                        Some(b) => b.click()
+                        None => println("no button")
+                    }
+                },
+            )
+            counter()
+        },
+    )
+    hydrate("#lists", lists)
+    hydrate("#texts", texts)
+    hydrate_with("#data", fallback(), guests)
+    hydrate_with("#filled", fallback(), listed)
+    hydrate_with("#fallback", fallback(), listed)
+    hydrate_with("#decoy", fallback(), listed)
+    hydrate_with("#untyped", fallback(), listed)
+    hydrate_with("#behind", fallback(), listed)
+    hydrate("#empty", fresh)
+    hydrate("#blank", fresh)
+    hydrate("#feed", fresh)
+    println("hydrated")
+}
