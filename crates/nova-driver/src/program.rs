@@ -22,6 +22,11 @@ pub enum Roots {
     /// Those, then `tests/*.nova` sorted by name: `nova test` and the
     /// language server.
     Test,
+    /// `src/server.nova` alone: the server `nova build --ssr` builds
+    /// natively, with the package's modules and dependencies (spec
+    /// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+    /// §8.4).
+    Server,
 }
 
 /// Where a root is.
@@ -58,7 +63,8 @@ pub struct Program {
     pub graph: Option<Graph>,
     /// The entry first.
     pub roots: Vec<Root>,
-    /// Whether MIR runs: the entry is `src/main.nova`, or a loose file.
+    /// Whether MIR runs: the entry is `src/main.nova`, a loose file, or a
+    /// server's `src/server.nova`.
     pub runs: bool,
     /// The graph's diagnostics.
     pub diagnostics: Vec<Diagnostic>,
@@ -114,7 +120,12 @@ impl Program {
         let mut db = FileDb::new();
         let (graph, diagnostics) = nova_pm::graph_with(root, None, offline, &mut db);
         let mut list = Vec::new();
-        let main = under(root, "src/main.nova");
+        let entry = if roots == Roots::Server {
+            "src/server.nova"
+        } else {
+            "src/main.nova"
+        };
+        let main = under(root, entry);
         if main.is_file() {
             list.push(Root {
                 path: main,
@@ -123,7 +134,7 @@ impl Program {
         }
         let runs = !list.is_empty();
         let lib = under(root, "src/lib.nova");
-        if roots != Roots::Program && lib.is_file() {
+        if !matches!(roots, Roots::Program | Roots::Server) && lib.is_file() {
             list.push(Root {
                 path: lib,
                 kind: RootKind::Src,

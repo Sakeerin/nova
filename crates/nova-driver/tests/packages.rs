@@ -444,3 +444,55 @@ fn a_missing_sibling_is_probed_once_per_directory() {
         .count();
     assert_eq!(probes, 1);
 }
+
+/// A package's server (spec
+/// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+/// §8.4): `Roots::Server` roots the program at `src/server.nova` alone,
+/// which imports the package's own modules and its dependencies, as the
+/// client does, and leaves `src/main.nova` and `src/lib.nova` out. A package
+/// with no server has no root.
+#[test]
+fn a_server_is_rooted_at_src_server_nova() {
+    let dir = fresh("server");
+    geom(&dir);
+    let app = dir.join("app");
+    write(
+        &app,
+        &[
+            ("nova.toml", manifest("app", GEOM_DEPENDENCY).as_str()),
+            (
+                "src/main.nova",
+                "import shared\n\nfn main() {\n    println(\"client ${label()}\")\n}\n",
+            ),
+            (
+                "src/server.nova",
+                "import geom\nimport shared\n\nfn main() {\n    println(\"server ${label()} ${area()}\")\n}\n",
+            ),
+            ("src/shared.nova", "pub fn label() -> String {\n    \"shared\"\n}\n"),
+            ("src/lib.nova", "pub fn unused() -> Int {\n    1\n}\n"),
+        ],
+    );
+    let program = Program::for_package(&app, Roots::Server);
+    assert!(program.runs);
+    assert_eq!(program.roots.len(), 1);
+    let a = check(program);
+    assert!(a.diagnostics.is_empty(), "{}", messages(&a));
+    let paths = paths(&a);
+    assert!(paths[0].ends_with("app/src/server.nova"), "{paths:?}");
+    assert!(
+        paths.iter().any(|p| p.ends_with("geom/src/lib.nova")),
+        "{paths:?}"
+    );
+    assert!(
+        paths.iter().any(|p| p.ends_with("app/src/shared.nova")),
+        "{paths:?}"
+    );
+    assert!(
+        !paths
+            .iter()
+            .any(|p| p.ends_with("app/src/main.nova") || p.ends_with("app/src/lib.nova")),
+        "{paths:?}"
+    );
+    let none = Program::for_package(&dir.join("geom"), Roots::Server);
+    assert!(none.roots.is_empty() && !none.runs);
+}
