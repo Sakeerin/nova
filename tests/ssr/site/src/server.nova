@@ -1,0 +1,21 @@
+//! The server: it serves `dist/` on a port the system chooses, rendering
+//! each page with the data; given `--ssg <dir>`, it writes the static pages
+//! into `<dir>` instead. It prints an error and exits with 3 when `serve`
+//! fails, and prints `stopped` when a signal stops it.
+
+import app::{App, data, routes}
+import ui
+import ui::ssr::{Page, Site, page_with, serve}
+
+fn render(location: String) -> Page { page_with(location, data(), App) }
+
+async fn main() {
+    let site = Site { address: "127.0.0.1:0", dist: "dist", routes: routes(), render: render }
+    match serve(site).await {
+        Ok(_) => println("stopped")
+        Err(e) => {
+            eprintln(e.message)
+            exit(3)
+        }
+    }
+}

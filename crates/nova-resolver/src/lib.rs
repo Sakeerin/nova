@@ -2066,12 +2066,15 @@ pub fn resolve_program_for(
 /// Each public name of each std module `target` does not compile, mapped to
 /// that module's name; the first module to export a name keeps it
 /// (spec 4.1 §3.2). The modules are parsed and their items collected as
-/// for a build, into scopes that are then dropped.
+/// for a build, into scopes that are then dropped. An imported module's
+/// names are left out, as `std/ui/ssr`'s: no module sees them without its
+/// import, which is E0092 itself on such a target (spec 4.6 §8.4).
 fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
     let compiled = target.std_modules();
     let mut missing: FxHashMap<String, &'static str> = FxHashMap::default();
     for &(name, src) in &STD_MODULES {
-        if compiled.iter().any(|&(n, _)| n == name) {
+        if compiled.iter().any(|&(n, _)| n == name) || IMPORTED_STD.iter().any(|&(_, m)| m == name)
+        {
             continue;
         }
         let (Some(file), _) = std_module(src, FileId::DUMMY) else {
@@ -2104,9 +2107,9 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 }
 
 /// The embedded standard-library modules, compiled as implicit modules and
-/// glob-imported into every user module, but for `std/ui`, `std/ui/html`
-/// and `std/ui/router`, which a program imports, and `std/ui`'s backend,
-/// which only std sees (spec 4.3 §3, §7.3; 4.5 §3). Order is significant
+/// glob-imported into every user module, but for `std/ui`, `std/ui/html`,
+/// `std/ui/router` and `std/ui/ssr`, which a program imports, and `std/ui`'s
+/// backend, which only std sees (spec 4.3 §3, §7.3; 4.5 §3; 4.6 §8.4). Order is significant
 /// only in that it fixes module indices; user modules always come first,
 /// then these in the order listed here — `std/core` stays first so its
 /// module index is unchanged from when it was the only embedded module.
@@ -2116,7 +2119,7 @@ fn missing_names(target: CompileTarget) -> FxHashMap<String, &'static str> {
 /// self-contained executable and `cargo package` keeps the files. Each name
 /// is `$std.*`, not a valid identifier, so it can never collide with a user
 /// module name or be named in an `import`.
-pub const STD_MODULES: [(&str, &str); 20] = [
+pub const STD_MODULES: [(&str, &str); 21] = [
     ("$std.core", nova_std::CORE),
     ("$std.bytes", nova_std::BYTES),
     ("$std.io", nova_std::IO),
@@ -2137,6 +2140,7 @@ pub const STD_MODULES: [(&str, &str); 20] = [
     ("$std.ui.html", nova_std::UI_HTML),
     ("$std.ui.backend", nova_std::UI_BACKEND_NATIVE),
     ("$std.ui.router", nova_std::UI_ROUTER),
+    ("$std.ui.ssr", nova_std::UI_SSR),
 ];
 
 /// What a program is compiled for (spec
@@ -2201,12 +2205,14 @@ pub const WASM_STD_MODULES: [(&str, &str); 16] = [
 /// The std modules a program imports by name instead of finding in its
 /// prelude, by the name an `import` writes, and the module's own name
 /// (spec `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
-/// §3.2; 4.5 §3).
-pub const IMPORTED_STD: [(&str, &str); 4] = [
+/// §3.2; 4.5 §3). `dom` is WASM's alone and `ui::ssr` native's alone (4.6
+/// §8.4): on the other target the import is E0092.
+pub const IMPORTED_STD: [(&str, &str); 5] = [
     ("dom", "$std.dom"),
     ("ui", "$std.ui"),
     ("ui::html", "$std.ui.html"),
     ("ui::router", "$std.ui.router"),
+    ("ui::ssr", "$std.ui.ssr"),
 ];
 
 /// The names a project's module or a dependency may not take: those of
@@ -3644,6 +3650,42 @@ mod tests {
             native.diagnostics[0].message,
             "`dom` is a std module, which target native does not have"
         );
+    }
+
+    /// `std/ui/ssr` is native only (spec 4.6 §8.4): natively a program sees
+    /// its names through `import ui::ssr` alone, and on WASM, which does not
+    /// compile it, that import is E0092, while its names, which no module
+    /// sees without it, are not E0092 by themselves there.
+    #[test]
+    fn ssr_is_imported_by_name_and_only_natively() {
+        let native = resolve_for(
+            CompileTarget::Native,
+            "import ui::ssr::{page}\nfn main() { }\n",
+        );
+        assert!(native.diagnostics.is_empty(), "{:?}", native.diagnostics);
+        assert!(native
+            .definitions
+            .resolve_value(ModuleId(0), "page")
+            .is_some());
+        assert!(native
+            .definitions
+            .resolve_value(ModuleId(0), "serve")
+            .is_none());
+        let bare = resolve_for(CompileTarget::Native, "fn main() { }\n");
+        assert!(bare
+            .definitions
+            .resolve_value(ModuleId(0), "page")
+            .is_none());
+        let wasm = resolve_for(CompileTarget::Wasm, "import ui::ssr\nfn main() { }\n");
+        let codes: Vec<&str> = wasm.diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["E0092"], "{:?}", wasm.diagnostics);
+        assert_eq!(
+            wasm.diagnostics[0].message,
+            "`ui::ssr` is a std module, which target wasm does not have"
+        );
+        for name in ["page", "serve", "Site", "document"] {
+            assert_eq!(wasm.definitions.missing_module(name), None, "{name}");
+        }
     }
 
     /// `std/ui` globs into no module: a program sees its names only through

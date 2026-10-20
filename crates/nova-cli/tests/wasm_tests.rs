@@ -229,6 +229,43 @@ fn dom_is_imported_by_name_and_only_on_wasm() {
     );
 }
 
+/// A native program imports `std/ui/ssr` by name; on WASM the import is
+/// E0092, and its names, never in any prelude, are unknown there without it,
+/// as natively (spec 4.6 §6.1, §8.4).
+#[test]
+fn ssr_is_imported_by_name_and_only_natively() {
+    let dir = fresh("import-ssr");
+    write(
+        &dir,
+        &[
+            (
+                "main.nova",
+                "import ui\nimport ui::ssr::{Page, page}\nfn f(p: Page) -> Int { 0 }\nfn main() { println(\"x\") }\n",
+            ),
+            (
+                "bare.nova",
+                "fn main() {\n    let p = page\n    println(\"x\")\n}\n",
+            ),
+        ],
+    );
+    nova_in(&dir, &["check", "main.nova"]).success();
+    let wasm = nova_in(&dir, &["check", "--target", "wasm", "main.nova"]).failure();
+    assert!(
+        stderr(&wasm)
+            .contains("error[E0092]: `ui::ssr` is a std module, which target wasm does not have"),
+        "{}",
+        stderr(&wasm)
+    );
+    for target in ["native", "wasm"] {
+        let bare = nova_in(&dir, &["check", "--target", target, "bare.nova"]).failure();
+        assert!(
+            stderr(&bare).contains("error[E0001]: cannot find `page` in this scope"),
+            "{target}: {}",
+            stderr(&bare)
+        );
+    }
+}
+
 /// A module of the program under a std module's name is E0093, a file
 /// beside a loose program's or a package's (spec 4.2 §3.2).
 #[test]
