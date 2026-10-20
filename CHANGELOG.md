@@ -87,6 +87,35 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   whose `Host` is not the server's, is refused (ADR 0044).
 - **`Event.modified()`** in `std/dom`: whether Ctrl, Meta, Shift or Alt was
   down, or a mouse button other than the main one was pressed.
+- **`nova build --ssr` and `--ssg`:** a project with `src/server.nova`
+  beside `src/main.nova` builds its client into `dist/` and its server
+  into `target/debug/<name>-server`; `--ssg` then runs the server once,
+  which writes `dist/<path>/index.html` for each route other than `*` with
+  no parameter, already rendered, and lists the pages in `manifest.json`
+  (ADR 0045).
+- **Hydration:** `render_hydratable(f)` writes a view as HTML a client can
+  adopt, and `hydrate("#app", App)` adopts it in the page: the server's
+  nodes stay, and their effects and handlers start.
+  `hydrate_with("#app", fallback, App)` reads the server's data, written as
+  JSON into the page just after its root, with `FromJson`, or uses
+  `fallback` when the page holds none, as under `nova dev`. A page whose
+  nodes differ from the view says so with `console.error`, and is built
+  again (ADR 0045).
+- **`std/ui/ssr`,** which a native program imports with `import ui::ssr`:
+  `serve(Site { … })` serves a built `dist/` and renders each other `GET`
+  into its `index.html`, with `404` for a path no route but `*` serves;
+  `page`, `page_with` and `document` render a page to a string, for a
+  server written by hand (ADR 0045).
+- **`with_location`, `found` and `static_paths`** in `std/ui/router`:
+  render a router at a given path, tell whether a route other than `*`
+  serves a path, and list the routes other than `*` with no parameter.
+- **`Server::fallback` and `Server::listen_on`** in `std/http`: a handler
+  for every `GET` no route matches, and serving a listener the program has
+  already bound, such as one on port 0.
+- **`console_error`** in `std/dom`.
+- **A CI test of SSR and SSG in Chromium,** `tests/browser/ssr.mjs`: a
+  server-rendered page and a statically generated one hydrate without
+  making their nodes again.
 
 ### Changed
 

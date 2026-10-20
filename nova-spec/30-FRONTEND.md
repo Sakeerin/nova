@@ -177,6 +177,18 @@ signals change. A value that is not a `String`, or a handler of another
 type, is E0097. A positional argument is an `Attr`, so 4.3's helpers still
 work. Named arguments exist only there (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §4; ADR 0043).
 
+**Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):** a
+view must not show a `Map`'s order. Each process seeds its `Map`s at
+random, natively and on WASM, and no seed passes from a server to its
+client, since that would hand every visitor the server's HashDoS seed; so
+a server's render and the client's hydration can iterate one `Map` in
+two orders. A view sorts a `Map`'s `keys()` before it shows them, and
+takes a value that differs between two renders, such as the time or a
+random number, as the server's data; hydration reports a view that forgets
+as a mismatch, and builds it again
+(`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+decision 4; ADR 0045).
+
 ---
 
 ## 5. DOM Bindings (`std/dom`)
@@ -365,6 +377,37 @@ Same component code runs on:
 - Client (WASM, hydrates)
 
 Hydration: client downloads WASM, attaches to existing DOM, replays effects.
+
+**Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):** 4.6
+builds both flags for a project with two entries: `src/main.nova`, the
+client, and `src/server.nova`, the server, which share components through
+a module such as `src/app.nova`. `nova build --ssr` builds the client into
+`dist/` as `--target wasm` does, and the server natively into
+`target/debug/<name>-server`; `--ssg` then runs the server once with
+`--ssg <dist>`, which writes `dist/<path>/index.html` for each route with no
+`:name` piece that is not `*`, and lists those pages in `manifest.json`.
+The server is the project's own program: it imports `ui::ssr`, native
+only, and calls `serve(Site { address, dist, routes, render })`, which
+serves `dist/`'s listed files and renders any other `GET` into the built
+`index.html`'s `<div id="app"></div>`, with `404` where no route but `*`
+serves the path;
+`page`, `page_with` and `document` render a page to a string for a server
+written by hand. The server writes `render_hydratable`'s HTML, which marks
+each `show` and `for_each` with `<!--[-->` and `<!--]-->` and two texts side
+by side with `<!--|-->`, and the client calls `hydrate("#app", App)`, or
+`hydrate_with("#app", fallback, App)` for data the server wrote as JSON
+in a `<script type="application/json" id="nova-data">` just after the root,
+or the `fallback` the program gives when the page holds none. Hydration
+walks the view against the page's nodes in order and adopts them, checking
+tags and texts but not attributes, and starts their effects and handlers
+rather than replaying them; at the first difference it reports `nova:
+hydration mismatch: …` with `console.error`, empties the root and builds
+the view afresh. An empty root is built into with no report, as under
+`nova dev`, which does not change; there `hydrate_with` builds the page
+from its fallback (the user's decision 13, of 2026-10-20). A hash `Router`
+is not for SSR; `HistoryRouter` is
+(`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+§3 to §7; ADR 0045).
 
 ---
 

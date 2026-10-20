@@ -568,6 +568,27 @@ ADR 0044).
     without re-creating its nodes.
   - `--ssg` writes one file per static route.
 
+**Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):** by the
+user's decisions of 2026-10-19, a project has two entries, `src/main.nova`
+for the client and `src/server.nova` for the server, sharing a module;
+`nova build --ssr` builds both, and `--ssg` then runs the server once,
+which writes a page for each static route. The server writes
+`render_hydratable`'s HTML, with comment markers around regions and between
+adjacent texts, into the built `dist/index.html`, through the native-only
+`ui::ssr`: `serve` at the high level, `page` at the low. The client's
+`hydrate` walks the nodes in order, and on a mismatch reports it and builds
+the view again; data passes as JSON, read back by `hydrate_with`, which
+uses a fallback the program gives when the page holds none, as under `nova
+dev` (the user's decision 13, of 2026-10-20); no hash seed is shared, so a
+view sorts a `Map`'s keys first; a path no route but `*` serves gets `404`
+with its page; and `nova dev` does not change. `std/http` gains
+`Server::fallback` and `listen_on`. The gate is `tests/browser/ssr-app` in
+Chromium (`tests/browser/ssr.mjs`): a server-rendered page and a page SSG
+wrote each hydrate in place, the server's nodes kept and updated by a
+click
+(`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`;
+ADR 0045).
+
 ### 4.7 — `examples/07-fullstack-blog`
 - **The blog as `60-EXAMPLES.md` §7 describes it,** with a JSON file
   (decision 11):
