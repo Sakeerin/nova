@@ -93,6 +93,32 @@ choose another with --port` and status 1
 (`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`
 §4; ADR 0044).
 
+**Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):** `nova
+build --ssr` and `nova build --ssg` exist, for a project with
+`src/server.nova` beside `src/main.nova`. `--ssr` builds the client from
+`src/main.nova` as `--target wasm` does, into `dist/` or the directory `-o`
+names, and the server from `src/server.nova` natively, into
+`target/debug/<name>-server`, or `target/release/<name>-server` with
+`--release`, which applies to both; it prints `built <dist>` and `built
+<server>`. `--ssg` builds both, then runs the server from the project's
+root with `--ssg <dist>`, its output passing through, and adds the pages it
+wrote, its `ssg: wrote <file>` lines, to `manifest.json`. A line's file,
+read from the project's root if relative, must lie inside `<dist>`, made
+absolute the same way, with each name below it a plain one by Rust's path
+components: no `..`, root or prefix, while a `.` piece and a trailing `/`
+are normalised away. Any other line fails the build, once the server has
+ended well. A server that fails ends `nova` with its exit code, after
+`Error: the server failed to generate the pages, with exit code <code>:
+<server>`; one a signal stops, which has no exit code, ends it with status
+1, after `…, stopped by signal <number>: <server>`. `--ssr --ssg` is
+`--ssg`. Each refuses, before building anything, a file argument,
+`--target`, a directory in no project, a library, and a project with no
+`src/server.nova`: "`--ssr` needs src/server.nova, the server's entry".
+`nova dev`, `nova run`, `nova check` and `nova bundle` do not change; `nova
+run src/server.nova` runs the server
+(`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+§7; ADR 0045).
+
 ### 1.2 Project Template (`nova new`)
 
 ```

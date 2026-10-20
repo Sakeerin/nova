@@ -65,6 +65,18 @@ only nested import path. Their functions are listed in
 `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
 §5 to §7 (ADR 0042).
 
+**Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):
+`std/ui/ssr`**, a native build's only, is imported with `import ui::ssr`,
+and on WASM that import is E0092, as `import dom` is natively. It holds
+`Page`, `page`, `page_with` and `document`, which render the page at a
+location to a string, and `Site` and `serve`, which serve a built `dist/`
+and render each other `GET` as a page, or, given `--ssg <dir>`, write the
+static routes' pages. `std/ui` gains `render_hydratable`, `hydrate` and
+`hydrate_with`; `std/ui/router` gains `with_location`, `found` and
+`static_paths`; and `std/dom` gains `console_error`. They are listed in
+`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+§3 to §6 and §8 (ADR 0045).
+
 ---
 
 ## 2. `std/core` — Foundational Types
@@ -523,6 +535,19 @@ narrower than the code block below.** `std/http` now has `Server` with
   the `Handler` and `Middleware` aliases, and the client.
 
 See `docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md`.
+
+**Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):**
+`Server` gains two methods. `fallback(handler)` returns a copy of the
+server whose `handler` answers each `GET` no route matches, in place of
+`Response::not_found()`; any other method still gets `not_found`, and a
+second `fallback` replaces the first. `listen_on(listener)` serves a
+`TcpListener` the program has already bound, such as one on port 0 whose
+`local_port` it prints first, with `listen`'s connections, limits and stop
+on SIGTERM or SIGINT; `listen(addr)` is now `bind`, then `listen_on`, and
+behaves as before. `ui::ssr`'s `serve` is built on both. `post`, cookies
+and path parameters are still not shipped
+(`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+§8.3; ADR 0045).
 
 ```nova
 module std.http

@@ -33,7 +33,7 @@ nova-mir            → Mid-level IR
 
 | Crate | Purpose |
 |---|---|
-| `nova-cli` | Binary entry point, CLI argument parsing; a WASM build's bundle: the page, `assets/`, `manifest.json` and `wasm-opt` (ADR 0043); `nova dev`: its builds in a child process, its watcher, and its server on `std::net` with the event stream that reloads a page or shows its overlay (ADR 0044) |
+| `nova-cli` | Binary entry point, CLI argument parsing; a WASM build's bundle: the page, `assets/`, `manifest.json` and `wasm-opt` (ADR 0043); `nova dev`: its builds in a child process, its watcher, and its server on `std::net` with the event stream that reloads a page or shows its overlay (ADR 0044); `nova build --ssr` and `--ssg`: a project's client and its server, the server's run that writes the static pages, and those pages in the manifest (ADR 0045) |
 | `nova-driver` | Orchestrates the compilation pipeline |
 | `nova-diagnostics` | Shared error reporting infrastructure, and the fixes a diagnostic suggests |
 | `nova-lexer` | Source → tokens (uses `logos`) |
@@ -47,7 +47,7 @@ nova-mir            → Mid-level IR
 | `nova-codegen-llvm` | Optimized release backend |
 | `nova-codegen-wasm` | WebAssembly backend: MIR to one module with `wasm-encoder`, structured control flow, and the JS shim (ADR 0039) |
 | `nova-runtime` | GC, async runtime, panic handling |
-| `nova-std` (in `std/`) | The standard library's `.nova` sources, embedded for the compiler; `std/rt` is a WASM build's runtime, in Nova: its allocator, collector and executor (ADRs 0039, 0040); `std/dom`, a WASM build's page, which a program imports (ADR 0041); `std/ui` and `std/ui/html`, reactivity and views, which a program imports, and `std/ui`'s backend, one source per target (ADR 0042); `std/ui/router`, routing by the URL's hash or path, which a program imports (ADR 0044) |
+| `nova-std` (in `std/`) | The standard library's `.nova` sources, embedded for the compiler; `std/rt` is a WASM build's runtime, in Nova: its allocator, collector and executor (ADRs 0039, 0040); `std/dom`, a WASM build's page, which a program imports (ADR 0041); `std/ui` and `std/ui/html`, reactivity and views, which a program imports, and `std/ui`'s backend, one source per target (ADR 0042); `std/ui/router`, routing by the URL's hash or path, which a program imports (ADR 0044); `std/ui/ssr`, server-side rendering and SSG, which a native program imports (ADR 0045) |
 | `nova-fmt` | The formatter: prints the AST in one fixed layout, keeps every comment, and refuses output that would change the program (ADR 0028); organize imports' block |
 | `nova-lsp` | The language server, `nova lsp`: diagnostics, completion, formatting, hover, definition, references, rename, code actions and semantic tokens over `nova_driver::analyze` (ADR 0029, ADR 0032, ADR 0033) |
 | `nova-test` | A stub, `publish = false`; the test runner is `nova-cli`'s `cmd/test.rs` |

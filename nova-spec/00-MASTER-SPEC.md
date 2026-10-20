@@ -682,7 +682,22 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
    whose state starts again, by the user's decision of 2026-10-14 (ADRs
    0038 and 0044).
 8. SSR: render to string in native runtime, hydrate in WASM
+   **Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):**
+   `nova build --ssr` builds a project's client for WASM and its server,
+   `src/server.nova`, natively. The server renders with
+   `render_hydratable`, which marks regions and adjacent texts with
+   comments, and serves through `ui::ssr::serve`, or through handlers of
+   its own that call `ui::ssr::page`; the client calls
+   `hydrate`, which adopts the server's nodes in order, or builds the view
+   again after reporting a mismatch, by the user's decisions of 2026-10-19
+   (ADR 0045).
 9. SSG: compile-time route enumeration
+   **Amended 2026-10-19 (branch `claude/loving-archimedes-frtf5q-46`):**
+   the routes are enumerated when the built server runs, not by the
+   compiler: `nova build --ssg` runs the server once with `--ssg <dist>`,
+   and `serve` writes a page for each route with no `:name` piece that is
+   not `*`; routes with parameters are skipped, by the user's decision 6
+   of 2026-10-19 (ADR 0045).
 
 **Gate:** `examples/06-counter-spa` and `examples/07-fullstack-blog` work in browser, pass Lighthouse 95+.
 
