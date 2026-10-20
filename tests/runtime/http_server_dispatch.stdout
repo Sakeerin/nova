@@ -6,3 +6,11 @@ POST / -> 404
 s1: /a 200 /b 200 /c 404
 s2: /a 200 /b 404 /c 200
 base: /a 200 /b 404 /c 404
+fallback: GET /nope?x=1 -> 404 fallback for /nope?x=1
+fallback: GET / -> 200 Hello from Nova!
+fallback: POST /nope -> 404 not found
+fallback: HEAD /nope -> 404 not found
+route after fallback: /later -> 200 later, /other -> fallback for /other
+second fallback: GET /nope -> 410 gone
+app after fallback: GET /nope -> 404 not found
+fallback after another: GET /nope -> fallback for /nope

@@ -1,0 +1,23 @@
+/posts/1: <div><p>post 1</p><a href="/posts/1/edit" data-nova-link="">edit</a></div>
+/q?a=1: <p>query a=1</p>
+/nowhere: <p>missing</p>
+/posts/3#top: <div><p>post 3</p><a href="/posts/3/edit" data-nova-link="">edit</a></div>
+hash router at /posts/2: <div><p>post 2</p><a href="#/posts/2/edit" data-nova-link="">edit</a></div>
+nested: <p>query a=2</p>, then <div><p>post 1</p><a href="/posts/1/edit" data-nova-link="">edit</a></div>
+restored: <p>home</p>
+a value: 42
+found /: true
+found /posts/1: true
+found /posts/a%20b?x=2: true
+found /q?a=1: true
+found /q#top: true
+found /q?a=1#top: true
+found /posts: false
+found /posts/1/2: false
+found /nowhere: false
+found with no routes: false
+found with no match: false
+found under /*: false
+found after a catch-all: false
+static paths: /, /about, /docs/intro
+static paths of none: []

@@ -1,6 +1,10 @@
 // `std/http`'s `Server::dispatch` and `Response::json`, with no socket.
 // `examples/03-http-server` drives the same routes over TCP; this pins the
-// routing and the JSON response's bytes on their own.
+// routing and the JSON response's bytes on their own. Then `fallback` (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §8.3): it answers a GET no route matches, its query included, and nothing
+// else; a route still answers its own path, before or after it; a second one
+// replaces the first; and the server it is called on keeps none.
 
 fn status_ok() -> JsonValue {
     let mut m: Map<String, JsonValue> = Map::new()
@@ -55,4 +59,27 @@ fn main() {
     println("s1: /a ${status_of(s1, "/a")} /b ${status_of(s1, "/b")} /c ${status_of(s1, "/c")}")
     println("s2: /a ${status_of(s2, "/a")} /b ${status_of(s2, "/b")} /c ${status_of(s2, "/c")}")
     println("base: /a ${status_of(base, "/a")} /b ${status_of(base, "/b")} /c ${status_of(base, "/c")}")
+
+    let fb = app.fallback(|r: Request| Response::text(404, "fallback for ${r.path}"))
+    let f1 = fb.dispatch(request(Get, "/nope?x=1"))
+    println("fallback: GET /nope?x=1 -> ${f1.status} ${body_text(f1)}")
+    let f2 = fb.dispatch(request(Get, "/"))
+    println("fallback: GET / -> ${f2.status} ${body_text(f2)}")
+    let f3 = fb.dispatch(request(Post, "/nope"))
+    println("fallback: POST /nope -> ${f3.status} ${body_text(f3)}")
+    let f4 = fb.dispatch(request(Head, "/nope"))
+    println("fallback: HEAD /nope -> ${f4.status} ${body_text(f4)}")
+    let later = fb.get("/later", |_| Response::text(200, "later"))
+    let l1 = later.dispatch(request(Get, "/later"))
+    let l2 = later.dispatch(request(Get, "/other"))
+    println(
+        "route after fallback: /later -> ${l1.status} ${body_text(l1)}, /other -> ${body_text(l2)}",
+    )
+    let twice = fb.fallback(|_| Response::text(410, "gone"))
+    let t1 = twice.dispatch(request(Get, "/nope"))
+    println("second fallback: GET /nope -> ${t1.status} ${body_text(t1)}")
+    let a1 = app.dispatch(request(Get, "/nope"))
+    println("app after fallback: GET /nope -> ${a1.status} ${body_text(a1)}")
+    let f5 = fb.dispatch(request(Get, "/nope"))
+    println("fallback after another: GET /nope -> ${body_text(f5)}")
 }

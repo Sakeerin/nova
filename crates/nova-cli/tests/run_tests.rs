@@ -9540,6 +9540,9 @@ fn http_keepalive_run() {
 /// GET routes, a handler that reads its request, 404 for an unknown path and
 /// for a non-GET method, and the JSON response's headers and bytes. Design:
 /// docs/superpowers/specs/2026-10-04-examples-03-http-server-design.md §7.2.
+/// Then `Server::fallback` (spec
+/// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+/// §8.3): a GET no route matches, and only that.
 #[test]
 fn http_server_dispatch_run() {
     let expected =
@@ -9552,6 +9555,26 @@ fn http_server_dispatch_run() {
         .assert()
         .success()
         .stdout(expected);
+}
+
+/// `std/http`'s `Server::listen_on` (spec 4.6 §8.3): a listener the program
+/// bound on port 0 itself, served over TCP, with a route, the fallback and a
+/// `POST` answered on one connection, as it is and under GC stress.
+#[test]
+fn http_listen_on_run() {
+    let source = repo_root().join("tests/runtime/http_listen_on.nova");
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    for stress in [false, true] {
+        let mut cmd = nova();
+        if stress {
+            cmd.env("NOVA_GC_STRESS", "1");
+        }
+        let a = cmd.arg("run").arg(&source).assert().success();
+        let out = String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n");
+        assert_eq!(out, expected, "stress {stress}");
+    }
 }
 
 /// `std/process`'s `args()` under `nova run FILE -- ARGS`: index 0 is FILE as
@@ -11308,7 +11331,8 @@ fn example_05_geometry_runs() {
 /// `std/ui`'s programs (spec
 /// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
 /// §9.2), `std/ui/router`'s paths and queries (spec 4.5 §3.2 to §3.5), and
-/// `render_hydratable`'s markers (spec 4.6 §9.2): each prints what
+/// `render_hydratable`'s markers and the router's functions for a server
+/// (spec 4.6 §9.2): each prints what
 /// `30-FRONTEND.md` §13's unit tests check, and runs the same with
 /// `NOVA_GC_STRESS=1` (collect on every allocation), so a part of the graph
 /// only the state's root keeps, freed, shows as wrong output or a crash.
@@ -11323,6 +11347,7 @@ fn ui_programs_run_and_survive_gc_stress() {
         "ui_view",
         "ui_router",
         "ui_hydratable",
+        "ui_router_server",
     ] {
         let source = repo_root().join(format!("tests/runtime/{name}.nova"));
         let expected = std::fs::read_to_string(source.with_extension("stdout"))
