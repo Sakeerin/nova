@@ -1405,7 +1405,8 @@ mod tests {
                 "time",
                 "ui",
                 "ui/html",
-                "ui/router"
+                "ui/router",
+                "ui/ssr"
             ]
         );
         let core = module(&d.site, "std/core/index.html");

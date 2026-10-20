@@ -272,8 +272,8 @@ fn every_name_in_the_corpora_is_indexed() {
         }
     }
     // 8 + 147 + 3 files of user code, 05-geometry's library's 2, and
-    // native std's 21.
-    assert_eq!(files, 181);
+    // native std's 22, `std/ui/ssr` among them.
+    assert_eq!(files, 182);
     failures.sort();
     failures.dedup();
     assert!(

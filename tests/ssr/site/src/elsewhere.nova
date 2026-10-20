@@ -1,0 +1,18 @@
+//! A server whose address cannot be bound, which `serve` reports.
+
+import app::{App, data, routes}
+import ui
+import ui::ssr::{Page, Site, page, serve}
+
+fn render(location: String) -> Page { page(location, || App(data())) }
+
+async fn main() {
+    let site = Site { address: "127.0.0.1:99999", dist: "dist", routes: routes(), render: render }
+    match serve(site).await {
+        Ok(_) => println("stopped")
+        Err(e) => {
+            eprintln(e.message)
+            exit(3)
+        }
+    }
+}

@@ -1,0 +1,38 @@
+//! A server whose third static route names no file, which `--ssg` refuses
+//! after it has written the first two, writing nothing more. The route's
+//! path is `/a/../b`, or, when the first argument names one, another such
+//! path: `empty`, `/a//b`; `backslash`, `/a\b`; `nul`, `/a`, NUL and `b`;
+//! `query`, `/a?b`; `hash`, `/a#b`. An argument cannot hold NUL, so each is
+//! named.
+
+import app::{App, data, routes}
+import ui
+import ui::router::{Route}
+import ui::ssr::{Page, Site, page, serve}
+
+fn render(location: String) -> Page { page(location, || App(data())) }
+
+// The path `name` names, or `/a/../b` when it names none, as when `nova
+// build --ssg` runs this with `--ssg` first.
+fn bad_path(name: String) -> String {
+    if name == "empty" { return "/a//b" }
+    if name == "backslash" { return "/a\\b" }
+    if name == "nul" { return "/a\0b" }
+    if name == "query" { return "/a?b" }
+    if name == "hash" { return "/a#b" }
+    "/a/../b"
+}
+
+async fn main() {
+    let all = routes()
+    let path = bad_path(args().get(1).unwrap_or(""))
+    let bad = [all[0], all[1], Route { path: path, component: all[2].component }, all[2]]
+    let site = Site { address: "127.0.0.1:0", dist: "dist", routes: bad, render: render }
+    match serve(site).await {
+        Ok(_) => println("stopped")
+        Err(e) => {
+            eprintln(e.message)
+            exit(3)
+        }
+    }
+}

@@ -1,0 +1,7 @@
+//! The client: it hydrates the page the server rendered, with the server's
+//! data, or with no title and no names on a page with none.
+
+import app::{App, Data}
+import ui
+
+fn main() { hydrate_with("#app", Data { title: "", names: [] }, App) }

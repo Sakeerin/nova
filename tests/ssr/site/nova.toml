@@ -1,0 +1,5 @@
+[package]
+name = "site"
+version = "0.1.0"
+edition = "2026"
+description = "A project with a client and a server, which run_tests.rs serves and ssr_tests.rs builds with --ssr and --ssg"

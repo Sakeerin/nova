@@ -2,7 +2,7 @@
 //! build time so the compiler stays one self-contained executable.
 //!
 //! Every `include_str!` path stays inside this package, so `cargo package`
-//! carries all 24 files, and its verification step builds the packaged copy
+//! carries all 25 files, and its verification step builds the packaged copy
 //! on its own (spec
 //! `docs/superpowers/specs/2026-10-07-phase-3-0-foundations-design.md` §3).
 //! `nova-resolver` gives each module its `$std.*` name and its place.
@@ -53,6 +53,11 @@ pub const UI: &str = include_str!("ui/lib.nova");
 pub const UI_HTML: &str = include_str!("ui/html/lib.nova");
 /// `std/ui/router/lib.nova`: routing by the URL, which a program imports.
 pub const UI_ROUTER: &str = include_str!("ui/router/lib.nova");
+/// `std/ui/ssr/lib.nova`: server-side rendering, which a native program
+/// imports (spec
+/// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+/// §6).
+pub const UI_SSR: &str = include_str!("ui/ssr/lib.nova");
 /// `std/ui/backend/native.nova`, `std/ui`'s backend natively. Not in
 /// [`ALL`]: only std's modules see it (spec
 /// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
@@ -70,7 +75,7 @@ pub const RT: &str = include_str!("rt/lib.nova");
 
 /// Every documented module, by its directory under `std/`: all but
 /// [`RT`], [`DOM`] and `std/ui`'s backend.
-pub const ALL: [(&str, &str); 20] = [
+pub const ALL: [(&str, &str); 21] = [
     ("bytes", BYTES),
     ("collections", COLLECTIONS),
     ("core", CORE),
@@ -91,6 +96,7 @@ pub const ALL: [(&str, &str); 20] = [
     ("ui", UI),
     ("ui/html", UI_HTML),
     ("ui/router", UI_ROUTER),
+    ("ui/ssr", UI_SSR),
 ];
 
 #[cfg(test)]
@@ -140,7 +146,7 @@ mod tests {
             )
             .collect();
         assert_eq!(embedded, on_disk);
-        assert_eq!(on_disk.len(), 24);
+        assert_eq!(on_disk.len(), 25);
     }
 
     /// Each entry carries its own file, not a neighbour's.

@@ -1,0 +1,130 @@
+//! What the client, `main.nova`, and the server, `server.nova`, share (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §1): the server's data, the routes, and the app, which shows the data's
+//! title and names above the route the location matches.
+
+import ui
+import ui::html::{div, h1, li, p, text, ul}
+import ui::router::{HistoryRouter, Route, link, use_params}
+
+/// The server's data.
+pub record Data { title: String, names: [String] }
+
+impl ToJson for Data {
+    fn to_json(self) -> JsonValue {
+        let mut names = [Null; self.names.len()]
+        let mut i = 0
+        while i < self.names.len() {
+            names[i] = self.names[i].to_json()
+            i = i + 1
+        }
+        let mut fields: Map<String, JsonValue> = Map::new()
+        fields.insert("title", self.title.to_json())
+        fields.insert("names", Array(names))
+        Object(fields)
+    }
+}
+
+// The string `v` holds, or `""` when it holds none.
+fn string_of(v: Option<JsonValue>) -> String {
+    match v {
+        Some(x) => {
+            match String::from_json(x) {
+                Ok(s) => s
+                Err(e) => ""
+            }
+        }
+        None => ""
+    }
+}
+
+impl FromJson for Data {
+    fn from_json(v: JsonValue) -> Result<Data, JsonError> {
+        let fields = match v {
+            Object(m) => m
+            _ => return Err(JsonError { msg: "expected an object", at: 0 })
+        }
+        let list = match fields.get("names") {
+            Some(x) => {
+                match x {
+                    Array(xs) => xs
+                    _ => return Err(JsonError { msg: "expected names", at: 0 })
+                }
+            }
+            None => return Err(JsonError { msg: "expected names", at: 0 })
+        }
+        let mut names = [""; list.len()]
+        let mut i = 0
+        while i < list.len() {
+            names[i] = string_of(Some(list[i]))
+            i = i + 1
+        }
+        Ok(Data { title: string_of(fields.get("title")), names: names })
+    }
+}
+
+/// The data the server renders with.
+pub fn data() -> Data { Data { title: "Names </script> & \u{2028} more", names: ["Ada", "Grace"] } }
+
+component Home() {
+    view {
+        p {
+            text("Home ")
+            link(to: "/about") { text("About") }
+        }
+    }
+}
+
+component About() {
+    view {
+        p { text("About") }
+    }
+}
+
+component Intro() {
+    view {
+        p { text("Intro") }
+    }
+}
+
+component Post() {
+    let id = use_params().get("id").unwrap_or("?")
+    view {
+        p { text("Post ${id}") }
+    }
+}
+
+component NotFound() {
+    view {
+        p { text("Nothing here") }
+    }
+}
+
+/// The routes: three static ones, one with a parameter, and the catch-all.
+pub fn routes() -> [Route] {
+    [
+        Route { path: "/", component: Home },
+        Route { path: "/about", component: About },
+        Route { path: "/docs/intro", component: Intro },
+        Route { path: "/posts/:id", component: Post },
+        Route { path: "*", component: NotFound },
+    ]
+}
+
+/// The app: the data's title and names, then the route.
+pub component App(data: Data) {
+    view {
+        div {
+            h1 { text(data.title) }
+            ul {
+                for_each(
+                    signal(data.names),
+                    |name: String| view {
+                        li { text(name) }
+                    },
+                )
+            }
+            HistoryRouter(routes())
+        }
+    }
+}

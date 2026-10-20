@@ -11550,3 +11550,646 @@ fn ui_mount_panics_natively() {
         "{err}"
     );
 }
+
+/// `ui::ssr`'s low level (spec
+/// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+/// §6.2): `page` renders at its location, query and all, with no data;
+/// `page_with` renders its data's view, and writes the data as JSON with
+/// `<`, `>`, `&`, U+2028 and U+2029 as escapes, which parse back to the same
+/// value; and `document` fills the first `<div id="app">` alone, with the
+/// data's `script` after it when there is data. A root that holds
+/// whitespace, a placeholder with a `div` of its own, a `<divx>`, which is
+/// no `div`, or a page and its data, as SSG writes them, is emptied first,
+/// and one never closed keeps what follows it. A stale data `script` past
+/// whitespace after the root goes too, the whitespace kept, though the page
+/// has no data; one with no `</script>` stays as it is. Then `document`
+/// panics on a template with no root, after what the program printed
+/// first.
+#[test]
+fn ssr_page_page_with_and_document() {
+    let dir = std::env::temp_dir().join("nova-ssr-page");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let program = "import ui\n\
+        import ui::html::{p, text}\n\
+        import ui::router::{HistoryRouter, Route, use_params, use_query}\n\
+        import ui::ssr::{Page, document, page, page_with}\n\
+        \n\
+        component Post() {\n\
+        \x20   let id = use_params().get(\"id\").unwrap_or(\"?\")\n\
+        \x20   let tab = use_query().get(\"tab\").unwrap_or(\"?\")\n\
+        \x20   view { p { text(\"post ${id}, tab ${tab}\") } }\n\
+        }\n\
+        \n\
+        fn shown(s: String) -> View { p([], [text(s)]) }\n\
+        \n\
+        fn main() {\n\
+        \x20   let routes = [Route { path: \"/posts/:id\", component: Post }]\n\
+        \x20   let a = page(\"/posts/1?tab=2\", | | HistoryRouter(routes))\n\
+        \x20   println(\"page: ${a.body} ${a.data.is_none()}\")\n\
+        \x20   let words = \"a </script> & b \\u{2028}\\u{2029} <!--\"\n\
+        \x20   let b = page_with(\"/\", words, shown)\n\
+        \x20   println(\"page_with: ${b.body}\")\n\
+        \x20   let data = b.data.unwrap_or(\"none\")\n\
+        \x20   println(\"data: ${data}\")\n\
+        \x20   let back = match parse(data) {\n\
+        \x20       Ok(v) => String::from_json(v).unwrap_or(\"not a string\")\n\
+        \x20       Err(e) => e.msg\n\
+        \x20   }\n\
+        \x20   println(\"parses back: ${back == words}\")\n\
+        \x20   let t = \"<body><div id=\\\"app\\\"></div><div id=\\\"app\\\"></div></body>\"\n\
+        \x20   println(\"document: ${document(t, a)}\")\n\
+        \x20   let filled = Page { body: \"x\", data: Some(\"[1]\") }\n\
+        \x20   println(\"with data: ${document(t, filled)}\")\n\
+        \x20   let blank = \"<div id=\\\"app\\\"> \\n\\t</div><p>after</p>\"\n\
+        \x20   println(\"blank: ${document(blank, filled)}\")\n\
+        \x20   let waiting = \"<main><div id=\\\"app\\\"><div class=\\\"spinner\\\"><p>Loading</p></div></div><script src=\\\"/app.js\\\"></script></main>\"\n\
+        \x20   println(\"placeholder: ${document(waiting, filled)}\")\n\
+        \x20   let divx = \"<div id=\\\"app\\\"><divx>old</divx></div><p>after</p>\"\n\
+        \x20   println(\"divx: ${document(divx, filled)}\")\n\
+        \x20   let built = \"<div id=\\\"app\\\"><p>old</p></div><script type=\\\"application/json\\\" id=\\\"nova-data\\\">[0]</script><p>after</p>\"\n\
+        \x20   println(\"rendered: ${document(built, filled)}\")\n\
+        \x20   let open = \"<div id=\\\"app\\\"><p>open\"\n\
+        \x20   println(\"unclosed: ${document(open, filled)}\")\n\
+        \x20   let bare = Page { body: \"x\", data: None }\n\
+        \x20   let spaced = \"<div id=\\\"app\\\"><p>old</p></div>\\n<script type=\\\"application/json\\\" id=\\\"nova-data\\\">[0]</script><p>after</p>\"\n\
+        \x20   println(\"spaced: ${document(spaced, bare)}\")\n\
+        \x20   let cut = \"<div id=\\\"app\\\"><p>old</p></div><script type=\\\"application/json\\\" id=\\\"nova-data\\\">[0]<p>after</p>\"\n\
+        \x20   println(\"unclosed data: ${document(cut, filled)}\")\n\
+        \x20   println(document(\"<div id=\\\"root\\\"></div>\", a))\n\
+        \x20   println(\"not reached\")\n\
+        }\n";
+    std::fs::write(dir.join("main.nova"), program).expect("write the program");
+    let a = nova()
+        .current_dir(&dir)
+        .env("RUST_BACKTRACE", "0")
+        .arg("run")
+        .arg("main.nova")
+        .assert()
+        .failure();
+    let o = a.get_output();
+    assert_eq!(
+        String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"),
+        "page: <!--[--><p>post 1, tab 2</p><!--]--> true\n\
+         page_with: <p>a &lt;/script&gt; &amp; b \u{2028}\u{2029} &lt;!--</p>\n\
+         data: \"a \\u003c/script\\u003e \\u0026 b \\u2028\\u2029 \\u003c!--\"\n\
+         parses back: true\n\
+         document: <body><div id=\"app\"><!--[--><p>post 1, tab 2</p><!--]--></div><div id=\"app\"></div></body>\n\
+         with data: <body><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><div id=\"app\"></div></body>\n\
+         blank: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><p>after</p>\n\
+         placeholder: <main><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><script src=\"/app.js\"></script></main>\n\
+         divx: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><p>after</p>\n\
+         rendered: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><p>after</p>\n\
+         unclosed: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><p>open\n\
+         spaced: <div id=\"app\">x</div>\n<p>after</p>\n\
+         unclosed data: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><script type=\"application/json\" id=\"nova-data\">[0]<p>after</p>\n"
+    );
+    let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
+    assert!(
+        err.ends_with("nova: panic: ssr: the page has no <div id=\"app\">\n"),
+        "{err}"
+    );
+}
+
+/// A copy of `tests/ssr/site` in a fresh directory named for `name`, with a
+/// fresh `NOVA_HOME` beside it, and `dist/` written by hand: a template, a
+/// script, a WASM module and an image the manifest lists, and a file it does
+/// not. A file sits outside `dist/` too, `secret`, which the manifest lists
+/// as `../secret`; and the manifest lists `gone.js`, which is not there.
+fn ssr_site(name: &str) -> (PathBuf, PathBuf) {
+    let base = std::env::temp_dir().join(format!("nova-ssr-{name}"));
+    let _ = std::fs::remove_dir_all(&base);
+    let site = base.join("site");
+    std::fs::create_dir_all(site.join("src")).expect("temp dir");
+    let fixture = repo_root().join("tests/ssr/site");
+    std::fs::copy(fixture.join("nova.toml"), site.join("nova.toml")).expect("copy nova.toml");
+    for entry in std::fs::read_dir(fixture.join("src")).expect("the fixture's src") {
+        let path = entry.expect("an entry").path();
+        std::fs::copy(
+            &path,
+            site.join("src").join(path.file_name().expect("a name")),
+        )
+        .expect("copy a source");
+    }
+    let dist = site.join("dist");
+    std::fs::create_dir_all(dist.join("assets")).expect("dist");
+    for (path, text) in [
+        ("index.html", SSR_TEMPLATE),
+        ("app.js", "export default function init() {}\n"),
+        ("assets/logo.svg", "<svg></svg>"),
+        ("secret.txt", "not listed"),
+        (
+            "manifest.json",
+            "{\"files\": {\"index.html\": 1, \"app.js\": 1, \"app.wasm\": 8, \"assets/logo.svg\": 1, \
+             \"../secret\": 12, \"gone.js\": 1}}\n",
+        ),
+    ] {
+        std::fs::write(dist.join(path), text).expect("write dist");
+    }
+    std::fs::write(dist.join("app.wasm"), b"\0asm\x01\0\0\0").expect("write app.wasm");
+    std::fs::write(site.join("secret"), "outside dist").expect("write a secret");
+    (site, base.join("home"))
+}
+
+/// The template `ssr_site` writes.
+const SSR_TEMPLATE: &str = "<!doctype html>\n<title>Site</title>\n<body>\n<div id=\"app\"></div>\n<script type=\"module\" src=\"/app.js\"></script>\n</body>\n";
+
+/// What `tests/ssr/site`'s app renders around `route`, the route's own HTML.
+fn ssr_view(route: &str) -> String {
+    format!(
+        "<div><h1>Names &lt;/script&gt; &amp; \u{2028} more</h1><ul><!--[--><li>Ada</li><li>Grace</li><!--]--></ul><!--[-->{route}<!--]--></div>"
+    )
+}
+
+/// The page `document` makes of `template` for `view` with the fixture's
+/// data: one for each order of the data's two keys, which a `Map` decides.
+fn ssr_pages(template: &str, view: &str) -> [String; 2] {
+    let title = "\"title\":\"Names \\u003c/script\\u003e \\u0026 \\u2028 more\"";
+    let names = "\"names\":[\"Ada\",\"Grace\"]";
+    [
+        format!("{{{title},{names}}}"),
+        format!("{{{names},{title}}}"),
+    ]
+    .map(|json| {
+        template.replacen(
+            "<div id=\"app\"></div>",
+            &format!(
+                "<div id=\"app\">{view}</div><script type=\"application/json\" id=\"nova-data\">{json}</script>"
+            ),
+            1,
+        )
+    })
+}
+
+/// A running `nova run src/<entry>.nova` in a copy of `tests/ssr/site`,
+/// with the port its first line names. Its streams are drained on threads,
+/// and dropping it kills a server still running.
+struct SsrServer {
+    child: std::process::Child,
+    port: u16,
+    stdout: Option<std::thread::JoinHandle<String>>,
+    stderr: Option<std::thread::JoinHandle<String>>,
+}
+
+impl SsrServer {
+    fn spawn(site: &std::path::Path, home: &std::path::Path) -> Self {
+        use std::io::{BufRead, BufReader, Read};
+        use std::process::Stdio;
+        let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"));
+        cmd.current_dir(site)
+            .env("NOVA_HOME", home)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .args(["run", "src/server.nova"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0000_0200);
+        }
+        let mut child = cmd.spawn().expect("spawn the server");
+        let mut out = BufReader::new(child.stdout.take().expect("stdout was piped"));
+        let mut err = child.stderr.take().expect("stderr was piped");
+        let stderr = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = err.read_to_string(&mut s);
+            s
+        });
+        // The first line comes once the program has compiled and bound; if
+        // it fails first, the stream closes and the line is empty.
+        let mut first = String::new();
+        let _ = out.read_line(&mut first);
+        let stdout = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = out.read_to_string(&mut s);
+            s
+        });
+        let mut server = SsrServer {
+            child,
+            port: 0,
+            stdout: Some(stdout),
+            stderr: Some(stderr),
+        };
+        match first
+            .trim_end()
+            .strip_prefix("ssr: serving http://127.0.0.1:")
+            .and_then(|p| p.strip_suffix('/'))
+            .and_then(|p| p.parse::<u16>().ok())
+        {
+            Some(port) => server.port = port,
+            None => server.kill_and_panic(&format!("no serving line, but {first:?}")),
+        }
+        server
+    }
+
+    /// One request on a connection of its own: the status, the headers by
+    /// lower-cased name, and the body, framed by `content-length`.
+    fn ask(&mut self, request: &str) -> (u16, std::collections::HashMap<String, String>, Vec<u8>) {
+        match ssr_exchange(self.port, request) {
+            Ok(r) => (r.status, r.headers, r.body),
+            Err(e) => self.kill_and_panic(&format!("{request:?}: {e}")),
+        }
+    }
+
+    fn wait_for_exit(&mut self, limit: std::time::Duration) -> Option<std::process::ExitStatus> {
+        let deadline = std::time::Instant::now() + limit;
+        loop {
+            match self.child.try_wait().expect("try_wait") {
+                Some(s) => return Some(s),
+                None if std::time::Instant::now() >= deadline => return None,
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+    }
+
+    /// Both streams, the first line left out. Call once the process has
+    /// exited.
+    fn streams(&mut self) -> (String, String) {
+        let out = self
+            .stdout
+            .take()
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        let err = self
+            .stderr
+            .take()
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default();
+        (out, err)
+    }
+
+    fn kill_and_panic(&mut self, why: &str) -> ! {
+        let _ = self.child.kill();
+        let status = self.child.wait();
+        let (out, err) = self.streams();
+        panic!("{why}; killed: {status:?}; stdout={out:?} stderr={err:?}");
+    }
+}
+
+impl Drop for SsrServer {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// A response `serve` sent: its status, its headers by lower-cased name, and
+/// its body.
+struct SsrResponse {
+    status: u16,
+    headers: std::collections::HashMap<String, String>,
+    body: Vec<u8>,
+}
+
+/// `request` sent to `127.0.0.1:port` on a new connection, and the response
+/// read whole.
+fn ssr_exchange(port: u16, request: &str) -> Result<SsrResponse, String> {
+    use std::io::{Read, Write};
+    let mut sock =
+        std::net::TcpStream::connect(("127.0.0.1", port)).map_err(|e| format!("connect: {e}"))?;
+    let limit = Some(std::time::Duration::from_secs(10));
+    sock.set_read_timeout(limit).map_err(|e| e.to_string())?;
+    sock.set_write_timeout(limit).map_err(|e| e.to_string())?;
+    sock.write_all(request.as_bytes())
+        .map_err(|e| format!("write: {e}"))?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4) {
+            let head = String::from_utf8_lossy(&buf[..end]).to_string();
+            let mut lines = head.split("\r\n");
+            let status = lines
+                .next()
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|s| s.parse::<u16>().ok())
+                .ok_or_else(|| format!("no status line in {head:?}"))?;
+            let mut headers = std::collections::HashMap::new();
+            for line in lines {
+                if let Some((name, value)) = line.split_once(':') {
+                    headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                }
+            }
+            let len: usize = headers
+                .get("content-length")
+                .and_then(|v| v.parse().ok())
+                .ok_or_else(|| format!("no content-length in {head:?}"))?;
+            if buf.len() >= end + len {
+                return Ok(SsrResponse {
+                    status,
+                    headers,
+                    body: buf[end..end + len].to_vec(),
+                });
+            }
+        }
+        match sock.read(&mut chunk) {
+            Ok(0) => return Err(format!("closed early: {:?}", String::from_utf8_lossy(&buf))),
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
+}
+
+/// `ui::ssr::serve` end to end, on port 0 (spec 4.6 §6.3, §9.2): it prints
+/// the port it bound; `/` is the template filled with the page and its data;
+/// a page keeps its query and takes its route's parameter; the files the
+/// manifest lists come with their content types and `nosniff`, asked for
+/// with an escape or a query too; a name with a `.` it does not list, a file
+/// in `dist/` it does not list, a listed file not on disk, and a path that
+/// would leave `dist/`, which the manifest lists, all get `404`, and nothing
+/// outside `dist/` is read; a path only the catch-all serves gets `404` and
+/// the rendered page; a `POST` gets `404`; and a signal stops it, and
+/// `serve` returns `Ok`.
+#[test]
+fn ssr_serve_answers_files_and_pages() {
+    use std::time::Duration;
+    let (site, home) = ssr_site("serve");
+    let mut server = SsrServer::spawn(&site, &home);
+    let get = |path: &str| format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n");
+    let text = |body: &[u8]| String::from_utf8_lossy(body).to_string();
+
+    let (status, headers, body) = server.ask(&get("/"));
+    assert_eq!(status, 200);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    let home_view = ssr_view("<p>Home <a href=\"/about\" data-nova-link=\"\">About</a></p>");
+    assert!(
+        ssr_pages(SSR_TEMPLATE, &home_view).contains(&text(&body)),
+        "{}",
+        text(&body)
+    );
+
+    let (status, _, body) = server.ask(&get("/posts/7?tab=1"));
+    assert_eq!(status, 200);
+    assert!(
+        ssr_pages(SSR_TEMPLATE, &ssr_view("<p>Post 7</p>")).contains(&text(&body)),
+        "{}",
+        text(&body)
+    );
+
+    for (path, kind, bytes) in [
+        (
+            "/app.js",
+            "text/javascript; charset=utf-8",
+            &b"export default function init() {}\n"[..],
+        ),
+        (
+            "/app%2ejs",
+            "text/javascript; charset=utf-8",
+            &b"export default function init() {}\n"[..],
+        ),
+        (
+            "/app.js?v=1",
+            "text/javascript; charset=utf-8",
+            &b"export default function init() {}\n"[..],
+        ),
+        ("/app.wasm", "application/wasm", &b"\0asm\x01\0\0\0"[..]),
+        ("/assets/logo.svg", "image/svg+xml", &b"<svg></svg>"[..]),
+        (
+            "/index.html",
+            "text/html; charset=utf-8",
+            SSR_TEMPLATE.as_bytes(),
+        ),
+    ] {
+        let (status, headers, body) = server.ask(&get(path));
+        assert_eq!(status, 200, "{path}");
+        assert_eq!(headers["content-type"], kind, "{path}");
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(body, bytes, "{path}");
+    }
+
+    for path in [
+        "/missing.png",
+        "/secret.txt",
+        "/manifest.json",
+        "/gone.js",
+        "/..%2fsecret",
+        "/%2e%2e/secret",
+    ] {
+        let (status, _, body) = server.ask(&get(path));
+        assert_eq!(status, 404, "{path}");
+        assert!(!text(&body).contains("outside dist"), "{path}");
+        assert!(!text(&body).contains("not listed"), "{path}");
+    }
+    for path in ["/missing.png", "/gone.js"] {
+        let (_, headers, body) = server.ask(&get(path));
+        assert_eq!(
+            headers["content-type"], "text/plain; charset=utf-8",
+            "{path}"
+        );
+        assert_eq!(text(&body), "not found", "{path}");
+    }
+
+    let (status, headers, body) = server.ask(&get("/nowhere"));
+    assert_eq!(status, 404);
+    assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+    assert!(
+        ssr_pages(SSR_TEMPLATE, &ssr_view("<p>Nothing here</p>")).contains(&text(&body)),
+        "{}",
+        text(&body)
+    );
+
+    let (status, _, body) = server.ask("POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 2\r\n\r\nhi");
+    assert_eq!(status, 404);
+    assert_eq!(text(&body), "not found");
+
+    if let Err(e) = send_termination_request(server.child.id()) {
+        server.kill_and_panic(&format!("could not deliver the signal: {e}"));
+    }
+    let status = match server.wait_for_exit(Duration::from_secs(10)) {
+        Some(s) => s,
+        None => server.kill_and_panic("the server did not stop within 10 s of the signal"),
+    };
+    let (out, err) = server.streams();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "{}; stdout={out:?} stderr={err:?}",
+        describe_status(&status)
+    );
+    assert_eq!(out.replace("\r\n", "\n"), "stopped\n", "stderr={err:?}");
+}
+
+/// What stops `serve` starting (spec 4.6 §6.3), each an `Err` naming its
+/// file or address, which the fixture's server prints before it exits with
+/// 3: no template, a template with no root, no manifest, a manifest with no
+/// `files`, and an address that cannot be bound.
+#[test]
+fn ssr_serve_reports_what_stops_it_starting() {
+    let (site, home) = ssr_site("start");
+    let dist = site.join("dist");
+    let run = |entry: &str| {
+        let a = nova()
+            .current_dir(&site)
+            .env("NOVA_HOME", &home)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .args(["run", entry])
+            .assert()
+            .code(3);
+        let o = a.get_output();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "", "{entry}");
+        String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n")
+    };
+    let err = run("src/elsewhere.nova");
+    assert!(
+        err.starts_with("ssr: cannot bind 127.0.0.1:99999: "),
+        "{err}"
+    );
+
+    std::fs::write(dist.join("manifest.json"), "{\"name\": \"site\"}\n").expect("a manifest");
+    assert_eq!(
+        run("src/server.nova"),
+        "ssr: dist/manifest.json has no \"files\" object\n"
+    );
+    std::fs::remove_file(dist.join("manifest.json")).expect("remove the manifest");
+    let err = run("src/server.nova");
+    assert!(
+        err.starts_with("ssr: cannot read dist/manifest.json: "),
+        "{err}"
+    );
+
+    std::fs::write(dist.join("index.html"), "<div id=\"root\"></div>\n").expect("a template");
+    assert_eq!(
+        run("src/server.nova"),
+        "ssr: dist/index.html has no <div id=\"app\">\n"
+    );
+    std::fs::remove_file(dist.join("index.html")).expect("remove the template");
+    let err = run("src/server.nova");
+    assert!(
+        err.starts_with("ssr: cannot read dist/index.html: "),
+        "{err}"
+    );
+}
+
+/// SSG (spec 4.6 §6.4): `serve` given `--ssg <dir>` binds nothing, and
+/// writes a page for each static route, `/` over the template it read, the
+/// others in directories it makes, skipping the route with a parameter and
+/// the catch-all, and prints a line for each. Run again over its own output,
+/// it writes the same pages. A route path that names no file, for a piece
+/// of it that is `..` or empty, or holds `\`, NUL, `?` or `#`, is refused,
+/// with an `Err` naming it, after the pages before it, and nothing more is
+/// written; and `--ssg` with no directory is refused.
+#[test]
+fn ssr_ssg_writes_the_static_pages_and_refuses_a_bad_path() {
+    let (site, home) = ssr_site("ssg");
+    let dist = site.join("dist");
+    let run = |args: &[&str]| {
+        nova()
+            .current_dir(&site)
+            .env("NOVA_HOME", &home)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .arg("run")
+            .args(args)
+            .assert()
+    };
+    let read = |path: &str| std::fs::read_to_string(dist.join(path)).expect("a page");
+    let pages = [
+        (
+            "index.html",
+            ssr_view("<p>Home <a href=\"/about\" data-nova-link=\"\">About</a></p>"),
+        ),
+        ("about/index.html", ssr_view("<p>About</p>")),
+        ("docs/intro/index.html", ssr_view("<p>Intro</p>")),
+    ];
+    for round in 0..2 {
+        let a = run(&["src/server.nova", "--", "--ssg", "dist"]).success();
+        assert_eq!(
+            String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n"),
+            "ssg: wrote dist/index.html\n\
+             ssg: wrote dist/about/index.html\n\
+             ssg: wrote dist/docs/intro/index.html\n\
+             stopped\n",
+            "round {round}"
+        );
+        for (path, view) in &pages {
+            assert!(
+                ssr_pages(SSR_TEMPLATE, view).contains(&read(path)),
+                "round {round}, {path}: {}",
+                read(path)
+            );
+        }
+    }
+    assert!(!dist.join("posts").exists());
+    assert_eq!(read("app.js"), "export default function init() {}\n");
+
+    // `refuse.nova`'s third route, `/a/../b` or the path its first argument
+    // names, each into a fresh directory, of which the two pages before it
+    // are then all there is.
+    let fresh = site.join("fresh");
+    let under = |dir: &std::path::Path| {
+        let mut out = Vec::new();
+        let mut dirs = vec![dir.to_path_buf()];
+        while let Some(d) = dirs.pop() {
+            for entry in std::fs::read_dir(&d).expect("a directory") {
+                let path = entry.expect("an entry").path();
+                let rel = path.strip_prefix(dir).expect("under the directory");
+                let names: Vec<String> = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                out.push(names.join("/"));
+                if path.is_dir() {
+                    dirs.push(path);
+                }
+            }
+        }
+        out.sort();
+        out
+    };
+    for (name, path) in [
+        (None, "/a/../b"),
+        (Some("empty"), "/a//b"),
+        (Some("backslash"), "/a\\b"),
+        (Some("nul"), "/a\0b"),
+        (Some("query"), "/a?b"),
+        (Some("hash"), "/a#b"),
+    ] {
+        let _ = std::fs::remove_dir_all(&fresh);
+        std::fs::create_dir_all(&fresh).expect("a directory");
+        std::fs::write(fresh.join("index.html"), SSR_TEMPLATE).expect("a template");
+        let mut args = vec!["src/refuse.nova", "--"];
+        args.extend(name);
+        args.extend(["--ssg", "fresh"]);
+        let a = run(&args).code(3);
+        let o = a.get_output();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"),
+            "ssg: wrote fresh/index.html\nssg: wrote fresh/about/index.html\n",
+            "{path:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n"),
+            format!(
+                "ssg: the route path \"{path}\" names no file: a piece of it is empty, \".\" or \
+                 \"..\", or holds \"\\\", NUL, \"?\" or \"#\"\n"
+            ),
+            "{path:?}"
+        );
+        assert_eq!(
+            under(&fresh),
+            ["about", "about/index.html", "index.html"],
+            "{path:?}"
+        );
+        assert!(!site.join("b").exists(), "{path:?}");
+        let about = std::fs::read_to_string(fresh.join("about/index.html")).expect("a page");
+        assert_eq!(
+            about,
+            SSR_TEMPLATE.replacen(
+                "<div id=\"app\"></div>",
+                &format!("<div id=\"app\">{}</div>", ssr_view("<p>About</p>")),
+                1
+            ),
+            "{path:?}"
+        );
+    }
+
+    let a = run(&["src/server.nova", "--", "--ssg"]).code(3);
+    assert_eq!(
+        String::from_utf8_lossy(&a.get_output().stderr).replace("\r\n", "\n"),
+        "ssg: --ssg needs a directory\n"
+    );
+}

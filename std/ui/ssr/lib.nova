@@ -1,0 +1,700 @@
+//! Server-side rendering: a page whose view is already written as HTML,
+//! which the client's `hydrate` then adopts, and a server that answers with
+//! such pages; or, given `--ssg <dir>`, writes them ahead of time.
+//!
+//! It is native only: a program imports it with `import ui::ssr`, or
+//! `import ui::ssr::{…}`, and on WASM that import is E0092, as `import dom`
+//! is natively. A project with a server has two entries that share their
+//! components through a module such as `src/app.nova`: `src/main.nova`, the
+//! client, which calls `hydrate("#app", App)` or `hydrate_with`, and
+//! `src/server.nova`, which calls `serve`. `nova build --ssr` builds both:
+//! the client into `dist/`, the server into `target/debug/<name>-server`.
+//! `nova build --ssg` then runs the server once with `--ssg dist`, which
+//! writes a page for each static route.
+//!
+//! `page` renders the view at a location, `page_with` with the server's data
+//! beside it, and `document` puts a page into the built `index.html`, in its
+//! `<div id="app">`:
+//!
+//! ```
+//! import ui
+//! import ui::html::{p, text}
+//! import ui::router::{HistoryRouter, Route}
+//! import ui::ssr::{document, page}
+//!
+//! component Home() { view { p { text("Home") } } }
+//!
+//! component About() { view { p { text("About") } } }
+//!
+//! fn main() {
+//!     let routes = [
+//!         Route { path: "/", component: Home },
+//!         Route { path: "/about", component: About },
+//!     ]
+//!     let template = "<body><div id=\"app\"></div><script src=\"/app.js\"></script></body>"
+//!     let html = document(template, page("/about", || HistoryRouter(routes)))
+//!     assert_eq(
+//!         html,
+//!         "<body><div id=\"app\"><!--[--><p>About</p><!--]--></div><script src=\"/app.js\"></script></body>",
+//!     )
+//! }
+//! ```
+
+// The design (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §6). The low level is three functions of strings: `page` and `page_with`
+// render a view at a location through `std/ui/router`'s `with_location`,
+// and `document` fills the template. `serve` is `std/http`'s `Server` with
+// one fallback that answers every `GET`: a file the build's manifest lists,
+// a 404 for any other name with a `.`, or a page. A file is read when it is
+// asked for, through the builtins `std/fs` is written on, since a handler
+// cannot await; no path outside the manifest is ever read, so there is no
+// traversal to refuse; and a manifest's path that would leave `dist`, with
+// a piece that is empty, `.` or `..`, is never served either. Given
+// `--ssg <dir>`, `serve` writes the static routes' pages instead of
+// binding. Both read the template from an `index.html` that SSG may already
+// have filled with the root's page, and a project's own page may hold a
+// placeholder there, so `document`, which both fill pages with, empties the
+// root first (`emptied`).
+
+import ui
+import ui::router::{Route, found, static_paths, with_location}
+
+/// A page a server renders: the view's HTML, and the server's data for
+/// `hydrate_with`, if any. `document` puts it into the page's template.
+pub record Page {
+    /// The view, as `render_hydratable` writes it.
+    pub body: String,
+    /// The data as JSON, made safe for a `script` element, or `None`.
+    pub data: Option<String>,
+}
+
+/// The page at `location`, a path and its query such as `/posts/1?tab=2`:
+/// `f`'s view rendered by `render_hydratable` with a router made inside it
+/// starting at `location`, as `with_location` makes it, and no data. The
+/// client hydrates it with `hydrate("#app", f)`.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::router::{HistoryRouter, Route, use_params}
+/// import ui::ssr::{page}
+///
+/// component Post() {
+///     let id = use_params().get("id").unwrap_or("?")
+///     view { p { text("Post ${id}") } }
+/// }
+///
+/// fn main() {
+///     let p = page("/posts/7", || HistoryRouter([Route { path: "/posts/:id", component: Post }]))
+///     assert_eq(p.body, "<!--[--><p>Post 7</p><!--]-->")
+///     assert(p.data.is_none(), "a page has no data")
+/// }
+/// ```
+pub fn page(location: String, f: fn() -> View) -> Page {
+    Page { body: with_location(location, || render_hydratable(f)), data: None }
+}
+
+/// The page at `location` for `data`: `f(data)`'s view rendered as `page`
+/// renders a view, and `data` written as JSON, as `stringify` writes
+/// `data.to_json()`, then made safe for a `script` element: `<`, `>` and `&`
+/// are written as the escapes `\u003c`, `\u003e` and `\u0026`, and U+2028
+/// and U+2029 as `\u2028` and `\u2029`. Those characters occur only inside
+/// JSON's strings, so the text parses back to the same value, and no
+/// `</script>` in the data can end its element. The client hydrates it with
+/// `hydrate_with("#app", fallback, f)`, which reads the data back with
+/// `T::from_json`.
+///
+/// ```
+/// import ui
+/// import ui::html::{p, text}
+/// import ui::ssr::{page_with}
+///
+/// fn greeting(name: String) -> View { p([], [text("Hello, ${name}")]) }
+///
+/// fn main() {
+///     let p = page_with("/", "Ada & <Grace>", greeting)
+///     assert_eq(p.body, "<p>Hello, Ada &amp; &lt;Grace&gt;</p>")
+///     assert_eq(p.data.unwrap(), "\"Ada \\u0026 \\u003cGrace\\u003e\"")
+/// }
+/// ```
+pub fn page_with<T: ToJson>(location: String, data: T, f: fn(T) -> View) -> Page {
+    let body = with_location(location, || render_hydratable(|| f(data)))
+    Page { body: body, data: Some(script_safe(stringify(data.to_json()))) }
+}
+
+/// `template`, a page's HTML such as the built `dist/index.html`, with its
+/// first `<div id="app">` holding `page`'s body, and, when the page has
+/// data, followed by `<script type="application/json" id="nova-data">`
+/// holding the data, just after the root, where `hydrate_with` reads it. A
+/// root that already holds something, whitespace, a placeholder, or a page
+/// SSG wrote, is emptied first, and a data element after it, alone or past
+/// whitespace, dropped, as `serve` and SSG empty it. A root that no
+/// `</div>` closes keeps what follows it: an empty root goes before it, and
+/// the rest stays; so does a data element with no `</script>`. Nothing else
+/// of the template changes: its head, title and scripts serve the server's
+/// pages and the client alike.
+///
+/// It panics with `ssr: the page has no <div id="app">` when the template
+/// has none, written just so.
+///
+/// ```
+/// import ui
+/// import ui::ssr::{Page, document}
+///
+/// let template = "<title>Names</title><div id=\"app\"></div>"
+/// let html = document(template, Page { body: "<p>Ada</p>", data: Some("[\"Ada\"]") })
+/// assert_eq(
+///     html,
+///     "<title>Names</title><div id=\"app\"><p>Ada</p></div><script type=\"application/json\" id=\"nova-data\">[\"Ada\"]</script>",
+/// )
+/// assert_eq(document("<div id=\"app\"></div>", Page { body: "x", data: None }), "<div id=\"app\">x</div>")
+/// // A placeholder in the root gives way to the page.
+/// let waiting = "<div id=\"app\">\n  <div class=\"spinner\"></div>\n</div><script src=\"/app.js\"></script>"
+/// assert_eq(
+///     document(waiting, Page { body: "x", data: None }),
+///     "<div id=\"app\">x</div><script src=\"/app.js\"></script>",
+/// )
+/// ```
+pub fn document(template: String, page: Page) -> String {
+    let empty = match emptied(template) {
+        Some(t) => t
+        None => panic("ssr: the page has no <div id=\"app\">")
+    }
+    let root = app_root()
+    let at = empty.index_of(root).unwrap_or(0)
+    let data = match page.data {
+        Some(d) => "<script type=\"application/json\" id=\"nova-data\">${d}</script>"
+        None => ""
+    }
+    let before = empty.slice(0, at)
+    let after = empty.slice(at + root.len(), empty.len())
+    "${before}<div id=\"app\">${page.body}</div>${data}${after}"
+}
+
+/// What `serve` serves: an address, the built site, the app's routes, and
+/// the page at each location.
+pub record Site {
+    /// The address to listen on, `"host:port"`, such as `"127.0.0.1:3000"`;
+    /// port 0 lets the system choose a free port.
+    pub address: String,
+    /// The directory `nova build --ssr` wrote, such as `"dist"`: its
+    /// `index.html` is every page's template, and its `manifest.json` lists
+    /// the files served.
+    pub dist: String,
+    /// The app's routes: a page's status is `200` when `found` says a route
+    /// serves its location, and SSG writes their `static_paths`.
+    pub routes: [Route],
+    /// The page at a location, a path and its query, such as one of `page`
+    /// or `page_with`.
+    pub render: fn(String) -> Page,
+}
+
+/// Serves `site` over HTTP until the process is asked to stop, then returns
+/// `Ok(())`; or, when the program's arguments hold `--ssg` and a directory,
+/// writes the site's static pages into that directory, and returns.
+///
+/// **Serving.** It first reads `<dist>/index.html`, the template, and
+/// `<dist>/manifest.json`, whose `files` are what it may serve, and returns
+/// an `IoError` naming the file when either cannot be read, when the
+/// manifest has no `files`, or when the template has no `<div id="app">`.
+/// An `index.html` whose root holds a page, as the one SSG writes for `/`
+/// does, or a placeholder, is a template too: its root is emptied, and the
+/// data after it dropped, as `document` empties it; a root that no `</div>`
+/// closes keeps what follows it, after an empty root. A manifest's path with
+/// a piece that is empty, `.` or `..`, or that holds `\` or NUL, which
+/// could name a file outside `dist`, is never served. It binds `address`,
+/// returning an `IoError` naming it when that fails, then prints
+/// `ssr: serving http://<host>:<port>/`, the port the one bound, and flushes
+/// it. Each `GET` is answered by its path: the target before any `?`,
+/// percent-decoded, less its leading `/`.
+///
+/// - A path that the manifest lists gets `200` and the file, read then, with
+///   the `Content-Type` its extension gives (`html`, `js` and `mjs`, `wasm`,
+///   `css`, `json`, `svg`, `png`, `jpg`, `gif`, `webp`, `ico`, `txt` and
+///   `woff2`; any other is `application/octet-stream`) and
+///   `X-Content-Type-Options: nosniff`. One that cannot be read gets `404`.
+/// - Any other path whose last piece holds a `.` gets `404 not found`.
+/// - Any other path is a page: `document(template, render(target))`, the
+///   target with its query, as `text/html; charset=utf-8`, with `200` when
+///   `found(routes, target)`, and `404` otherwise.
+///
+/// No file the manifest does not list is ever read, so a file added after
+/// the build is served only once the server starts again. Any method but
+/// `GET` gets `404`. It is built on `std/http`'s `Server`, so connections,
+/// limits and the stop on SIGTERM or SIGINT are as `Server::listen` says.
+///
+/// **SSG.** With `--ssg <dir>` in the program's arguments it binds nothing.
+/// It reads `<dir>/index.html` as the template, as serving does, so SSG can
+/// run again over its own output, then for each of `static_paths(routes)`
+/// writes `document(template, render(path))`: `/` to `<dir>/index.html`,
+/// which it overwrites, and any other path to
+/// `<dir>/<its pieces>/index.html`, making the directories. It prints
+/// `ssg: wrote <file>` for each. A path with a piece that is empty, `.` or
+/// `..`, or that holds `\`, NUL, `?` or `#`, is refused: it returns an
+/// `IoError` naming the path, and writes nothing more. `nova build --ssg`
+/// runs the server this way.
+///
+/// A server's `main`, for a project whose `src/app.nova` holds `App`,
+/// `Data` and `routes`:
+///
+/// ```ignore
+/// import ui
+/// import ui::ssr::{Page, Site, page_with, serve}
+/// import app::{App, Data, routes}
+///
+/// fn render(location: String) -> Page {
+///     page_with(location, Data { names: ["Ada", "Grace"] }, App)
+/// }
+///
+/// async fn main() {
+///     let site = Site { address: "127.0.0.1:3000", dist: "dist", routes: routes(), render: render }
+///     match serve(site).await {
+///         Ok(_) => {}
+///         Err(e) => {
+///             eprintln(e.message)
+///             exit(1)
+///         }
+///     }
+/// }
+/// ```
+pub async fn serve(site: Site) -> Result<(), IoError> {
+    match ssg_dir(args()) {
+        Some(dir) => return generate(site, dir).await
+        None => {}
+    }
+    let index = "${site.dist}/index.html"
+    let template = match read_to_string(index).await {
+        Ok(t) => {
+            match emptied(t) {
+                Some(t) => t
+                None => return Err(rootless("ssr", index))
+            }
+        }
+        Err(e) => return Err(unreadable("ssr", index, e))
+    }
+    let listing = "${site.dist}/manifest.json"
+    let text = match read_to_string(listing).await {
+        Ok(t) => t
+        Err(e) => return Err(unreadable("ssr", listing, e))
+    }
+    let files = match listed(text) {
+        Some(files) => files
+        None => {
+            return Err(
+                IoError { kind: InvalidData, message: "ssr: ${listing} has no \"files\" object" },
+            )
+        }
+    }
+    // As `Server::listen` does before its `bind`: from here a signal stops
+    // the server gracefully, even before `listen_on` runs.
+    let _ = shutdown_requested()
+    let l = match bind(site.address) {
+        Ok(l) => l
+        Err(e) => {
+            return Err(
+                IoError { kind: e.kind, message: "ssr: cannot bind ${site.address}: ${e.message}" },
+            )
+        }
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => {
+            let _ = l.close().await
+            return Err(e)
+        }
+    }
+    println("ssr: serving http://${host_of(site.address)}:${port}/")
+    let _ = stdout().flush().await
+    let served = Served {
+        dist: site.dist,
+        files: files,
+        template: template,
+        routes: site.routes,
+        render: site.render,
+    }
+    Server::new().fallback(|r: Request| answer(served, r)).listen_on(l).await
+}
+
+// What each request is answered from: the site, and what `serve` read when
+// it started.
+record Served {
+    dist: String,
+    files: Map<String, JsonValue>,
+    template: String,
+    routes: [Route],
+    render: fn(String) -> Page,
+}
+
+// The response to a `GET` of `req.path` (spec §6.3). `Server` sends any
+// other method `not_found` before it asks.
+fn answer(s: Served, req: Request) -> Response {
+    let target = req.path
+    let raw = match target.index_of("?") {
+        Some(at) => target.slice(0, at)
+        None => target
+    }
+    let decoded_path = decoded(raw)
+    let path = if decoded_path.starts_with("/") {
+        decoded_path.slice(1, decoded_path.len())
+    } else {
+        decoded_path
+    }
+    if s.files.get(path).is_some() { return file(s.dist, path) }
+    let pieces = path.split("/")
+    if pieces[pieces.len() - 1].contains(".") { return Response::not_found() }
+    let render = s.render
+    let body = bytes_from_string(document(s.template, render(target)))
+    let mut h: Map<String, String> = Map::new()
+    h.insert("content-length", "${body.len()}")
+    h.insert("content-type", "text/html; charset=utf-8")
+    let status = if found(s.routes, target) { 200 } else { 404 }
+    Response { status: status, headers: h, body: body }
+}
+
+// `200` and the file at `path` under `dist`, read now, or `404` when it
+// cannot be read. The read is `std/fs`'s `read` without its `async`, which
+// a handler cannot await: the builtin, then its slot, with nothing between.
+fn file(dist: String, path: String) -> Response {
+    if fs_read("${dist}/${path}") != 0 { return Response::not_found() }
+    let body = fs_take_bytes()
+    let mut h: Map<String, String> = Map::new()
+    h.insert("content-length", "${body.len()}")
+    h.insert("content-type", content_type(path))
+    h.insert("x-content-type-options", "nosniff")
+    Response { status: 200, headers: h, body: body }
+}
+
+// The `Content-Type` of a file named `path`, by its extension in any case,
+// as `nova dev` gives it, with `webp` too.
+fn content_type(path: String) -> String {
+    let pieces = path.split("/")
+    let name = pieces[pieces.len() - 1]
+    let parts = name.split(".")
+    let ext = if parts.len() < 2 { "" } else { parts[parts.len() - 1].to_lower() }
+    if ext == "html" { return "text/html; charset=utf-8" }
+    if ext == "js" || ext == "mjs" { return "text/javascript; charset=utf-8" }
+    if ext == "wasm" { return "application/wasm" }
+    if ext == "css" { return "text/css; charset=utf-8" }
+    if ext == "json" { return "application/json" }
+    if ext == "svg" { return "image/svg+xml" }
+    if ext == "png" { return "image/png" }
+    if ext == "jpg" { return "image/jpeg" }
+    if ext == "gif" { return "image/gif" }
+    if ext == "webp" { return "image/webp" }
+    if ext == "ico" { return "image/x-icon" }
+    if ext == "txt" { return "text/plain; charset=utf-8" }
+    if ext == "woff2" { return "font/woff2" }
+    "application/octet-stream"
+}
+
+// SSG (spec §6.4): the static routes' pages written into `dir`, each
+// rendered into `dir/index.html` as it was before the first is written.
+async fn generate(site: Site, dir: String) -> Result<(), IoError> {
+    if dir == "" {
+        return Err(IoError { kind: InvalidData, message: "ssg: --ssg needs a directory" })
+    }
+    let index = "${dir}/index.html"
+    let template = match read_to_string(index).await {
+        Ok(t) => {
+            match emptied(t) {
+                Some(t) => t
+                None => return Err(rootless("ssg", index))
+            }
+        }
+        Err(e) => return Err(unreadable("ssg", index, e))
+    }
+    let render = site.render
+    let paths = static_paths(site.routes)
+    let mut i = 0
+    while i < paths.len() {
+        let path = paths[i]
+        let pieces = match file_pieces(path) {
+            Some(pieces) => pieces
+            None => {
+                return Err(
+                    IoError {
+                        kind: InvalidData,
+                        message: "ssg: the route path \"${path}\" names no file: a piece of it is empty, \".\" or \"..\", or holds \"\\\", NUL, \"?\" or \"#\"",
+                    },
+                )
+            }
+        }
+        let folder = if pieces.len() == 0 { dir } else { "${dir}/${"/".join(pieces)}" }
+        match create_dir_all(folder).await {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(
+                    IoError { kind: e.kind, message: "ssg: cannot make ${folder}: ${e.message}" },
+                )
+            }
+        }
+        let file = "${folder}/index.html"
+        match write_string(file, document(template, render(path))).await {
+            Ok(_) => {}
+            Err(e) => {
+                return Err(
+                    IoError { kind: e.kind, message: "ssg: cannot write ${file}: ${e.message}" },
+                )
+            }
+        }
+        println("ssg: wrote ${file}")
+        i = i + 1
+    }
+    Ok(())
+}
+
+// The pieces of the directory a static route's page goes into, below SSG's
+// directory: `path` less one leading `/`, split at `/`, so none for `/`; or
+// `None` when a piece is empty, `.` or `..`, or holds `\`, NUL, `?` or `#`.
+fn file_pieces(path: String) -> Option<[String]> {
+    let rest = if path.starts_with("/") { path.slice(1, path.len()) } else { path }
+    if rest == "" {
+        let none: [String] = []
+        return Some(none)
+    }
+    let pieces = rest.split("/")
+    let mut i = 0
+    while i < pieces.len() {
+        let p = pieces[i]
+        if !plain_piece(p) || p.contains("?") || p.contains("#") { return None }
+        i = i + 1
+    }
+    Some(pieces)
+}
+
+// The directory after `--ssg` in the program's arguments, after its name:
+// `None` when there is no `--ssg`, and `""` when nothing follows it.
+fn ssg_dir(argv: Vec<String>) -> Option<String> {
+    let mut i = 1
+    while i < argv.len() {
+        if argv.get(i).unwrap_or("") == "--ssg" { return Some(argv.get(i + 1).unwrap_or("")) }
+        i = i + 1
+    }
+    None
+}
+
+// The manifest's `files`, by path, from its JSON text, less those `inside`
+// leaves out; or `None` when it has no `files` object.
+fn listed(text: String) -> Option<Map<String, JsonValue>> {
+    match parse(text) {
+        Ok(v) => {
+            match v {
+                Object(m) => {
+                    match m.get("files") {
+                        Some(f) => {
+                            match f {
+                                Object(files) => Some(inside(files))
+                                _ => None
+                            }
+                        }
+                        None => None
+                    }
+                }
+                _ => None
+            }
+        }
+        Err(_) => None
+    }
+}
+
+// `files` less each path that could name a file outside the directory it is
+// read from: one with a piece that is empty, `.` or `..`, or that holds `\`
+// or NUL, as `file_pieces` refuses a route's path. A hand-written manifest
+// can list one; it is never served.
+fn inside(files: Map<String, JsonValue>) -> Map<String, JsonValue> {
+    let mut kept = files
+    let names = files.keys()
+    let mut i = 0
+    while i < names.len() {
+        if !plain_path(names[i]) { let _ = kept.remove(names[i]) }
+        i = i + 1
+    }
+    kept
+}
+
+// Whether each piece of `path`, between its `/`s, is plain (`plain_piece`).
+fn plain_path(path: String) -> Bool {
+    let pieces = path.split("/")
+    let mut i = 0
+    while i < pieces.len() {
+        if !plain_piece(pieces[i]) { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Whether `piece` names a file or a directory below the one it is in: it is
+// not empty, `.` or `..`, and holds no `\` or NUL.
+fn plain_piece(piece: String) -> Bool {
+    let special = piece == "" || piece == "." || piece == ".."
+    !special && !piece.contains("\\") && !piece.contains("\0")
+}
+
+// The root a page's view goes into, written just so.
+fn app_root() -> String { "<div id=\"app\"></div>" }
+
+// The template in `html`, a page's HTML: `html` with its first
+// `<div id="app">` emptied, written `<div id="app"></div>`, and the data's
+// `script` just after it removed. The built `index.html`'s root is empty
+// already; a project's own page may hold whitespace or a placeholder there;
+// and the `index.html` SSG wrote for `/` holds a view and its data, so that
+// a server started after `nova build --ssg`, or SSG run again, finds the
+// page it was built with. A view's HTML holds no `<div` or `</div>` but its
+// own elements', since text and attribute values are escaped, so the root
+// ends at the `</div>` that balances it; a comment of the template holding
+// one could end it early. The data's `script` goes when it follows the
+// root, alone or past whitespace, as the client's `hydrate_with` would read
+// it there, and has its `</script>`; the whitespace stays. A data `script`
+// with no `</script>` stays as it is, since nothing tells where its text
+// ends, and a root no `</div>` balances keeps what follows it, after an
+// empty root. `None` when there is no `<div id="app">`.
+fn emptied(html: String) -> Option<String> {
+    let open = "<div id=\"app\">"
+    let at = match html.index_of(open) {
+        Some(at) => at
+        None => return None
+    }
+    let cs = html.chars()
+    let mut depth = 1
+    let mut i = at + open.len()
+    while depth > 0 && i < cs.len() {
+        if matches_at(cs, i, "</div>") {
+            depth = depth - 1
+            if depth > 0 { i = i + 6 }
+        } else {
+            if matches_at(cs, i, "<div") && i + 4 < cs.len() && ends_name(cs[i + 4]) {
+                depth = depth + 1
+            }
+            i = i + 1
+        }
+    }
+    let start = at + open.len()
+    if depth > 0 {
+        return Some("${html.slice(0, at)}${app_root()}${html.slice(start, html.len())}")
+    }
+    let end = i + 6
+    let mut rest = html.slice(end, html.len())
+    let mut k = end
+    while k < cs.len() && html_space(cs[k]) { k = k + 1 }
+    if matches_at(cs, k, "<script type=\"application/json\" id=\"nova-data\">") {
+        match html.slice(k, html.len()).index_of("</script>") {
+            Some(close) => rest = "${html.slice(end, k)}${html.slice(k + close + 9, html.len())}"
+            None => {}
+        }
+    }
+    Some("${html.slice(0, at)}${app_root()}${rest}")
+}
+
+// Whether `word`, in lower case, is written in `cs` at `at`, ASCII letters
+// in either case.
+fn matches_at(cs: [Char], at: Int, word: String) -> Bool {
+    let ws = word.chars()
+    if at + ws.len() > cs.len() { return false }
+    let mut k = 0
+    while k < ws.len() {
+        let c = cs[at + k]
+        let same = c == ws[k] || (c >= 'A' && c <= 'Z' && "${c}".to_lower() == "${ws[k]}")
+        if !same { return false }
+        k = k + 1
+    }
+    true
+}
+
+// Whether `c` is whitespace as HTML reads it: a space, a tab, an LF, a CR
+// or a form feed.
+fn html_space(c: Char) -> Bool {
+    c == ' ' || c == '\t' || c == '\n' || c == '\r' || "${c}" == "\u{c}"
+}
+
+// Whether `c` ends a tag's name, as a space, `>` or `/` does.
+fn ends_name(c: Char) -> Bool {
+    c == ' ' || c == '>' || c == '/' || c == '\t' || c == '\n' || c == '\r'
+}
+
+// The error for a file that cannot be read, naming it.
+fn unreadable(by: String, path: String, e: IoError) -> IoError {
+    IoError { kind: e.kind, message: "${by}: cannot read ${path}: ${e.message}" }
+}
+
+// The error for a template with no root, naming it.
+fn rootless(by: String, path: String) -> IoError {
+    IoError { kind: InvalidData, message: "${by}: ${path} has no <div id=\"app\">" }
+}
+
+// The host of `address`, `"host:port"`: all before its last `:`.
+fn host_of(address: String) -> String {
+    let cs = address.chars()
+    let mut at = cs.len()
+    let mut i = 0
+    while i < cs.len() {
+        if cs[i] == ':' { at = i }
+        i = i + 1
+    }
+    address.slice(0, at)
+}
+
+// `json` made safe for a `script` element (spec §6.2): `<`, `>` and `&`, and
+// U+2028 and U+2029, as JSON's `\u` escapes, which only its strings can hold.
+fn script_safe(json: String) -> String {
+    let cs = json.chars()
+    let mut parts = [""; cs.len()]
+    let mut i = 0
+    while i < cs.len() {
+        let c = cs[i]
+        let code = char_to_int(c)
+        parts[i] = if c == '<' {
+            "\\u003c"
+        } else if c == '>' {
+            "\\u003e"
+        } else if c == '&' {
+            "\\u0026"
+        } else if code == 8232 {
+            "\\u2028"
+        } else if code == 8233 {
+            "\\u2029"
+        } else {
+            "${c}"
+        }
+        i = i + 1
+    }
+    "".join(parts)
+}
+
+// `text` percent-decoded as UTF-8, or as written when a `%` is not followed
+// by two hex digits or the bytes are not UTF-8: `std/ui/router`'s rule.
+fn decoded(text: String) -> String {
+    if !text.contains("%") { return text }
+    let bs = bytes_from_string(text).to_ints()
+    let mut out = [0; bs.len()]
+    let mut n = 0
+    let mut i = 0
+    while i < bs.len() {
+        if bs[i] == 37 {
+            if i + 2 >= bs.len() { return text }
+            let hi = hex_digit(bs[i + 1])
+            let lo = hex_digit(bs[i + 2])
+            if hi < 0 || lo < 0 { return text }
+            out[n] = hi * 16 + lo
+            i = i + 3
+        } else {
+            out[n] = bs[i]
+            i = i + 1
+        }
+        n = n + 1
+    }
+    bytes_from_ints(out).slice(0, n).to_string().unwrap_or(text)
+}
+
+// The value of the hex digit whose ASCII code is `b`, or -1.
+fn hex_digit(b: Int) -> Int {
+    if b >= 48 && b <= 57 {
+        b - 48
+    } else if b >= 65 && b <= 70 {
+        b - 55
+    } else if b >= 97 && b <= 102 {
+        b - 87
+    } else {
+        -1
+    }
+}
