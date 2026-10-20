@@ -1,0 +1,34 @@
+//! The server's side of `tests/dom/hydrate_mismatch.mjs`: for each root of
+//! the page, a line of its id and the HTML `render_hydratable` writes for
+//! the server's view of it; and one root's HTML written by hand, with a
+//! comment that is no marker where the client's view has an element.
+
+import ui
+import view::{
+    end_server,
+    joined_server,
+    missing_server,
+    nothing_server,
+    over_server,
+    region_server,
+    root_server,
+    separator_server,
+    stops_server,
+    tag_server,
+    text_server,
+}
+
+fn main() {
+    println("tag ${render_hydratable(tag_server)}")
+    println("text ${render_hydratable(text_server)}")
+    println("region ${render_hydratable(region_server)}")
+    println("end ${render_hydratable(end_server)}")
+    println("missing ${render_hydratable(missing_server)}")
+    println("nothing ${render_hydratable(nothing_server)}")
+    println("over ${render_hydratable(over_server)}")
+    println("separator ${render_hydratable(separator_server)}")
+    println("joined ${render_hydratable(joined_server)}")
+    println("root ${render_hydratable(root_server)}")
+    println("comment <div><!-- a note --><p>a</p></div>")
+    println("stops ${render_hydratable(stops_server)}")
+}

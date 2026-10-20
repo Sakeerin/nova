@@ -11307,11 +11307,11 @@ fn example_05_geometry_runs() {
 
 /// `std/ui`'s programs (spec
 /// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
-/// §9.2), and `std/ui/router`'s paths and queries (spec 4.5 §3.2 to §3.5):
-/// each prints what `30-FRONTEND.md` §13's unit tests check, and runs
-/// the same with `NOVA_GC_STRESS=1` (collect on every allocation), so a part
-/// of the graph only the state's root keeps, freed, shows as wrong output or
-/// a crash.
+/// §9.2), `std/ui/router`'s paths and queries (spec 4.5 §3.2 to §3.5), and
+/// `render_hydratable`'s markers (spec 4.6 §9.2): each prints what
+/// `30-FRONTEND.md` §13's unit tests check, and runs the same with
+/// `NOVA_GC_STRESS=1` (collect on every allocation), so a part of the graph
+/// only the state's root keeps, freed, shows as wrong output or a crash.
 #[test]
 fn ui_programs_run_and_survive_gc_stress() {
     for name in [
@@ -11322,6 +11322,7 @@ fn ui_programs_run_and_survive_gc_stress() {
         "ui_collect",
         "ui_view",
         "ui_router",
+        "ui_hydratable",
     ] {
         let source = repo_root().join(format!("tests/runtime/{name}.nova"));
         let expected = std::fs::read_to_string(source.with_extension("stdout"))
@@ -11445,6 +11446,50 @@ fn ui_checks_every_name_and_never_parses_html() {
         assert!(
             err.ends_with(&format!("nova: panic: std/ui: {message}\n")),
             "{attrs}: {err}"
+        );
+    }
+}
+
+/// Natively there is no page: `hydrate` and `hydrate_with` panic with
+/// `mount`'s message, before they look for a root or for data, and
+/// `render_hydratable` still renders (spec 4.6 §4.1).
+#[test]
+fn ui_hydrate_panics_natively() {
+    let dir = std::env::temp_dir().join("nova-ui-hydrate-native");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for (file, call) in [
+        ("plain.nova", "hydrate(\"#app\", | | text(\"no page\"))"),
+        (
+            "data.nova",
+            "hydrate_with(\"#app\", \"none\", |s: String| text(s))",
+        ),
+    ] {
+        std::fs::write(
+            dir.join(file),
+            format!(
+                "import ui\nimport ui::html::{{text}}\n\nfn main() {{\n    println(render_hydratable(| | text(\"fine\")))\n    {call}\n    println(\"not reached\")\n}}\n"
+            ),
+        )
+        .expect("write the program");
+        let a = nova()
+            .current_dir(&dir)
+            .arg("run")
+            .arg(file)
+            .assert()
+            .failure();
+        let o = a.get_output();
+        assert_eq!(
+            String::from_utf8_lossy(&o.stdout).replace("\r\n", "\n"),
+            "fine\n",
+            "{file}"
+        );
+        let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
+        assert!(
+            err.ends_with(
+                "nova: panic: std/ui: mount needs a build for WASM; render_to_string renders on any target\n"
+            ),
+            "{file}: {err}"
         );
     }
 }

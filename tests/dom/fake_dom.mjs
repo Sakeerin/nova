@@ -8,6 +8,14 @@
 // collection under stress would free the closure behind it. And as a
 // browser does, it keeps an exception a listener throws, in `uncaught`,
 // and goes on: the dispatch that called the listener returns normally.
+//
+// For hydration (spec
+// docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+// §9.3), it has comments, an `innerHTML` setter that parses the HTML
+// `render_hydratable` writes, a textarea's value that, as a browser's, is
+// not its `value` attribute, and a console whose errors it keeps, in
+// `errors`, and prints at once, so that a harness's output shows them in
+// order.
 
 // What listeners threw, as a browser reports them.
 const uncaught = [];
@@ -140,8 +148,12 @@ class FakeNode extends Target {
     siblings.splice(siblings.indexOf(this), 1);
     this.parentNode = null;
   }
+  // The text of every text node inside, as a browser's: comments' is not.
   get textContent() {
-    return this.childNodes.map((c) => c.textContent).join("");
+    return this.childNodes
+      .filter((c) => !(c instanceof FakeComment))
+      .map((c) => c.textContent)
+      .join("");
   }
   set textContent(value) {
     for (const c of [...this.childNodes]) c.remove();
@@ -169,7 +181,100 @@ class FakeText extends FakeNode {
   }
 }
 
+class FakeComment extends FakeNode {
+  constructor(data, doc) {
+    super("#comment", doc);
+    this.data = data;
+  }
+  get textContent() {
+    return this.data;
+  }
+  set textContent(value) {
+    this.data = String(value);
+  }
+  get outerHTML() {
+    return `<!--${this.data}-->`;
+  }
+}
+
 const VOID = new Set(["br", "hr", "img", "input", "link", "meta"]);
+
+// The void elements std/ui writes, which the parser closes as it opens them.
+const PARSED_VOID = new Set(["br", "hr", "img", "input"]);
+
+// The entities `render_hydratable` writes.
+const ENTITIES = new Map([
+  ["&amp;", "&"],
+  ["&lt;", "<"],
+  ["&gt;", ">"],
+  ["&quot;", '"'],
+  ["&#13;", "\r"],
+]);
+
+// `s` with its entities decoded; any other `&` is a SyntaxError, since
+// std/ui escapes every one.
+function decode(s) {
+  return s.replace(/&[^&;]*;?/g, (m) => {
+    if (!ENTITIES.has(m)) throw domError("SyntaxError", `the fake DOM does not parse "${m}"`);
+    return ENTITIES.get(m);
+  });
+}
+
+// Parse `html` into `parent`'s children, as a browser parses what
+// `render_hydratable` writes: elements, their double-quoted attributes, the
+// void elements std/ui knows, comments, and text with five entities. As a
+// browser's parser does, it first turns each CR LF, and each CR left, into
+// LF. Anything else, an unclosed or a stray tag included, is a SyntaxError.
+function parseInto(parent, html) {
+  const s = String(html).replace(/\r\n?/g, "\n");
+  const doc = parent.ownerDocument;
+  const open = [parent];
+  const top = () => open[open.length - 1];
+  const start = /<([a-zA-Z][a-zA-Z0-9-]*)/y;
+  const attr = /\s+([^\s"'>\/=]+)="([^"]*)"/y;
+  const end = /<\/([a-zA-Z][a-zA-Z0-9-]*)>/y;
+  let at = 0;
+  while (at < s.length) {
+    if (s.startsWith("<!--", at)) {
+      const close = s.indexOf("-->", at + 4);
+      if (close < 0) throw domError("SyntaxError", "an unclosed comment");
+      top().appendChild(new FakeComment(s.slice(at + 4, close), doc));
+      at = close + 3;
+    } else if (s.startsWith("</", at)) {
+      end.lastIndex = at;
+      const m = end.exec(s);
+      const tag = m === null ? null : m[1].toLowerCase();
+      if (tag === null || open.length === 1 || top().localName !== tag) {
+        throw domError("SyntaxError", `an unexpected end tag at ${at}: ${s.slice(at, at + 20)}`);
+      }
+      open.pop();
+      at = end.lastIndex;
+    } else if (s[at] === "<") {
+      start.lastIndex = at;
+      const m = start.exec(s);
+      if (m === null) throw domError("SyntaxError", `a "<" that opens no tag at ${at}`);
+      const el = doc.createElement(m[1]);
+      at = start.lastIndex;
+      for (;;) {
+        attr.lastIndex = at;
+        const a = attr.exec(s);
+        if (a === null) break;
+        el.setAttribute(a[1], decode(a[2]));
+        at = attr.lastIndex;
+      }
+      if (s[at] !== ">") throw domError("SyntaxError", `a tag not closed by ">" at ${at}`);
+      at += 1;
+      top().appendChild(el);
+      if (!PARSED_VOID.has(el.localName)) open.push(el);
+    } else {
+      const next = s.indexOf("<", at);
+      const stop = next < 0 ? s.length : next;
+      top().appendChild(new FakeText(decode(s.slice(at, stop)), doc));
+      at = stop;
+    }
+  }
+  if (open.length !== 1) throw domError("SyntaxError", `an unclosed <${top().localName}>`);
+}
 
 function escapeText(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -220,7 +325,11 @@ class FakeElement extends FakeNode {
   set className(value) {
     this.setAttribute("class", value);
   }
+  // A textarea's value is its text until it is set, as in a browser, which
+  // ignores a `value` attribute on one; another element's falls back to the
+  // attribute.
   get value() {
+    if (this.localName === "textarea") return this.ownValue ?? this.textContent;
     return this.ownValue ?? this.getAttribute("value") ?? "";
   }
   set value(v) {
@@ -257,6 +366,11 @@ class FakeElement extends FakeNode {
   }
   get innerHTML() {
     return this.childNodes.map((c) => c.outerHTML).join("");
+  }
+  // Replaces the children with what `html` parses to (`parseInto`).
+  set innerHTML(html) {
+    for (const c of [...this.childNodes]) c.remove();
+    parseInto(this, html);
   }
   get outerHTML() {
     let attrs = "";
@@ -325,6 +439,9 @@ class FakeDocument extends FakeNode {
   }
   createTextNode(data) {
     return new FakeText(String(data), this);
+  }
+  createComment(data) {
+    return new FakeComment(String(data), this);
   }
   getElementById(id) {
     return this.documentElement.querySelectorAll(`#${id}`)[0] ?? null;
@@ -425,6 +542,8 @@ class FakeWindow extends Target {
     this.routes = {};
     this.requests = [];
     this.uncaught = uncaught;
+    // What `console.error` was given.
+    this.errors = [];
   }
   // A reply after a timer, never from the network: a route's
   // `{ status, body }`, or a `TypeError` for `{ error }` or no route.
@@ -450,7 +569,9 @@ class FakeWindow extends Target {
 }
 
 // Install the page as `window`, `document`, `location`, `history` and
-// `fetch`, at `options.url` (`http://localhost/` by default).
+// `fetch`, at `options.url` (`http://localhost/` by default), and its
+// console's `error`, which keeps each message in `errors` and prints it to
+// stdout at once, after `console.error: `.
 export function install(options = {}) {
   const win = new FakeWindow(options.url ?? "http://localhost/");
   globalThis.window = win;
@@ -458,6 +579,11 @@ export function install(options = {}) {
   globalThis.location = win.location;
   globalThis.history = win.history;
   globalThis.fetch = (url, init) => win.fetch(url, init);
+  console.error = (...args) => {
+    const message = args.map(String).join(" ");
+    win.errors.push(message);
+    process.stdout.write(`console.error: ${message}\n`);
+  };
   return win;
 }
 

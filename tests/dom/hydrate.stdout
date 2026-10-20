@@ -1,0 +1,42 @@
+counter: before hydration, the textarea's value is ""
+hydrated
+counter: <div class="odd"><p>Count: <!--|-->1</p><button id="inc">+</button><input type="text" value="0"><textarea id="note" value="a fixed note"></textarea></div>
+counter: 9 of 9 server nodes kept, in order; new: none
+lists: <div><button id="toggle">toggle</button><button id="more">more</button><!--[--><p id="panel">panel</p><!--]--><ul id="rows"><li>first</li><!--[--><li>row 1<!--[--><span>!</span><!--]--></li><li>row 2<!--[--><span>!</span><!--]--></li><!--]--><li>last</li></ul><ul id="none"><!--[--><!--]--></ul></div>
+lists: 31 of 31 server nodes kept, in order; new: none
+texts: <div><p id="greeting">Hello, <!--|-->world<!--|--><!--|-->!</p><p id="alone"></p><p id="around"><span>s</span></p><p id="listed">[<!--[-->x<!--|-->y<!--]-->]</p><p id="cr">a\rb</p><button id="word">word</button></div>
+texts: 24 of 24 server nodes kept, in order; new: text "", text "", text "", text ""
+data: <div><h2>Guests &lt;/script&gt; &amp; &lt;b&gt;friends&lt;/b&gt;</h2><p id="nova-data">not the data</p><ul><!--[--><li>Ada</li><li>Grace</li><!--]--></ul><button id="guest">guest</button></div>
+data: 14 of 14 server nodes kept, in order; new: none
+filled: <div><h2>No data</h2><ul><!--[--><li>Hedy</li><!--]--></ul></div>
+filled: 8 of 8 server nodes kept, in order; new: none
+fallback: <div><h2>No data</h2><ul><li>Hedy</li></ul></div>
+fallback: 0 of 0 server nodes kept, in order; new: <div>, <h2>, text "No data", <ul>, text "", <li>, text "Hedy", text ""
+decoy: <div><h2>No data</h2><ul><!--[--><li>Hedy</li><!--]--></ul></div>
+decoy: 8 of 8 server nodes kept, in order; new: none
+untyped: <div><h2>No data</h2><ul><li>Hedy</li></ul></div>
+untyped: 0 of 0 server nodes kept, in order; new: <div>, <h2>, text "No data", <ul>, text "", <li>, text "Hedy", text ""
+behind: <div><h2>No data</h2><ul><li>Hedy</li></ul></div>
+behind: 0 of 0 server nodes kept, in order; new: <div>, <h2>, text "No data", <ul>, text "", <li>, text "Hedy", text ""
+empty: <p>builthere</p>
+empty: 0 of 0 server nodes kept, in order; new: <p>, text "built", text "", text "here"
+blank: <p>builthere</p>
+blank: 0 of 1 server nodes kept, in order; new: <p>, text "built", text "", text "here"
+feed: <p>builthere</p>
+feed: 0 of 1 server nodes kept, in order; new: <p>, text "built", text "", text "here"
+counter: the input's value is 1
+counter: the textarea is the server's: true; its value is "a fixed note"
+counter: <div class="even"><p>Count: <!--|-->2</p><button id="inc">+</button><input type="text" value="0"><textarea id="note" value="a fixed note"></textarea></div>
+counter: 9 of 9 server nodes kept, in order; new: none
+counter: the input's value is 2
+clicked row 2
+lists: <div><button id="toggle">toggle</button><button id="more">more</button><!--[--><!--]--><ul id="rows"><li>first</li><!--[--><li>row 1<!--[--><!--]--></li><li>row 2<!--[--><!--]--></li><!--]--><li>last</li></ul><ul id="none"><!--[--><!--]--></ul></div>
+lists: <div><button id="toggle">toggle</button><button id="more">more</button><!--[--><p id="panel">panel</p><!--]--><ul id="rows"><li>first</li><!--[--><li>row 1<!--[--><span>!</span><!--]--></li><li>row 2<!--[--><span>!</span><!--]--></li><!--]--><li>last</li></ul><ul id="none"><!--[--><!--]--></ul></div>
+lists: <div><button id="toggle">toggle</button><button id="more">more</button><!--[--><p id="panel">panel</p><!--]--><ul id="rows"><li>first</li><!--[--><li>row 1<span>!</span></li><li>row 2<span>!</span></li><li>row 3<span>!</span></li><!--]--><li>last</li></ul><ul id="none"><!--[--><!--]--></ul></div>
+lists: the server's 6 outer markers are in the page: true
+lists: a row the server wrote is in the page: false
+clicked row 3
+texts: <div><p id="greeting">Hello, <!--|-->there<!--|--><!--|-->!</p><p id="alone"></p><p id="around"><span>s</span></p><p id="listed">[<!--[-->x<!--|-->y<!--]-->]</p><p id="cr">a\rb</p><button id="word">word</button></div>
+texts: 24 of 24 server nodes kept, in order; new: text "", text "", text "", text ""
+data: <div><h2>Guests &lt;/script&gt; &amp; &lt;b&gt;friends&lt;/b&gt;</h2><p id="nova-data">not the data</p><ul><!--[--><li>Ada</li><li>Grace</li><li>Hedy</li><!--]--></ul><button id="guest">guest</button></div>
+console errors: 0

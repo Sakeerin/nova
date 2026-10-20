@@ -1,0 +1,88 @@
+//! The views of `tests/dom/hydrate_mismatch.mjs` (spec
+//! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
+//! §4.3, §9.3): for each root, the view `server.nova` renders, and another,
+//! a little different, which `main.nova` hydrates there.
+
+import ui
+import ui::html::{button, div, dyn_text, em, id, li, on_click, p, span, text, ul}
+
+fn items(xs: [String]) -> View { ul([], [for_each(signal(xs), |x: String| li([], [text(x)]))]) }
+
+/// Another tag.
+pub fn tag_server() -> View { div([], [text("a")]) }
+
+pub fn tag_client() -> View { p([], [text("a")]) }
+
+/// Another text, longer than a mismatch quotes.
+pub fn text_server() -> View {
+    p([], [text("The server wrote this text, which is longer than forty characters")])
+}
+
+pub fn text_client() -> View {
+    p([], [dyn_text(|| "The client reads this text, which is longer than forty characters")])
+}
+
+/// A region where the server had none.
+pub fn region_server() -> View { div([], [p([], [text("x")])]) }
+
+pub fn region_client() -> View { div([], [show(signal(true), || p([], [text("x")]))]) }
+
+/// A region with fewer views, and one with more.
+pub fn end_server() -> View { items(["a", "b"]) }
+
+pub fn end_client() -> View { items(["a"]) }
+
+pub fn missing_server() -> View { items(["a"]) }
+
+pub fn missing_client() -> View { items(["a", "b"]) }
+
+/// An element with a child more, and one with a child less.
+pub fn nothing_server() -> View { div([], [span([], [])]) }
+
+pub fn nothing_client() -> View { div([], [span([], []), em([], [])]) }
+
+pub fn over_server() -> View { div([], [span([], []), em([], [])]) }
+
+pub fn over_client() -> View { div([], [span([], [])]) }
+
+/// A text more, after another, and an element after a text where the server
+/// had a second text.
+pub fn separator_server() -> View { p([], [text("a")]) }
+
+pub fn separator_client() -> View { p([], [text("a"), dyn_text(|| "b")]) }
+
+pub fn joined_server() -> View { p([], [text("a"), text("b")]) }
+
+pub fn joined_client() -> View { p([], [text("a"), span([], [])]) }
+
+/// A root with more than the client's view: a node left after it.
+pub fn root_server() -> View { p([], [text("x")]) }
+
+pub fn root_client() -> View { text("") }
+
+/// An element where the server's HTML holds a comment that is no marker,
+/// which a server written by hand can write, as `server.nova` does.
+pub fn comment_client() -> View { div([], [p([], [text("a")])]) }
+
+/// A difference after the walk has adopted a button, given it a handler,
+/// and begun a dynamic text's effect, which the rebuild stops.
+pub fn stops_server() -> View {
+    div([], [button([id("go")], [text("go")]), dyn_text(|| "0"), span([], [text("server")])])
+}
+
+pub fn stops_client(n: Signal<Int>) -> View {
+    div(
+        [],
+        [
+            button([id("go"), on_click(|| n.update(|k: Int| k + 1))], [text("go")]),
+            dyn_text(
+                || {
+                    let k = n.value()
+                    println("stops: the count reads ${k}")
+                    "${k}"
+                },
+            ),
+            em([], [text("client")]),
+        ],
+    )
+}

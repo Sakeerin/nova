@@ -1,0 +1,33 @@
+console.error: nova: hydration mismatch: expected <p>, found <div>; building the view again
+tag: a cleanup ran
+tag: on_mount ran
+console.error: nova: hydration mismatch: expected text "The client reads this text, which is lon", found text "The server wrote this text, which is lon"; building the view again
+console.error: nova: hydration mismatch: expected a region, found <p>; building the view again
+console.error: nova: hydration mismatch: expected the end of a region, found <li>; building the view again
+console.error: nova: hydration mismatch: expected <li>, found the end of a region; building the view again
+console.error: nova: hydration mismatch: expected <em>, found nothing; building the view again
+console.error: nova: hydration mismatch: expected nothing, found <em>; building the view again
+console.error: nova: hydration mismatch: expected text "b", found nothing; building the view again
+console.error: nova: hydration mismatch: expected <span>, found text "b"; building the view again
+console.error: nova: hydration mismatch: expected nothing, found <p>; building the view again
+console.error: nova: hydration mismatch: expected <p>, found a comment; building the view again
+stops: the count reads 0
+console.error: nova: hydration mismatch: expected <em>, found <span>; building the view again
+stops: the count reads 0
+hydrated
+tag: <p>a</p> (server nodes left: 0)
+text: <p>The client reads this text, which is longer than forty characters</p> (server nodes left: 0)
+region: <div><p>x</p></div> (server nodes left: 0)
+end: <ul><li>a</li></ul> (server nodes left: 0)
+missing: <ul><li>a</li><li>b</li></ul> (server nodes left: 0)
+nothing: <div><span></span><em></em></div> (server nodes left: 0)
+over: <div><span></span></div> (server nodes left: 0)
+separator: <p>ab</p> (server nodes left: 0)
+joined: <p>a<span></span></p> (server nodes left: 0)
+root:  (server nodes left: 0)
+comment: <div><p>a</p></div> (server nodes left: 0)
+stops: <div><button id="go">go</button>0<em>client</em></div> (server nodes left: 0)
+clicked the server's button
+stops: the count reads 1
+stops: <div><button id="go">go</button>1<em>client</em></div>
+console errors: 12
