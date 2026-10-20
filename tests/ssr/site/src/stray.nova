@@ -1,0 +1,9 @@
+//! A server that, given `--ssg <dir>`, says it wrote two pages, one in
+//! `<dir>` and one outside it, `<dir>/../nova.toml`, and writes neither.
+//! `nova build --ssg` lists neither, and fails, naming the second line.
+
+fn main() {
+    let dir = args().get(2).unwrap_or("dist")
+    println("ssg: wrote ${dir}/index.html")
+    println("ssg: wrote ${dir}/../nova.toml")
+}

@@ -15,6 +15,17 @@ use crate::project::{self, Mode};
 /// The files the compiler writes into `dist/` (spec 4.0 §7).
 const BUILT: [&str; 4] = ["index.html", "app.js", "app.wasm", "package.json"];
 
+/// What [`Bundle::finish`] listed in `manifest.json`, to which `nova build
+/// --ssg` adds the pages its server wrote (the 4.6 spec
+/// `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
+/// §7).
+pub struct Listing {
+    wasm_opt: bool,
+    /// Each file by its path from `dist/`, with `/` between names, and its
+    /// size in bytes.
+    files: BTreeMap<String, u64>,
+}
+
 /// What a build's bundle needs to know of its program.
 pub struct Bundle {
     /// The project's root, beside its `nova.toml`; `None` for a program
@@ -79,8 +90,8 @@ impl Bundle {
     /// `wasm-opt` and `manifest.json`, in that order, so the manifest lists
     /// what is there at the end. `assets/` is the build's only when it
     /// copies a `public/` into it: otherwise it is left as it is, and not
-    /// listed.
-    pub fn finish(&self, out: &Path) -> Result<()> {
+    /// listed. Returns what the manifest lists.
+    pub fn finish(&self, out: &Path) -> Result<Listing> {
         let mut copied = false;
         if let Some(root) = &self.root {
             let page = root.join("index.html");
@@ -113,8 +124,28 @@ impl Bundle {
         if copied {
             list(&out.join("assets"), "assets", &mut files)?;
         }
+        let listing = Listing { wasm_opt, files };
+        self.write_manifest(out, &listing)?;
+        Ok(listing)
+    }
+
+    /// After `nova build --ssg`'s server has written its pages into `out`:
+    /// `manifest.json` again, with `pages`, each a path from `out` such as
+    /// `about/index.html`, added to `listing`, and every file measured
+    /// again, since the root's page replaced `index.html`.
+    pub fn add_pages(&self, out: &Path, mut listing: Listing, pages: &[String]) -> Result<()> {
+        for page in pages {
+            listing.files.insert(page.clone(), 0);
+        }
+        for (name, bytes) in listing.files.iter_mut() {
+            *bytes = size(&out.join(name))?;
+        }
+        self.write_manifest(out, &listing)
+    }
+
+    fn write_manifest(&self, out: &Path, listing: &Listing) -> Result<()> {
         let path = out.join("manifest.json");
-        std::fs::write(&path, self.manifest(wasm_opt, &files))
+        std::fs::write(&path, self.manifest(listing.wasm_opt, &listing.files))
             .with_context(|| format!("writing {}", path.display()))
     }
 
@@ -340,6 +371,43 @@ mod tests {
             .expect("the bundle finishes");
         let page = std::fs::read_to_string(dir.join("index.html")).expect("the page");
         assert_eq!(page, "mine");
+    }
+
+    /// `add_pages` lists the pages `nova build --ssg`'s server wrote, with
+    /// their sizes, and measures the files already listed again, since the
+    /// root's page has replaced `index.html` (the 4.6 spec §7).
+    #[test]
+    fn ssg_pages_join_the_manifest_with_their_sizes() {
+        let dir = std::env::temp_dir().join("nova-cli-bundle-ssg-pages");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("about")).expect("a directory");
+        for (name, text) in [
+            ("index.html", "page"),
+            ("app.js", "js"),
+            ("app.wasm", "wasm"),
+            ("package.json", "{}"),
+        ] {
+            std::fs::write(dir.join(name), text).expect("a file");
+        }
+        let bundle = Bundle {
+            root: None,
+            name: "site".to_string(),
+            version: None,
+            release: false,
+        };
+        let listing = bundle.finish(&dir).expect("the bundle finishes");
+        std::fs::write(dir.join("index.html"), "the root's page").expect("a page");
+        std::fs::write(dir.join("about").join("index.html"), "about").expect("a page");
+        bundle
+            .add_pages(&dir, listing, &["about/index.html".to_string()])
+            .expect("the pages are listed");
+        let manifest = std::fs::read_to_string(dir.join("manifest.json")).expect("the manifest");
+        assert!(
+            manifest.contains(
+                "    \"about/index.html\": 5,\n    \"app.js\": 2,\n    \"app.wasm\": 4,\n    \"index.html\": 15,\n"
+            ),
+            "{manifest}"
+        );
     }
 
     #[test]
