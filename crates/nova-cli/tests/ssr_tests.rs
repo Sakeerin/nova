@@ -227,7 +227,10 @@ fn a_build_removes_the_pages_ssg_wrote() {
         .assert()
         .success();
     let app = dir.join("src/app.nova");
-    let source = std::fs::read_to_string(&app).expect("app.nova");
+    // A Windows checkout gives the fixture CRLF line ends.
+    let source = std::fs::read_to_string(&app)
+        .expect("app.nova")
+        .replace("\r\n", "\n");
     let route = "        Route { path: \"/docs/intro\", component: Intro },\n";
     assert!(source.contains(route));
     std::fs::write(&app, source.replace(route, "")).expect("app.nova without the route");
