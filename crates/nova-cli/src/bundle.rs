@@ -457,6 +457,7 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
             std::fs::write(&path, "page").expect("a file");
         }
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut keys = vec![
             "index.html".to_string(),
             "app.js".to_string(),
