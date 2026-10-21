@@ -1,7 +1,7 @@
 # Phase 4.7, `examples/07-fullstack-blog`: design
 
 - **Date:** 2026-10-21.
-- **Status:** a draft, for the user's approval.
+- **Status:** approved by the user on 2026-10-21.
 - **The user's decisions, 2026-10-21:**
   1. **std grows what the blog needs.** `std/http` gains routes by
      method, path parameters, readers for a form and for cookies, several
