@@ -12,11 +12,16 @@
 // empty, a `script` with the data's id and no type; and after `behind`,
 // empty, a plain `p` and then a `script` with the data's id and type, which
 // the client never reaches, since the first element after a root is the
-// data or there is none. Each hydrates with its fallback. Once the client has
-// hydrated them, this prints each root, says which of the server's nodes
-// are still there and which nodes are new, and reads the counter's
-// textarea, whose fixed value the server wrote as an attribute; then it
-// clicks, a turn apart, printing the page after each.
+// data or there is none. Each hydrates with its fallback. Two more roots
+// hold a text of 70,000 characters, fixed in `long` and dynamic in
+// `longer`, which the fake DOM's parser, as Chromium's, splits into two
+// nodes, and hydration joins again into the first. Once the client has
+// hydrated them, this prints each root, a run of `0123456789` by its count;
+// says which of the server's nodes are still there, which nodes are new,
+// and how many the parser split off a text; and reads the counter's
+// textarea, whose fixed value the server wrote as an attribute, and the
+// lengths of the long roots' text nodes. Then it clicks, a turn apart,
+// printing the page after each.
 import { readFileSync } from "node:fs";
 import { install } from "./fake_dom.mjs";
 const win = install();
@@ -28,7 +33,7 @@ for (const line of readFileSync(new URL("./server.txt", import.meta.url), "utf8"
 // Guests that are not the data, which no root may show.
 const other = JSON.stringify({ title: "Not the data", names: ["Eve"] });
 const roots = {};
-for (const name of ["counter", "lists", "texts", "data", "filled", "fallback", "decoy", "untyped", "behind", "empty", "blank", "feed"]) {
+for (const name of ["counter", "lists", "texts", "data", "filled", "fallback", "decoy", "untyped", "behind", "empty", "blank", "feed", "long", "longer"]) {
   const root = document.createElement("div");
   root.setAttribute("id", name);
   if (server.has(name)) root.innerHTML = server.get(name);
@@ -78,28 +83,55 @@ function nodes(root) {
   return out;
 }
 const before = {};
-for (const name in roots) before[name] = nodes(roots[name]);
+// The text nodes the parser split off a text, each just after a text node.
+const split = {};
+for (const name in roots) {
+  before[name] = nodes(roots[name]);
+  split[name] = before[name].filter((n) => {
+    const siblings = n.parentNode.childNodes;
+    const at = siblings.indexOf(n);
+    return n.nodeName === "#text" && at > 0 && siblings[at - 1].nodeName === "#text";
+  });
+}
+// The lengths of the text nodes in a root's first element.
+const lengths = (name) =>
+  roots[name].firstChild.childNodes
+    .filter((n) => n.nodeName === "#text")
+    .map((n) => n.data.length)
+    .join(", ");
+const parsed = { long: lengths("long"), longer: lengths("longer") };
 // The counter's textarea: the server wrote its value as an attribute,
 // which a textarea ignores, so until the client sets the property its value
 // is its text, "".
 const note = roots.counter.querySelector("#note");
 console.log(`counter: before hydration, the textarea's value is "${note.value}"`);
 
-// A string to print on one line.
+// A string to print on one line, and short: a run of `0123456789` ten
+// times or more is written as its count.
 const line = (s) =>
-  s.replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t").replace(/\f/g, "\\f");
+  s
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t")
+    .replace(/\f/g, "\\f")
+    .replace(/(?:0123456789){10,}/g, (m) => `(0123456789 x ${m.length / 10})`);
 const describe = (n) =>
   n.nodeName === "#text" ? `text "${line(n.data)}"` : n.nodeName === "#comment" ? `<!--${n.data}-->` : `<${n.localName}>`;
 const show = (name) => console.log(`${name}: ${line(roots[name].innerHTML)}`);
 // How many of the server's nodes under the root are there still, whether in
-// their order, and the nodes the client made.
+// their order, and the nodes the client made; and, where the parser split a
+// text, how many nodes it split off, which hydration joins into the node
+// before them, and how many of those are in the page still.
 function kept(name) {
   const after = nodes(roots[name]);
-  const stayed = after.filter((n) => before[name].includes(n));
+  const server = before[name].filter((n) => !split[name].includes(n));
+  const stayed = after.filter((n) => server.includes(n));
   const made = after.filter((n) => !before[name].includes(n));
-  const order = stayed.every((n, i) => n === before[name][i]) ? "in order" : "out of order";
+  const order = stayed.every((n, i) => n === server[i]) ? "in order" : "out of order";
   const news = made.length === 0 ? "none" : made.map(describe).join(", ");
-  console.log(`${name}: ${stayed.length} of ${before[name].length} server nodes kept, ${order}; new: ${news}`);
+  const left = split[name].filter((n) => roots[name].contains(n)).length;
+  const joined = split[name].length === 0 ? "" : `; split off: ${split[name].length}, in the page still: ${left}`;
+  console.log(`${name}: ${stayed.length} of ${server.length} server nodes kept, ${order}; new: ${news}${joined}`);
 }
 const turn = () => new Promise((r) => setTimeout(r, 0));
 async function click(selector) {
@@ -116,6 +148,9 @@ for (const name in roots) {
 console.log(`counter: the input's value is ${roots.counter.querySelector("input").value}`);
 const same = roots.counter.querySelector("#note") === note;
 console.log(`counter: the textarea is the server's: ${same}; its value is "${note.value}"`);
+for (const name of ["long", "longer"]) {
+  console.log(`${name}: its text nodes' lengths, parsed: ${parsed[name]}; hydrated: ${lengths(name)}`);
+}
 
 // The counter's adopted nodes follow its signal.
 await click("#inc");

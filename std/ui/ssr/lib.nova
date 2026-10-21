@@ -9,8 +9,9 @@
 //! client, which calls `hydrate("#app", App)` or `hydrate_with`, and
 //! `src/server.nova`, which calls `serve`. `nova build --ssr` builds both:
 //! the client into `dist/`, the server into `target/debug/<name>-server`.
-//! `nova build --ssg` then runs the server once with `--ssg dist`, which
-//! writes a page for each static route.
+//! `nova build --ssg` then runs the server once, from the project's root,
+//! with `--ssg` and the client's output directory, which may be absolute,
+//! and the server writes a page there for each static route.
 //!
 //! `page` renders the view at a location, `page_with` with the server's data
 //! beside it, and `document` puts a page into the built `index.html`, in its
@@ -124,19 +125,24 @@ pub fn page_with<T: ToJson>(location: String, data: T, f: fn(T) -> View) -> Page
 }
 
 /// `template`, a page's HTML such as the built `dist/index.html`, with its
-/// first `<div id="app">` holding `page`'s body, and, when the page has
-/// data, followed by `<script type="application/json" id="nova-data">`
-/// holding the data, just after the root, where `hydrate_with` reads it. A
-/// root that already holds something, whitespace, a placeholder, or a page
-/// SSG wrote, is emptied first, and a data element after it, alone or past
-/// whitespace, dropped, as `serve` and SSG empty it. A root that no
-/// `</div>` closes keeps what follows it: an empty root goes before it, and
-/// the rest stays; so does a data element with no `</script>`. Nothing else
-/// of the template changes: its head, title and scripts serve the server's
-/// pages and the client alike.
+/// root, its first `<div id="app">` tag, holding `page`'s body, and, when
+/// the page has data, followed by `<script type="application/json"
+/// id="nova-data">` holding the data, just after the root, where
+/// `hydrate_with` reads it. A root that already holds something,
+/// whitespace, a placeholder, or a page SSG wrote, is emptied first, to the
+/// `div` end tag that balances it, and a data element after it, alone or
+/// past whitespace, dropped, as `serve` and SSG empty it. The root and the
+/// `div` tags inside it are found as HTML reads the template: a
+/// `<div id="app">`, a `<div` or a `</div` in a comment, in an attribute's
+/// value, or in the text of a `script`, `style`, `textarea` or `title`
+/// element is no tag, and an end tag may hold whitespace, `</div >`. A root
+/// that no end tag closes keeps what follows it: an empty root goes before
+/// it, and the rest stays; so does a data element with no `</script>`.
+/// Nothing else of the template changes: its head, title and scripts serve
+/// the server's pages and the client alike.
 ///
 /// It panics with `ssr: the page has no <div id="app">` when the template
-/// has none, written just so.
+/// has no such tag, written just so.
 ///
 /// ```
 /// import ui
@@ -162,7 +168,7 @@ pub fn document(template: String, page: Page) -> String {
         None => panic("ssr: the page has no <div id=\"app\">")
     }
     let root = app_root()
-    let at = empty.index_of(root).unwrap_or(0)
+    let at = root_at(empty.chars()).unwrap_or(0)
     let data = match page.data {
         Some(d) => "<script type=\"application/json\" id=\"nova-data\">${d}</script>"
         None => ""
@@ -200,7 +206,7 @@ pub record Site {
 /// manifest has no `files`, or when the template has no `<div id="app">`.
 /// An `index.html` whose root holds a page, as the one SSG writes for `/`
 /// does, or a placeholder, is a template too: its root is emptied, and the
-/// data after it dropped, as `document` empties it; a root that no `</div>`
+/// data after it dropped, as `document` empties it; a root that no end tag
 /// closes keeps what follows it, after an empty root. A manifest's path with
 /// a piece that is empty, `.` or `..`, or that holds `\` or NUL, which
 /// could name a file outside `dist`, is never served. It binds `address`,
@@ -531,49 +537,56 @@ fn plain_piece(piece: String) -> Bool {
     !special && !piece.contains("\\") && !piece.contains("\0")
 }
 
+// The root's start tag, written just so.
+fn app_open() -> String { "<div id=\"app\">" }
+
 // The root a page's view goes into, written just so.
 fn app_root() -> String { "<div id=\"app\"></div>" }
 
-// The template in `html`, a page's HTML: `html` with its first
-// `<div id="app">` emptied, written `<div id="app"></div>`, and the data's
-// `script` just after it removed. The built `index.html`'s root is empty
-// already; a project's own page may hold whitespace or a placeholder there;
-// and the `index.html` SSG wrote for `/` holds a view and its data, so that
-// a server started after `nova build --ssg`, or SSG run again, finds the
-// page it was built with. A view's HTML holds no `<div` or `</div>` but its
-// own elements', since text and attribute values are escaped, so the root
-// ends at the `</div>` that balances it; a comment of the template holding
-// one could end it early. The data's `script` goes when it follows the
-// root, alone or past whitespace, as the client's `hydrate_with` would read
-// it there, and has its `</script>`; the whitespace stays. A data `script`
-// with no `</script>` stays as it is, since nothing tells where its text
-// ends, and a root no `</div>` balances keeps what follows it, after an
-// empty root. `None` when there is no `<div id="app">`.
+// The template in `html`, a page's HTML: `html` with its root emptied,
+// written `<div id="app"></div>`, and the data's `script` just after it
+// removed. The built `index.html`'s root is empty already; a project's own
+// page may hold whitespace or a placeholder there; and the `index.html` SSG
+// wrote for `/` holds a view and its data, so that a server started after
+// `nova build --ssg`, or SSG run again, finds the page it was built with.
+// The root and its end are found by markup, as HTML's tokenizer reads it
+// (`past_markup`): the root is the first `<div id="app">` that is a tag,
+// never one in a comment, in an attribute's value, or in the text of a
+// `script`, `style`, `textarea` or `title` element; and it ends at the end
+// tag, `</div` then whitespace, `/` or `>`, that balances it, each `<div`
+// tag counted, a `<div` then whitespace, `/` or `>`, in those places too.
+// A view's HTML holds no `<div` or `</div` but its own elements', since text
+// and attribute values are escaped. The data's `script` goes when it
+// follows the root, alone or past whitespace, as the client's
+// `hydrate_with` would read it there, and has its `</script>`; the
+// whitespace stays. A data `script` with no `</script>` stays as it is,
+// since nothing tells where its text ends, and a root no end tag balances
+// keeps what follows it, after an empty root. `None` when there is no
+// `<div id="app">` tag.
 fn emptied(html: String) -> Option<String> {
-    let open = "<div id=\"app\">"
-    let at = match html.index_of(open) {
+    let cs = html.chars()
+    let at = match root_at(cs) {
         Some(at) => at
         None => return None
     }
-    let cs = html.chars()
+    let start = at + app_open().len()
     let mut depth = 1
-    let mut i = at + open.len()
+    let mut i = start
     while depth > 0 && i < cs.len() {
-        if matches_at(cs, i, "</div>") {
-            depth = depth - 1
-            if depth > 0 { i = i + 6 }
-        } else {
-            if matches_at(cs, i, "<div") && i + 4 < cs.len() && ends_name(cs[i + 4]) {
-                depth = depth + 1
-            }
+        if cs[i] != '<' {
             i = i + 1
+        } else if named_at(cs, i, "</div") {
+            depth = depth - 1
+            i = tag_end(cs, i)
+        } else {
+            if named_at(cs, i + 1, "div") { depth = depth + 1 }
+            i = past_markup(cs, i)
         }
     }
-    let start = at + open.len()
     if depth > 0 {
         return Some("${html.slice(0, at)}${app_root()}${html.slice(start, html.len())}")
     }
-    let end = i + 6
+    let end = i
     let mut rest = html.slice(end, html.len())
     let mut k = end
     while k < cs.len() && html_space(cs[k]) { k = k + 1 }
@@ -584,6 +597,102 @@ fn emptied(html: String) -> Option<String> {
         }
     }
     Some("${html.slice(0, at)}${app_root()}${rest}")
+}
+
+// Where the root, the first `<div id="app">` written just so that is a tag
+// (`emptied`), starts in `cs`, a page's HTML; `None` when there is none.
+fn root_at(cs: [Char]) -> Option<Int> {
+    let open = app_open().chars()
+    let mut i = 0
+    while i < cs.len() {
+        if cs[i] != '<' {
+            i = i + 1
+        } else {
+            if same_at(cs, i, open) { return Some(i) }
+            i = past_markup(cs, i)
+        }
+    }
+    None
+}
+
+// The index past what starts at `cs[i]`, a `<`, as HTML's tokenizer reads
+// it: a comment, to its `-->`, `<!-->` and `<!--->` included; any other
+// `<!` or `<?`, to its `>`; an end tag, to its `>`; and a start tag, to its
+// `>` (`tag_end`), and for a `script`, `style`, `textarea` or `title`
+// element its text too, to its end tag, since HTML reads no tag there. A
+// `<` that starts none of these is text, and the index is the next one's.
+// Each runs to the end of `cs` when nothing closes it.
+fn past_markup(cs: [Char], i: Int) -> Int {
+    if matches_at(cs, i, "<!--") { return past(cs, i + 2, "-->") }
+    if matches_at(cs, i, "<!") || matches_at(cs, i, "<?") { return past(cs, i + 2, ">") }
+    if i + 2 < cs.len() && cs[i + 1] == '/' && is_letter(cs[i + 2]) { return tag_end(cs, i) }
+    if i + 1 >= cs.len() || !is_letter(cs[i + 1]) { return i + 1 }
+    let end = tag_end(cs, i)
+    let raw = ["script", "style", "textarea", "title"]
+    let mut r = 0
+    while r < raw.len() {
+        if named_at(cs, i + 1, raw[r]) { return end_tag_at(cs, end, raw[r]) }
+        r = r + 1
+    }
+    end
+}
+
+// The index past the tag that starts at `cs[i]`, its `>`, read as HTML's
+// tokenizer reads an attribute: a value after `=`, quoted with `"` or `'`,
+// runs to its closing quote, a `>` in it included; an unquoted one, to
+// whitespace or `>`.
+fn tag_end(cs: [Char], i: Int) -> Int {
+    let mut k = i + 1
+    while k < cs.len() {
+        let c = cs[k]
+        if c == '>' { return k + 1 }
+        k = k + 1
+        if c == '=' {
+            while k < cs.len() && html_space(cs[k]) { k = k + 1 }
+            if k < cs.len() && (cs[k] == '"' || cs[k] == '\'') {
+                let quote = cs[k]
+                k = k + 1
+                while k < cs.len() && cs[k] != quote { k = k + 1 }
+                k = k + 1
+            } else {
+                while k < cs.len() && !html_space(cs[k]) && cs[k] != '>' { k = k + 1 }
+            }
+        }
+    }
+    cs.len()
+}
+
+// The index of the first end tag of the element `name` in `cs` at or after
+// `from`, `</name` then whitespace, `/` or `>`, in either case; or the end of
+// `cs`.
+fn end_tag_at(cs: [Char], from: Int, name: String) -> Int {
+    let close = "</${name}"
+    let mut k = from
+    while k < cs.len() {
+        if cs[k] == '<' && named_at(cs, k, close) { return k }
+        k = k + 1
+    }
+    cs.len()
+}
+
+// The index past the first `word` in `cs` at or after `from`, or the end of
+// `cs`.
+fn past(cs: [Char], from: Int, word: String) -> Int {
+    let ws = word.chars()
+    let mut k = from
+    while k < cs.len() {
+        if cs[k] == ws[0] && same_at(cs, k, ws) { return k + ws.len() }
+        k = k + 1
+    }
+    cs.len()
+}
+
+// Whether `word`, a tag's name or `</` and one, in lower case, is written in
+// `cs` at `at`, in either case, and ends there, as whitespace, `/` or `>`
+// after it ends a tag's name.
+fn named_at(cs: [Char], at: Int, word: String) -> Bool {
+    let n = word.len()
+    matches_at(cs, at, word) && at + n < cs.len() && ends_name(cs[at + n])
 }
 
 // Whether `word`, in lower case, is written in `cs` at `at`, ASCII letters
@@ -601,16 +710,28 @@ fn matches_at(cs: [Char], at: Int, word: String) -> Bool {
     true
 }
 
+// Whether `ws` is written in `cs` at `at`, character for character.
+fn same_at(cs: [Char], at: Int, ws: [Char]) -> Bool {
+    if at + ws.len() > cs.len() { return false }
+    let mut k = 0
+    while k < ws.len() {
+        if cs[at + k] != ws[k] { return false }
+        k = k + 1
+    }
+    true
+}
+
+// Whether `c` is an ASCII letter, which starts a tag's name.
+fn is_letter(c: Char) -> Bool { (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') }
+
 // Whether `c` is whitespace as HTML reads it: a space, a tab, an LF, a CR
 // or a form feed.
 fn html_space(c: Char) -> Bool {
     c == ' ' || c == '\t' || c == '\n' || c == '\r' || "${c}" == "\u{c}"
 }
 
-// Whether `c` ends a tag's name, as a space, `>` or `/` does.
-fn ends_name(c: Char) -> Bool {
-    c == ' ' || c == '>' || c == '/' || c == '\t' || c == '\n' || c == '\r'
-}
+// Whether `c` ends a tag's name, as whitespace, `/` or `>` does.
+fn ends_name(c: Char) -> Bool { html_space(c) || c == '>' || c == '/' }
 
 // The error for a file that cannot be read, naming it.
 fn unreadable(by: String, path: String, e: IoError) -> IoError {

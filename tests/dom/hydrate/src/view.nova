@@ -201,3 +201,14 @@ pub fn listed(g: Guests) -> View {
 
 /// What the client builds where the server wrote nothing.
 pub fn fresh() -> View { p([], [text("built"), text(""), dyn_text(|| "here")]) }
+
+// A text longer than Chromium's parser puts into one node, which it, and
+// the fake DOM, split in two: "0123456789" 7,000 times, 70,000 characters.
+fn long_text() -> String { "0123456789".repeat(7000) }
+
+/// The long text, fixed, after a short one, between a separator and a
+/// fixed text.
+pub fn long() -> View { p([], [text("<"), text(long_text()), span([], [text(">")])]) }
+
+/// The long text, dynamic, after a short one.
+pub fn long_dynamic() -> View { p([], [text("<"), dyn_text(|| long_text())]) }

@@ -5,6 +5,7 @@
 //! under `--release`, and `manifest.json`.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -69,10 +70,14 @@ impl Bundle {
         check_output_for(self.root.as_deref(), out)
     }
 
-    /// Before the compiler writes `out`: a link at a name the build writes,
-    /// symbolic or, on Unix, hard, is removed, so that no write goes through
-    /// it to a file elsewhere, such as the project's own page.
+    /// Before the compiler writes `out`: the pages a previous `nova build
+    /// --ssg` wrote there, which its `manifest.json` lists, are removed
+    /// ([`remove_pages`]), so that no build leaves one behind; and a link at
+    /// a name the build writes, symbolic or, on Unix, hard, is removed, so
+    /// that no write goes through it to a file elsewhere, such as the
+    /// project's own page.
     pub fn prepare(&self, out: &Path) -> Result<()> {
+        remove_pages(out)?;
         for name in BUILT.iter().chain(&["manifest.json"]) {
             let path = out.join(name);
             let link = std::fs::symlink_metadata(&path)
@@ -165,6 +170,84 @@ impl Bundle {
             files.join(",\n"),
         )
     }
+}
+
+/// The pages a previous `nova build --ssg` wrote into `out`, which the
+/// `manifest.json` there lists, removed, and each directory that leaves
+/// empty, up to `out` (ADR 0045). Such a page is a path whose names are all
+/// plain ones by Rust's path components, with no `..`, root or prefix, and
+/// which ends in `/index.html`, so neither the root's `index.html` nor any
+/// other file a build writes; nor one under `assets/`, which a build
+/// replaces or leaves as it is. A page reached through a directory that is
+/// a link is left, as is a directory at its place. A missing manifest, a
+/// link at its place, and one that does not parse or has no `files` object
+/// remove nothing.
+fn remove_pages(out: &Path) -> Result<()> {
+    let path = out.join("manifest.json");
+    if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+        return Ok(());
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Ok(());
+    };
+    let Some(files) = manifest.get("files").and_then(|f| f.as_object()) else {
+        return Ok(());
+    };
+    for key in files.keys() {
+        if let Some(names) = page_names(key) {
+            remove_page(out, &names)?;
+        }
+    }
+    Ok(())
+}
+
+/// The names of the page a manifest's `key` lists, for [`remove_pages`]:
+/// `None` unless each is a plain one, at least two, the last `index.html`
+/// after a `/`, and the first not `assets`.
+fn page_names(key: &str) -> Option<Vec<&OsStr>> {
+    if !key.ends_with("/index.html") {
+        return None;
+    }
+    let mut names = Vec::new();
+    for c in Path::new(key).components() {
+        match c {
+            Component::Normal(name) => names.push(name),
+            _ => return None,
+        }
+    }
+    if names.len() < 2 || names[0] == "assets" {
+        return None;
+    }
+    Some(names)
+}
+
+/// The page at `names` below `out` removed, unless a directory on the way
+/// to it is not one, a link included, or it is a directory itself; then
+/// each directory that leaves empty, up to `out`.
+fn remove_page(out: &Path, names: &[&OsStr]) -> Result<()> {
+    let (file, dirs) = names.split_last().expect("a page has names");
+    let mut dir = out.to_path_buf();
+    for name in dirs {
+        dir.push(name);
+        if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+            return Ok(());
+        }
+    }
+    let page = dir.join(file);
+    if !std::fs::symlink_metadata(&page).is_ok_and(|m| !m.is_dir()) {
+        return Ok(());
+    }
+    std::fs::remove_file(&page).with_context(|| format!("removing {}", page.display()))?;
+    for _ in dirs {
+        if std::fs::remove_dir(&dir).is_err() {
+            break;
+        }
+        dir.pop();
+    }
+    Ok(())
 }
 
 /// [`Bundle::check_output`] for a program whose project's root is `root`,
@@ -343,6 +426,85 @@ fn by_text(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::{quote, Bundle};
+
+    /// `prepare` removes the pages a previous `--ssg` wrote, which the
+    /// manifest lists, and the directories that leaves empty, up to the
+    /// output directory, and nothing else (ADR 0045): not the root's
+    /// `index.html` or another file a build writes, not a page under
+    /// `assets/` or one the manifest does not list, and never a file a key
+    /// names outside the directory, by `..`, by an absolute path or, on
+    /// Unix, through a link. A manifest that does not parse removes nothing.
+    #[test]
+    fn prepare_removes_only_the_pages_ssg_listed() {
+        let base = std::env::temp_dir().join("nova-cli-bundle-stale-pages");
+        let _ = std::fs::remove_dir_all(&base);
+        let out = base.join("dist");
+        let files = [
+            "dist/index.html",
+            "dist/app.js",
+            "dist/about/index.html",
+            "dist/docs/intro/index.html",
+            "dist/docs/notes.txt",
+            "dist/deep/a/b/index.html",
+            "dist/assets/p/index.html",
+            "dist/unlisted/index.html",
+            "x/index.html",
+            "abs/index.html",
+            "linked/index.html",
+        ];
+        for file in files {
+            let path = base.join(file);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("a directory");
+            std::fs::write(&path, "page").expect("a file");
+        }
+        let mut keys = vec![
+            "index.html".to_string(),
+            "app.js".to_string(),
+            "about/index.html".to_string(),
+            "docs/intro/index.html".to_string(),
+            "deep/a/b/index.html".to_string(),
+            "assets/p/index.html".to_string(),
+            "../x/index.html".to_string(),
+            "about/../../x/index.html".to_string(),
+            base.join("abs").join("index.html").display().to_string(),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("linked"), out.join("link")).expect("a link");
+            keys.push("link/index.html".to_string());
+        }
+        let listed: Vec<String> = keys.iter().map(|k| format!("{}: 4", quote(k))).collect();
+        let manifest = format!("{{\"files\": {{{}}}}}\n", listed.join(", "));
+        std::fs::write(out.join("manifest.json"), &manifest).expect("a manifest");
+        let bundle = Bundle {
+            root: None,
+            name: "site".to_string(),
+            version: None,
+            release: false,
+        };
+        bundle.prepare(&out).expect("prepare");
+        for gone in ["dist/about", "dist/docs/intro", "dist/deep"] {
+            assert!(!base.join(gone).exists(), "{gone}");
+        }
+        for kept in files.iter().filter(|f| {
+            !f.starts_with("dist/about/")
+                && !f.starts_with("dist/docs/intro/")
+                && !f.starts_with("dist/deep/")
+        }) {
+            assert!(base.join(kept).is_file(), "{kept}");
+        }
+        assert!(out.join("manifest.json").is_file());
+
+        std::fs::create_dir_all(out.join("about")).expect("a directory");
+        std::fs::write(out.join("about").join("index.html"), "page").expect("a page");
+        std::fs::write(
+            out.join("manifest.json"),
+            manifest.replace("\"files\": {", "\"files\": ["),
+        )
+        .expect("a manifest");
+        bundle.prepare(&out).expect("prepare");
+        assert!(out.join("about").join("index.html").is_file());
+    }
 
     /// `finish` never copies the project's page onto itself, which would
     /// empty it, even when `check_output` is not asked first and the output

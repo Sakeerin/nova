@@ -106,16 +106,19 @@ wrote, its `ssg: wrote <file>` lines, to `manifest.json`. A line's file,
 read from the project's root if relative, must lie inside `<dist>`, made
 absolute the same way, with each name below it a plain one by Rust's path
 components: no `..`, root or prefix, while a `.` piece and a trailing `/`
-are normalised away. Any other line fails the build, once the server has
-ended well. A server that fails ends `nova` with its exit code, after
-`Error: the server failed to generate the pages, with exit code <code>:
-<server>`; one a signal stops, which has no exit code, ends it with status
-1, after `…, stopped by signal <number>: <server>`. `--ssr --ssg` is
+are normalised away. Any other `ssg: wrote` line fails the build, once the
+server has ended well. A server that fails ends `nova` with its exit code,
+after `Error: the server failed to generate the pages, with exit code
+<code>: <server>`; one a signal stops, which has no exit code, ends it with
+status 1, after `…, stopped by signal <number>: <server>`. `--ssr --ssg` is
 `--ssg`. Each refuses, before building anything, a file argument,
 `--target`, a directory in no project, a library, and a project with no
 `src/server.nova`: "`--ssr` needs src/server.nova, the server's entry".
-`nova dev`, `nova run`, `nova check` and `nova bundle` do not change; `nova
-run src/server.nova` runs the server
+Every WASM build, the client's of `--ssr` and `--ssg` and `nova dev`'s and
+`nova bundle`'s included, first removes the pages a previous `--ssg` wrote
+into its directory, which the `manifest.json` there lists. Otherwise `nova
+dev`, `nova run`, `nova check` and `nova bundle` do not change; `nova run
+src/server.nova` runs the server
 (`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
 §7; ADR 0045).
 

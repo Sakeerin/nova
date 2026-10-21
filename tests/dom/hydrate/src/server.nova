@@ -1,13 +1,14 @@
 //! The server's side of `tests/dom/hydrate.mjs`: for each root of the page,
 //! a line of its id and the HTML `render_hydratable` writes for its view,
-//! two of them rendered with the guests the client falls back on, and a
-//! line `nova-data` and the guests as JSON, made safe for a `script`
-//! element as the spec writes it (spec
+//! two of them rendered with the guests the client falls back on and two
+//! holding a text of 70,000 characters, and a line `nova-data` and the
+//! guests as JSON, made safe for a `script` element as the spec writes it
+//! (spec
 //! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
 //! §6.2).
 
 import ui
-import view::{Guests, counter, fallback, guests, listed, lists, texts}
+import view::{Guests, counter, fallback, guests, listed, lists, long, long_dynamic, texts}
 
 // `json` with `<`, `>` and `&` written as escapes, which only JSON strings
 // hold, so that a `script` element holds it whole.
@@ -39,5 +40,7 @@ fn main() {
     println("data ${render_hydratable(|| guests(g))}")
     println("filled ${render_hydratable(|| listed(fallback()))}")
     println("decoy ${render_hydratable(|| listed(fallback()))}")
+    println("long ${render_hydratable(long)}")
+    println("longer ${render_hydratable(long_dynamic)}")
     println("nova-data ${safe(stringify(g.to_json()))}")
 }

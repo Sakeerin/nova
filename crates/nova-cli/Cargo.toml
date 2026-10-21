@@ -41,6 +41,10 @@ semver = { workspace = true }
 # `nova add` and `nova remove` edit nova.toml, keeping its comments and
 # layout (spec docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §5.3).
 toml_edit = { workspace = true }
+# A build reads the last build's `manifest.json` to remove the pages
+# `--ssg` wrote (ADR 0045); already in the lockfile, and in `nova` through
+# nova-doc, nova-index and nova-lsp.
+serde_json = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
@@ -58,7 +62,6 @@ crc32fast = { workspace = true }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 insta = { workspace = true }
-serde_json = { workspace = true }
 # The stand-in GitHub API the registry tests share with nova-index's.
 base64 = { workspace = true }
 # The WASM gate's size check (spec
