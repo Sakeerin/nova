@@ -24,8 +24,14 @@ blank: <p>builthere</p>
 blank: 0 of 1 server nodes kept, in order; new: <p>, text "built", text "", text "here"
 feed: <p>builthere</p>
 feed: 0 of 1 server nodes kept, in order; new: <p>, text "built", text "", text "here"
+long: <p>&lt;<!--|-->(0123456789 x 7000)<span>&gt;</span></p>
+long: 6 of 6 server nodes kept, in order; new: none; split off: 1, in the page still: 0
+longer: <p>&lt;<!--|-->(0123456789 x 7000)</p>
+longer: 4 of 4 server nodes kept, in order; new: none; split off: 1, in the page still: 0
 counter: the input's value is 1
 counter: the textarea is the server's: true; its value is "a fixed note"
+long: its text nodes' lengths, parsed: 1, 65536, 4464; hydrated: 1, 70000
+longer: its text nodes' lengths, parsed: 1, 65536, 4464; hydrated: 1, 70000
 counter: <div class="even"><p>Count: <!--|-->2</p><button id="inc">+</button><input type="text" value="0"><textarea id="note" value="a fixed note"></textarea></div>
 counter: 9 of 9 server nodes kept, in order; new: none
 counter: the input's value is 2

@@ -2514,10 +2514,13 @@ fn hydration_program(name: &str, env: &[(&str, &str)]) -> String {
 /// ADR 0045), as it does when the first element after the root holds other
 /// guests as JSON but is a `div` with the data's id and type, or a `script`
 /// with its id and no type, or a `p`, the data's `script` coming only after
-/// it; and a root with nothing, or only whitespace, a form feed among it,
-/// gets the view built, the whitespace removed first, with no report. Under
-/// stress the collector keeps the adopted nodes' seven handlers, and the
-/// rebuilt rows' three listeners replace the adopted rows' two: eight calls.
+/// it; a root with nothing, or only whitespace, a form feed among it, gets
+/// the view built, the whitespace removed first, with no report; and a text
+/// of 70,000 characters, fixed or dynamic, which the fake DOM's parser
+/// splits in two as Chromium's does, is joined into its first node, the
+/// other removed, with no report (ADR 0045). Under stress the collector
+/// keeps the adopted nodes' seven handlers, and the rebuilt rows' three
+/// listeners replace the adopted rows' two: eight calls.
 #[test]
 fn hydrate_adopts_the_servers_nodes() {
     hydration_program("hydrate", &[]);

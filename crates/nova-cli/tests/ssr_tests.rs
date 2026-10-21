@@ -194,6 +194,64 @@ fn ssg_writes_a_page_per_static_route_and_lists_them() {
     assert!(server(&dir, "debug").is_file());
 }
 
+/// A build removes the pages a previous `--ssg` wrote, which its manifest
+/// lists, with the directories that leaves empty (ADR 0045): a `--target
+/// wasm` build, as `nova dev` makes, and an `--ssr` build each leave no
+/// page, and a manifest that lists none; and an `--ssg` build after a
+/// route is removed leaves no page for it.
+#[test]
+fn a_build_removes_the_pages_ssg_wrote() {
+    let (dir, home) = site("stale");
+    let dist = dir.join("dist");
+    let built = ["app.js", "app.wasm", "index.html", "package.json"];
+    for build in [&["build", "--target", "wasm"][..], &["build", "--ssr"]] {
+        nova_at(&dir, &home)
+            .args(["build", "--ssg"])
+            .assert()
+            .success();
+        assert!(dist.join("about/index.html").is_file(), "{build:?}");
+        assert!(dist.join("docs/intro/index.html").is_file(), "{build:?}");
+        nova_at(&dir, &home).args(build).assert().success();
+        for gone in ["about", "docs"] {
+            assert!(!dist.join(gone).exists(), "{build:?}: {gone}");
+        }
+        let names: Vec<String> = listed(&dist).into_keys().collect();
+        assert_eq!(names, built, "{build:?}");
+        let page = std::fs::read_to_string(dist.join("index.html")).expect("the page");
+        assert!(page.contains("<div id=\"app\"></div>"), "{build:?}: {page}");
+        assert!(!page.contains("nova-data"), "{build:?}: {page}");
+    }
+
+    nova_at(&dir, &home)
+        .args(["build", "--ssg"])
+        .assert()
+        .success();
+    let app = dir.join("src/app.nova");
+    let source = std::fs::read_to_string(&app).expect("app.nova");
+    let route = "        Route { path: \"/docs/intro\", component: Intro },\n";
+    assert!(source.contains(route));
+    std::fs::write(&app, source.replace(route, "")).expect("app.nova without the route");
+    let a = nova_at(&dir, &home)
+        .args(["build", "--ssg"])
+        .assert()
+        .success();
+    assert!(!stdout(&a).contains("docs"), "{}", stdout(&a));
+    assert!(!dist.join("docs").exists());
+    assert!(dist.join("about/index.html").is_file());
+    let names: Vec<String> = listed(&dist).into_keys().collect();
+    assert_eq!(
+        names,
+        [
+            "about/index.html",
+            "app.js",
+            "app.wasm",
+            "index.html",
+            "package.json"
+        ]
+    );
+    sizes_match(&dist);
+}
+
 /// `--ssr --ssg` is `--ssg`, from a subdirectory too: the server still runs
 /// from the project's root, and is given the client's directory, here the
 /// one `-o` names from the subdirectory, so the pages land beside the

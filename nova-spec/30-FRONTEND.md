@@ -402,10 +402,11 @@ walks the view against the page's nodes in order and adopts them, checking
 tags and texts but not attributes, and starts their effects and handlers
 rather than replaying them; at the first difference it reports `nova:
 hydration mismatch: …` with `console.error`, empties the root and builds
-the view afresh. An empty root is built into with no report, as under
-`nova dev`, which does not change; there `hydrate_with` builds the page
-from its fallback (the user's decision 13, of 2026-10-20). A hash `Router`
-is not for SSR; `HistoryRouter` is
+the view afresh. An empty root is built into with no report, as in the
+page `nova dev`'s build writes, unless the project's own page holds
+something in its root; there `hydrate_with` builds the page from its
+fallback (the user's decision 13, of 2026-10-20). A hash `Router` is not
+for SSR; `HistoryRouter` is
 (`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
 §3 to §7; ADR 0045).
 

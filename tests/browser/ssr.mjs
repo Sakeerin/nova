@@ -17,8 +17,12 @@
 // under `#app`, elements, texts and comments, is kept as a handle; then,
 // once `app.wasm` loads and the client's `on_mount` sets `data-state` to
 // `hydrated`, which it does after hydration's walk, each handle is `===` the
-// node at its place in the page, with no node more or less. Through
-// Playwright:
+// node at its place in the page, with no node more or less, but for the
+// text nodes Chromium's parser split off a long text. Every page holds
+// `#long`, a text of 70,000 characters, which the parser puts into nodes of
+// at most 65,536; more than one must be there before hydration, which
+// joins the rest into the first, so that it then holds the whole text,
+// alone in `#long`. Through Playwright:
 // 1. `/` answers `200` and hydrates in place; a click on `+` updates the
 //    count's own text node, kept from the server; the `show` hides and
 //    shows again;
@@ -33,10 +37,12 @@
 // On every page the title the server's data carries, which holds
 // `</script>`, `<!--` and `&`, reads as written; the console has no error
 // but the one Chromium logs for `/nowhere`'s own `404`, and the page throws
-// none. The summary line ends with the client's size, `app.wasm` and
-// `app.js` gzipped, printed and not limited (spec §12). The server is
-// killed at the end, pass or fail. Every wait polls, for 30 seconds at
-// most. Playwright is the job's own install, as for `counter.mjs`.
+// none. The summary line gives, for each page that hydrates, the nodes kept
+// and, after a `+`, the text nodes joined, and ends with the client's size,
+// `app.wasm` and `app.js` gzipped, printed and not limited (spec §12). The
+// server is killed at the end, pass or fail. Every wait polls, for 30
+// seconds at most. Playwright is the job's own install, as for
+// `counter.mjs`.
 
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -152,9 +158,11 @@ const heading = (page) => page.evaluate(() => document.getElementById("page")?.t
 const state = (page) => page.evaluate(() => document.getElementById("root")?.dataset.state ?? null);
 
 // Opens `url` with `app.wasm` held back, checks the server's HTML is there,
-// keeps a handle to each node under `#app`, lets `app.wasm` load, waits for
-// hydration, and checks every handle is still the page's node, in place.
-// Returns the response's status, the handles, and how many there are.
+// keeps a handle to each node under `#app` and to those the parser split off
+// a text, lets `app.wasm` load, waits for hydration, and checks every handle
+// is still the page's node, in place, but those split off, which are gone,
+// and that `#long` holds its whole text in one node. Returns the response's
+// status, the handles, how many of them are kept, and how many were joined.
 async function hydratesInPlace(page, url, expected) {
   let release;
   const held = new Promise((go) => {
@@ -173,15 +181,35 @@ async function hydratesInPlace(page, url, expected) {
       throw new Error(`${url}: the server's HTML shows ${JSON.stringify(await heading(page))}, not ${expected}`);
     }
     const kept = await page.evaluateHandle(() => window.novaNodes());
-    const count = await kept.evaluate((nodes) => nodes.length);
+    // Each text node just after a text node, which the parser split off a
+    // text longer than it puts into one node.
+    const split = await kept.evaluateHandle((nodes) =>
+      nodes.filter((n) => n.nodeType === Node.TEXT_NODE && n.previousSibling?.nodeType === Node.TEXT_NODE),
+    );
+    const joined = await split.evaluate((nodes) => nodes.length);
+    const count = (await kept.evaluate((nodes) => nodes.length)) - joined;
+    const parsed = await page.evaluate(() =>
+      [...document.getElementById("long").childNodes].map((n) => n.data.length),
+    );
+    if (parsed.length < 2 || parsed.reduce((a, b) => a + b, 0) !== 70000) {
+      throw new Error(`${url}: before app.wasm loads, #long's text nodes hold ${parsed.join(", ")} characters`);
+    }
     release();
     await until(page, () => document.getElementById("root")?.dataset.state === "hydrated", null, `${url} to hydrate`);
-    const moved = await page.evaluate((nodes) => {
-      const now = window.novaNodes();
-      if (now.length !== nodes.length) return `${nodes.length} nodes became ${now.length}`;
-      const at = nodes.findIndex((node, i) => node !== now[i]);
-      return at < 0 ? null : `node ${at}, ${nodes[at].nodeName}, is not the server's`;
-    }, kept);
+    const moved = await page.evaluate(
+      ([all, split]) => {
+        const nodes = all.filter((n) => !split.includes(n));
+        const now = window.novaNodes();
+        if (now.length !== nodes.length) return `${nodes.length} nodes became ${now.length}`;
+        const at = nodes.findIndex((node, i) => node !== now[i]);
+        if (at >= 0) return `node ${at}, ${nodes[at].nodeName}, is not the server's`;
+        const left = split.filter((n) => n.isConnected).length;
+        if (left > 0) return `${left} of the text nodes split off are in the page still`;
+        const long = [...document.getElementById("long").childNodes].map((n) => n.data.length).join(", ");
+        return long === "70000" ? null : `#long's text nodes hold ${long} characters, not 70000`;
+      },
+      [kept, split],
+    );
     if (moved) throw new Error(`${url} did not hydrate in place: ${moved}`);
     if ((await heading(page)) !== expected) {
       throw new Error(`${url}: the hydrated page shows ${JSON.stringify(await heading(page))}, not ${expected}`);
@@ -193,7 +221,7 @@ async function hydratesInPlace(page, url, expected) {
         `${url}: the page is titled ${JSON.stringify(await page.title())}, not the generated page's "Nova"`,
       );
     }
-    return { status: response.status(), kept, count };
+    return { status: response.status(), kept, count, joined };
   } finally {
     release();
     await page.unroute("**/app.wasm");
@@ -301,7 +329,7 @@ try {
   }
 
   console.log(
-    `ssr: / hydrates in place (${home.count} nodes kept) and counts, a link to /about without a reload, /posts/2 in place (${post.count}), /nowhere 404 in place (${nowhere.count}), and SSG's /about/ arrives rendered and hydrates in place (${generated.count}); the client is ${gzipped} bytes gzipped`,
+    `ssr: / hydrates in place (${home.count} nodes kept + ${home.joined} joined) and counts, a link to /about without a reload, /posts/2 in place (${post.count} + ${post.joined}), /nowhere 404 in place (${nowhere.count} + ${nowhere.joined}), and SSG's /about/ arrives rendered and hydrates in place (${generated.count} + ${generated.joined}); the client is ${gzipped} bytes gzipped`,
   );
 } catch (e) {
   console.error(`the server's stderr:\n${server.stderr()}`);

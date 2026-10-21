@@ -6,11 +6,12 @@
 //! the roots the server left empty: three with those guests, one of them
 //! followed by a `script` with the data's id and no type, one by a `p` and
 //! then the data's `script`, and three, one blank and one holding a form
-//! feed, with a fresh view.
+//! feed, with a fresh view; and two whose long text the page's parser
+//! split, fixed and dynamic.
 
 import dom
 import ui
-import view::{counter, fallback, fresh, guests, listed, lists, texts}
+import view::{counter, fallback, fresh, guests, listed, lists, long, long_dynamic, texts}
 
 fn main() {
     // `on_mount` runs once the walk has given the button its handler, so its
@@ -40,5 +41,7 @@ fn main() {
     hydrate("#empty", fresh)
     hydrate("#blank", fresh)
     hydrate("#feed", fresh)
+    hydrate("#long", long)
+    hydrate("#longer", long_dynamic)
     println("hydrated")
 }

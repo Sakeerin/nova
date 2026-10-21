@@ -1,9 +1,10 @@
 //! What the client, `main.nova`, and the server, `server.nova`, share (spec
 //! docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
 //! §1, §9.5): the server's data, the routes, and the app. The app shows the
-//! data's title and names, a `for_each` over them, then links, then the
-//! route the location matches: a home page with a counter and a `show`, an
-//! about page, a post by its id, and a page for any other path.
+//! data's title and names, a `for_each` over them, a text longer than
+//! Chromium's parser puts into one node, then links, then the route the
+//! location matches: a home page with a counter and a `show`, an about
+//! page, a post by its id, and a page for any other path.
 //!
 //! `tests/browser/ssr.mjs` builds it with `nova build --ssg`, serves it with
 //! its server, and serves the statically generated pages with a server of
@@ -76,6 +77,11 @@ impl FromJson for Data {
     }
 }
 
+/// A text of 70,000 characters, `0123456789` 7,000 times: more than the
+/// 65,536 Chromium's parser puts into one text node, so the page holds it
+/// in two, which hydration joins.
+pub fn long_text() -> String { "0123456789".repeat(7000) }
+
 /// The data the server renders every page with.
 pub fn data() -> Data {
     Data { title: "Guests </script><!-- & friends", names: ["Ada", "Grace", "Katherine"] }
@@ -137,7 +143,8 @@ pub fn routes() -> [Route] {
     ]
 }
 
-/// The app: the data's title and names, the links, then the route.
+/// The app: the data's title and names, the long text, the links, then the
+/// route.
 pub component App(data: Data) {
     let state = signal("server")
     on_mount(|| state.set("hydrated"))
@@ -152,6 +159,7 @@ pub component App(data: Data) {
                     },
                 )
             }
+            p(id: "long") { text(long_text()) }
             nav {
                 link(id: "home", to: "/") { text("Home") }
                 link(id: "about", to: "/about") { text("About") }

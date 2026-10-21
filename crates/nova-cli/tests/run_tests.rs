@@ -11562,9 +11562,14 @@ fn ui_mount_panics_natively() {
 /// no `div`, or a page and its data, as SSG writes them, is emptied first,
 /// and one never closed keeps what follows it. A stale data `script` past
 /// whitespace after the root goes too, the whitespace kept, though the page
-/// has no data; one with no `</script>` stays as it is. Then `document`
-/// panics on a template with no root, after what the program printed
-/// first.
+/// has no data; one with no `</script>` stays as it is. The root is found
+/// as HTML reads the template (ADR 0045): a `<div id="app">` in a comment,
+/// in an inline script's string or in an attribute's value comes before
+/// the real one and is left as it is; a `<div` in an inline script inside
+/// the root, or a `</div>` in an attribute's value, is not counted; and a
+/// root closed by `</div >` ends there, so what follows it stays. Then
+/// `document` panics on a template with no root, after what the program
+/// printed first.
 #[test]
 fn ssr_page_page_with_and_document() {
     let dir = std::env::temp_dir().join("nova-ssr-page");
@@ -11616,6 +11621,16 @@ fn ssr_page_page_with_and_document() {
         \x20   println(\"spaced: ${document(spaced, bare)}\")\n\
         \x20   let cut = \"<div id=\\\"app\\\"><p>old</p></div><script type=\\\"application/json\\\" id=\\\"nova-data\\\">[0]<p>after</p>\"\n\
         \x20   println(\"unclosed data: ${document(cut, filled)}\")\n\
+        \x20   let noted = \"<head><!-- mounts in <div id=\\\"app\\\"></div> --></head><body><div id=\\\"app\\\"></div></body>\"\n\
+        \x20   println(\"comment: ${document(noted, filled)}\")\n\
+        \x20   let quoted = \"<head><script>var shell = '<div id=\\\"app\\\"></div>';</script></head><body><div id=\\\"app\\\"></div></body>\"\n\
+        \x20   println(\"script string: ${document(quoted, filled)}\")\n\
+        \x20   let written = \"<body><div id=\\\"app\\\"><script>if (x) document.write('<div class=\\\"s\\\">')</script></div><footer>kept</footer></body>\"\n\
+        \x20   println(\"script div: ${document(written, filled)}\")\n\
+        \x20   let attributes = \"<body title='<div id=\\\"app\\\">'><div id=\\\"app\\\"><a title=\\\"</div>\\\">old</a></div><footer>kept</footer></body>\"\n\
+        \x20   println(\"attributes: ${document(attributes, filled)}\")\n\
+        \x20   let end_spaced = \"<main><div id=\\\"app\\\"><p>Loading</p></div ></main><footer>kept</footer>\"\n\
+        \x20   println(\"end tag: ${document(end_spaced, filled)}\")\n\
         \x20   println(document(\"<div id=\\\"root\\\"></div>\", a))\n\
         \x20   println(\"not reached\")\n\
         }\n";
@@ -11642,7 +11657,12 @@ fn ssr_page_page_with_and_document() {
          rendered: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><p>after</p>\n\
          unclosed: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><p>open\n\
          spaced: <div id=\"app\">x</div>\n<p>after</p>\n\
-         unclosed data: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><script type=\"application/json\" id=\"nova-data\">[0]<p>after</p>\n"
+         unclosed data: <div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><script type=\"application/json\" id=\"nova-data\">[0]<p>after</p>\n\
+         comment: <head><!-- mounts in <div id=\"app\"></div> --></head><body><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script></body>\n\
+         script string: <head><script>var shell = '<div id=\"app\"></div>';</script></head><body><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script></body>\n\
+         script div: <body><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><footer>kept</footer></body>\n\
+         attributes: <body title='<div id=\"app\">'><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script><footer>kept</footer></body>\n\
+         end tag: <main><div id=\"app\">x</div><script type=\"application/json\" id=\"nova-data\">[1]</script></main><footer>kept</footer>\n"
     );
     let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
     assert!(
@@ -11897,16 +11917,47 @@ fn ssr_exchange(port: u16, request: &str) -> Result<SsrResponse, String> {
 /// the port it bound; `/` is the template filled with the page and its data;
 /// a page keeps its query and takes its route's parameter; the files the
 /// manifest lists come with their content types and `nosniff`, asked for
-/// with an escape or a query too; a name with a `.` it does not list, a file
-/// in `dist/` it does not list, a listed file not on disk, and a path that
-/// would leave `dist/`, which the manifest lists, all get `404`, and nothing
-/// outside `dist/` is read; a path only the catch-all serves gets `404` and
-/// the rendered page; a `POST` gets `404`; and a signal stops it, and
-/// `serve` returns `Ok`.
+/// with an escape or a query too, a file of each extension `serve` knows,
+/// one it does not know as `application/octet-stream`, and `.PNG` as
+/// `image/png`, since the extension is read in any case; a name with a `.`
+/// it does not list, a file in `dist/` it does not list, a listed file not
+/// on disk, and a path that would leave `dist/`, which the manifest lists,
+/// all get `404`, and nothing outside `dist/` is read; a path only the
+/// catch-all serves gets `404` and the rendered page; a `POST` gets `404`;
+/// and a signal stops it, and `serve` returns `Ok`.
 #[test]
 fn ssr_serve_answers_files_and_pages() {
     use std::time::Duration;
     let (site, home) = ssr_site("serve");
+    // One more listed file of each type, each holding its own path.
+    let typed = [
+        ("style.css", "text/css; charset=utf-8"),
+        ("data.json", "application/json"),
+        ("assets/a.png", "image/png"),
+        ("assets/b.jpg", "image/jpeg"),
+        ("assets/c.gif", "image/gif"),
+        ("assets/d.webp", "image/webp"),
+        ("favicon.ico", "image/x-icon"),
+        ("robots.txt", "text/plain; charset=utf-8"),
+        ("assets/e.woff2", "font/woff2"),
+        ("worker.mjs", "text/javascript; charset=utf-8"),
+        ("assets/f.unknown", "application/octet-stream"),
+        ("assets/G.PNG", "image/png"),
+    ];
+    let dist = site.join("dist");
+    for (path, _) in typed {
+        std::fs::write(dist.join(path), path).expect("write a typed file");
+    }
+    let manifest = std::fs::read_to_string(dist.join("manifest.json")).expect("the manifest");
+    let more: String = typed
+        .iter()
+        .map(|(path, _)| format!("\"{path}\": 1, "))
+        .collect();
+    std::fs::write(
+        dist.join("manifest.json"),
+        manifest.replacen("{\"files\": {", &format!("{{\"files\": {{{more}"), 1),
+    )
+    .expect("list the typed files");
     let mut server = SsrServer::spawn(&site, &home);
     let get = |path: &str| format!("GET {path} HTTP/1.1\r\nhost: x\r\n\r\n");
     let text = |body: &[u8]| String::from_utf8_lossy(body).to_string();
@@ -11958,6 +12009,13 @@ fn ssr_serve_answers_files_and_pages() {
         assert_eq!(headers["content-type"], kind, "{path}");
         assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
         assert_eq!(body, bytes, "{path}");
+    }
+    for (path, kind) in typed {
+        let (status, headers, body) = server.ask(&get(&format!("/{path}")));
+        assert_eq!(status, 200, "{path}");
+        assert_eq!(headers["content-type"], kind, "{path}");
+        assert_eq!(headers["x-content-type-options"], "nosniff", "{path}");
+        assert_eq!(body, path.as_bytes(), "{path}");
     }
 
     for path in [
@@ -12068,10 +12126,14 @@ fn ssr_serve_reports_what_stops_it_starting() {
 /// writes a page for each static route, `/` over the template it read, the
 /// others in directories it makes, skipping the route with a parameter and
 /// the catch-all, and prints a line for each. Run again over its own output,
-/// it writes the same pages. A route path that names no file, for a piece
-/// of it that is `..` or empty, or holds `\`, NUL, `?` or `#`, is refused,
-/// with an `Err` naming it, after the pages before it, and nothing more is
-/// written; and `--ssg` with no directory is refused.
+/// it writes the same pages. In a template whose root is found by markup
+/// (ADR 0045), past a `<div id="app">` in a comment and one in an inline
+/// script's string, the root holding an inline script with an unbalanced
+/// `<div` and closed by `</div >`, it fills the real root, and keeps the
+/// rest, the footer after the root included. A route path that names no
+/// file, for a piece of it that is `..` or empty, or holds `\`, NUL, `?` or
+/// `#`, is refused, with an `Err` naming it, after the pages before it, and
+/// nothing more is written; and `--ssg` with no directory is refused.
 #[test]
 fn ssr_ssg_writes_the_static_pages_and_refuses_a_bad_path() {
     let (site, home) = ssr_site("ssg");
@@ -12115,6 +12177,37 @@ fn ssr_ssg_writes_the_static_pages_and_refuses_a_bad_path() {
     }
     assert!(!dist.join("posts").exists());
     assert_eq!(read("app.js"), "export default function init() {}\n");
+
+    let marked = site.join("marked");
+    let _ = std::fs::remove_dir_all(&marked);
+    std::fs::create_dir_all(&marked).expect("a directory");
+    let before = format!(
+        "<!doctype html>\n<title>Site</title>\n{}{}",
+        "<!-- mounts in <div id=\"app\"></div> -->\n",
+        "<script>var shell = '<div id=\"app\"></div>';</script>\n<body>\n"
+    );
+    let after =
+        "\n<footer>kept</footer>\n<script type=\"module\" src=\"/app.js\"></script>\n</body>\n";
+    let placeholder = "<script>document.write('<div class=\"s\">')</script><p>Loading</p>";
+    std::fs::write(
+        marked.join("index.html"),
+        format!("{before}<div id=\"app\">{placeholder}</div >{after}"),
+    )
+    .expect("a template");
+    let a = run(&["src/server.nova", "--", "--ssg", "marked"]).success();
+    assert_eq!(
+        String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n"),
+        "ssg: wrote marked/index.html\n\
+         ssg: wrote marked/about/index.html\n\
+         ssg: wrote marked/docs/intro/index.html\n\
+         stopped\n"
+    );
+    for (path, view) in &pages {
+        let page = std::fs::read_to_string(marked.join(path)).expect("a page");
+        let expected = ssr_pages("@before@<div id=\"app\"></div>@after@", view)
+            .map(|p| p.replace("@before@", &before).replace("@after@", after));
+        assert!(expected.contains(&page), "{path}: {page}");
+    }
 
     // `refuse.nova`'s third route, `/a/../b` or the path its first argument
     // names, each into a fresh directory, of which the two pages before it

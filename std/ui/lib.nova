@@ -833,7 +833,9 @@ pub fn mount(selector: String, f: fn() -> View) {
 /// `hydrate("#app", App)`.
 ///
 /// It walks `f()`'s view against the root's nodes in order: an element must
-/// have the view's tag, and a text its text; attributes are not compared. At
+/// have the view's tag, and a text its text, once the text nodes a browser's
+/// parser split it into, as Chromium splits one longer than 65,536
+/// characters, are joined into the first; attributes are not compared. At
 /// the first difference, it writes `nova: hydration mismatch: expected …,
 /// found …; building the view again` with `console.error`, disposes of what
 /// it began, removes the root's children, and builds the view there as
@@ -1258,9 +1260,10 @@ fn adopt_attr(a: Attr, el: Node) {
 }
 
 // The node of a text view whose text is `t`: past the separator `joined`
-// asks for, the text node at `c`, which must hold `t`; or, where there is
-// none and `t` is empty, a new empty one put there, since an empty text
-// writes nothing. `None` once the walk stops.
+// asks for, the text node at `c`, which must hold `t` once the nodes a
+// browser split it into are joined (`whole_text`); or, where there is none
+// and `t` is empty, a new empty one put there, since an empty text writes
+// nothing. `None` once the walk stops.
 fn adopt_text(t: String, joined: Bool, w: Walk, c: Cursor) -> Option<Node> {
     let expected = "text \"${clipped(t)}\""
     if joined {
@@ -1277,7 +1280,7 @@ fn adopt_text(t: String, joined: Bool, w: Walk, c: Cursor) -> Option<Node> {
     match c.at {
         Some(n) => {
             if backend_kind(n) == "#text" {
-                if backend_text_of(n) != t {
+                if whole_text(n, t) != t {
                     missed(w, expected, c)
                     return None
                 }
@@ -1294,6 +1297,32 @@ fn adopt_text(t: String, joined: Bool, w: Walk, c: Cursor) -> Option<Node> {
     let n = backend_text("")
     put(c.parent, n, c.at)
     Some(n)
+}
+
+// The text of the text node `n`, once each text node after it is joined to
+// it while its text is a proper prefix of `t`: that node's text appended to
+// `n`'s, and the node removed. A browser's parser splits a long text into
+// several nodes, Chromium's at 65,536 characters, and `render_hydratable`
+// never writes two texts side by side, a separator or another node always
+// between them, so a text node just after another is the rest of its text.
+fn whole_text(n: Node, t: String) -> String {
+    let mut have = backend_text_of(n)
+    let mut more = true
+    while more && have != t && t.starts_with(have) {
+        more = false
+        match backend_next_sibling(n) {
+            Some(next) => {
+                if backend_kind(next) == "#text" {
+                    have = "${have}${backend_text_of(next)}"
+                    backend_set_text(n, have)
+                    backend_remove(next)
+                    more = true
+                }
+            }
+            None => {}
+        }
+    }
+    have
 }
 
 // A region's first run under hydration, as `build_region`'s with a walk for

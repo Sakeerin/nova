@@ -14,7 +14,10 @@ dev` unchanged; the gate and its tests; and `404` with the rendered page
 are the user's decisions of 2026-10-19 (decisions 1 to 12 below).
 `hydrate_with`'s fallback is the user's decision of 2026-10-20, after the
 prototype's fact-check (decision 13), and adds a parameter to the spec's
-API. The spec settled the rest (its §14).
+API. The spec settled the rest (its §14). The review of 4.6 made three
+fixes, each marked below as the review's: a text a browser's parser split
+into several nodes is joined again; the template's root is found by its
+markup; and a build removes the pages a previous `--ssg` wrote.
 
 ## Context
 
@@ -83,8 +86,8 @@ starts from (spec §2, read at `2b7a6ed`) has:
    `hydrate_with` for the server's data; `import ui::ssr`, native only, as
    `dom` is WASM only; `ssr::serve` the high level and `ssr::page` the low.
 10. **`nova dev` does not change;** it stays client only. In an SSR
-    project its page has an empty root, where `hydrate` builds the view.
-    4.7, or the backlog, decides on a development mode for SSR.
+    project the client builds the view itself when `hydrate` finds an
+    empty root. 4.7, or the backlog, decides on a development mode for SSR.
 11. **The gate and the tests:** `tests/browser/ssr-app`, with a router, a
     `show`, a `for_each`, a counter and the server's data; in CI,
     Playwright opens a server-rendered page and a statically generated
@@ -96,7 +99,9 @@ starts from (spec §2, read at `2b7a6ed`) has:
     static server, each with `app.wasm` held back, keeps a handle to every
     node under `#app`, and checks that each is `===` the page's node once
     the app's `on_mount`, which runs after the walk, has set its root's
-    `data-state` from `server` to `hydrated`.
+    `data-state` from `server` to `hydrated`, but the text nodes Chromium's
+    parser split off the app's text of 70,000 characters, which hydration
+    joins into the first (the review's fix).
 12. **A path no route serves gets `404`** with the rendered page, when it
     falls to `*` or matches no route; the router says which route a path
     matches.
@@ -242,9 +247,21 @@ starts from (spec §2, read at `2b7a6ed`) has:
   message, whether `parse` or `from_json` refused the text.
 - **The disposed walk's owner** is removed from the roots `std/ui` keeps,
   so nothing holds it after the view is built again.
+- **A long text is joined again** (the review's fix). A browser's parser
+  can put one text into several text nodes side by side: Chromium's puts
+  at most 65,536 characters into one. Before the walk compares a text
+  node, while its text is a proper prefix of the view's and the node after
+  it is a text node, it appends that node's text to its own and removes
+  that node; so the first node, kept, holds the whole text, and a
+  `DynText`'s effect writes to it. `render_hydratable` never writes two
+  texts side by side, a separator or another node always between them, so
+  a text node just after another is the rest of its text.
 - **The fake DOM's parser** turns CR and CRLF into LF, as a browser does,
-  so `&#13;` is tested under it; it throws on an entity it does not know,
-  and on HTML it cannot parse, such as an end tag it does not expect.
+  so `&#13;` is tested under it; it splits a text longer than 65,536
+  characters into nodes of at most that many, as Chromium's does, but in a
+  `script` or `style` element; and it throws on an entity it does not
+  know, and on HTML it cannot parse, such as an end tag it does not
+  expect.
 - **A filled root is a template too.** After `--ssg`, `dist/index.html`
   is the rendered `/`, and a project's own page may hold whitespace or a
   placeholder in its root. So `document`, which `serve` and SSG fill each
@@ -255,13 +272,25 @@ starts from (spec §2, read at `2b7a6ed`) has:
   root holds anything included. `serve` and SSG
   empty the template's root once when they read it, and refuse a template
   with no `<div id="app">`, `ssr: <dist>/index.html has no <div
-  id="app">`, or `ssg: …`. The root's end is the `</div>` that balances
-  it; a root no `</div>` balances keeps what follows it, after an empty
-  root. A data element with no `</script>` stays where it is, since
+  id="app">`, or `ssg: …`. The root's end is the `div` end tag that
+  balances it; a root no end tag balances keeps what follows it, after an
+  empty root. A data element with no `</script>` stays where it is, since
   nothing tells where its text ends: such a template is broken HTML, whose
   rest a browser reads as that script's text. So SSG can run again over
   its own output, and a server started after `--ssg` renders each page
   from the page it was built with.
+- **The root is found by the template's markup** (the review's fix), as
+  HTML's tokenizer reads it, by `document` and so by `serve` and SSG: a
+  comment is skipped to its `-->`, any other `<!` or `<?` to its `>`, a
+  tag to its `>`, an attribute's quoted value read whole, and the text of
+  a `script`, `style`, `textarea` or `title` element to its end tag. The
+  root is the first `<div id="app">`, written just so, that is a tag, so
+  one in a comment, an inline script's string or an attribute's value
+  before it is left as it is. Inside it, a `<div` followed by whitespace,
+  `/` or `>` opens a `div`, and `</div` followed by whitespace, `/` or `>`
+  closes one, to its `>`, so `</div >` ends the root, and what follows it
+  stays; neither counts in a comment, in an attribute's value, or in the
+  text of those four elements, an inline script's included.
 - **`serve`'s own errors:** an address it cannot bind, `ssr: cannot bind
   <address>: …`; a manifest with no `files` object; and `--ssg` with no
   directory after it, `ssg: --ssg needs a directory`. A listed file that
@@ -293,6 +322,19 @@ starts from (spec §2, read at `2b7a6ed`) has:
   stops it, which leaves it no code, `…, stopped by signal <number>: …`,
   and exits with 1. These words are the same on every system, where
   `ExitStatus`'s own are not.
+- **A build removes the pages `--ssg` wrote** (the review's fix). Before
+  a WASM build writes its directory, as `--target wasm`, `nova bundle`,
+  `nova dev`'s build, `--ssr` and `--ssg` each build the client, it reads
+  the `manifest.json` there, with `serde_json`, already in `nova` through
+  three of its crates, and removes each page it lists: a path whose names
+  are all plain ones by Rust's path components, with no `..`, root or
+  prefix, that ends in `/index.html` and does not start with `assets/`;
+  then each directory that leaves empty, up to the output directory. A
+  page reached through a link, or a directory at its place, is left. A
+  missing manifest, a link at its place, and one that does not parse or
+  has no `files` object remove nothing. So no build leaves a page with
+  stale data, which `nova dev` would serve at its path, or a static server
+  for a route since removed.
 - **On WASM, a name of `ui::ssr` with no import** is E0001, as natively:
   the resolver leaves an imported module's names out of the list of names
   WASM lacks, since no module sees them without the import, which is
@@ -344,20 +386,26 @@ starts from (spec §2, read at `2b7a6ed`) has:
   - hydration adds code to every client that calls `hydrate`;
     `06-counter-spa` does not, and its size test reads 21,070 bytes
     gzipped, the 21 KB 4.4 recorded. `ssr-app`'s client, built without
-    `--release` and so without `wasm-opt`, measured 41,260 bytes gzipped
+    `--release` and so without `wasm-opt`, measured 41,688 bytes gzipped
     when `ssr.mjs` printed it; its size is printed, not limited;
   - a server is a second program to build natively, slow under
     `--release`.
 - **Under `nova dev`, `hydrate_with` builds the page from its fallback**
-  (decision 13): the page holds no `nova-data`, its root is empty, and the
-  client builds `f(fallback)` there, as `hydrate` builds its view, so an
-  SSR project with data still runs under `nova dev`, without the server's
-  data, until 4.7, or the backlog, gives `nova dev` a mode for SSR. A page
-  a server filled with no data after the root is walked with the fallback,
-  and mismatches where the server rendered other data. A project's own
-  page whose root holds a placeholder is not empty either: under `nova
-  dev` the client walks the placeholder, reports a mismatch with
-  `console.error` on every load, and builds the view, which works.
+  (decision 13): the page `nova dev`'s build writes holds no `nova-data`,
+  and the build first removes the pages a previous `--ssg` listed, so,
+  where the root is empty, the client builds `f(fallback)` there, as
+  `hydrate` builds its view, and an SSR project with data still runs under
+  `nova dev`, without the server's data, until 4.7, or the backlog, gives
+  `nova dev` a mode for SSR. A page a server filled with no data after the
+  root is walked with the fallback, and mismatches where the server
+  rendered other data. A project's own page whose root holds a placeholder
+  is not empty either: under `nova dev` the client walks the placeholder,
+  reports a mismatch with `console.error` on every load, and builds the
+  view, which works. And a page in the output directory that no manifest
+  lists stays, such as one a server run by hand with `--ssg` wrote, or one
+  a failing `--ssg` left: `nova dev` serves it at its path, with the data
+  it was written with, which `hydrate_with` reads in place of the
+  fallback.
 - **A hash `Router` is not for SSR:** a server never sees the hash, so it
   renders `/`, and a page opened at `#/posts/1` mismatches and is built
   again. `HistoryRouter` is the router for SSR.
@@ -377,11 +425,15 @@ starts from (spec §2, read at `2b7a6ed`) has:
   a route's page may fail to be written, or land under another name. It
   is still written inside `<dir>`, since a piece that is empty, `.` or
   `..`, or holds `\`, is refused.
-- **A comment in the template can fool the root's emptying,** which counts
-  `<div` and `</div>` and reads no comment: one inside the root holding
-  `</div>` ends the root there, and the rest of the root stays in the
-  page. A view cannot, since its text and attribute values are escaped,
-  and `render_hydratable` writes no comment but its markers.
+- **The template's markup is read by the rules a template usually
+  needs,** not by all of HTML's: the text of a `noscript`, `iframe`,
+  `xmp`, `noembed`, `noframes` or `plaintext` element is read as markup;
+  a script's text ends at its first `</script`, where HTML reads on past
+  one that follows `<!--<script` in it; and an SVG `title`'s text is
+  skipped as an HTML `title`'s is, where HTML reads tags in it. A
+  `<div id="app">`, a `<div` or a `</div` in such a place can still move
+  the root or its end. A view cannot, since its text and attribute values
+  are escaped, and `render_hydratable` writes no comment but its markers.
 - **A server must report `serve`'s `Err`,** print it and exit with a
   failure, or an SSG refusal passes silently; `tests/browser/ssr-app`'s
   server does.

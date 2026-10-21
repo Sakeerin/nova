@@ -12,10 +12,11 @@
 // For hydration (spec
 // docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
 // §9.3), it has comments, an `innerHTML` setter that parses the HTML
-// `render_hydratable` writes, a textarea's value that, as a browser's, is
-// not its `value` attribute, and a console whose errors it keeps, in
-// `errors`, and prints at once, so that a harness's output shows them in
-// order.
+// `render_hydratable` writes and, as Chromium's parser does, splits a text
+// longer than 65,536 characters into several nodes, a textarea's value
+// that, as a browser's, is not its `value` attribute, and a console whose
+// errors it keeps, in `errors`, and prints at once, so that a harness's
+// output shows them in order.
 
 // What listeners threw, as a browser reports them.
 const uncaught = [];
@@ -222,9 +223,10 @@ function decode(s) {
 
 // Parse `html` into `parent`'s children, as a browser parses what
 // `render_hydratable` writes: elements, their double-quoted attributes, the
-// void elements std/ui knows, comments, and text with five entities. As a
-// browser's parser does, it first turns each CR LF, and each CR left, into
-// LF. Anything else, an unclosed or a stray tag included, is a SyntaxError.
+// void elements std/ui knows, comments, and text with five entities, a long
+// one split as Chromium splits it (`appendText`). As a browser's parser
+// does, it first turns each CR LF, and each CR left, into LF. Anything
+// else, an unclosed or a stray tag included, is a SyntaxError.
 function parseInto(parent, html) {
   const s = String(html).replace(/\r\n?/g, "\n");
   const doc = parent.ownerDocument;
@@ -269,11 +271,32 @@ function parseInto(parent, html) {
     } else {
       const next = s.indexOf("<", at);
       const stop = next < 0 ? s.length : next;
-      top().appendChild(new FakeText(decode(s.slice(at, stop)), doc));
+      appendText(top(), decode(s.slice(at, stop)));
       at = stop;
     }
   }
   if (open.length !== 1) throw domError("SyntaxError", `an unclosed <${top().localName}>`);
+}
+
+// The most characters Chromium's parser puts into one text node: it splits
+// a longer text into several nodes of at most this many, side by side, but
+// in a `script` or a `style` element (its `Text::kDefaultLengthLimit`).
+const TEXT_LIMIT = 65536;
+
+// `text` as `parent`'s next children, as Chromium's parser adds it: in
+// nodes of at most `TEXT_LIMIT` characters, UTF-16 code units as a JS
+// string counts them, a surrogate pair never split between two.
+function appendText(parent, text) {
+  const doc = parent.ownerDocument;
+  const whole = parent.localName === "script" || parent.localName === "style";
+  let at = 0;
+  while (at < text.length) {
+    let stop = whole ? text.length : Math.min(at + TEXT_LIMIT, text.length);
+    const high = text.charCodeAt(stop - 1);
+    if (stop < text.length && high >= 0xd800 && high <= 0xdbff) stop -= 1;
+    parent.appendChild(new FakeText(text.slice(at, stop), doc));
+    at = stop;
+  }
 }
 
 function escapeText(s) {
