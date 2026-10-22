@@ -6,6 +6,13 @@
 .env.local
 /examples/04-todo-cli/todos.json
 /examples/06-counter-spa/dist
+/examples/07-fullstack-blog/dist
+/examples/07-fullstack-blog/target
+/examples/07-fullstack-blog/data/blog.json
+/examples/07-fullstack-blog/data/blog.json.tmp
+/examples/07-fullstack-blog/data/users.json
+/examples/07-fullstack-blog/data/users.json.tmp
+/examples/07-fullstack-blog/data/secret
 /tools/vscode-nova/node_modules
 /tools/vscode-nova/out
 /tools/vscode-nova/.vscode-test

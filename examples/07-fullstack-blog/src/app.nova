@@ -8,6 +8,15 @@
 //! reads the same `Data` back and hydrates the same view. Links are plain
 //! anchors, so each page arrives from the server with its own data.
 
+import admin::{AdminPage, Editor}
+import header::{Header}
+import home::{Home}
+import login::{LoginPage}
+import post::{PostPage}
+import ui
+import ui::html::{a, div, h1, p}
+import ui::router::{HistoryRouter, Route}
+
 /// A post: written as plain text, a blank line between paragraphs, and when
 /// it was written and last changed, as `SystemTime::to_iso8601` writes them.
 pub record Post {
@@ -383,5 +392,70 @@ impl FromJson for Data {
                 missing: missing,
             },
         )
+    }
+}
+
+// --- The pages ---
+
+/// The page for a path that has none, and for a post that does not exist.
+component NotFound() {
+    view {
+        div(class: "notice") {
+            h1 { text("Not found") }
+            p { text("There is no page here.") }
+            p { a(href: "/") { text("Back to the posts") } }
+        }
+    }
+}
+
+/// The page for a form the server refused: `why` says what was wrong.
+component Refused(why: String) {
+    view {
+        div(class: "notice") {
+            h1 { text("Not sent") }
+            p(id: "refused") { text(why) }
+            p { a(href: "/") { text("Back to the posts") } }
+        }
+    }
+}
+
+/// Each path's page, the same on both sides. A form the server sends back
+/// with its messages is answered at the path it was posted to, so those
+/// paths have their pages too: a comment at `/posts/:id/comments`, a new
+/// post at `/admin/posts`, an edited one at `/admin/posts/:id`.
+pub fn routes(data: Data) -> [Route] {
+    [
+        Route { path: "/", component: || Home(data) },
+        Route { path: "/posts/:id", component: || PostPage(data) },
+        Route { path: "/posts/:id/comments", component: || PostPage(data) },
+        Route { path: "/login", component: || LoginPage(data) },
+        Route { path: "/admin", component: || AdminPage(data) },
+        Route { path: "/admin/new", component: || Editor(data) },
+        Route { path: "/admin/posts", component: || Editor(data) },
+        Route { path: "/admin/posts/:id/edit", component: || Editor(data) },
+        Route { path: "/admin/posts/:id", component: || Editor(data) },
+        Route { path: "*", component: NotFound },
+    ]
+}
+
+// The page's content: what refused the form, or that there is nothing here,
+// or the route's page.
+fn content(data: Data) -> View {
+    if data.refused != "" { return Refused(data.refused) }
+    if data.missing { return NotFound() }
+    HistoryRouter(routes(data))
+}
+
+/// The app: the header, then the page. The root's `data-state` reads
+/// `server` in the server's HTML and `hydrated` once the client has adopted
+/// the page, which a test can wait for.
+pub component App(data: Data) {
+    let state = signal("server")
+    on_mount(|| state.set("hydrated"))
+    view {
+        div(id: "root", class: "page", data_state: state.value()) {
+            Header(data)
+            content(data)
+        }
     }
 }

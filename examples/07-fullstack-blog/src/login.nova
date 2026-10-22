@@ -1,0 +1,48 @@
+//! The login: the admin's name and password, checked as they are typed once
+//! the page has hydrated, and on the server, which answers a wrong name or
+//! password with the form again and `401`.
+
+import app::{Data}
+import forms::{csrf_field, login_name_message, login_ok, message, password_message, submit}
+import ui
+import ui::html::{div, form, h1, input, label, p, text}
+
+/// The login page.
+pub component LoginPage(data: Data) {
+    let name = signal(data.draft.name)
+    let password = signal("")
+    let live = signal(false)
+    let shown = memo(|| live.value() || data.draft.failed)
+    let ok = memo(|| !live.value() || login_ok(name.value(), password.value()))
+    on_mount(|| live.set(true))
+    view {
+        div {
+            h1 { text("Log in") }
+            p(id: "login-error", class: "error") { text(data.draft.error) }
+            form(id: "login-form", class: "stacked", method: "post", action: "/login") {
+                csrf_field(data.csrf)
+                label {
+                    text("Name")
+                    input(
+                        name: "name",
+                        autocomplete: "username",
+                        value: data.draft.name,
+                        on_input: |v: String| name.set(v),
+                    )
+                }
+                message(shown, || login_name_message(name.value()))
+                label {
+                    text("Password")
+                    input(
+                        type: "password",
+                        name: "password",
+                        autocomplete: "current-password",
+                        on_input: |v: String| password.set(v),
+                    )
+                }
+                message(shown, || password_message(password.value()))
+                submit(ok, "Log in")
+            }
+        }
+    }
+}

@@ -1,0 +1,29 @@
+//! The home page: the posts, newest first, as the server sends them, each
+//! with its title, its date and its first paragraph.
+
+import app::{Data}
+import post_card::{PostCard}
+import ui
+import ui::html::{div, h1, p, section, text}
+
+// A card for each post, or a line saying there are none.
+fn cards(data: Data) -> View {
+    if data.posts.len() == 0 { return p([], [text("Nothing has been written yet.")]) }
+    let mut views = [text(""); data.posts.len()]
+    let mut i = 0
+    while i < data.posts.len() {
+        views[i] = PostCard(data.posts[i])
+        i = i + 1
+    }
+    div([], views)
+}
+
+/// The home page.
+pub component Home(data: Data) {
+    view {
+        section(id: "posts") {
+            h1 { text("Posts") }
+            cards(data)
+        }
+    }
+}
