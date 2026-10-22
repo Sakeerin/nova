@@ -1,7 +1,7 @@
 # Phase 4.8, "The gate and `v0.4.0`": design
 
 - **Date:** 2026-10-22.
-- **Status:** a draft, for the user's approval.
+- **Status:** approved by the user on 2026-10-22.
 - **The user's decisions, 2026-10-22:**
   1. **Lighthouse measures the mobile preset,** with its default simulated
      throttling, three runs a page; a page passes when the median of its
