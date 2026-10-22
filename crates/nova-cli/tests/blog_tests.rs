@@ -16,7 +16,10 @@
 //! for 30 seconds at most. The copied files may have CRLF line ends on a
 //! Windows checkout; nothing here compares their text. The test that times
 //! logins sets another user's password over 1000 rounds first, then the
-//! admin's over 100000.
+//! admin's over 100000. The two tests that need a `--set-password` to
+//! outlast other work give it a count measured first ([`rounds_lasting`]),
+//! since a runtime built for release, as `cargo test --release` builds it,
+//! hashes about eight times as fast as one built for debugging.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
@@ -195,6 +198,54 @@ fn set_password_over(data: &Path, iterations: &str) {
     );
     assert_eq!(code, Some(0), "--set-password failed: {out}{err}");
     assert_eq!(out, "blog: set the password of admin\n");
+}
+
+/// A count of PBKDF2 rounds over which `--set-password` hashes for at
+/// least `at_least` on this runner and this build of the runtime, and how
+/// it was measured. 600,000 rounds take about 2.6 s on a runtime built for
+/// debugging and about 0.3 s on one built for release, so no fixed count
+/// lasts long enough on one without being slow on the other. It times
+/// `--set-password` in a data directory of its own, `<name>-calibration`,
+/// at 10,000 rounds, then ten times as many each time, until a run takes
+/// 200 ms or more, and scales that count to `at_least` and half as much
+/// again, within PBKDF2's bounds. A run's time includes starting the
+/// process and writing the file, which makes the count err low by their
+/// share, and the runner may be busier, with the other tests, while it
+/// measures than afterwards: the half to spare covers both.
+fn rounds_lasting(name: &str, at_least: Duration) -> (u64, String) {
+    const MOST: u64 = 4_294_967_295;
+    let data = data_dir(&format!("{name}-calibration"));
+    let mut rounds: u64 = 10_000;
+    loop {
+        let started = Instant::now();
+        let (code, out, err) = run_server(
+            &data,
+            &[
+                "--set-password",
+                "calibration",
+                "--iterations",
+                &rounds.to_string(),
+            ],
+            b"a password for the calibration\n",
+        );
+        let took = started.elapsed();
+        assert_eq!(
+            code,
+            Some(0),
+            "the calibration's --set-password failed: {out}{err}"
+        );
+        if took >= Duration::from_millis(200) || rounds * 10 > MOST {
+            let wanted = rounds as f64 * at_least.as_secs_f64() * 1.5 / took.as_secs_f64();
+            let count = (wanted.ceil() as u64).clamp(rounds, MOST);
+            return (
+                count,
+                format!(
+                    "{rounds} rounds took {took:?}, so {count} should take {at_least:?} or more"
+                ),
+            );
+        }
+        rounds *= 10;
+    }
 }
 
 /// A running server, killed when dropped.
@@ -1394,13 +1445,14 @@ impl Drop for Setting {
 
 /// A password set while the server runs loses nothing, and nothing loses
 /// it: `--set-password` writes only `users.json`, and the server only
-/// `blog.json`. Comments are posted while `--set-password` hashes over
-/// 600,000 rounds, about two seconds on a debug runtime, each awaited
-/// until `blog.json` holds it, and some saved before it ends; once it has
-/// ended, `blog.json` holds every one, and `users.json`, after the server
-/// writes again, the new user and the admin. The running server checks
-/// logins against the users it read when it started, so the new user logs
-/// in once it starts again, and the comments are still on the post's page.
+/// `blog.json`. Comments are posted while `--set-password` hashes over a
+/// count measured to last two seconds at least ([`rounds_lasting`]), each
+/// awaited until `blog.json` holds it, and some saved before it ends; once
+/// it has ended, `blog.json` holds every one, and `users.json`, after the
+/// server writes again, the new user and the admin. The running server
+/// checks logins against the users it read when it started, so the new
+/// user logs in once it starts again, and the comments are still on the
+/// post's page.
 #[test]
 fn a_password_set_while_the_server_runs_loses_nothing() {
     const GRACE: &str = "a password for grace";
@@ -1408,9 +1460,13 @@ fn a_password_set_while_the_server_runs_loses_nothing() {
     set_password(&data);
     let blog = Blog::start(&data);
     let (sid, csrf) = visitor(&blog, "/posts/1");
+    let (rounds, measured) = rounds_lasting("set-while-serving", Duration::from_secs(2));
+    eprintln!("grace's --set-password: {measured}");
     let mut setting = Setting(
         Command::new(server_exe())
-            .args(["--set-password", "grace", "--data"])
+            .args(["--set-password", "grace", "--iterations"])
+            .arg(rounds.to_string())
+            .arg("--data")
             .arg(&data)
             .current_dir(project())
             .stdin(Stdio::piped())
@@ -1468,7 +1524,7 @@ fn a_password_set_while_the_server_runs_loses_nothing() {
     );
     assert!(
         during > 0,
-        "--set-password ended before a comment was saved while it ran"
+        "--set-password ended before a comment was saved while it ran ({measured})"
     );
     let saved = std::fs::read_to_string(data.join("blog.json")).expect("blog.json");
     for text in &posted {
@@ -1517,21 +1573,25 @@ fn a_password_set_while_the_server_runs_loses_nothing() {
 /// Two `--set-password` runs that overlap both keep their user: each hashes
 /// first and reads `users.json` only then, so one that runs from start to
 /// end while another hashes is in the file the other reads. One run sets
-/// `ada` over 600,000 rounds, about two seconds on a debug runtime; half a
-/// second in, a second run sets `bea` over 1,000 rounds and ends. The test
-/// needs the first run still going when the second has ended, by a quarter
-/// of a second at least, and fails saying so when the runner is too slow
-/// for that, rather than judging the files. Then `users.json` holds both
-/// users, and both log in on a server started afterwards.
+/// `ada` over a count measured to last two seconds at least
+/// ([`rounds_lasting`]); half a second in, a second run sets `bea` over
+/// 1,000 rounds and ends. The test needs the first run still going when the
+/// second has ended, by a quarter of a second at least, and fails saying so
+/// when they did not overlap so, `ada`'s ending too soon or `bea`'s too
+/// late, rather than judging the files. Then `users.json` holds both users,
+/// and both log in on a server started afterwards.
 #[test]
 fn overlapping_set_password_runs_keep_both_users() {
     const ADA: &str = "a password for ada";
     const BEA: &str = "a password for bea";
     let data = data_dir("overlapping-set-password");
+    let (rounds, measured) = rounds_lasting("overlapping-set-password", Duration::from_secs(2));
     let started = Instant::now();
     let mut slow = Setting(
         Command::new(server_exe())
-            .args(["--set-password", "ada", "--iterations", "600000", "--data"])
+            .args(["--set-password", "ada", "--iterations"])
+            .arg(rounds.to_string())
+            .arg("--data")
             .arg(&data)
             .current_dir(project())
             .stdin(Stdio::piped())
@@ -1576,12 +1636,13 @@ fn overlapping_set_password_runs_keep_both_users() {
         err.join().unwrap_or_default(),
     );
     assert_eq!(status.code(), Some(0), "{out}{err}");
-    eprintln!("bea's run ended at {fast_done:?}, ada's at {slow_done:?}");
+    eprintln!("ada's rounds: {measured}; bea's run ended at {fast_done:?}, ada's at {slow_done:?}");
     assert!(
         still_hashing && slow_done >= fast_done + Duration::from_millis(250),
-        "this runner is too slow for the test: bea's run, at 1000 rounds, ended \
-         {fast_done:?} after ada's started, and ada's, at 600000, ended at \
-         {slow_done:?}; the test needs ada's to end at least 250ms after bea's"
+        "the runs did not overlap as the test needs, ada's ending at least 250ms \
+         after bea's: ada's run ended too soon, or bea's too late. ada's, at \
+         {rounds} rounds ({measured}), ended {slow_done:?} after it started; \
+         bea's, at 1000 rounds, started 500ms after ada's and ended at {fast_done:?}"
     );
     let users = std::fs::read_to_string(data.join("users.json")).expect("users.json");
     assert!(

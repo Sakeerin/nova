@@ -5,12 +5,16 @@
 //! Each file has one writer. Only the server writes `blog.json`, from its
 //! own copy of the store: a handler changes the store, then spawns the
 //! write, which runs after the response: the store's JSON goes to
-//! `blog.json.tmp`, then `rename` puts it over `blog.json`, so a crash never
-//! leaves half a file. Spawned writes run in order, so the file ends as the
-//! last change left the store. Only `--set-password` writes `users.json`,
-//! the same way, through `users.json.tmp`. The server reads `users.json`
-//! once, when it starts, and `--set-password` never reads or writes
-//! `blog.json`, so neither writes over a change the other made.
+//! `blog.json.tmp`, then `rename` puts it over `blog.json`, so if the
+//! server stops, or its process dies, the file is the old one or the new
+//! one, never half of one. Nothing flushes the file to disk before the
+//! rename, which `std/fs` cannot do, so a power loss or a crash of the
+//! system can still leave it empty on a file system that does not flush
+//! first. Spawned writes run in order, so the file ends as the last change
+//! left the store. Only `--set-password` writes `users.json`, the same way,
+//! through `users.json.tmp`. The server reads `users.json` once, when it
+//! starts, and `--set-password` never reads or writes `blog.json`, so
+//! neither writes over a change the other made.
 //!
 //! Posts and comments keep the order they were written in; a view that
 //! wants the newest first walks them backwards, and no view walks a `Map`,

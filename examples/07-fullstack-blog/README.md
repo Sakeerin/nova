@@ -25,8 +25,9 @@ hydrates it.
   valid.
 - **Sessions and CSRF tokens.** Every visitor gets a session: a random id in
   a table in memory, carried by the cookie `sid` as `<id>.<tag>`, the tag
-  `hmac_sha256` of the id, `HttpOnly` and `SameSite=Lax`. Every form carries
-  a token derived from the session, and a `POST` without the right one is
+  `hmac_sha256` of `sid:` and the id, `HttpOnly` and `SameSite=Lax`. Every
+  form carries a token derived from the session, `hmac_sha256` of `csrf:`
+  and the id, so no token is a tag, and a `POST` without the right one is
   refused with `403`. Logging in starts a new session, so an id set before
   it is worth nothing after; logging out ends it (`src/auth.nova`).
 - **Passwords stored only as hashes,** PBKDF2-HMAC-SHA256 with a random
@@ -39,25 +40,32 @@ hydrates it.
   line starts a new paragraph.
 - **A store in JSON files.** The posts and comments live in memory; each
   change is written whole to `data/blog.json.tmp`, then renamed over
-  `data/blog.json`, so a crash never leaves half a file
-  (`src/store.nova`). `data/seed.json`, in the repository, is where the
-  first start reads from. The users are in `data/users.json`, which only
-  `--set-password` writes, the same way, and the server reads when it
-  starts.
+  `data/blog.json`, so if the server stops, or its process dies, the file
+  is the old one or the new one, never half of one (`src/store.nova`).
+  `data/seed.json`, in the repository, is where the first start reads
+  from. The users are in `data/users.json`, which only `--set-password`
+  writes, the same way, and the server reads when it starts.
 
 ## Run it
 
-```bash
+```sh
 cd examples/07-fullstack-blog
 nova build --ssr
-echo 'a long password' | target/debug/fullstack-blog-server --set-password admin
+stty -echo; IFS= read -r PW; stty echo
+printf '%s\n' "$PW" | target/debug/fullstack-blog-server --set-password admin
+unset PW
 target/debug/fullstack-blog-server
 ```
 
-`nova build --ssr` builds the client into `dist/` and the server into
-`target/debug/fullstack-blog-server` (`.exe` on Windows). `--set-password`
-reads one line, of at least eight characters and not blank, writes the user
-`admin` and its hash into `data/users.json`, and ends.
+The commands are for a POSIX shell. `nova build --ssr` builds the client
+into `dist/` and the server into `target/debug/fullstack-blog-server`
+(`.exe` on Windows). The third line reads the admin's password as you type
+it, without showing it, and since no command line holds it, neither does
+the shell's history; press Enter after it. `printf`, built into the common
+shells, hands it to the server on standard input, not as an argument a list
+of processes would show. `--set-password` reads one line, of at least eight
+characters and not blank, writes the user `admin` and its hash into
+`data/users.json`, and ends.
 Then the server serves the blog on `127.0.0.1:3000`; open it in a browser,
 and log in at `/login`. Ctrl-C stops it, once the writes it has started are
 done.
@@ -73,7 +81,7 @@ few milliseconds can lose one's user.
 
 The server's arguments: `--address <host:port>`, port 0 for one the system
 chooses; `--data <dir>` and `--dist <dir>`, `data` and `dist` unless given;
-and `--iterations <n>`, PBKDF2's rounds for `--set-password`, which the
+and `--iterations <n>`, PBKDF2's rounds for `--set-password`, which most
 tests lower to 1,000.
 
 `nova test` runs `tests/*.nova`, which reach the server's modules through
@@ -98,10 +106,15 @@ to delete it, and `Write a new post` opens the editor.
 
 - **What a public deployment adds:** TLS, with the session cookie made
   `Secure` (`Cookie`'s `secure`, which `std/http` leaves off so the blog
-  works over plain HTTP on `127.0.0.1`); a limit on login attempts; and
+  works over plain HTTP on `127.0.0.1`); a limit on login attempts;
   keeping `data/` private: the key in `data/secret` and the password hashes
   in `data/users.json` are written with the system's default permissions,
-  since `std/fs` sets no mode. PBKDF2's 600,000 rounds hold the
+  since `std/fs` sets no mode; and a copy of `data/` kept elsewhere: nothing
+  flushes a file to disk before it is renamed into place, which `std/fs`
+  cannot do, so after a power loss or a crash of the system, a file system
+  that does not flush first can leave `data/blog.json` or
+  `data/users.json` empty, and the server then refuses to start. PBKDF2's
+  600,000 rounds hold the
   single-threaded server for each login, about 2.6 seconds on a debug
   runtime.
 - **The session table is in memory,** so a restart logs everyone out. The

@@ -76,6 +76,29 @@ fn a_csrf_token_belongs_to_its_session() {
 }
 
 @test
+fn a_csrf_token_is_no_cookie_tag() {
+    let mut table = sessions(key("k"), 60, 60)
+    let s = table.start("")
+    let token = table.token(s)
+    // A token signs `csrf:` and its session's id, and a tag `sid:` and an
+    // id, so no token is the tag of any id: not of `csrf:` and the id, whose
+    // tag it would be were a tag the id's alone, nor of the id, nor of
+    // others.
+    let ids = ["csrf:${s.id}", s.id, "sid:${s.id}", "", token]
+    let mut i = 0
+    while i < ids.len() {
+        assert(!table.tag_ok(ids[i], token), "the token is the tag of ${ids[i]}")
+        assert(table.tag(ids[i]) != token, "the token is the tag of ${ids[i]}")
+        i = i + 1
+    }
+    assert(table.find("csrf:${s.id}.${token}").is_none(), "the token makes a cookie")
+    // Nor is a tag a token; and a tag is its own id's.
+    assert(!table.token_ok(s, table.tag(s.id)), "the tag is a token")
+    assert(table.tag_ok(s.id, table.tag(s.id)), "the tag is its id's")
+    assert(!table.tag_ok(s.id, "zz"), "a tag that is not hex")
+}
+
+@test
 fn ended_sessions_are_dropped_once_the_table_has_doubled() {
     // A visitor's session ends at once; the admin's lasts an hour.
     // A fresh table has kept none, so it has always doubled since; still,

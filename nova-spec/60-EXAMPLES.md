@@ -887,7 +887,7 @@ first of the 2026-10-04 note's two reasons is stale: since Phase 3.3a,
 `nova test` in a project runs every top-level `tests/*.nova` as well as the
 tests of the `src/` files its program and its library reach (`40-TOOLING.md`
 §7). `examples/07-fullstack-blog` is the first example with a `tests/`
-folder: its four files hold 21 tests, which reach the server's modules
+folder: its four files hold 22 tests, which reach the server's modules
 through its `src/lib.nova`, and `run_tests.rs`'s
 `the_blog_example_passes_its_own_tests` runs `nova test` in a copy of it,
 in the ordinary `cargo test` step on all three operating systems. Its server

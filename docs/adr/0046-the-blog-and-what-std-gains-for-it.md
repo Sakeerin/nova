@@ -94,9 +94,10 @@ The repository 4.7 starts from (spec §2, read at `9ad78cd`) has:
    ends. Logging out ends it; a restart ends every session. The signing
    key is made at random the first time the server starts, and kept in the
    data directory.
-7. **The JSON file is written whole, then renamed into place,** so a crash
-   never leaves half a file: `std/fs` gains `rename`. The seed data is in
-   the repository; the file the server writes is ignored by git.
+7. **The JSON file is written whole, then renamed into place,** so a
+   server that stops, or whose process dies, never leaves half a file:
+   `std/fs` gains `rename`. The seed data is in the repository; the file
+   the server writes is ignored by git.
 8. **`src/` is flat.** A nested module path is E0900, so the modules of
    `60-EXAMPLES.md` §7's tree sit side by side in `src/`.
 9. **The tests:** `crates/nova-cli/tests/blog_tests.rs` builds 07 with
@@ -321,6 +322,16 @@ The repository 4.7 starts from (spec §2, read at `9ad78cd`) has:
   `tests/*.nova` import the library as `fullstack_blog`, can name only what
   it declares, and use what those functions return through its methods and
   fields.
+- **The cookie's tag is `hmac_sha256(key, "sid:" + id)`,** where spec §6.4
+  has `hmac_sha256(key, id)`. The CSRF token is
+  `hmac_sha256(key, "csrf:" + id)`, so with the spec's tag a session's
+  token was also the tag of the id `csrf:<id>`, and only the table, which
+  never holds such an id, refused the cookie it made. With a prefix each,
+  no token is the tag of any id, and no tag is a token, as
+  `tests/sessions.nova`'s `a_csrf_token_is_no_cookie_tag` checks. The
+  review of 4.7 found it. The sessions are in memory only, so nothing
+  stored changes; a server started on the new code ends the old sessions,
+  as any restart does.
 - **The session cookie lasts as long as its session,** `Max-Age` 86,400 for
   a visitor and 28,800 for the admin, so a browser drops it when the server
   would; logging out sends `Cookie::expired("sid")`.
@@ -339,11 +350,23 @@ The repository 4.7 starts from (spec §2, read at `9ad78cd`) has:
   needs the median of five logins with a name no user has and of five
   with a wrong password each to be at least half the other. Eleven start a
   server of their own; one of them posts comments while `--set-password`
-  hashes at 600,000 rounds, and another first runs a `--set-password` at
-  1,000 rounds to its end while one at 600,000 hashes, and needs both
-  users in `users.json`. The server's refusal to start is checked on a key
-  file that does not hold 32 bytes in hex, and on a `users.json` that
-  does not hold users. The example's `nova test` runs 21 tests.
+  hashes, and another first runs a `--set-password` at 1,000 rounds to its
+  end while one hashes, and needs both users in `users.json`. Those two
+  hashes are over a count each test measures first, in a data directory
+  of its own (`rounds_lasting`): it times `--set-password` at 10,000
+  rounds, then ten times as many each time, until a run takes 200 ms, and
+  scales that count to two seconds and half as much again. A fixed 600,000
+  rounds, as the tests had before the review of 4.7, took about 2.6 s on
+  the debug runtime `cargo test` links, but about 0.3 s on the release
+  runtime that `cargo test --release` builds, where the test of the
+  overlapping runs failed: the run at 600,000 rounds had ended by the time
+  the one at 1,000, started half a second after it, did. With the timing
+  test's 100,000 rounds, a login took 44 to 89 ms on the release runtime,
+  most of it the hashing still, and the test passed there. The server's refusal to start is
+  checked on a key file that does not hold 32 bytes in hex, and on a
+  `users.json` that does not hold users. `blog_tests` took 9.1 to 10.1 s
+  on the debug runtime and 6.8 to 8.0 s on the release one, three runs
+  each. The example's `nova test` runs 22 tests.
 
 ## What departs from `60-EXAMPLES.md` §7 and `20-STDLIB.md` §6
 
@@ -387,12 +410,21 @@ The repository 4.7 starts from (spec §2, read at `9ad78cd`) has:
   known name or not: every other request waits meanwhile. 600,000 rounds
   took about 2.6 s with the runtime built for debugging (2,564 to 2,638 ms,
   three runs), and a program built with `nova build --release`, which
-  links the same runtime, took as long; a runtime built for release is
-  expected to take about 0.3 s, as `ring` built optimized took 303 to
-  340 ms in a probe.
-- **A crash between a response and the write it spawned loses that
-  change.** The file is always whole, the old one or the new, but not
-  always the newest.
+  links the same runtime, took as long. The runtime built for release,
+  which a `nova` built with `cargo build --release` carries, took 485 to
+  846 ms for 1,000,000 rounds in `blog_tests`' measurements, the slower
+  with the other tests hashing beside them, so 600,000 take about 0.3 s
+  alone, as `ring` built optimized took 303 to 340 ms in a probe.
+- **A server that stops between a response and the write it spawned
+  loses that change.** If the server stops, or its process dies, during a
+  write, the file is whole, the old one or the new, but not always the
+  newest. Nothing flushes the new file to disk before the rename, so after
+  a power loss or a crash of the system, a file system that does not flush
+  before a rename can leave `blog.json` or `users.json` empty, and the
+  server then refuses to start, as it does on any file it cannot read a
+  store or users from. A sync before the rename would need `std/fs` to
+  gain one, which it does not have; the README says to keep a copy of
+  `data/` elsewhere.
 - **A restart ends every session,** the admin's included, since the table
   is in memory; the key in `data/secret` stays.
 - **Ended sessions stay in the table until it has doubled,** so it holds
