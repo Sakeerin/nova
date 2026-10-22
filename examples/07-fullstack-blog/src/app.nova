@@ -1,0 +1,387 @@
+//! What the client, `main.nova`, and the server, `server.nova`, share: the
+//! records a page is rendered from and their JSON, the routes, and the app.
+//!
+//! `hydrate_with` reads one value of one type for the whole app, so `Data`
+//! holds what any page needs: who is logged in, the CSRF token, the posts or
+//! the post and its comments, and a form's values. The server fills the
+//! parts the page at hand shows and renders it with `page_with`; the client
+//! reads the same `Data` back and hydrates the same view. Links are plain
+//! anchors, so each page arrives from the server with its own data.
+
+/// A post: written as plain text, a blank line between paragraphs, and when
+/// it was written and last changed, as `SystemTime::to_iso8601` writes them.
+pub record Post {
+    pub id: Int,
+    pub title: String,
+    pub body: String,
+    pub created: String,
+    pub updated: String,
+}
+
+/// A comment on the post whose id is `post`.
+pub record Comment {
+    pub id: Int,
+    pub post: Int,
+    pub name: String,
+    pub text: String,
+    pub created: String,
+}
+
+/// A form's values as the page shows them: the editor's title and body, the
+/// comment form's name and text, or the login form's name (a password is
+/// never sent back). `failed` says the server refused the form, so its
+/// messages show from the start; `error` is the server's message for the
+/// whole form, such as a wrong password.
+pub record Draft {
+    pub title: String,
+    pub body: String,
+    pub name: String,
+    pub text: String,
+    pub failed: Bool,
+    pub error: String,
+}
+
+/// What a page is rendered from, on the server and again on the client.
+pub record Data {
+    /// Who is logged in, or `""`.
+    pub user: String,
+    /// The CSRF token of the visitor's session, for every form's hidden
+    /// `csrf` field.
+    pub csrf: String,
+    /// The home page's posts, newest first, each with its first paragraph
+    /// only, and the admin's list, with no bodies.
+    pub posts: [Post],
+    /// The post the page shows or edits.
+    pub post: Option<Post>,
+    /// The post's comments, in the order they were written.
+    pub comments: [Comment],
+    /// The form's values.
+    pub draft: Draft,
+    /// Why the server refused a form, such as an expired token; the page
+    /// then says so instead of showing its route.
+    pub refused: String,
+    /// The page has nothing to show: no such post, or no such path.
+    pub missing: Bool,
+}
+
+/// A draft with nothing in it.
+pub fn empty_draft() -> Draft {
+    Draft { title: "", body: "", name: "", text: "", failed: false, error: "" }
+}
+
+/// Data with nothing in it but who is logged in and the token.
+pub fn data_for(user: String, csrf: String) -> Data {
+    Data {
+        user: user,
+        csrf: csrf,
+        posts: [],
+        post: None,
+        comments: [],
+        draft: empty_draft(),
+        refused: "",
+        missing: false,
+    }
+}
+
+// --- JSON, by hand, since there is no derive ---
+
+/// The member `k` of `m`, or `Null`.
+pub fn member(m: Map<String, JsonValue>, k: String) -> JsonValue { m.get(k).unwrap_or(Null) }
+
+/// The object `v` holds, or an error naming `what`.
+pub fn object_of(v: JsonValue, what: String) -> Result<Map<String, JsonValue>, JsonError> {
+    match v {
+        Object(m) => Ok(m)
+        _ => Err(JsonError { msg: "expected ${what}", at: 0 })
+    }
+}
+
+/// The string member `k` of `m`.
+pub fn string_of(m: Map<String, JsonValue>, k: String) -> Result<String, JsonError> {
+    match String::from_json(member(m, k)) {
+        Ok(s) => Ok(s)
+        Err(e) => Err(JsonError { msg: "${k}: ${e.msg}", at: 0 })
+    }
+}
+
+/// The integer member `k` of `m`.
+pub fn int_of(m: Map<String, JsonValue>, k: String) -> Result<Int, JsonError> {
+    match Int::from_json(member(m, k)) {
+        Ok(n) => Ok(n)
+        Err(e) => Err(JsonError { msg: "${k}: ${e.msg}", at: 0 })
+    }
+}
+
+/// The array member `k` of `m`.
+pub fn list_of(m: Map<String, JsonValue>, k: String) -> Result<[JsonValue], JsonError> {
+    match member(m, k) {
+        Array(xs) => Ok(xs)
+        _ => Err(JsonError { msg: "${k}: expected an array", at: 0 })
+    }
+}
+
+impl ToJson for Post {
+    fn to_json(self) -> JsonValue {
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("id", self.id.to_json())
+        m.insert("title", self.title.to_json())
+        m.insert("body", self.body.to_json())
+        m.insert("created", self.created.to_json())
+        m.insert("updated", self.updated.to_json())
+        Object(m)
+    }
+}
+
+impl FromJson for Post {
+    fn from_json(v: JsonValue) -> Result<Post, JsonError> {
+        let m = match object_of(v, "a post") {
+            Ok(m) => m
+            Err(e) => return Err(e)
+        }
+        let id = match int_of(m, "id") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let title = match string_of(m, "title") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let body = match string_of(m, "body") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let created = match string_of(m, "created") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let updated = match string_of(m, "updated") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        Ok(Post { id: id, title: title, body: body, created: created, updated: updated })
+    }
+}
+
+impl ToJson for Comment {
+    fn to_json(self) -> JsonValue {
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("id", self.id.to_json())
+        m.insert("post", self.post.to_json())
+        m.insert("name", self.name.to_json())
+        m.insert("text", self.text.to_json())
+        m.insert("created", self.created.to_json())
+        Object(m)
+    }
+}
+
+impl FromJson for Comment {
+    fn from_json(v: JsonValue) -> Result<Comment, JsonError> {
+        let m = match object_of(v, "a comment") {
+            Ok(m) => m
+            Err(e) => return Err(e)
+        }
+        let id = match int_of(m, "id") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let post = match int_of(m, "post") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let name = match string_of(m, "name") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let text = match string_of(m, "text") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let created = match string_of(m, "created") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        Ok(Comment { id: id, post: post, name: name, text: text, created: created })
+    }
+}
+
+/// `posts` as a JSON array.
+pub fn posts_json(posts: [Post]) -> JsonValue {
+    let mut xs = [Null; posts.len()]
+    let mut i = 0
+    while i < posts.len() {
+        xs[i] = posts[i].to_json()
+        i = i + 1
+    }
+    Array(xs)
+}
+
+/// `comments` as a JSON array.
+pub fn comments_json(comments: [Comment]) -> JsonValue {
+    let mut xs = [Null; comments.len()]
+    let mut i = 0
+    while i < comments.len() {
+        xs[i] = comments[i].to_json()
+        i = i + 1
+    }
+    Array(xs)
+}
+
+/// The posts a JSON array holds.
+pub fn posts_from(list: [JsonValue]) -> Result<[Post], JsonError> {
+    let mut posts = [Post { id: 0, title: "", body: "", created: "", updated: "" }; list.len()]
+    let mut i = 0
+    while i < list.len() {
+        posts[i] = match Post::from_json(list[i]) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        i = i + 1
+    }
+    Ok(posts)
+}
+
+/// The comments a JSON array holds.
+pub fn comments_from(list: [JsonValue]) -> Result<[Comment], JsonError> {
+    let mut comments = [Comment { id: 0, post: 0, name: "", text: "", created: "" }; list.len()]
+    let mut i = 0
+    while i < list.len() {
+        comments[i] = match Comment::from_json(list[i]) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        i = i + 1
+    }
+    Ok(comments)
+}
+
+impl ToJson for Draft {
+    fn to_json(self) -> JsonValue {
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("title", self.title.to_json())
+        m.insert("body", self.body.to_json())
+        m.insert("name", self.name.to_json())
+        m.insert("text", self.text.to_json())
+        m.insert("failed", self.failed.to_json())
+        m.insert("error", self.error.to_json())
+        Object(m)
+    }
+}
+
+impl FromJson for Draft {
+    fn from_json(v: JsonValue) -> Result<Draft, JsonError> {
+        let m = match object_of(v, "a draft") {
+            Ok(m) => m
+            Err(e) => return Err(e)
+        }
+        let title = match string_of(m, "title") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let body = match string_of(m, "body") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let name = match string_of(m, "name") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let text = match string_of(m, "text") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let failed = match Bool::from_json(member(m, "failed")) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let error = match string_of(m, "error") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        Ok(Draft { title: title, body: body, name: name, text: text, failed: failed, error: error })
+    }
+}
+
+impl ToJson for Data {
+    fn to_json(self) -> JsonValue {
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("user", self.user.to_json())
+        m.insert("csrf", self.csrf.to_json())
+        m.insert("posts", posts_json(self.posts))
+        let post = match self.post {
+            Some(x) => x.to_json()
+            None => Null
+        }
+        m.insert("post", post)
+        m.insert("comments", comments_json(self.comments))
+        m.insert("draft", self.draft.to_json())
+        m.insert("refused", self.refused.to_json())
+        m.insert("missing", self.missing.to_json())
+        Object(m)
+    }
+}
+
+impl FromJson for Data {
+    fn from_json(v: JsonValue) -> Result<Data, JsonError> {
+        let m = match object_of(v, "the page's data") {
+            Ok(m) => m
+            Err(e) => return Err(e)
+        }
+        let user = match string_of(m, "user") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let csrf = match string_of(m, "csrf") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let listed = match list_of(m, "posts") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let posts = match posts_from(listed) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let post = match member(m, "post") {
+            Null => None
+            x => {
+                match Post::from_json(x) {
+                    Ok(p) => Some(p)
+                    Err(e) => return Err(e)
+                }
+            }
+        }
+        let said = match list_of(m, "comments") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let comments = match comments_from(said) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let draft = match Draft::from_json(member(m, "draft")) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let refused = match string_of(m, "refused") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let missing = match Bool::from_json(member(m, "missing")) {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        Ok(
+            Data {
+                user: user,
+                csrf: csrf,
+                posts: posts,
+                post: post,
+                comments: comments,
+                draft: draft,
+                refused: refused,
+                missing: missing,
+            },
+        )
+    }
+}

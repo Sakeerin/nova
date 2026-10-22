@@ -1,0 +1,105 @@
+//! The blog's own modules as a library, so `nova test` reaches them: it runs
+//! the tests of the `src/` modules the program and the library reach, and
+//! the client, `main.nova`, reaches only the shared ones. `tests/*.nova`
+//! import this library as `fullstack_blog`, and can name only what it
+//! declares, so it gives them a way in to each module; what they get back
+//! they use through its methods and fields.
+
+import app::{Data}
+import auth::{Sessions, hash_password, no_user_rounds, password_ok}
+import forms::{
+    body_message,
+    cleaned,
+    comment_ok,
+    login_name_message,
+    login_ok,
+    name_message,
+    password_message,
+    post_ok,
+    text_message,
+    title_message,
+}
+import post_card::{first_paragraph, paragraphs}
+import store::{Store, User, Users}
+
+/// The store `text` holds, as `data/seed.json` and `data/blog.json` hold
+/// it, or what is wrong with it.
+pub fn store_from(text: String) -> Result<Store, String> { Store::from_text(text) }
+
+/// The users `text` holds, as `data/users.json` holds them, or what is
+/// wrong with it.
+pub fn users_from(text: String) -> Result<Users, String> { Users::from_text(text) }
+
+/// No users, as when `data/users.json` does not exist yet.
+pub fn no_users() -> Users { Users::new() }
+
+/// No sessions, signed with `key`, lasting `visitor` seconds for a visitor
+/// and `admin` for the admin.
+pub fn sessions(key: Bytes, visitor: Int, admin: Int) -> Sessions {
+    Sessions::lasting(key, visitor, admin)
+}
+
+/// The user `name` with `password` hashed over `iterations` rounds.
+pub fn user_with(name: String, password: String, iterations: Int) -> User {
+    hash_password(name, password, iterations)
+}
+
+/// Whether `password` is the password of the user `name` of `users`,
+/// spending `iterations` rounds when there is no such user.
+pub fn logs_in(users: Users, name: String, password: String, iterations: Int) -> Bool {
+    password_ok(users.user(name), password, iterations)
+}
+
+/// The rounds a login with a name no user has spends: the largest count of
+/// `users`' hashes, or `otherwise` when there is none.
+pub fn rounds_for_no_user(users: Users, otherwise: Int) -> Int {
+    no_user_rounds(users.list, otherwise)
+}
+
+/// The message of the form field `field`, one of `title`, `body`, `name`,
+/// `text`, `login` and `password`, for `value`: `""` when it passes.
+pub fn message_for(field: String, value: String) -> String {
+    if field == "title" { return title_message(value) }
+    if field == "body" { return body_message(value) }
+    if field == "name" { return name_message(value) }
+    if field == "text" { return text_message(value) }
+    if field == "login" { return login_name_message(value) }
+    if field == "password" { return password_message(value) }
+    panic("no field ${field}")
+}
+
+/// Whether the form `form`, one of `post`, `comment` and `login`, passes
+/// with the values `a` and `b`: a title and a body, a name and a text, or a
+/// name and a password.
+pub fn form_ok(form: String, a: String, b: String) -> Bool {
+    if form == "post" { return post_ok(a, b) }
+    if form == "comment" { return comment_ok(a, b) }
+    if form == "login" { return login_ok(a, b) }
+    panic("no form ${form}")
+}
+
+/// `text` as the server stores a field: NULs dropped, line ends as line
+/// feeds, trimmed.
+pub fn stored(text: String) -> String { cleaned(text) }
+
+/// The paragraphs of a post's body.
+pub fn paragraphs_of(body: String) -> [String] { paragraphs(body) }
+
+/// The first paragraph of a post's body.
+pub fn first_of(body: String) -> String { first_paragraph(body) }
+
+/// The page data `json` holds, as the client reads it, or what is wrong.
+pub fn data_from(json: String) -> Result<Data, String> {
+    match parse(json) {
+        Ok(v) => {
+            match Data::from_json(v) {
+                Ok(d) => Ok(d)
+                Err(e) => Err(e.msg)
+            }
+        }
+        Err(e) => Err(e.msg)
+    }
+}
+
+/// `data` as the JSON the server sends with a page.
+pub fn data_json(data: Data) -> String { stringify(data.to_json()) }

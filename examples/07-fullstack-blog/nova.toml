@@ -1,0 +1,5 @@
+[package]
+name = "fullstack-blog"
+version = "0.1.0"
+edition = "2026"
+description = "A blog that a visitor reads and comments on and its admin writes: a server on std/http that renders each page, and a client that hydrates it"

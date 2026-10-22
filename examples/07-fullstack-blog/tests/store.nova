@@ -1,0 +1,135 @@
+//! The store's JSON both ways, and its changes.
+
+import fullstack_blog::{store_from, user_with, users_from}
+
+// A store as `seed.json` holds one: two posts and a comment on each, and no
+// next ids, which come from the ids taken.
+fn seed() -> String {
+    let lines = [
+        "{\"posts\": [",
+        "  {\"id\": 1, \"title\": \"One\", \"body\": \"First.\\n\\nSecond.\",",
+        "   \"created\": \"2026-10-19T08:30:00.000Z\", \"updated\": \"2026-10-19T08:30:00.000Z\"},",
+        "  {\"id\": 5, \"title\": \"Two <b>\", \"body\": \"Text\",",
+        "   \"created\": \"2026-10-20T08:30:00.000Z\", \"updated\": \"2026-10-20T09:00:00.000Z\"}",
+        "], \"comments\": [",
+        "  {\"id\": 3, \"post\": 1, \"name\": \"Ada\", \"text\": \"Hi\", \"created\": \"2026-10-19T10:00:00.000Z\"},",
+        "  {\"id\": 4, \"post\": 5, \"name\": \"Grace\", \"text\": \"Yes\", \"created\": \"2026-10-20T10:00:00.000Z\"}",
+        "]}",
+    ]
+    "\n".join(lines)
+}
+
+@test
+fn reads_a_seed() {
+    let s = store_from(seed()).unwrap()
+    assert_eq(s.posts.len(), 2)
+    assert_eq(s.comments.len(), 2)
+    assert_eq(s.next_post, 6)
+    assert_eq(s.next_comment, 5)
+    let two = s.post(5).unwrap()
+    assert_eq(two.title, "Two <b>")
+    assert_eq(two.updated, "2026-10-20T09:00:00.000Z")
+    assert(s.post(2).is_none(), "no post 2")
+    let newest = s.newest_first()
+    assert_eq(newest[0].id, 5)
+    assert_eq(newest[1].id, 1)
+    assert_eq(s.comments_on(1)[0].name, "Ada")
+}
+
+@test
+fn writes_what_it_reads_back() {
+    let mut s = store_from(seed()).unwrap()
+    let made = s.add_post("Three \"quoted\"", "Line one\nline two", "2026-10-21T08:00:00.000Z")
+    assert_eq(made.id, 6)
+    let c = s.add_comment(6, "Eve", "<script>x</script>", "2026-10-21T09:00:00.000Z")
+    assert_eq(c.id, 5)
+    let again = store_from(s.to_text()).unwrap()
+    assert_eq(again.posts.len(), 3)
+    assert_eq(again.next_post, 7)
+    assert_eq(again.next_comment, 6)
+    let three = again.post(6).unwrap()
+    assert_eq(three.title, "Three \"quoted\"")
+    assert_eq(three.body, "Line one\nline two")
+    assert_eq(three.created, "2026-10-21T08:00:00.000Z")
+    assert_eq(again.comments_on(6)[0].text, "<script>x</script>")
+}
+
+@test
+fn edits_and_deletes() {
+    let mut s = store_from(seed()).unwrap()
+    assert(s.edit_post(1, "One, edited", "New", "2026-10-22T00:00:00.000Z"), "edited")
+    let one = s.post(1).unwrap()
+    assert_eq(one.title, "One, edited")
+    assert_eq(one.created, "2026-10-19T08:30:00.000Z")
+    assert_eq(one.updated, "2026-10-22T00:00:00.000Z")
+    assert(!s.edit_post(9, "x", "y", "z"), "no post 9")
+    // Deleting a post deletes its comments, and no other.
+    assert(s.delete_post(1), "deleted")
+    assert(s.post(1).is_none(), "gone")
+    assert_eq(s.comments.len(), 1)
+    assert(s.comment(3).is_none(), "its comment is gone")
+    assert(!s.delete_post(1), "already gone")
+    // A deleted id is not given again.
+    assert_eq(s.add_post("t", "b", "now").id, 6)
+    assert_eq(s.delete_comment(4).unwrap().post, 5)
+    assert(s.delete_comment(4).is_none(), "already gone")
+    assert_eq(s.comments.len(), 0)
+}
+
+// What is wrong with `text`, or `""` when it is a store.
+fn wrong(text: String) -> String {
+    match store_from(text) {
+        Ok(_) => ""
+        Err(why) => why
+    }
+}
+
+@test
+fn refuses_what_is_not_a_store() {
+    assert(store_from("not json").is_err(), "not JSON")
+    assert(store_from("[]").is_err(), "not an object")
+    assert_eq(wrong("{\"posts\": []}"), "comments: expected an array")
+    assert_eq(wrong("{\"posts\": [{\"id\": 1}], \"comments\": []}"), "title: expected a string")
+}
+
+// What is wrong with `text`, or `""` when it holds users.
+fn wrong_users(text: String) -> String {
+    match users_from(text) {
+        Ok(_) => ""
+        Err(why) => why
+    }
+}
+
+@test
+fn the_users_have_a_file_of_their_own() {
+    // The store's JSON holds no users, and the store ignores a `users` key.
+    let s = store_from("{\"posts\": [], \"comments\": [], \"users\": [1]}").unwrap()
+    assert(!s.to_text().contains("users"), "users in the store's JSON")
+    assert(!store_from(seed()).unwrap().to_text().contains("users"), "users in the seed's")
+    // The users' JSON both ways, in the order they were set.
+    let mut users = users_from("{\"users\": []}").unwrap()
+    assert_eq(users.list.len(), 0)
+    users.set_user(user_with("grace", "correct horse", 1000))
+    users.set_user(user_with("admin", "battery staple", 2000))
+    let back = users_from(users.to_text()).unwrap()
+    assert_eq(back.list.len(), 2)
+    assert_eq(back.list.get(0).unwrap().name, "grace")
+    let admin = back.user("admin").unwrap()
+    let was = users.user("admin").unwrap()
+    assert_eq(admin.iterations, 2000)
+    assert_eq(admin.salt, was.salt)
+    assert_eq(admin.hash, was.hash)
+    assert(back.user("nobody").is_none(), "no such user")
+    assert(!users.to_text().contains("posts"), "posts in the users' JSON")
+    // What is not a list of users.
+    assert(wrong_users("not json") != "", "not JSON")
+    assert_eq(wrong_users("[]"), "expected an object")
+    assert_eq(wrong_users("{\"posts\": []}"), "users: expected an array")
+    assert_eq(wrong_users("{\"users\": [1]}"), "expected a user")
+    assert_eq(
+        wrong_users(
+            "{\"users\": [{\"name\": \"a\", \"salt\": \"00\", \"iterations\": \"many\", \"hash\": \"00\"}]}",
+        ),
+        "iterations: expected a number",
+    )
+}

@@ -1,0 +1,92 @@
+//! The checks both sides run, the text the server keeps, paragraphs, and
+//! the page's data as JSON.
+
+import fullstack_blog::{data_from, data_json, first_of, form_ok, message_for, paragraphs_of, stored}
+
+@test
+fn a_title_has_1_to_200_characters() {
+    assert_eq(message_for("title", ""), "Give the post a title.")
+    assert_eq(message_for("title", "  \n "), "Give the post a title.")
+    assert_eq(message_for("title", "x"), "")
+    assert_eq(message_for("title", "é".repeat(200)), "")
+    assert_eq(message_for("title", "  ${"x".repeat(200)}  "), "")
+    assert_eq(
+        message_for("title", "x".repeat(201)),
+        "A title has at most 200 characters; this one has 201.",
+    )
+}
+
+@test
+fn each_field_has_its_limits() {
+    assert_eq(message_for("body", "x".repeat(20000)), "")
+    assert(message_for("body", "x".repeat(20001)) != "", "a body of 20,001")
+    assert_eq(message_for("body", " "), "Write something in the post.")
+    assert_eq(message_for("name", "x".repeat(60)), "")
+    assert(message_for("name", "x".repeat(61)) != "", "a name of 61")
+    assert_eq(message_for("name", ""), "Say who you are.")
+    assert_eq(message_for("text", "x".repeat(2000)), "")
+    assert(message_for("text", "x".repeat(2001)) != "", "a comment of 2,001")
+    assert_eq(message_for("text", "\t"), "Write a comment.")
+    assert_eq(message_for("login", " "), "Give your name.")
+    assert_eq(message_for("password", ""), "Give your password.")
+    assert_eq(message_for("password", " secret "), "")
+}
+
+@test
+fn a_form_passes_when_each_field_does() {
+    assert(form_ok("post", "Title", "Body"), "a post")
+    assert(!form_ok("post", "Title", ""), "no body")
+    assert(!form_ok("post", "", "Body"), "no title")
+    assert(form_ok("comment", "Ada", "Hi"), "a comment")
+    assert(!form_ok("comment", "Ada", " "), "no text")
+    assert(form_ok("login", "admin", "pw"), "a login")
+    assert(!form_ok("login", "admin", ""), "no password")
+}
+
+@test
+fn the_server_keeps_line_feeds_and_no_spaces_around() {
+    assert_eq(stored("  One\r\ntwo\r\n\r\nThree\r\n"), "One\ntwo\n\nThree")
+}
+
+@test
+fn the_server_keeps_no_nul() {
+    assert_eq(stored("one\0two\0"), "onetwo")
+    assert_eq(stored("\0 a\r\0\nb \0"), "a\nb")
+    assert_eq(message_for("text", "\0\0"), "Write a comment.")
+    assert_eq(message_for("name", "${"x".repeat(60)}\0"), "")
+}
+
+@test
+fn a_blank_line_separates_paragraphs() {
+    let ps = paragraphs_of("One\nstill one\n\n  \nTwo <b>&amp;</b>\r\n\r\nThree")
+    assert_eq(ps.len(), 3)
+    assert_eq(ps[0], "One\nstill one")
+    assert_eq(ps[1], "Two <b>&amp;</b>")
+    assert_eq(ps[2], "Three")
+    assert_eq(paragraphs_of("\n\n  \n").len(), 0)
+    assert_eq(paragraphs_of("Only").len(), 1)
+    assert_eq(first_of("\n\nFirst\n\nSecond"), "First")
+    assert_eq(first_of(""), "")
+}
+
+@test
+fn the_pages_data_reads_back() {
+    let json = "{\"user\": \"admin\", \"csrf\": \"ab\", \"posts\": [],
+        \"post\": {\"id\": 2, \"title\": \"</script> & <b>\", \"body\": \"B\", \"created\": \"c\", \"updated\": \"u\"},
+        \"comments\": [{\"id\": 1, \"post\": 2, \"name\": \"N\", \"text\": \"T\", \"created\": \"c\"}],
+        \"draft\": {\"title\": \"\", \"body\": \"\", \"name\": \"Ada\", \"text\": \"\", \"failed\": true, \"error\": \"\"},
+        \"refused\": \"\", \"missing\": false}"
+    let d = data_from(json).unwrap()
+    assert_eq(d.user, "admin")
+    assert_eq(d.post.unwrap().title, "</script> & <b>")
+    assert_eq(d.comments[0].name, "N")
+    assert(d.draft.failed, "failed")
+    let back = data_from(data_json(d)).unwrap()
+    assert_eq(back.post.unwrap().id, 2)
+    assert_eq(back.draft.name, "Ada")
+    assert_eq(back.csrf, "ab")
+    // No post is `null`.
+    let none = data_from("\"post\": null, \"old\": {".join(json.split("\"post\": {"))).unwrap()
+    assert(none.post.is_none(), "no post")
+    assert(data_from("{}").is_err(), "no fields")
+}

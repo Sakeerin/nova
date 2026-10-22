@@ -12593,3 +12593,62 @@ fn ssr_ssg_writes_the_static_pages_and_refuses_a_bad_path() {
         "ssg: --ssg needs a directory\n"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `examples/07-fullstack-blog`'s own tests (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §7.3).
+
+/// `nova test` in a copy of `examples/07-fullstack-blog`, in a directory
+/// with a fixed name and a fresh `NOVA_HOME` beside it: the example's
+/// `tests/*.nova` reach its server's modules through `src/lib.nova`, which
+/// the client never imports, and pass: the store's JSON both ways, and the
+/// users' in a file of their own, sessions and their tags, when ended
+/// sessions are dropped, CSRF tokens, a password hashed and checked with a
+/// low count, the rounds a name no user has costs, the form checks, the
+/// text the server keeps, paragraphs and the page's data.
+#[test]
+fn the_blog_example_passes_its_own_tests() {
+    let base = std::env::temp_dir().join("nova-blog-nova-test");
+    let _ = std::fs::remove_dir_all(&base);
+    let dir = base.join("fullstack-blog");
+    let example = repo_root().join("examples/07-fullstack-blog");
+    for sub in ["src", "tests"] {
+        std::fs::create_dir_all(dir.join(sub)).expect("create the project");
+        for entry in std::fs::read_dir(example.join(sub)).expect("the example's files") {
+            let path = entry.expect("an entry").path();
+            let to = dir.join(sub).join(path.file_name().expect("a name"));
+            std::fs::copy(&path, to).expect("copy a file");
+        }
+    }
+    std::fs::copy(example.join("nova.toml"), dir.join("nova.toml")).expect("copy nova.toml");
+    let a = nova()
+        .current_dir(&dir)
+        .env("NOVA_HOME", base.join("home"))
+        .env("NO_COLOR", "1")
+        .env("RUST_BACKTRACE", "0")
+        .arg("test")
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n");
+    for name in [
+        "store::writes_what_it_reads_back",
+        "store::the_users_have_a_file_of_their_own",
+        "sessions::a_wrong_tag_is_no_session",
+        "sessions::a_csrf_token_belongs_to_its_session",
+        "sessions::ended_sessions_are_dropped_once_the_table_has_doubled",
+        "passwords::the_right_password_logs_in",
+        "passwords::a_name_no_user_has_costs_the_most_rounds_a_user_has",
+        "forms::a_title_has_1_to_200_characters",
+        "forms::the_server_keeps_no_nul",
+        "forms::a_blank_line_separates_paragraphs",
+    ] {
+        assert!(
+            out.contains(&format!("test {name} ... ok\n")),
+            "{name}: {out}"
+        );
+    }
+    assert!(
+        out.ends_with("test result: ok. 21 passed; 0 failed; 0 trapped; 21 total\n"),
+        "{out}"
+    );
+}

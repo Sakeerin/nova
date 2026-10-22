@@ -1,0 +1,123 @@
+//! Sessions, their signed cookies, and the CSRF tokens bound to them.
+
+import fullstack_blog::{sessions}
+
+fn key(c: String) -> Bytes { bytes_from_string(c.repeat(32)) }
+
+@test
+fn a_cookie_names_its_session() {
+    let mut table = sessions(key("k"), 60, 60)
+    let s = table.start("")
+    assert_eq(s.id.len(), 64)
+    assert_eq(s.user, "")
+    let cookie = table.cookie(s)
+    // `<id>.<tag>`, the tag 32 bytes of HMAC-SHA256 in hex.
+    assert_eq(cookie.len(), 64 + 1 + 64)
+    assert_eq(cookie.slice(0, 64), s.id)
+    assert_eq(table.find(cookie).unwrap().id, s.id)
+    let admin = table.start("admin")
+    assert_eq(table.find(table.cookie(admin)).unwrap().user, "admin")
+    assert(admin.id != s.id, "a new id each time")
+    assert_eq(table.len(), 2)
+}
+
+@test
+fn a_wrong_tag_is_no_session() {
+    let mut table = sessions(key("k"), 60, 60)
+    let s = table.start("admin")
+    let cookie = table.cookie(s)
+    // The tag of another key, the tag cut short, changed, or missing, and an
+    // id of the table's with another id's tag.
+    let other = sessions(key("x"), 60, 60)
+    assert(table.find("${s.id}.${other.tag(s.id)}").is_none(), "another key's tag")
+    assert(table.find(cookie.slice(0, cookie.len() - 2)).is_none(), "a tag cut short")
+    let last = cookie.slice(cookie.len() - 1, cookie.len())
+    let flipped = if last == "0" { "1" } else { "0" }
+    assert(table.find("${cookie.slice(0, cookie.len() - 1)}${flipped}").is_none(), "a changed tag")
+    assert(table.find(s.id).is_none(), "no tag")
+    assert(table.find("${s.id}.").is_none(), "an empty tag")
+    assert(table.find("${s.id}.zz").is_none(), "a tag that is not hex")
+    let t = table.start("")
+    assert(table.find("${s.id}.${table.tag(t.id)}").is_none(), "another session's tag")
+}
+
+@test
+fn an_ended_or_unknown_session_is_no_session() {
+    let mut table = sessions(key("k"), 60, 60)
+    let s = table.start("admin")
+    let cookie = table.cookie(s)
+    table.end(s.id)
+    assert(table.find(cookie).is_none(), "ended")
+    // A tag the key signs, for an id the table never held.
+    let id = "ab".repeat(32)
+    assert(table.find("${id}.${table.tag(id)}").is_none(), "unknown")
+    // Sessions that last no time end at once.
+    let mut brief = sessions(key("k"), 0, 0)
+    let gone = brief.start("")
+    assert(brief.find(brief.cookie(gone)).is_none(), "already ended")
+}
+
+@test
+fn a_csrf_token_belongs_to_its_session() {
+    let mut table = sessions(key("k"), 60, 60)
+    let s = table.start("")
+    let t = table.start("")
+    let token = table.token(s)
+    assert_eq(token.len(), 64)
+    assert(table.token_ok(s, token), "its own")
+    assert(!table.token_ok(t, token), "another session's")
+    assert(table.token(s) == token, "the same each time")
+    assert(token != table.tag(s.id), "not the cookie's tag")
+    assert(!table.token_ok(s, ""), "none")
+    assert(!table.token_ok(s, "not hex"), "not hex")
+    assert(!table.token_ok(s, token.slice(0, 62)), "cut short")
+    let other = sessions(key("x"), 60, 60)
+    assert(!table.token_ok(s, other.token(s)), "another key's")
+}
+
+@test
+fn ended_sessions_are_dropped_once_the_table_has_doubled() {
+    // A visitor's session ends at once; the admin's lasts an hour.
+    // A fresh table has kept none, so it has always doubled since; still,
+    // under 64 sessions the ended ones stay.
+    let mut fresh = sessions(key("k"), 0, 3600)
+    let mut m = 0
+    while m < 63 {
+        let _ = fresh.start("")
+        m = m + 1
+    }
+    assert_eq(fresh.len(), 63)
+    let _ = fresh.start("")
+    assert_eq(fresh.len(), 64)
+    // At 64, the next start drops all 64.
+    let _ = fresh.start("")
+    assert_eq(fresh.len(), 1)
+
+    let mut table = sessions(key("k"), 0, 3600)
+    let mut live: Vec<String> = Vec::new()
+    while live.len() < 40 { live.push(table.cookie(table.start("admin"))) }
+    // Under 64 sessions, the ended ones stay.
+    let mut n = 0
+    while n < 24 {
+        let _ = table.start("")
+        n = n + 1
+    }
+    assert_eq(table.len(), 64)
+    // At 64, they are dropped as the next one starts, and the live ones stay.
+    let _ = table.start("")
+    assert_eq(table.len(), 41)
+    let mut i = 0
+    while i < live.len() {
+        assert(table.find(live.get(i).unwrap()).is_some(), "a live session")
+        i = i + 1
+    }
+    // 40 kept: the ended ones stay until the table holds twice as many.
+    n = 0
+    while n < 39 {
+        let _ = table.start("")
+        n = n + 1
+    }
+    assert_eq(table.len(), 80)
+    let _ = table.start("")
+    assert_eq(table.len(), 41)
+}

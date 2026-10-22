@@ -1,0 +1,423 @@
+//! The store: the posts, the comments and the next ids, kept in memory and
+//! written whole to `<data>/blog.json` after each change; and the users,
+//! in `<data>/users.json`.
+//!
+//! Each file has one writer. Only the server writes `blog.json`, from its
+//! own copy of the store: a handler changes the store, then spawns the
+//! write, which runs after the response: the store's JSON goes to
+//! `blog.json.tmp`, then `rename` puts it over `blog.json`, so a crash never
+//! leaves half a file. Spawned writes run in order, so the file ends as the
+//! last change left the store. Only `--set-password` writes `users.json`,
+//! the same way, through `users.json.tmp`. The server reads `users.json`
+//! once, when it starts, and `--set-password` never reads or writes
+//! `blog.json`, so neither writes over a change the other made.
+//!
+//! Posts and comments keep the order they were written in; a view that
+//! wants the newest first walks them backwards, and no view walks a `Map`,
+//! whose order changes from one run to the next.
+//!
+//! Native only: it reads and writes files with `std/fs`.
+
+import app::{
+    Comment,
+    Post,
+    comments_from,
+    comments_json,
+    int_of,
+    list_of,
+    object_of,
+    posts_from,
+    posts_json,
+    string_of,
+}
+
+/// A user who can log in: a name, and the password's PBKDF2-HMAC-SHA256
+/// hash of 32 bytes, with the 16 random bytes of salt and the iteration
+/// count that made it, the bytes in hex.
+pub record User { pub name: String, pub salt: String, pub iterations: Int, pub hash: String }
+
+/// The posts, the comments and the next ids.
+pub record Store {
+    pub posts: Vec<Post>,
+    pub comments: Vec<Comment>,
+    pub next_post: Int,
+    pub next_comment: Int,
+}
+
+/// The users who can log in, in the order they were set.
+pub record Users { pub list: Vec<User> }
+
+// `v`'s items as an array.
+fn posts_of(v: Vec<Post>) -> [Post] {
+    let mut out = [Post { id: 0, title: "", body: "", created: "", updated: "" }; v.len()]
+    let mut i = 0
+    while i < v.len() {
+        out[i] = v.get(i).unwrap()
+        i = i + 1
+    }
+    out
+}
+
+fn comments_of(v: Vec<Comment>) -> [Comment] {
+    let mut out = [Comment { id: 0, post: 0, name: "", text: "", created: "" }; v.len()]
+    let mut i = 0
+    while i < v.len() {
+        out[i] = v.get(i).unwrap()
+        i = i + 1
+    }
+    out
+}
+
+impl ToJson for User {
+    fn to_json(self) -> JsonValue {
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("name", self.name.to_json())
+        m.insert("salt", self.salt.to_json())
+        m.insert("iterations", self.iterations.to_json())
+        m.insert("hash", self.hash.to_json())
+        Object(m)
+    }
+}
+
+impl FromJson for User {
+    fn from_json(v: JsonValue) -> Result<User, JsonError> {
+        let m = match object_of(v, "a user") {
+            Ok(m) => m
+            Err(e) => return Err(e)
+        }
+        let name = match string_of(m, "name") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let salt = match string_of(m, "salt") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let iterations = match int_of(m, "iterations") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        let hash = match string_of(m, "hash") {
+            Ok(x) => x
+            Err(e) => return Err(e)
+        }
+        Ok(User { name: name, salt: salt, iterations: iterations, hash: hash })
+    }
+}
+
+// The larger of `a` and `b`.
+fn larger(a: Int, b: Int) -> Int { if a > b { a } else { b } }
+
+impl Store {
+    /// The store `text` holds, as `blog.json` and `seed.json` hold it: an
+    /// object with `posts` and `comments`, and optionally `next_post` and
+    /// `next_comment`; any other key is ignored. A next id is never one
+    /// already taken. An error says what is wrong.
+    pub fn from_text(text: String) -> Result<Store, String> {
+        let v = match parse(text) {
+            Ok(v) => v
+            Err(e) => return Err("not JSON: ${e.msg} at ${e.at}")
+        }
+        let m = match object_of(v, "an object") {
+            Ok(m) => m
+            Err(e) => return Err(e.msg)
+        }
+        let listed = match list_of(m, "posts") {
+            Ok(xs) => xs
+            Err(e) => return Err(e.msg)
+        }
+        let posts = match posts_from(listed) {
+            Ok(xs) => xs
+            Err(e) => return Err(e.msg)
+        }
+        let said = match list_of(m, "comments") {
+            Ok(xs) => xs
+            Err(e) => return Err(e.msg)
+        }
+        let comments = match comments_from(said) {
+            Ok(xs) => xs
+            Err(e) => return Err(e.msg)
+        }
+        let mut store = Store {
+            posts: Vec::new(),
+            comments: Vec::new(),
+            next_post: int_of(m, "next_post").unwrap_or(1),
+            next_comment: int_of(m, "next_comment").unwrap_or(1),
+        }
+        let mut ps = store.posts
+        let mut i = 0
+        while i < posts.len() {
+            ps.push(posts[i])
+            store.next_post = larger(store.next_post, posts[i].id + 1)
+            i = i + 1
+        }
+        let mut cs = store.comments
+        i = 0
+        while i < comments.len() {
+            cs.push(comments[i])
+            store.next_comment = larger(store.next_comment, comments[i].id + 1)
+            i = i + 1
+        }
+        Ok(store)
+    }
+
+    /// The store as JSON, which `from_text` reads back.
+    pub fn to_text(self) -> String {
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("posts", posts_json(posts_of(self.posts)))
+        m.insert("comments", comments_json(comments_of(self.comments)))
+        m.insert("next_post", self.next_post.to_json())
+        m.insert("next_comment", self.next_comment.to_json())
+        stringify(Object(m))
+    }
+
+    /// The posts, newest first.
+    pub fn newest_first(self) -> [Post] {
+        let all = posts_of(self.posts)
+        let n = all.len()
+        let mut out = [Post { id: 0, title: "", body: "", created: "", updated: "" }; n]
+        let mut i = 0
+        while i < n {
+            out[i] = all[n - 1 - i]
+            i = i + 1
+        }
+        out
+    }
+
+    /// The post `id`, if there is one.
+    pub fn post(self, id: Int) -> Option<Post> {
+        let mut i = 0
+        while i < self.posts.len() {
+            let p = self.posts.get(i).unwrap()
+            if p.id == id { return Some(p) }
+            i = i + 1
+        }
+        None
+    }
+
+    /// The comments on post `id`, in the order they were written.
+    pub fn comments_on(self, id: Int) -> [Comment] {
+        let mut kept: Vec<Comment> = Vec::new()
+        let mut i = 0
+        while i < self.comments.len() {
+            let c = self.comments.get(i).unwrap()
+            if c.post == id { kept.push(c) }
+            i = i + 1
+        }
+        comments_of(kept)
+    }
+
+    /// The comment `id`, if there is one.
+    pub fn comment(self, id: Int) -> Option<Comment> {
+        let mut i = 0
+        while i < self.comments.len() {
+            let c = self.comments.get(i).unwrap()
+            if c.id == id { return Some(c) }
+            i = i + 1
+        }
+        None
+    }
+
+    /// Adds a post written at `now`, and returns it.
+    pub fn add_post(mut self, title: String, body: String, now: String) -> Post {
+        let p = Post { id: self.next_post, title: title, body: body, created: now, updated: now }
+        self.next_post = self.next_post + 1
+        let mut ps = self.posts
+        ps.push(p)
+        p
+    }
+
+    /// Changes post `id`'s title and body at `now`; `false` when there is no
+    /// such post.
+    pub fn edit_post(mut self, id: Int, title: String, body: String, now: String) -> Bool {
+        let mut ps = self.posts
+        let mut i = 0
+        while i < ps.len() {
+            let p = ps.get(i).unwrap()
+            if p.id == id {
+                ps.set(
+                    i,
+                    Post { id: id, title: title, body: body, created: p.created, updated: now },
+                )
+                return true
+            }
+            i = i + 1
+        }
+        false
+    }
+
+    /// Deletes post `id` and its comments; `false` when there is no such
+    /// post.
+    pub fn delete_post(mut self, id: Int) -> Bool {
+        if self.post(id).is_none() { return false }
+        let mut ps: Vec<Post> = Vec::new()
+        let mut i = 0
+        while i < self.posts.len() {
+            let p = self.posts.get(i).unwrap()
+            if p.id != id { ps.push(p) }
+            i = i + 1
+        }
+        let mut cs: Vec<Comment> = Vec::new()
+        i = 0
+        while i < self.comments.len() {
+            let c = self.comments.get(i).unwrap()
+            if c.post != id { cs.push(c) }
+            i = i + 1
+        }
+        self.posts = ps
+        self.comments = cs
+        true
+    }
+
+    /// Adds a comment on post `post` written at `now`, and returns it.
+    pub fn add_comment(mut self, post: Int, name: String, text: String, now: String) -> Comment {
+        let c = Comment { id: self.next_comment, post: post, name: name, text: text, created: now }
+        self.next_comment = self.next_comment + 1
+        let mut cs = self.comments
+        cs.push(c)
+        c
+    }
+
+    /// Deletes comment `id`, and returns it, or `None` when there is none.
+    pub fn delete_comment(mut self, id: Int) -> Option<Comment> {
+        let gone = self.comment(id)
+        if gone.is_none() { return None }
+        let mut cs: Vec<Comment> = Vec::new()
+        let mut i = 0
+        while i < self.comments.len() {
+            let c = self.comments.get(i).unwrap()
+            if c.id != id { cs.push(c) }
+            i = i + 1
+        }
+        self.comments = cs
+        gone
+    }
+}
+
+impl Users {
+    /// No users.
+    pub fn new() -> Users { Users { list: Vec::new() } }
+
+    /// The users `text` holds, as `users.json` holds them: an object whose
+    /// `users` is an array of users. An error says what is wrong.
+    pub fn from_text(text: String) -> Result<Users, String> {
+        let v = match parse(text) {
+            Ok(v) => v
+            Err(e) => return Err("not JSON: ${e.msg} at ${e.at}")
+        }
+        let m = match object_of(v, "an object") {
+            Ok(m) => m
+            Err(e) => return Err(e.msg)
+        }
+        let people = match list_of(m, "users") {
+            Ok(xs) => xs
+            Err(e) => return Err(e.msg)
+        }
+        let users = Users::new()
+        let mut us = users.list
+        let mut i = 0
+        while i < people.len() {
+            match User::from_json(people[i]) {
+                Ok(u) => us.push(u)
+                Err(e) => return Err(e.msg)
+            }
+            i = i + 1
+        }
+        Ok(users)
+    }
+
+    /// The users as JSON, which `from_text` reads back.
+    pub fn to_text(self) -> String {
+        let mut users = [Null; self.list.len()]
+        let mut i = 0
+        while i < self.list.len() {
+            users[i] = self.list.get(i).unwrap().to_json()
+            i = i + 1
+        }
+        let mut m: Map<String, JsonValue> = Map::new()
+        m.insert("users", Array(users))
+        stringify(Object(m))
+    }
+
+    /// The user named `name`, if there is one.
+    pub fn user(self, name: String) -> Option<User> {
+        let mut i = 0
+        while i < self.list.len() {
+            let u = self.list.get(i).unwrap()
+            if u.name == name { return Some(u) }
+            i = i + 1
+        }
+        None
+    }
+
+    /// Adds `u`, in place of a user of the same name.
+    pub fn set_user(mut self, u: User) {
+        let mut us: Vec<User> = Vec::new()
+        let mut i = 0
+        while i < self.list.len() {
+            let old = self.list.get(i).unwrap()
+            if old.name != u.name { us.push(old) }
+            i = i + 1
+        }
+        us.push(u)
+        self.list = us
+    }
+}
+
+/// The store in `<dir>/blog.json`, or, when that does not exist yet, in
+/// `<dir>/seed.json`. An error names the file and says what is wrong.
+pub async fn load_store(dir: String) -> Result<Store, String> {
+    let live = "${dir}/blog.json"
+    let path = if exists(live).await { live } else { "${dir}/seed.json" }
+    let text = match read_to_string(path).await {
+        Ok(t) => t
+        Err(e) => return Err("cannot read ${path}: ${e.message}")
+    }
+    match Store::from_text(text) {
+        Ok(s) => Ok(s)
+        Err(why) => Err("${path}: ${why}")
+    }
+}
+
+/// The users in `<dir>/users.json`, or none when it does not exist yet. An
+/// error names the file and says what is wrong.
+pub async fn load_users(dir: String) -> Result<Users, String> {
+    let path = "${dir}/users.json"
+    if !exists(path).await { return Ok(Users::new()) }
+    let text = match read_to_string(path).await {
+        Ok(t) => t
+        Err(e) => return Err("cannot read ${path}: ${e.message}")
+    }
+    match Users::from_text(text) {
+        Ok(u) => Ok(u)
+        Err(why) => Err("${path}: ${why}")
+    }
+}
+
+// Writes `text` to `<dir>/<name>.tmp`, then renames it over `<dir>/<name>`.
+async fn replace(dir: String, name: String, text: String) -> Result<(), IoError> {
+    let tmp = "${dir}/${name}.tmp"
+    match write_string(tmp, text).await {
+        Ok(_) => {}
+        Err(e) => return Err(e)
+    }
+    rename(tmp, "${dir}/${name}").await
+}
+
+/// Writes `users` to `<dir>/users.json.tmp`, then renames it over
+/// `<dir>/users.json`. Only `--set-password` calls it.
+pub async fn save_users(dir: String, users: Users) -> Result<(), IoError> {
+    replace(dir, "users.json", users.to_text()).await
+}
+
+/// Writes `store` to `<dir>/blog.json.tmp`, then renames it over
+/// `<dir>/blog.json`, for a running server's handler to spawn. It reads no
+/// file: the server's copy of the store is the whole of what it writes.
+/// It says on standard error when it cannot write, since no one awaits it;
+/// the change stays in memory, for the next write.
+pub async fn saved(dir: String, store: Store) {
+    match replace(dir, "blog.json", store.to_text()).await {
+        Ok(_) => {}
+        Err(e) => eprintln("blog: cannot save ${dir}/blog.json: ${e.message}")
+    }
+}
