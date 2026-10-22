@@ -1,0 +1,116 @@
+//! The admin's pages: the posts, each with a link to edit it and a button
+//! that deletes it, and the editor, empty for a new post and filled for one
+//! to edit. The server shows them only to the admin; anyone else is sent to
+//! the login.
+
+import app::{Data, Post}
+import forms::{body_message, csrf_field, message, post_ok, submit, title_message}
+import post_card::{day}
+import ui
+import ui::html::{
+    a,
+    attr,
+    button,
+    class,
+    div,
+    form,
+    h1,
+    href,
+    input,
+    label,
+    li,
+    p,
+    span,
+    text,
+    textarea,
+    ul,
+}
+
+// A post in the admin's list: its title, linked to its page, its date, a
+// link to edit it and a button that deletes it.
+fn row(data: Data, post: Post) -> View {
+    li(
+        [class("row")],
+        [
+            a([href("/posts/${post.id}")], [text(post.title)]),
+            span([class("date")], [text(day(post.created))]),
+            a([class("edit"), href("/admin/posts/${post.id}/edit")], [text("Edit")]),
+            form(
+                [
+                    class("inline"),
+                    attr("method", "post"),
+                    attr("action", "/admin/posts/${post.id}/delete"),
+                ],
+                [csrf_field(data.csrf), button([attr("type", "submit")], [text("Delete")])],
+            ),
+        ],
+    )
+}
+
+// The list, newest first, or a line saying there is nothing in it.
+fn rows(data: Data) -> View {
+    if data.posts.len() == 0 { return p([], [text("No posts yet.")]) }
+    let mut views = [text(""); data.posts.len()]
+    let mut i = 0
+    while i < data.posts.len() {
+        views[i] = row(data, data.posts[i])
+        i = i + 1
+    }
+    ul([class("rows")], views)
+}
+
+/// The admin's page.
+pub component AdminPage(data: Data) {
+    view {
+        div {
+            h1 { text("Admin") }
+            p { a(id: "new-post", href: "/admin/new") { text("Write a new post") } }
+            rows(data)
+        }
+    }
+}
+
+/// The editor: a new post's when `data` holds no post, and otherwise the
+/// post's, filled from `data.draft`.
+pub component Editor(data: Data) {
+    let action = match data.post {
+        Some(post) => "/admin/posts/${post.id}"
+        None => "/admin/posts"
+    }
+    let heading = match data.post {
+        Some(post) => "Edit a post"
+        None => "A new post"
+    }
+    let title = signal(data.draft.title)
+    let body = signal(data.draft.body)
+    let live = signal(false)
+    let shown = memo(|| live.value() || data.draft.failed)
+    let ok = memo(|| !live.value() || post_ok(title.value(), body.value()))
+    on_mount(|| live.set(true))
+    view {
+        div {
+            h1 { text(heading) }
+            form(id: "editor", class: "stacked", method: "post", action: action) {
+                csrf_field(data.csrf)
+                label {
+                    text("Title")
+                    input(
+                        name: "title",
+                        value: data.draft.title,
+                        on_input: |v: String| title.set(v),
+                    )
+                }
+                message(shown, || title_message(title.value()))
+                label {
+                    text("Text")
+                    textarea(name: "body", rows: "16", on_input: |v: String| body.set(v)) {
+                        text(data.draft.body)
+                    }
+                }
+                message(shown, || body_message(body.value()))
+                p(class: "hint") { text("A blank line starts a new paragraph.") }
+                submit(ok, "Save")
+            }
+        }
+    }
+}

@@ -1,0 +1,728 @@
+//! The server: `std/http`'s `Server` with the blog's routes, beside the
+//! built site, `ui::ssr::Dist`, which it serves from its fallback.
+//!
+//! Every page is rendered here with `page_with`, its data after it, and the
+//! client hydrates it. Every page `GET` without a session starts one, a
+//! visitor's, and sets its cookie, so every form can carry a CSRF token.
+//! Every `POST` checks that token against its session before anything else,
+//! and answers `403` when it is missing or wrong; one that succeeds is
+//! answered with `303` (post, redirect, get), and one whose fields fail a
+//! check gets the form again with its values and messages, and `400`.
+//!
+//! The store lives in memory. A handler changes it there, then spawns the
+//! write of the whole store to `<data>/blog.json`, which runs after the
+//! response. The users are read from `<data>/users.json` once, at start;
+//! the server never writes them.
+//!
+//! Arguments:
+//!
+//! - `--address <host:port>`, `127.0.0.1:3000` unless given; port 0 lets
+//!   the system choose. Once bound, it prints
+//!   `blog: serving http://<host>:<port>/`.
+//! - `--data <dir>`, `data`, and `--dist <dir>`, `dist`, unless given.
+//! - `--set-password <name>` reads a password, one line of at least eight
+//!   characters, not blank, from standard input, and hashes it; then it
+//!   reads `<data>/users.json`, no users when it does not exist yet, sets
+//!   the user `<name>` with its hash, in place of one of that name, writes
+//!   `<data>/users.json`, prints `blog: set the password of <name>`, and
+//!   ends. It never reads or writes `blog.json`, so a server running
+//!   meanwhile loses nothing; but the server checks logins against the
+//!   users it read when it started, so the password takes effect when it
+//!   next starts.
+//! - `--iterations <n>`: PBKDF2's rounds for `--set-password`, and for a
+//!   login with a name no user has when there is no user; 600,000 unless
+//!   given.
+//!
+//! It stops on SIGTERM or SIGINT, as `Server` does, once the writes it has
+//! spawned are done.
+
+import app::{App, Data, Draft, Post, data_for}
+import auth::{Session, Sessions, hash_password, load_key, no_user_rounds, password_ok}
+import forms::{cleaned, comment_ok, login_ok, post_ok}
+import post_card::{first_paragraph}
+import store::{Store, Users, load_store, load_users, save_users, saved}
+import ui
+import ui::ssr::{Dist, page_with}
+
+/// OWASP's count of PBKDF2-HMAC-SHA256 rounds for a password.
+const ITERATIONS: Int = 600000
+
+/// What the page of a form says when its token is missing or wrong.
+const EXPIRED: String = "This form has expired, or it was not sent from this site. Open the page again and send it from there."
+
+/// What the page says when someone who is not logged in posts an admin's
+/// form.
+const NOT_ADMIN: String = "Only the admin can do that. Log in first."
+
+const USAGE: String = "usage: fullstack-blog-server [--address <host:port>] [--data <dir>] [--dist <dir>] [--set-password <name>] [--iterations <n>]"
+
+// The arguments.
+record Options {
+    address: String,
+    data: String,
+    dist: String,
+    set_password: Option<String>,
+    iterations: Int,
+}
+
+// What every handler shares: the store, the users read at start, the
+// sessions, the built site, the data directory, and the rounds for a name
+// no user has when there is no user.
+record Blog {
+    store: Store,
+    users: Users,
+    sessions: Sessions,
+    dist: Dist,
+    data: String,
+    iterations: Int,
+}
+
+// The session a page is shown in, and whether it was started for this page,
+// so its cookie goes with the response.
+record Visit { session: Session, fresh: Bool }
+
+// --- Arguments ---
+
+// The number `s` writes in decimal digits, or `None`.
+fn number(s: String) -> Option<Int> {
+    let codes = bytes_from_string(s).to_ints()
+    if codes.len() == 0 || codes.len() > 15 { return None }
+    let mut n = 0
+    let mut i = 0
+    while i < codes.len() {
+        let c = codes[i]
+        if c < 48 || c > 57 { return None }
+        n = n * 10 + c - 48
+        i = i + 1
+    }
+    Some(n)
+}
+
+// The options `argv` gives, after the program's name, or what is wrong.
+fn options(argv: Vec<String>) -> Result<Options, String> {
+    let mut o = Options {
+        address: "127.0.0.1:3000",
+        data: "data",
+        dist: "dist",
+        set_password: None,
+        iterations: ITERATIONS,
+    }
+    let mut i = 1
+    while i < argv.len() {
+        let flag = argv.get(i).unwrap_or("")
+        let given = match argv.get(i + 1) {
+            Some(v) => v
+            None => return Err("${flag} needs a value")
+        }
+        if flag == "--address" {
+            o.address = given
+        } else if flag == "--data" {
+            o.data = given
+        } else if flag == "--dist" {
+            o.dist = given
+        } else if flag == "--set-password" {
+            o.set_password = Some(given)
+        } else if flag == "--iterations" {
+            let n = number(given).unwrap_or(0)
+            if n < 1 || n > 4294967295 {
+                return Err("--iterations takes a number from 1 to 4294967295, not ${given}")
+            }
+            o.iterations = n
+        } else {
+            return Err("unknown argument ${flag}")
+        }
+        i = i + 2
+    }
+    Ok(o)
+}
+
+// The host of `address`, `host:port`: all before its last `:`.
+fn host_of(address: String) -> String {
+    let cs = address.chars()
+    let mut at = cs.len()
+    let mut i = 0
+    while i < cs.len() {
+        if cs[i] == ':' { at = i }
+        i = i + 1
+    }
+    address.slice(0, at)
+}
+
+// --- Sessions, pages and refusals ---
+
+// The session the request's cookie names, if it is one.
+fn session_of(b: Blog, req: Request) -> Option<Session> {
+    match req.cookies().get("sid") {
+        Some(value) => b.sessions.find(value)
+        None => None
+    }
+}
+
+// The session a page is shown in: the request's, or a visitor's started now.
+fn visit(b: Blog, req: Request) -> Visit {
+    match session_of(b, req) {
+        Some(s) => Visit { session: s, fresh: false }
+        None => {
+            let mut sessions = b.sessions
+            Visit { session: sessions.start(""), fresh: true }
+        }
+    }
+}
+
+// The cookie that carries `s`, lasting as long as it does.
+fn cookie_for(b: Blog, s: Session) -> Cookie {
+    let mut c = Cookie::new("sid", b.sessions.cookie(s))
+    c.max_age = Some(s.life)
+    c
+}
+
+// The data every page of `s` starts from: who is logged in and the token.
+fn base(b: Blog, s: Session) -> Data { data_for(s.user, b.sessions.token(s)) }
+
+// The page at the request's path for `data`, with `status`, and the cookie
+// of a session started for it.
+fn page(b: Blog, v: Visit, req: Request, status: Int, data: Data) -> Response {
+    let r = b.dist.respond(status, page_with(req.path, data, App))
+    if v.fresh { r.with_cookie(cookie_for(b, v.session)) } else { r }
+}
+
+// The not-found page, with `404`.
+fn missing(b: Blog, v: Visit, req: Request) -> Response {
+    let mut d = base(b, v.session)
+    d.missing = true
+    page(b, v, req, 404, d)
+}
+
+// The page saying why a form was refused, with `403`, shown in `s` when
+// there is one. Nothing changes.
+fn refused(b: Blog, req: Request, s: Option<Session>, why: String) -> Response {
+    let mut d = match s {
+        Some(x) => base(b, x)
+        None => data_for("", "")
+    }
+    d.refused = why
+    b.dist.respond(403, page_with(req.path, d, App))
+}
+
+// The post the request's `:id` names, if there is one.
+fn post_named(b: Blog, req: Request) -> Option<Post> {
+    match number(req.params.get("id").unwrap_or("")) {
+        Some(id) => b.store.post(id)
+        None => None
+    }
+}
+
+// A draft of a form that failed its checks.
+fn failed(title: String, body: String, name: String, text: String, error: String) -> Draft {
+    Draft { title: title, body: body, name: name, text: text, failed: true, error: error }
+}
+
+// The time now, as a post or a comment keeps it.
+fn now() -> String { SystemTime::now().to_iso8601() }
+
+// Spawns the write of the whole store, which runs after the response.
+fn save(b: Blog) { let _ = spawn(saved(b.data, b.store)) }
+
+// `posts` with each body cut to its first paragraph, for the home page.
+fn excerpts(posts: [Post]) -> [Post] {
+    let mut out = [Post { id: 0, title: "", body: "", created: "", updated: "" }; posts.len()]
+    let mut i = 0
+    while i < posts.len() {
+        let p = posts[i]
+        out[i] = Post {
+            id: p.id,
+            title: p.title,
+            body: first_paragraph(p.body),
+            created: p.created,
+            updated: p.updated,
+        }
+        i = i + 1
+    }
+    out
+}
+
+// `posts` with no bodies, for the admin's list.
+fn titles(posts: [Post]) -> [Post] {
+    let mut out = [Post { id: 0, title: "", body: "", created: "", updated: "" }; posts.len()]
+    let mut i = 0
+    while i < posts.len() {
+        let p = posts[i]
+        out[i] = Post { id: p.id, title: p.title, body: "", created: p.created, updated: p.updated }
+        i = i + 1
+    }
+    out
+}
+
+// The answer to a form posted to the request's path: `then`'s, given the
+// session and the fields, once the form's CSRF token is found to be the
+// session's, and, for an admin's form, the session to be the admin's;
+// otherwise `403`, and nothing changes. The token is checked before any
+// other field is looked at.
+fn checked(
+    b: Blog,
+    req: Request,
+    admin: Bool,
+    then: fn(Session, Map<String, String>) -> Response,
+) -> Response {
+    let found = session_of(b, req)
+    let fields = req.form()
+    let s = match found {
+        Some(s) => s
+        None => return refused(b, req, None, EXPIRED)
+    }
+    if !b.sessions.token_ok(s, fields.get("csrf").unwrap_or("")) {
+        return refused(b, req, Some(s), EXPIRED)
+    }
+    if admin && s.user == "" { return refused(b, req, Some(s), NOT_ADMIN) }
+    then(s, fields)
+}
+
+// --- The pages ---
+
+// `/`: the posts, newest first.
+fn home(b: Blog, req: Request) -> Response {
+    let v = visit(b, req)
+    let mut d = base(b, v.session)
+    d.posts = excerpts(b.store.newest_first())
+    page(b, v, req, 200, d)
+}
+
+// `/posts/:id`: the post, its comments and the form.
+fn post_page(b: Blog, req: Request) -> Response {
+    let v = visit(b, req)
+    match post_named(b, req) {
+        Some(p) => {
+            let mut d = base(b, v.session)
+            d.post = Some(p)
+            d.comments = b.store.comments_on(p.id)
+            page(b, v, req, 200, d)
+        }
+        None => missing(b, v, req)
+    }
+}
+
+// `/login`: the form.
+fn login_page(b: Blog, req: Request) -> Response {
+    let v = visit(b, req)
+    page(b, v, req, 200, base(b, v.session))
+}
+
+// The admin's session, if the request has one.
+fn admin_of(b: Blog, req: Request) -> Option<Session> {
+    match session_of(b, req) {
+        Some(s) => { if s.user == "" { None } else { Some(s) } }
+        None => None
+    }
+}
+
+// An admin's page: `then`'s, for the admin; anyone else goes to the login.
+fn for_admin(b: Blog, req: Request, then: fn(Visit) -> Response) -> Response {
+    match admin_of(b, req) {
+        Some(s) => then(Visit { session: s, fresh: false })
+        None => Response::redirect("/login")
+    }
+}
+
+// `/admin`: the posts, newest first, to edit or delete.
+fn admin_page(b: Blog, req: Request, v: Visit) -> Response {
+    let mut d = base(b, v.session)
+    d.posts = titles(b.store.newest_first())
+    page(b, v, req, 200, d)
+}
+
+// `/admin/new`: the editor, empty.
+fn new_post(b: Blog, req: Request, v: Visit) -> Response {
+    page(b, v, req, 200, base(b, v.session))
+}
+
+// `/admin/posts/:id/edit`: the editor, filled.
+fn edit_post(b: Blog, req: Request, v: Visit) -> Response {
+    match post_named(b, req) {
+        Some(p) => {
+            let mut d = base(b, v.session)
+            d.post = Some(p)
+            d.draft = Draft {
+                title: p.title,
+                body: p.body,
+                name: "",
+                text: "",
+                failed: false,
+                error: "",
+            }
+            page(b, v, req, 200, d)
+        }
+        None => missing(b, v, req)
+    }
+}
+
+// --- The forms ---
+
+// `POST /posts/:id/comments`: adds the comment, then goes to the post's.
+fn add_comment(b: Blog, req: Request, s: Session, fields: Map<String, String>) -> Response {
+    let v = Visit { session: s, fresh: false }
+    let post = match post_named(b, req) {
+        Some(p) => p
+        None => return missing(b, v, req)
+    }
+    let name = cleaned(fields.get("name").unwrap_or(""))
+    let text = cleaned(fields.get("text").unwrap_or(""))
+    if !comment_ok(name, text) {
+        let mut d = base(b, s)
+        d.post = Some(post)
+        d.comments = b.store.comments_on(post.id)
+        d.draft = failed("", "", name, text, "")
+        return page(b, v, req, 400, d)
+    }
+    let mut store = b.store
+    let _ = store.add_comment(post.id, name, text, now())
+    save(b)
+    Response::redirect("/posts/${post.id}#comments")
+}
+
+// `POST /login`: checks the password; then the old session ends, a new one
+// starts for the admin, and the admin's page comes next.
+fn log_in(b: Blog, req: Request, s: Session, fields: Map<String, String>) -> Response {
+    let v = Visit { session: s, fresh: false }
+    let name = fields.get("name").unwrap_or("").trim()
+    let password = fields.get("password").unwrap_or("")
+    if !login_ok(name, password) {
+        let mut d = base(b, s)
+        d.draft = failed("", "", name, "", "")
+        return page(b, v, req, 400, d)
+    }
+    // A name no user has costs the most rounds a user's hash has.
+    let rounds = no_user_rounds(b.users.list, b.iterations)
+    if !password_ok(b.users.user(name), password, rounds) {
+        let mut d = base(b, s)
+        d.draft = failed("", "", name, "", "Wrong name or password.")
+        return page(b, v, req, 401, d)
+    }
+    let mut sessions = b.sessions
+    sessions.end(s.id)
+    let admin = sessions.start(name)
+    Response::redirect("/admin").with_cookie(cookie_for(b, admin))
+}
+
+// `POST /logout`: ends the session and removes its cookie.
+fn log_out(b: Blog, s: Session) -> Response {
+    b.sessions.end(s.id)
+    Response::redirect("/").with_cookie(Cookie::expired("sid"))
+}
+
+// `POST /admin/posts`: adds the post.
+fn create_post(b: Blog, req: Request, s: Session, fields: Map<String, String>) -> Response {
+    let title = cleaned(fields.get("title").unwrap_or(""))
+    let body = cleaned(fields.get("body").unwrap_or(""))
+    if !post_ok(title, body) {
+        let mut d = base(b, s)
+        d.draft = failed(title, body, "", "", "")
+        return page(b, Visit { session: s, fresh: false }, req, 400, d)
+    }
+    let mut store = b.store
+    let _ = store.add_post(title, body, now())
+    save(b)
+    Response::redirect("/admin")
+}
+
+// `POST /admin/posts/:id`: changes the post.
+fn update_post(b: Blog, req: Request, s: Session, fields: Map<String, String>) -> Response {
+    let v = Visit { session: s, fresh: false }
+    let post = match post_named(b, req) {
+        Some(p) => p
+        None => return missing(b, v, req)
+    }
+    let title = cleaned(fields.get("title").unwrap_or(""))
+    let body = cleaned(fields.get("body").unwrap_or(""))
+    if !post_ok(title, body) {
+        let mut d = base(b, s)
+        d.post = Some(post)
+        d.draft = failed(title, body, "", "", "")
+        return page(b, v, req, 400, d)
+    }
+    let mut store = b.store
+    let _ = store.edit_post(post.id, title, body, now())
+    save(b)
+    Response::redirect("/admin")
+}
+
+// `POST /admin/posts/:id/delete`: deletes the post and its comments.
+fn delete_post(b: Blog, req: Request, s: Session) -> Response {
+    let post = match post_named(b, req) {
+        Some(p) => p
+        None => return missing(b, Visit { session: s, fresh: false }, req)
+    }
+    let mut store = b.store
+    let _ = store.delete_post(post.id)
+    save(b)
+    Response::redirect("/admin")
+}
+
+// `POST /admin/comments/:id/delete`: deletes the comment, then goes back to
+// its post.
+fn delete_comment(b: Blog, req: Request, s: Session) -> Response {
+    let mut store = b.store
+    let gone = match number(req.params.get("id").unwrap_or("")) {
+        Some(id) => store.delete_comment(id)
+        None => None
+    }
+    match gone {
+        Some(c) => {
+            save(b)
+            Response::redirect("/posts/${c.post}#comments")
+        }
+        None => missing(b, Visit { session: s, fresh: false }, req)
+    }
+}
+
+// --- The server ---
+
+// The blog's routes, beside the built site. A path that has only a `POST`
+// route answers a `GET` with the not-found page, as any path without a page
+// does, rather than `405`.
+fn server(b: Blog) -> Server {
+    let nowhere = |req: Request| missing(b, visit(b, req), req)
+    Server::new()
+        .get("/", |req: Request| home(b, req))
+        .get("/posts/:id", |req: Request| post_page(b, req))
+        .post(
+            "/posts/:id/comments",
+            |req: Request| checked(
+                b,
+                req,
+                false,
+                |s: Session, f: Map<String, String>| add_comment(b, req, s, f),
+            ),
+        )
+        .get("/posts/:id/comments", nowhere)
+        .get("/login", |req: Request| login_page(b, req))
+        .post(
+            "/login",
+            |req: Request| checked(
+                b,
+                req,
+                false,
+                |s: Session, f: Map<String, String>| log_in(b, req, s, f),
+            ),
+        )
+        .post(
+            "/logout",
+            |req: Request| checked(
+                b,
+                req,
+                false,
+                |s: Session, f: Map<String, String>| log_out(b, s),
+            ),
+        )
+        .get("/logout", nowhere)
+        .get("/admin", |req: Request| for_admin(b, req, |v: Visit| admin_page(b, req, v)))
+        .get("/admin/new", |req: Request| for_admin(b, req, |v: Visit| new_post(b, req, v)))
+        .post(
+            "/admin/posts",
+            |req: Request| checked(
+                b,
+                req,
+                true,
+                |s: Session, f: Map<String, String>| create_post(b, req, s, f),
+            ),
+        )
+        .get("/admin/posts", nowhere)
+        .get(
+            "/admin/posts/:id/edit",
+            |req: Request| for_admin(b, req, |v: Visit| edit_post(b, req, v)),
+        )
+        .post(
+            "/admin/posts/:id",
+            |req: Request| checked(
+                b,
+                req,
+                true,
+                |s: Session, f: Map<String, String>| update_post(b, req, s, f),
+            ),
+        )
+        .get("/admin/posts/:id", nowhere)
+        .post(
+            "/admin/posts/:id/delete",
+            |req: Request| checked(
+                b,
+                req,
+                true,
+                |s: Session, f: Map<String, String>| delete_post(b, req, s),
+            ),
+        )
+        .get("/admin/posts/:id/delete", nowhere)
+        .post(
+            "/admin/comments/:id/delete",
+            |req: Request| checked(
+                b,
+                req,
+                true,
+                |s: Session, f: Map<String, String>| delete_comment(b, req, s),
+            ),
+        )
+        .get("/admin/comments/:id/delete", nowhere)
+        .fallback(
+            |req: Request| match b.dist.file(req) {
+                Some(file) => file
+                None => missing(b, visit(b, req), req)
+            },
+        )
+}
+
+// One line from standard input, less its line end, or `None` when it is not
+// UTF-8.
+async fn read_line() -> Option<String> {
+    let mut got = bytes_from_ints([])
+    let newline = bytes_from_string("\n")
+    let mut more = true
+    while more {
+        match stdin().read(4096).await {
+            Ok(chunk) => {
+                if chunk.len() == 0 { more = false } else { got = got.concat(chunk) }
+                if got.contains(newline) { more = false }
+            }
+            Err(e) => more = false
+        }
+    }
+    let text = match got.to_string() {
+        Some(t) => t
+        None => return None
+    }
+    let line = match text.index_of("\n") {
+        Some(at) => text.slice(0, at)
+        None => text
+    }
+    if line.ends_with("\r") { Some(line.slice(0, line.len() - 1)) } else { Some(line) }
+}
+
+// `--set-password <name>`: the user `name`, with the password read from
+// standard input, in `<data>/users.json`.
+async fn set_password(o: Options, name: String) {
+    if name.trim() == "" || name != name.trim() {
+        eprintln("blog: a user's name is not blank and has no spaces around it")
+        exit(2)
+        return
+    }
+    let password = match read_line().await {
+        Some(p) => p
+        None => {
+            eprintln("blog: the password is not UTF-8")
+            exit(1)
+            return
+        }
+    }
+    if password.len() < 8 {
+        eprintln("blog: a password has at least eight characters")
+        exit(1)
+        return
+    }
+    if password.trim() == "" {
+        eprintln("blog: a password is not blank")
+        exit(1)
+        return
+    }
+    // The hash first, since it takes longest: the file is read after it,
+    // and written straight away.
+    let user = hash_password(name, password, o.iterations)
+    let mut users = match load_users(o.data).await {
+        Ok(u) => u
+        Err(why) => {
+            eprintln("blog: ${why}")
+            exit(1)
+            return
+        }
+    }
+    users.set_user(user)
+    match save_users(o.data, users).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln("blog: cannot write ${o.data}/users.json: ${e.message}")
+            exit(1)
+            return
+        }
+    }
+    println("blog: set the password of ${name}")
+}
+
+async fn main() {
+    let o = match options(args()) {
+        Ok(o) => o
+        Err(why) => {
+            eprintln("blog: ${why}")
+            eprintln(USAGE)
+            exit(2)
+            return
+        }
+    }
+    match o.set_password {
+        Some(name) => {
+            set_password(o, name).await
+            return
+        }
+        None => {}
+    }
+    let store = match load_store(o.data).await {
+        Ok(s) => s
+        Err(why) => {
+            eprintln("blog: ${why}")
+            exit(1)
+            return
+        }
+    }
+    let users = match load_users(o.data).await {
+        Ok(u) => u
+        Err(why) => {
+            eprintln("blog: ${why}")
+            exit(1)
+            return
+        }
+    }
+    let key = match load_key(o.data).await {
+        Ok(k) => k
+        Err(why) => {
+            eprintln("blog: ${why}")
+            exit(1)
+            return
+        }
+    }
+    let dist = match Dist::open(o.dist).await {
+        Ok(d) => d
+        Err(e) => {
+            eprintln("blog: ${e.message}")
+            exit(1)
+            return
+        }
+    }
+    let l = match bind(o.address) {
+        Ok(l) => l
+        Err(e) => {
+            eprintln("blog: cannot bind ${o.address}: ${e.message}")
+            exit(1)
+            return
+        }
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => {
+            eprintln("blog: ${e.message}")
+            exit(1)
+            return
+        }
+    }
+    println("blog: serving http://${host_of(o.address)}:${port}/")
+    let _ = stdout().flush().await
+    let b = Blog {
+        store: store,
+        users: users,
+        sessions: Sessions::new(key),
+        dist: dist,
+        data: o.data,
+        iterations: o.iterations,
+    }
+    match server(b).listen_on(l).await {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln("blog: ${e.message}")
+            exit(1)
+        }
+    }
+}

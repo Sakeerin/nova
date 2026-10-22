@@ -1,0 +1,127 @@
+//! A post's page: the post, its comments, and the form that adds one; for
+//! the admin, a button under each comment that deletes it.
+//!
+//! The comment form's fields are signals that `on_input` sets. Once the page
+//! has hydrated, `on_mount` starts the checks: each field's message shows
+//! under it as it is typed, and the submit button is disabled while the
+//! form is not valid. Until then the page is what the server sent, which is
+//! all a browser without JavaScript gets, and still posts the form.
+
+import app::{Comment, Data, Post}
+import forms::{comment_ok, csrf_field, message, name_message, submit, text_message}
+import post_card::{body_view, day}
+import ui
+import ui::html::{
+    article,
+    attr,
+    button,
+    class,
+    div,
+    form,
+    h1,
+    h2,
+    id,
+    input,
+    label,
+    p,
+    section,
+    strong,
+    text,
+    textarea,
+}
+
+// The button that deletes comment `c`, for the admin, or nothing.
+fn delete_comment(data: Data, c: Comment) -> View {
+    if data.user == "" { return text("") }
+    form(
+        [class("inline"), attr("method", "post"), attr("action", "/admin/comments/${c.id}/delete")],
+        [csrf_field(data.csrf), button([attr("type", "submit")], [text("Delete")])],
+    )
+}
+
+// The comments, in the order they were written, or a line saying there are
+// none.
+fn comment_list(data: Data) -> View {
+    if data.comments.len() == 0 { return p([], [text("No comments yet.")]) }
+    let mut views = [text(""); data.comments.len()]
+    let mut i = 0
+    while i < data.comments.len() {
+        let c = data.comments[i]
+        views[i] = article(
+            [class("comment")],
+            [
+                p([class("who")], [strong([], [text(c.name)]), text(" on ${day(c.created)}")]),
+                body_view(c.text),
+                delete_comment(data, c),
+            ],
+        )
+        i = i + 1
+    }
+    div([], views)
+}
+
+/// The form that adds a comment to `post`.
+component CommentForm(data: Data, post: Post) {
+    let name = signal(data.draft.name)
+    let said = signal(data.draft.text)
+    let live = signal(false)
+    let shown = memo(|| live.value() || data.draft.failed)
+    let ok = memo(|| !live.value() || comment_ok(name.value(), said.value()))
+    on_mount(|| live.set(true))
+    view {
+        form(
+            id: "comment-form",
+            class: "stacked",
+            method: "post",
+            action: "/posts/${post.id}/comments",
+        ) {
+            h2 { text("Add a comment") }
+            csrf_field(data.csrf)
+            label {
+                text("Name")
+                input(name: "name", value: data.draft.name, on_input: |v: String| name.set(v))
+            }
+            message(shown, || name_message(name.value()))
+            label {
+                text("Comment")
+                textarea(name: "text", rows: "5", on_input: |v: String| said.set(v)) {
+                    text(data.draft.text)
+                }
+            }
+            message(shown, || text_message(said.value()))
+            submit(ok, "Comment")
+        }
+    }
+}
+
+// The post, its comments and the form.
+fn shown_post(data: Data, post: Post) -> View {
+    div(
+        [],
+        [
+            article(
+                [id("post")],
+                [
+                    h1([], [text(post.title)]),
+                    p([class("date")], [text(day(post.created))]),
+                    body_view(post.body),
+                ],
+            ),
+            section(
+                [id("comments")],
+                [h2([], [text("Comments")]), comment_list(data), CommentForm(data, post)],
+            ),
+        ],
+    )
+}
+
+/// The page of the post `data` holds.
+pub component PostPage(data: Data) {
+    let page = match data.post {
+        Some(post) => shown_post(data, post)
+        None => p([], [text("There is no such post.")])
+    }
+    view {
+        div { page }
+    }
+}

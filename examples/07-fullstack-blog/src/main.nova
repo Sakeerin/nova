@@ -1,0 +1,9 @@
+//! The client: it hydrates the page the server rendered, with the data the
+//! server put after the page's root, so every node the server wrote is kept
+//! and the forms' checks come alive. On a page with no data it shows the
+//! empty data's page, with no posts.
+
+import app::{App, data_for}
+import ui
+
+fn main() { hydrate_with("#app", data_for("", ""), App) }

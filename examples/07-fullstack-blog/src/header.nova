@@ -1,0 +1,36 @@
+//! The header every page has: the blog's name, linked to the list of
+//! posts, and, for the admin, a link to the admin's page and a form that
+//! logs out, or, for anyone else, a link to the login.
+
+import app::{Data}
+import forms::{csrf_field}
+import ui
+import ui::html::{a, attr, button, class, form, header, href, nav, text}
+
+// The links for who is logged in, or for a visitor.
+fn links(data: Data) -> View {
+    if data.user == "" { return nav([], [a([href("/login")], [text("Log in")])]) }
+    nav(
+        [],
+        [
+            a([href("/admin")], [text("Admin")]),
+            form(
+                [class("inline"), attr("method", "post"), attr("action", "/logout")],
+                [
+                    csrf_field(data.csrf),
+                    button([attr("type", "submit")], [text("Log out ${data.user}")]),
+                ],
+            ),
+        ],
+    )
+}
+
+/// The header.
+pub component Header(data: Data) {
+    view {
+        header(class: "site") {
+            a(class: "brand", href: "/") { text("A Nova blog") }
+            links(data)
+        }
+    }
+}

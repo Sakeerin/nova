@@ -1,0 +1,43 @@
+{
+  "posts": [
+    {
+      "id": 1,
+      "title": "Hello from a Nova server",
+      "body": "This blog is a Nova program. Its server is built on std/http, and it renders every page you read before it sends it, so the page is whole even before any script runs.\n\nThe client is the same program's components, built for WebAssembly. When it loads, it hydrates the page: it adopts the elements the server wrote instead of building them again, and the forms come alive.\n\nNothing here needs a database. The posts and the comments live in memory, and each change is written to a JSON file.",
+      "created": "2026-10-19T08:30:00.000Z",
+      "updated": "2026-10-19T08:30:00.000Z"
+    },
+    {
+      "id": 2,
+      "title": "How the forms work",
+      "body": "Every form on this blog is a plain HTML form. It posts to the server, which checks it and answers with a redirect, so a reload never sends it twice.\n\nOnce the page has hydrated, the client checks the fields as you type. A blank or too long field is reported under it, and the button stays disabled until the form is valid.\n\nWithout JavaScript the forms still work: the server runs the same checks, and sends the form back with its messages when one fails.",
+      "created": "2026-10-20T09:15:00.000Z",
+      "updated": "2026-10-20T09:15:00.000Z"
+    },
+    {
+      "id": 3,
+      "title": "Sessions, tokens and passwords",
+      "body": "Every visitor gets a session: a random id in a cookie, signed with HMAC-SHA256, that scripts cannot read. Every form carries a token derived from that session, and a form without the right one is refused.\n\nThe admin's password is stored only as a PBKDF2 hash, with its salt and its iteration count. No password is in the repository: the server sets it from standard input.\n\nText you write here reaches the page only as text. A title or a comment that holds a script shows the script's text, and runs nothing.",
+      "created": "2026-10-21T07:45:00.000Z",
+      "updated": "2026-10-21T07:45:00.000Z"
+    }
+  ],
+  "comments": [
+    {
+      "id": 1,
+      "post": 1,
+      "name": "Ada",
+      "text": "The page was there before the script loaded. Nice.",
+      "created": "2026-10-19T10:02:00.000Z"
+    },
+    {
+      "id": 2,
+      "post": 3,
+      "name": "Grace",
+      "text": "So a reload after a comment does not post it again?\n\nGood.",
+      "created": "2026-10-21T08:10:00.000Z"
+    }
+  ],
+  "next_post": 4,
+  "next_comment": 3
+}
