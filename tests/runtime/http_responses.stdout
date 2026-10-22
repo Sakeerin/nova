@@ -1,0 +1,72 @@
+-- Cookie::new and Cookie::expired
+new: sid=abc.123 path=/ max_age none=true http_only=true same_site=Lax secure=false
+expired: sid=[] path=/ max_age=0 http_only=true same_site=Lax secure=false
+written: sid=abc.123; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+written: sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax (after the other headers: true)
+-- each attribute only when it applies
+all: all=1; Path=/; Max-Age=3600; HttpOnly; SameSite=Strict; Secure (after the other headers: true)
+none: bare= (after the other headers: true)
+others: neg=x; Path=/admin; Max-Age=-5; HttpOnly; SameSite=None (after the other headers: true)
+-- several set-cookie lines, in order
+base: (after the other headers: true)
+one: | sid=new; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+two: | sid=new; Path=/; HttpOnly; SameSite=Lax | old=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax | theme=dark; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+two keeps: HTTP/1.1 303 See Other, location /admin, 3 cookies
+one again: | sid=new; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+a branch: | sid=new; Path=/; HttpOnly; SameSite=Lax | other=1; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+a header by hand: | from=headers | from=cookies; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+-- a name that is not a token
+empty: left out (after the other headers: true)
+space: left out (after the other headers: true)
+semicolon: left out (after the other headers: true)
+equals: left out (after the other headers: true)
+comma: left out (after the other headers: true)
+quote: left out (after the other headers: true)
+slash: left out (after the other headers: true)
+non-ascii: left out (after the other headers: true)
+crlf: left out (after the other headers: true)
+every tchar: !#$%&'*+-.^_`|~09AZaz=v; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+-- a value a cookie cannot carry
+empty: c=; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+space: left out (after the other headers: true)
+semicolon: left out (after the other headers: true)
+comma: left out (after the other headers: true)
+quote: left out (after the other headers: true)
+backslash: left out (after the other headers: true)
+tab: left out (after the other headers: true)
+del: left out (after the other headers: true)
+non-ascii: left out (after the other headers: true)
+crlf: left out (after the other headers: true)
+every octet: c=!#$%&'()*+-./09:<=>?@AZ[]^_`az{|}~; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+-- a path a cookie cannot carry
+semicolon: left out (after the other headers: true)
+cr: left out (after the other headers: true)
+non-ascii: left out (after the other headers: true)
+space and comma: c=v; Path=/a b,c; HttpOnly; SameSite=Lax (after the other headers: true)
+-- a same_site that is not a token
+injected: left out (after the other headers: true)
+-- only the bad one is left out
+mixed: | good=1; Path=/; HttpOnly; SameSite=Lax | also=3; Path=/; HttpOnly; SameSite=Lax (after the other headers: true)
+mixed holds 3
+-- html and redirect
+html: HTTP/1.1 404 Not Found, text/html; charset=utf-8, 23, <p>café &amp; more</p>
+redirect: HTTP/1.1 303 See Other, location /posts/7#comments, content-length 0, body 0 bytes, 2 headers
+redirect ends with a blank line: true
+a location with CRLF is left out: true
+-- reason phrases
+HTTP/1.1 200 OK
+HTTP/1.1 201 Created
+HTTP/1.1 204 No Content
+HTTP/1.1 301 Moved Permanently
+HTTP/1.1 302 Found
+HTTP/1.1 303 See Other
+HTTP/1.1 400 Bad Request
+HTTP/1.1 401 Unauthorized
+HTTP/1.1 403 Forbidden
+HTTP/1.1 404 Not Found
+HTTP/1.1 405 Method Not Allowed
+HTTP/1.1 413 Payload Too Large
+HTTP/1.1 500 Internal Server Error
+HTTP/1.1 307 Redirection
+HTTP/1.1 418 Client Error
+HTTP/1.1 503 Server Error

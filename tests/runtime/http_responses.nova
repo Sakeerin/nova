@@ -1,0 +1,181 @@
+// `std/http`'s answers (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.3): `Cookie::new`'s safe defaults and `Cookie::expired`;
+// `with_cookie`, which leaves its receiver alone; several `set-cookie` lines
+// on the wire, in order, after the other headers, each attribute written
+// only when it applies; a cookie left out for a name that is not a token, a
+// value or a path holding what a cookie cannot carry, or a `same_site` that
+// is not a token; `Response::html`, `Response::redirect`; and the reason
+// phrases. Headers are read back by name, and the wire's lines are printed
+// only where a `Map`'s order cannot move them.
+
+// The lines of `r` on the wire, its head only.
+fn head_lines(r: Response) -> [String] {
+    let wire = r.to_bytes().to_string().unwrap_or("")
+    let end = wire.index_of("\r\n\r\n").unwrap_or(wire.len())
+    wire.slice(0, end).split("\r\n")
+}
+
+// The `set-cookie` lines of `r` on the wire, in order, each after a `|`;
+// and whether every one comes after every other header.
+fn set_cookies(r: Response) -> String {
+    let lines = head_lines(r)
+    let mut out = ""
+    let mut seen = false
+    let mut last = true
+    let mut i = 1
+    while i < lines.len() {
+        if lines[i].starts_with("set-cookie: ") {
+            out = "${out} | ${lines[i].slice(12, lines[i].len())}"
+            seen = true
+        } else if seen {
+            last = false
+        }
+        i = i + 1
+    }
+    "${out} (after the other headers: ${last})"
+}
+
+fn status_line(r: Response) -> String { head_lines(r)[0] }
+
+fn header(r: Response, name: String) -> String {
+    match r.headers.get(name) {
+        Some(v) => v
+        None => "<absent>"
+    }
+}
+
+// One line for `c` alone on a response: what is written, or that it was
+// left out.
+fn written(c: Cookie) -> String {
+    let line = set_cookies(Response::ok(bytes_from_string("")).with_cookie(c))
+    if line.starts_with(" | ") { line.slice(3, line.len()) } else { "left out${line}" }
+}
+
+fn named(name: String) -> String { written(Cookie::new(name, "v")) }
+
+fn valued(value: String) -> String { written(Cookie::new("c", value)) }
+
+fn pathed(path: String) -> String {
+    let mut c = Cookie::new("c", "v")
+    c.path = path
+    written(c)
+}
+
+fn main() {
+    println("-- Cookie::new and Cookie::expired")
+    let c = Cookie::new("sid", "abc.123")
+    println(
+        "new: ${c.name}=${c.value} path=${c.path} max_age none=${c.max_age.is_none()} http_only=${c.http_only} same_site=${c.same_site} secure=${c.secure}",
+    )
+    let e = Cookie::expired("sid")
+    println(
+        "expired: ${e.name}=[${e.value}] path=${e.path} max_age=${e.max_age.unwrap_or(-1)} http_only=${e.http_only} same_site=${e.same_site} secure=${e.secure}",
+    )
+    println("written: ${written(c)}")
+    println("written: ${written(e)}")
+
+    println("-- each attribute only when it applies")
+    let mut all = Cookie::new("all", "1")
+    all.max_age = Some(3600)
+    all.secure = true
+    all.same_site = "Strict"
+    println("all: ${written(all)}")
+    let mut bare = Cookie::new("bare", "")
+    bare.path = ""
+    bare.http_only = false
+    bare.same_site = ""
+    println("none: ${written(bare)}")
+    let mut neg = Cookie::new("neg", "x")
+    neg.max_age = Some(-5)
+    neg.path = "/admin"
+    neg.same_site = "None"
+    println("others: ${written(neg)}")
+
+    println("-- several set-cookie lines, in order")
+    let base = Response::redirect("/admin")
+    let one = base.with_cookie(Cookie::new("sid", "new"))
+    let two = one.with_cookie(Cookie::expired("old")).with_cookie(Cookie::new("theme", "dark"))
+    println("base:${set_cookies(base)}")
+    println("one:${set_cookies(one)}")
+    println("two:${set_cookies(two)}")
+    println(
+        "two keeps: ${status_line(two)}, location ${header(two, "location")}, ${two.cookies.len()} cookies",
+    )
+    let branch = one.with_cookie(Cookie::new("other", "1"))
+    println("one again:${set_cookies(one)}")
+    println("a branch:${set_cookies(branch)}")
+    // One header, so a `Map`'s order cannot move it.
+    let mut h: Map<String, String> = Map::new()
+    h.insert("set-cookie", "from=headers")
+    let by_hand = Response { status: 200, headers: h, body: bytes_from_string(""), cookies: [] }
+    println("a header by hand:${set_cookies(by_hand.with_cookie(Cookie::new("from", "cookies")))}")
+
+    println("-- a name that is not a token")
+    println("empty: ${named("")}")
+    println("space: ${named("a b")}")
+    println("semicolon: ${named("a;b")}")
+    println("equals: ${named("a=b")}")
+    println("comma: ${named("a,b")}")
+    println("quote: ${named("a\"b")}")
+    println("slash: ${named("a/b")}")
+    println("non-ascii: ${named("é")}")
+    println("crlf: ${named("a\r\nx-injected: 1")}")
+    println("every tchar: ${named("!#$%&'*+-.^_`|~09AZaz")}")
+
+    println("-- a value a cookie cannot carry")
+    println("empty: ${valued("")}")
+    println("space: ${valued("a b")}")
+    println("semicolon: ${valued("a;Path=/x")}")
+    println("comma: ${valued("a,b")}")
+    println("quote: ${valued("\"quoted\"")}")
+    println("backslash: ${valued("a\\b")}")
+    println("tab: ${valued("a\tb")}")
+    println("del: ${valued(bytes_from_ints([97, 127]).to_string().unwrap_or(""))}")
+    println("non-ascii: ${valued("caf\u{e9}")}")
+    println("crlf: ${valued("a\r\nx-injected: 1")}")
+    println("every octet: ${valued("!#$%&'()*+-./09:<=>?@AZ[]^_`az{|}~")}")
+
+    println("-- a path a cookie cannot carry")
+    println("semicolon: ${pathed("/a;Secure")}")
+    println("cr: ${pathed("/a\rb")}")
+    println("non-ascii: ${pathed("/caf\u{e9}")}")
+    println("space and comma: ${pathed("/a b,c")}")
+
+    println("-- a same_site that is not a token")
+    let mut lax = Cookie::new("c", "v")
+    lax.same_site = "Lax; Domain=evil.example"
+    println("injected: ${written(lax)}")
+
+    println("-- only the bad one is left out")
+    let mixed = Response::text(200, "ok")
+        .with_cookie(Cookie::new("good", "1"))
+        .with_cookie(Cookie::new("bad name", "2"))
+        .with_cookie(Cookie::new("also", "3"))
+    println("mixed:${set_cookies(mixed)}")
+    println("mixed holds ${mixed.cookies.len()}")
+
+    println("-- html and redirect")
+    let page = Response::html(404, "<p>caf\u{e9} &amp; more</p>")
+    println(
+        "html: ${status_line(page)}, ${header(page, "content-type")}, ${header(page, "content-length")}, ${page.body.to_string().unwrap_or("")}",
+    )
+    let go = Response::redirect("/posts/7#comments")
+    println(
+        "redirect: ${status_line(go)}, location ${header(go, "location")}, content-length ${header(go, "content-length")}, body ${go.body.len()} bytes, ${go.headers.len()} headers",
+    )
+    let wire = go.to_bytes().to_string().unwrap_or("")
+    println("redirect ends with a blank line: ${wire.ends_with("\r\n\r\n")}")
+    let split = Response::redirect("/x\r\nx-injected: 1")
+    println(
+        "a location with CRLF is left out: ${!split.to_bytes().contains(bytes_from_string("location"))}",
+    )
+
+    println("-- reason phrases")
+    let codes = [200, 201, 204, 301, 302, 303, 400, 401, 403, 404, 405, 413, 500, 307, 418, 503]
+    let mut i = 0
+    while i < codes.len() {
+        println(status_line(Response::text(codes[i], "")))
+        i = i + 1
+    }
+}

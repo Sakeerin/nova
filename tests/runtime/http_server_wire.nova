@@ -1,0 +1,132 @@
+// `std/http`'s routes, readers and answers over TCP (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §3),
+// as `http_listen_on.nova` serves: the program binds port 0, serves that
+// listener, and a client sends, on one connection, a `GET` with a path
+// parameter and a query, a form's `POST` with a cookie, a `DELETE` that gets
+// `405`, and a `GET` the fallback answers. Each answer's status line, its
+// `set-cookie` lines in order, its `location` and `allow`, and its body are
+// printed; the other headers are not, since a `Map` orders them.
+
+// One request on `s`, and its answer, as `shown` writes it.
+async fn ask(s: TcpStream, request: String) -> String {
+    let _ = match s.write(bytes_from_string(request)).await {
+        Ok(n) => n
+        Err(e) => panic("client write: ${e.message}")
+    }
+    let mut text = ""
+    let mut done = false
+    while !done {
+        let chunk = match s.read(4096).await {
+            Ok(b) => b
+            Err(e) => panic("client read: ${e.message}")
+        }
+        if chunk.len() == 0 { panic("the server closed the connection") }
+        text = "${text}${chunk.to_string().unwrap_or("<not utf-8>")}"
+        done = framed(text)
+    }
+    shown(text)
+}
+
+// The status line of `text`, a whole response, then its `set-cookie`,
+// `location` and `allow` lines in the order they came, then its body.
+fn shown(text: String) -> String {
+    let end = text.index_of("\r\n\r\n").unwrap_or(0)
+    let lines = text.slice(0, end).split("\r\n")
+    let mut out = lines[0]
+    let mut i = 1
+    while i < lines.len() {
+        let line = lines[i]
+        let name = line.to_lower()
+        if name.starts_with("set-cookie:")
+            || name.starts_with("location:")
+            || name.starts_with("allow:") {
+            out = "${out}\n  ${line}"
+        }
+        i = i + 1
+    }
+    "${out}\n  body: ${text.slice(end + 4, text.len())}"
+}
+
+// Whether `text` holds a whole response: its head, and as many bytes of body
+// as its `content-length` says.
+fn framed(text: String) -> Bool {
+    let end = match text.index_of("\r\n\r\n") {
+        Some(at) => at
+        None => return false
+    }
+    let lines = text.slice(0, end).split("\r\n")
+    let mut want = 0
+    let mut i = 0
+    while i < lines.len() {
+        let line = lines[i].to_lower()
+        if line.starts_with("content-length: ") { want = number(line.slice(16, line.len())) }
+        i = i + 1
+    }
+    text.len() - end - 4 >= want
+}
+
+// The decimal number `digits` writes.
+fn number(digits: String) -> Int {
+    let cs = digits.chars()
+    let mut n = 0
+    let mut i = 0
+    while i < cs.len() {
+        n = n * 10 + "0123456789".index_of("${cs[i]}").unwrap_or(0)
+        i = i + 1
+    }
+    n
+}
+
+// The answer to a login form: who it names, the session it came with, and
+// two cookies back, one the browser keeps and one that removes another.
+fn log_in(r: Request) -> Response {
+    let form = r.form()
+    let sid = r.cookies().get("sid").unwrap_or("none")
+    let mut session = Cookie::new("sid", "new.${form.get("name").unwrap_or("?")}")
+    session.max_age = Some(28800)
+    let to = "/admin?from=${sid}&password=${form.get("password").unwrap_or("?")}"
+    Response::redirect(to).with_cookie(session).with_cookie(Cookie::expired("visitor"))
+}
+
+async fn main() {
+    let l = match bind("127.0.0.1:0") {
+        Ok(l) => l
+        Err(e) => panic("bind: ${e.message}")
+    }
+    let port = match l.local_port() {
+        Ok(p) => p
+        Err(e) => panic("local_port: ${e.message}")
+    }
+    let app = Server::new()
+        .get(
+            "/posts/:id",
+            |r: Request| {
+                let tab = r.query().get("tab").unwrap_or("none")
+                Response::html(200, "<p>post ${r.params.get("id").unwrap_or("?")}, tab ${tab}</p>")
+                    .with_cookie(Cookie::new("seen", "1"))
+                    .with_cookie(Cookie::new("bad name", "2"))
+                    .with_cookie(Cookie::new("theme", "dark"))
+            },
+        )
+        .get("/login", |_| Response::html(200, "<form method=\"post\"></form>"))
+        .post("/login", log_in)
+        .fallback(|r: Request| Response::text(404, "no page at ${r.path}"))
+    let _ = spawn(app.listen_on(l))
+
+    let s = match connect("127.0.0.1:${port}").await {
+        Ok(s) => s
+        Err(e) => panic("client connect: ${e.message}")
+    }
+    println(ask(s, "GET /posts/a%20b/?tab=2 HTTP/1.1\r\nHost: h\r\n\r\n").await)
+    let form = "name=ada&password=x%26y+z"
+    println(
+        ask(
+            s,
+            "POST /login HTTP/1.1\r\nHost: h\r\nCookie: sid=old.1; theme=dark\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: ${form.len()}\r\n\r\n${form}",
+        ).await,
+    )
+    println(ask(s, "DELETE /login HTTP/1.1\r\nHost: h\r\n\r\n").await)
+    println(ask(s, "GET /nope?x=1 HTTP/1.1\r\nHost: h\r\n\r\n").await)
+    let _ = s.close().await
+    exit(0)
+}

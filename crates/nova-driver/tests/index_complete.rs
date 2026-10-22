@@ -241,11 +241,11 @@ fn every_name_is_covered(a: &Analysis, file: FileId, failures: &mut Vec<String>)
 #[test]
 fn every_name_in_the_corpora_is_indexed() {
     let programs = programs();
-    // 8 examples, 153 top-level runtime programs and the modules program,
+    // 8 examples, 155 top-level runtime programs and the modules program,
     // on 2026-10-21, after 4.7 added `fs_rename`, `crypto_pbkdf2`,
-    // `crypto_pbkdf2_refused` and `bytes_hex`, then `http_routes` and
-    // `http_request_readers`.
-    assert_eq!(programs.len(), 162, "{programs:#?}");
+    // `crypto_pbkdf2_refused` and `bytes_hex`, then `http_routes`,
+    // `http_request_readers`, `http_responses` and `http_server_wire`.
+    assert_eq!(programs.len(), 164, "{programs:#?}");
     let mut files = 0;
     let mut failures: Vec<String> = Vec::new();
     for (k, path) in programs.iter().enumerate() {
@@ -272,9 +272,9 @@ fn every_name_in_the_corpora_is_indexed() {
             every_name_is_covered(&a, file, &mut failures);
         }
     }
-    // 8 + 153 + 3 files of user code, 05-geometry's library's 2, and
+    // 8 + 155 + 3 files of user code, 05-geometry's library's 2, and
     // native std's 22, `std/ui/ssr` among them.
-    assert_eq!(files, 188);
+    assert_eq!(files, 190);
     failures.sort();
     failures.dedup();
     assert!(

@@ -355,7 +355,7 @@ fn answer(s: Served, req: Request) -> Response {
     h.insert("content-length", "${body.len()}")
     h.insert("content-type", "text/html; charset=utf-8")
     let status = if found(s.routes, target) { 200 } else { 404 }
-    Response { status: status, headers: h, body: body }
+    Response { status: status, headers: h, body: body, cookies: [] }
 }
 
 // `200` and the file at `path` under `dist`, read now, or `404` when it
@@ -368,7 +368,7 @@ fn file(dist: String, path: String) -> Response {
     h.insert("content-length", "${body.len()}")
     h.insert("content-type", content_type(path))
     h.insert("x-content-type-options", "nosniff")
-    Response { status: 200, headers: h, body: body }
+    Response { status: 200, headers: h, body: body, cookies: [] }
 }
 
 // The `Content-Type` of a file named `path`, by its extension in any case,
