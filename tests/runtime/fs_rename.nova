@@ -1,0 +1,66 @@
+// `std/fs`'s `rename` (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §5),
+// in a directory of fixed name under `temp_dir()`, which `run_tests.rs`
+// points at a directory of the test's own: a file written whole under a
+// temporary name, then renamed over an existing one, which it replaces; a
+// rename to a name that is free; and the errors, `NotFound` for a missing
+// source and for a missing directory to hold the target.
+
+fn kind(e: IoError) -> String {
+    match e.kind {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        _ => "another kind"
+    }
+}
+
+async fn show(path: String) -> String {
+    match read_to_string(path).await {
+        Ok(s) => s
+        Err(e) => "<${kind(e)}>"
+    }
+}
+
+async fn main() {
+    let dir = "${temp_dir()}/nova-fs-rename"
+    let _ = remove_dir_all(dir).await
+    create_dir_all(dir).await.unwrap()
+    let target = "${dir}/blog.json"
+    let temporary = "${dir}/blog.json.tmp"
+
+    write_string(target, "{\"posts\": 1}").await.unwrap()
+    write_string(temporary, "{\"posts\": 2}").await.unwrap()
+    match rename(temporary, target).await {
+        Ok(_) => println("renamed over the old file")
+        Err(e) => println("rename failed: ${kind(e)} ${e.message}")
+    }
+    println("target holds: ${show(target).await}")
+    println("temporary still there: ${exists(temporary).await}")
+
+    let moved = "${dir}/moved.json"
+    match rename(target, moved).await {
+        Ok(_) => println("renamed to a free name")
+        Err(e) => println("rename failed: ${kind(e)} ${e.message}")
+    }
+    println("moved holds: ${show(moved).await}, old name there: ${exists(target).await}")
+
+    match rename("${dir}/missing.json", target).await {
+        Ok(_) => println("a missing source renamed")
+        Err(e) => println("missing source: ${kind(e)}, message empty: ${e.message == ""}")
+    }
+    match rename(moved, "${dir}/no/such/dir/blog.json").await {
+        Ok(_) => println("renamed into a missing directory")
+        Err(e) => println(
+            "missing directory: ${kind(e)}, moved still there: ${exists(moved).await}",
+        )
+    }
+    let entries = read_dir(dir).await.unwrap()
+    let mut names = ""
+    let mut i = 0
+    while i < entries.len() {
+        names = "${names} ${entries[i].name}"
+        i = i + 1
+    }
+    println("left in the directory:${names}")
+}

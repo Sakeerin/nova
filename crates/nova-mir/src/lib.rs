@@ -295,6 +295,10 @@ rt_funcs! {
     /// `(str) -> i64` — remove the directory and everything under it.
     /// Status code, as `FsReadToString`.
     FsRemoveDirAll,
+    /// `(str, str) -> i64` — rename the file named by the first string to
+    /// the second, replacing it when it exists. Status code, as
+    /// `FsReadToString`.
+    FsRename,
     /// `(str) -> i64` — list the directory's entry names, sorted. Status
     /// code, as `FsReadToString`; on success the names are waiting in
     /// `FsTakeStringArray`.
@@ -507,6 +511,15 @@ rt_funcs! {
     /// negative, naming one of `crypto.rs`'s `ERR_*` kinds
     /// (`crates/nova-runtime/src/crypto.rs`).
     CryptoRandomInt,
+    /// `(ptr, ptr, i64, i64) -> i64` — `std/crypto`'s PBKDF2-HMAC-SHA-256
+    /// intrinsic. Status word, not the key: `0` on success, with the key
+    /// waiting in `FsTakeBytes`; otherwise negative, naming one of
+    /// `crypto.rs`'s `ERR_*` kinds (`crates/nova-runtime/src/crypto.rs`).
+    CryptoPbkdf2Sha256,
+    /// `(ptr, ptr, i64, ptr) -> i64` — PBKDF2-HMAC-SHA-256's constant-time
+    /// check: `0` for a match, `1` for a mismatch (an answer, not an error),
+    /// negative for an iteration count out of range.
+    CryptoPbkdf2Sha256Verify,
     /// `() -> i64` — nanoseconds since the runtime's process epoch.
     TimeNowNanos,
     /// `() -> i64` — nanoseconds since the **Unix** epoch. Distinct from
@@ -597,6 +610,7 @@ impl RtFunc {
             RtFunc::FsCreateDirAll => "nova_rt_fs_create_dir_all",
             RtFunc::FsRemoveFile => "nova_rt_fs_remove_file",
             RtFunc::FsRemoveDirAll => "nova_rt_fs_remove_dir_all",
+            RtFunc::FsRename => "nova_rt_fs_rename",
             RtFunc::FsReadDir => "nova_rt_fs_read_dir",
             RtFunc::FsTakeStringArray => "nova_rt_fs_take_string_array",
             RtFunc::FsKind => "nova_rt_fs_kind",
@@ -636,6 +650,8 @@ impl RtFunc {
             RtFunc::CryptoHash => "nova_rt_crypto_hash",
             RtFunc::CryptoRandomBytes => "nova_rt_crypto_random_bytes",
             RtFunc::CryptoRandomInt => "nova_rt_crypto_random_int",
+            RtFunc::CryptoPbkdf2Sha256 => "nova_rt_crypto_pbkdf2_sha256",
+            RtFunc::CryptoPbkdf2Sha256Verify => "nova_rt_crypto_pbkdf2_sha256_verify",
             RtFunc::TimeNowNanos => "nova_rt_time_now_nanos",
             RtFunc::TimeNowEpochNanos => "nova_rt_time_now_epoch_nanos",
             RtFunc::LogConfigLevel => "nova_rt_log_config_level",
@@ -691,7 +707,7 @@ impl RtFunc {
             RtFunc::TaskJoinFuture => (vec![MirTy::Ptr], MirTy::Ptr),
             RtFunc::TaskTimeoutFuture => (vec![MirTy::I64, MirTy::Ptr], MirTy::Ptr),
             RtFunc::FsReadToString => (vec![MirTy::Ptr], MirTy::I64),
-            RtFunc::FsWriteString => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
+            RtFunc::FsWriteString | RtFunc::FsRename => (vec![MirTy::Ptr, MirTy::Ptr], MirTy::I64),
             RtFunc::FsTakeString
             | RtFunc::FsLastErrorMessage
             | RtFunc::FsTempDir
@@ -832,6 +848,14 @@ impl RtFunc {
             ),
             RtFunc::CryptoRandomBytes => (vec![MirTy::I64], MirTy::I64),
             RtFunc::CryptoRandomInt => (vec![MirTy::I64, MirTy::I64], MirTy::I64),
+            RtFunc::CryptoPbkdf2Sha256 => (
+                vec![MirTy::Ptr, MirTy::Ptr, MirTy::I64, MirTy::I64],
+                MirTy::I64,
+            ),
+            RtFunc::CryptoPbkdf2Sha256Verify => (
+                vec![MirTy::Ptr, MirTy::Ptr, MirTy::I64, MirTy::Ptr],
+                MirTy::I64,
+            ),
             RtFunc::TimeNowNanos => (vec![], MirTy::I64),
             RtFunc::TimeNowEpochNanos => (vec![], MirTy::I64),
             RtFunc::LogConfigLevel => (vec![], MirTy::I64),
@@ -978,6 +1002,7 @@ impl RtFunc {
             | RtFunc::FsCreateDirAll
             | RtFunc::FsRemoveFile
             | RtFunc::FsRemoveDirAll
+            | RtFunc::FsRename
             | RtFunc::FsReadDir
             | RtFunc::FsTakeStringArray
             | RtFunc::FsKind
@@ -1006,6 +1031,8 @@ impl RtFunc {
             | RtFunc::CryptoHash
             | RtFunc::CryptoRandomBytes
             | RtFunc::CryptoRandomInt
+            | RtFunc::CryptoPbkdf2Sha256
+            | RtFunc::CryptoPbkdf2Sha256Verify
             | RtFunc::ShutdownRequested
             | RtFunc::ProcessArgCount
             | RtFunc::ProcessArg

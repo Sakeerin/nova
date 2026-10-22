@@ -1,0 +1,43 @@
+// `std/crypto`'s PBKDF2-HMAC-SHA-256 (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §5),
+// over `ring::pbkdf2`: RFC 7914 section 11's two PBKDF2-HMAC-SHA-256
+// vectors, each 64 bytes, written with `Bytes::to_hex`; a shorter key, which
+// is the longer one's start; and `pbkdf2_sha256_verify`, true for the key
+// and for its start, and false for another password, salt or count, a
+// longer key, and an empty one.
+//
+// **Provenance:** both vectors were cross-checked against Python's
+// `hashlib.pbkdf2_hmac` before being written down; RFC 7914 publishes them,
+// and this project has verified the cross-check, not the document.
+// `crypto_pbkdf2_refused.nova` holds the panics.
+
+fn main() {
+    let first = pbkdf2_sha256(bytes_from_string("passwd"), bytes_from_string("salt"), 1, 64)
+    println("passwd/salt c=1: ${first.to_hex()}")
+    let second = pbkdf2_sha256(bytes_from_string("Password"), bytes_from_string("NaCl"), 80000, 64)
+    println("Password/NaCl c=80000: ${second.to_hex()}")
+    let short = pbkdf2_sha256(bytes_from_string("passwd"), bytes_from_string("salt"), 1, 20)
+    println("20 bytes: ${short.to_hex()}, the start of the 64: ${first.slice(0, 20).eq(short)}")
+    let one = pbkdf2_sha256(bytes_from_string(""), bytes_from_string(""), 1, 1)
+    println("1 byte of empty inputs: ${one.to_hex()}")
+
+    let salt = bytes_from_ints([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
+    let key = pbkdf2_sha256(bytes_from_string("correct horse"), salt, 1000, 32)
+    let pw = bytes_from_string("correct horse")
+    println("verify the key: ${pbkdf2_sha256_verify(pw, salt, 1000, key)}")
+    println(
+        "verify the 64-byte vector: ${pbkdf2_sha256_verify(bytes_from_string("Password"), bytes_from_string("NaCl"), 80000, second)}",
+    )
+    println(
+        "another password: ${pbkdf2_sha256_verify(bytes_from_string("correct horsE"), salt, 1000, key)}",
+    )
+    println("another salt: ${pbkdf2_sha256_verify(pw, salt.slice(0, 15), 1000, key)}")
+    println("another count: ${pbkdf2_sha256_verify(pw, salt, 999, key)}")
+    // `ring` derives a key of `expected`'s own length, and a shorter key is
+    // the longer one's start, so a key cut short still verifies.
+    println("the key's first 31 bytes: ${pbkdf2_sha256_verify(pw, salt, 1000, key.slice(0, 31))}")
+    println(
+        "a key one byte long: ${pbkdf2_sha256_verify(pw, salt, 1000, key.concat(bytes_from_ints([0])))}",
+    )
+    println("an empty key: ${pbkdf2_sha256_verify(pw, salt, 1000, bytes_from_string(""))}")
+}

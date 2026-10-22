@@ -737,6 +737,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::FsCreateDirAll => Lowering::Runtime(RtFunc::FsCreateDirAll),
                     Builtin::FsRemoveFile => Lowering::Runtime(RtFunc::FsRemoveFile),
                     Builtin::FsRemoveDirAll => Lowering::Runtime(RtFunc::FsRemoveDirAll),
+                    Builtin::FsRename => Lowering::Runtime(RtFunc::FsRename),
                     Builtin::FsReadDir => Lowering::Runtime(RtFunc::FsReadDir),
                     Builtin::FsTakeStringArray => Lowering::Runtime(RtFunc::FsTakeStringArray),
                     Builtin::FsKind => Lowering::Runtime(RtFunc::FsKind),
@@ -778,6 +779,10 @@ impl<'a> Lowerer<'a> {
                     Builtin::CryptoHash => Lowering::Runtime(RtFunc::CryptoHash),
                     Builtin::CryptoRandomBytes => Lowering::Runtime(RtFunc::CryptoRandomBytes),
                     Builtin::CryptoRandomInt => Lowering::Runtime(RtFunc::CryptoRandomInt),
+                    Builtin::CryptoPbkdf2Sha256 => Lowering::Runtime(RtFunc::CryptoPbkdf2Sha256),
+                    Builtin::CryptoPbkdf2Sha256Verify => {
+                        Lowering::Runtime(RtFunc::CryptoPbkdf2Sha256Verify)
+                    }
                     Builtin::TimeNowNanos => Lowering::Runtime(RtFunc::TimeNowNanos),
                     Builtin::TimeNowEpochNanos => Lowering::Runtime(RtFunc::TimeNowEpochNanos),
                     Builtin::LogConfigLevel => Lowering::Runtime(RtFunc::LogConfigLevel),

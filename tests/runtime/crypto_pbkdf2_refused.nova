@@ -1,0 +1,26 @@
+// The panics of `std/crypto`'s PBKDF2 (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §5):
+// an iteration count below 1 or above 4,294,967,295, for either function,
+// and a length below 1 or above 65,536 for `pbkdf2_sha256`. The first
+// argument names the case, and `run_tests.rs` runs each, checking the panic's
+// text and that nothing after it ran; with no argument, the largest values
+// allowed run and print.
+
+fn main() {
+    let pw = bytes_from_string("pw")
+    let salt = bytes_from_string("salt")
+    let case = args().get(1).unwrap_or("")
+    if case == "zero" { let _ = pbkdf2_sha256(pw, salt, 0, 32) }
+    if case == "negative" { let _ = pbkdf2_sha256(pw, salt, -1, 32) }
+    if case == "too-many" { let _ = pbkdf2_sha256(pw, salt, 4294967296, 32) }
+    if case == "no-length" { let _ = pbkdf2_sha256(pw, salt, 1, 0) }
+    if case == "negative-length" { let _ = pbkdf2_sha256(pw, salt, 1, -32) }
+    if case == "too-long" { let _ = pbkdf2_sha256(pw, salt, 1, 65537) }
+    if case == "verify-zero" { let _ = pbkdf2_sha256_verify(pw, salt, 0, pw) }
+    if case == "verify-too-many" { let _ = pbkdf2_sha256_verify(pw, salt, 4294967296, pw) }
+    if case == "" {
+        println("65536 bytes: ${pbkdf2_sha256(pw, salt, 1, 65536).len()}")
+        println("1 byte: ${pbkdf2_sha256(pw, salt, 1, 1).len()}")
+    }
+    println("not reached for a refused case")
+}

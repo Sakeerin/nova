@@ -62,7 +62,8 @@ use std::cell::RefCell;
 /// from a second Rust source.** Per kind, now:
 /// - `NotFound`: `fs_not_found.nova` (`read_to_string` on a missing path),
 ///   and independently `file_errors.nova` (`open` on a path under a missing
-///   parent directory).
+///   parent directory) and `fs_rename.nova` (`rename` from a missing path,
+///   and into a missing directory).
 /// - `AlreadyExists`: `fs_already_exists.nova` (`create_dir` on an existing
 ///   path, twice), and independently `file_errors.nova` (`open` with
 ///   `create_new` on an existing path).
@@ -665,6 +666,27 @@ pub unsafe extern "C" fn nova_rt_fs_remove_dir_all(path: *const NovaStr) -> i64 
     // SAFETY: forwarding this function's own contract.
     let p = unsafe { crate::as_str(path) };
     match std::fs::remove_dir_all(p) {
+        Ok(()) => OK,
+        Err(e) => fail(&e),
+    }
+}
+
+/// Rename the file `from` to `to`, replacing `to` when it exists.
+///
+/// `std::fs::rename` replaces an existing `to` on every system this project
+/// supports: on Unix it is `rename(2)`, which does so atomically, and on
+/// Windows Rust's standard library asks for the replacement itself (it
+/// passes `MOVEFILE_REPLACE_EXISTING`, or renames with POSIX semantics where
+/// the system has them), so `std/fs`'s `rename` needs nothing of its own
+/// there. Errors take the kinds every other operation here maps (`fail`).
+///
+/// # Safety
+/// Both arguments must point to live `NovaStr`s.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_fs_rename(from: *const NovaStr, to: *const NovaStr) -> i64 {
+    // SAFETY: forwarding this function's own contract.
+    let (f, t) = unsafe { (crate::as_str(from), crate::as_str(to)) };
+    match std::fs::rename(f, t) {
         Ok(()) => OK,
         Err(e) => fail(&e),
     }

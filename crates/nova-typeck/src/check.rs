@@ -4224,6 +4224,7 @@ impl<'a> Checker<'a> {
             | Builtin::FsCreateDirAll
             | Builtin::FsRemoveFile
             | Builtin::FsRemoveDirAll
+            | Builtin::FsRename
             | Builtin::FsReadDir
             | Builtin::FsTakeStringArray
             | Builtin::FsKind
@@ -4263,6 +4264,8 @@ impl<'a> Checker<'a> {
             | Builtin::CryptoHash
             | Builtin::CryptoRandomBytes
             | Builtin::CryptoRandomInt
+            | Builtin::CryptoPbkdf2Sha256
+            | Builtin::CryptoPbkdf2Sha256Verify
             | Builtin::TimeNowNanos
             | Builtin::TimeNowEpochNanos
             | Builtin::LogConfigLevel
@@ -8057,6 +8060,7 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::FsCreateDirAll => (vec![Ty::String], Ty::Int),
         Builtin::FsRemoveFile => (vec![Ty::String], Ty::Int),
         Builtin::FsRemoveDirAll => (vec![Ty::String], Ty::Int),
+        Builtin::FsRename => (vec![Ty::String, Ty::String], Ty::Int),
         Builtin::FsReadDir => (vec![Ty::String], Ty::Int),
         Builtin::FsTakeStringArray => (vec![], Ty::Array(Box::new(Ty::String))),
         Builtin::FsKind => (vec![Ty::String], Ty::Int),
@@ -8144,6 +8148,10 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::CryptoHash => (vec![Ty::Int, Ty::Bytes, Ty::Bytes, Ty::Bytes], Ty::Int),
         Builtin::CryptoRandomBytes => (vec![Ty::Int], Ty::Int),
         Builtin::CryptoRandomInt => (vec![Ty::Int, Ty::Int], Ty::Int),
+        Builtin::CryptoPbkdf2Sha256 => (vec![Ty::Bytes, Ty::Bytes, Ty::Int, Ty::Int], Ty::Int),
+        Builtin::CryptoPbkdf2Sha256Verify => {
+            (vec![Ty::Bytes, Ty::Bytes, Ty::Int, Ty::Bytes], Ty::Int)
+        }
         Builtin::TimeNowNanos => (vec![], Ty::Int),
         Builtin::TimeNowEpochNanos => (vec![], Ty::Int),
         Builtin::LogConfigLevel => (vec![], Ty::Int),
@@ -16140,7 +16148,7 @@ mod tests {
                     (vec![], Ty::String),
                     "`fs_last_error_message()` in every fallible `std/fs` wrapper: \
                      `read_to_string`, `write_string`, `create_dir`, \
-                     `create_dir_all`, `remove_file`, `remove_dir_all`, `read_dir`",
+                     `create_dir_all`, `remove_file`, `remove_dir_all`, `rename`, `read_dir`",
                 ),
                 Builtin::FsTempDir => (
                     (vec![], Ty::String),
@@ -16165,6 +16173,10 @@ mod tests {
                 Builtin::FsRemoveDirAll => (
                     (vec![Ty::String], Ty::Int),
                     "`fs_remove_dir_all(path)` in `std/fs`'s `remove_dir_all`",
+                ),
+                Builtin::FsRename => (
+                    (vec![Ty::String, Ty::String], Ty::Int),
+                    "`fs_rename(from, to)` in `std/fs`'s `rename`",
                 ),
                 Builtin::FsReadDir => (
                     (vec![Ty::String], Ty::Int),
@@ -16350,6 +16362,15 @@ mod tests {
                 Builtin::CryptoRandomInt => (
                     (vec![Ty::Int, Ty::Int], Ty::Int),
                     "`crypto_random_int(min, max)` in `std/crypto`",
+                ),
+                Builtin::CryptoPbkdf2Sha256 => (
+                    (vec![Ty::Bytes, Ty::Bytes, Ty::Int, Ty::Int], Ty::Int),
+                    "`crypto_pbkdf2_sha256(password, salt, iterations, length)` in `std/crypto`",
+                ),
+                Builtin::CryptoPbkdf2Sha256Verify => (
+                    (vec![Ty::Bytes, Ty::Bytes, Ty::Int, Ty::Bytes], Ty::Int),
+                    "`crypto_pbkdf2_sha256_verify(password, salt, iterations, expected)` in \
+                     `std/crypto`",
                 ),
                 Builtin::TimeNowNanos => (
                     (vec![], Ty::Int),

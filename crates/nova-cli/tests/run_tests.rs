@@ -6514,6 +6514,47 @@ fn fs_roundtrip_run() {
     );
 }
 
+/// `std/fs`'s `rename` (spec
+/// `docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+/// §5): a file renamed over an existing one replaces it, a rename to a free
+/// name moves it, and a missing source or target directory is `NotFound`.
+/// The fixture works under `temp_dir()`, which this points at a directory of
+/// fixed name of the test's own; and the files left behind are checked here
+/// on the disk itself, so a `rename` that copied, or reported success and
+/// did nothing, fails here even if the fixture's own reads agreed with it.
+#[test]
+fn fs_rename_run() {
+    let tmp = std::env::temp_dir().join("nova-fs-rename-run");
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("the test's directory");
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/fs_rename.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/fs_rename.nova"))
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success()
+        .stdout(expected);
+    let dir = tmp.join("nova-fs-rename");
+    let left: Vec<String> = std::fs::read_dir(&dir)
+        .expect("the fixture's directory")
+        .map(|e| {
+            e.expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    let moved = std::fs::read_to_string(dir.join("moved.json")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert_eq!(left, ["moved.json"], "only the renamed file is left");
+    assert_eq!(moved, "{\"posts\": 2}", "it holds what was written last");
+}
+
 /// A second `create_dir` on an existing directory reports `AlreadyExists`.
 /// The fixture's own leading `remove_dir_all` (discarding the result: absent
 /// is fine, present is cleaned up) makes this independent of a previous
@@ -6776,6 +6817,16 @@ fn bytes_api_under_gc_stress() {
         .assert()
         .success()
         .stdout(expected);
+}
+
+/// `Bytes::to_hex` and `bytes_from_hex` (spec
+/// `docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+/// §5): every byte both ways, either case read, and the refused inputs: an
+/// odd length and each kind of character that is not a hex digit. As it is
+/// and under GC stress here; `wasm_tests.rs`'s gate runs it on WASM.
+#[test]
+fn bytes_hex_run() {
+    run_with_and_without_stress("bytes_hex");
 }
 
 /// Review finding P2 (Important): `bytes_from_ints`'s `0..=255` contract is
@@ -9577,6 +9628,24 @@ fn http_listen_on_run() {
     }
 }
 
+/// `tests/runtime/<name>.nova` run as it is and under GC stress, its stdout
+/// its `.stdout` file each time, as `http_listen_on_run` runs its program.
+fn run_with_and_without_stress(name: &str) {
+    let source = repo_root().join(format!("tests/runtime/{name}.nova"));
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    for stress in [false, true] {
+        let mut cmd = nova();
+        if stress {
+            cmd.env("NOVA_GC_STRESS", "1");
+        }
+        let a = cmd.arg("run").arg(&source).assert().success();
+        let out = String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n");
+        assert_eq!(out, expected, "{name}, stress {stress}");
+    }
+}
+
 /// `std/process`'s `args()` under `nova run FILE -- ARGS`: index 0 is FILE as
 /// written, and an argument with spaces and an empty one each arrive whole.
 /// Run from the repository root so FILE is a fixed relative path. Design:
@@ -9893,6 +9962,76 @@ fn crypto_random_run() {
         .assert()
         .success()
         .stdout(expected);
+}
+
+/// `pbkdf2_sha256` against RFC 7914 section 11's two PBKDF2-HMAC-SHA-256
+/// vectors (`passwd`/`salt`, c=1, and `Password`/`NaCl`, c=80000, both 64
+/// bytes), and `pbkdf2_sha256_verify` true and false (spec
+/// `docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+/// §5). Both vectors were cross-checked against Python's `hashlib`.
+#[test]
+fn crypto_pbkdf2_run() {
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/crypto_pbkdf2.stdout"))
+        .expect("expected-output fixture exists")
+        .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join("tests/runtime/crypto_pbkdf2.nova"))
+        .assert()
+        .success()
+        .stdout(expected);
+}
+
+/// The panics of PBKDF2 (spec 4.7 §5), one run per case: an iteration count
+/// below 1 or above 4,294,967,295 for either function, and a length below 1
+/// or above 65,536 for `pbkdf2_sha256`, each with its text and nothing after
+/// it run; and the largest length, 65,536, and the smallest, 1, accepted.
+#[test]
+fn crypto_pbkdf2_refuses_its_bad_arguments() {
+    let source = repo_root().join("tests/runtime/crypto_pbkdf2_refused.nova");
+    nova()
+        .arg("run")
+        .arg(&source)
+        .assert()
+        .success()
+        .stdout("65536 bytes: 65536\n1 byte: 1\nnot reached for a refused case\n");
+    let iterations = "iterations must be from 1 to 4294967295, not";
+    let length = "length must be from 1 to 65536, not";
+    for (case, says) in [
+        ("zero", format!("pbkdf2_sha256: {iterations} 0")),
+        ("negative", format!("pbkdf2_sha256: {iterations} -1")),
+        (
+            "too-many",
+            format!("pbkdf2_sha256: {iterations} 4294967296"),
+        ),
+        ("no-length", format!("pbkdf2_sha256: {length} 0")),
+        ("negative-length", format!("pbkdf2_sha256: {length} -32")),
+        ("too-long", format!("pbkdf2_sha256: {length} 65537")),
+        (
+            "verify-zero",
+            format!("pbkdf2_sha256_verify: {iterations} 0"),
+        ),
+        (
+            "verify-too-many",
+            format!("pbkdf2_sha256_verify: {iterations} 4294967296"),
+        ),
+    ] {
+        let a = nova()
+            .env("RUST_BACKTRACE", "0")
+            .arg("run")
+            .arg(&source)
+            .arg("--")
+            .arg(case)
+            .assert()
+            .failure();
+        let o = a.get_output();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert!(
+            err.contains(&format!("nova: panic: {says}\n")),
+            "{case}: {err}"
+        );
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "", "{case}");
+    }
 }
 
 /// `examples/05-json-api` driven over a real socket: its three routes and the

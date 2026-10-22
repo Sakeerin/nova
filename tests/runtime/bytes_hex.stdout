@@ -1,0 +1,19 @@
+empty: []
+every nibble: 0001090a0f107f80a0feff
+text: 4e6f766120e29c93
+256 bytes: 512 digits, round trip true
+upper case read: true
+from empty: Some()
+lower: Some(00ff7f)
+upper: Some(abcdef)
+mixed: Some(abcd)
+odd length: None
+one digit: None
+g: None
+G: None
+space: None
+leading 0x: None
+minus: None
+non-ascii: None
+bad last digit: None
+bad first digit: None
