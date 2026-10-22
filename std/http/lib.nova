@@ -1,14 +1,17 @@
 //! An HTTP/1.1 server: requests read and parsed, responses built and written,
-//! and a router that serves GET routes.
+//! and a router that sends each request to a handler by its method and path.
 //!
-//! `Server` is the simple way in: give it a handler for each path with `get`,
-//! and one for every other `GET` with `fallback`, then `listen` on an
-//! address, or `listen_on` a listener already bound. A handler is a plain
+//! `Server` is the simple way in: give it a handler for each method and path
+//! pattern with `get`, `post`, `put`, `delete` or `route`, and one for every
+//! other `GET` with `fallback`, then `listen` on an address, or `listen_on` a
+//! listener already bound. A pattern such as `/posts/:id` puts the piece of
+//! the path it matched in the request's `params`. A handler is a plain
 //! function from a `Request` to a `Response`, so it cannot await anything.
+//! `Request`'s `query`, `form` and `cookies` read what a browser sends.
 //! `read_request`, `write_response` and `parse_request_head` are the parts
-//! underneath, for serving a `std/net` `TcpStream` yourself. There is no HTTP client. Every
-//! module sees these names without an import, and a module's own definition
-//! of one of them shadows the one here.
+//! underneath, for serving a `std/net` `TcpStream` yourself. There is no
+//! HTTP client. Every module sees these names without an import, and a
+//! module's own definition of one of them shadows the one here.
 //!
 //! Only `Content-Length` says how long a request's body is: chunked transfer
 //! encoding is not supported, and a chunked request's body is misread as the
@@ -17,10 +20,12 @@
 //! change from one run of a program to the next.
 //!
 //! `Server::listen` serves until the process is stopped, so this example
-//! has the server `dispatch` a request parsed from bytes, with no socket:
+//! has the server `dispatch` requests parsed from bytes, with no socket:
 //!
 //! ```
-//! let app = Server::new().get("/hello", |_| Response::text(200, "hi"))
+//! let app = Server::new()
+//!     .get("/hello", |_| Response::text(200, "hi"))
+//!     .get("/posts/:id", |r: Request| Response::text(200, "post ${r.params.get("id").unwrap()}"))
 //!
 //! let raw = bytes_from_string("GET /hello HTTP/1.1\r\nHost: example\r\nX-Trace: abc\r\n\r\n")
 //! let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
@@ -32,6 +37,12 @@
 //! let wire = resp.to_bytes().to_string().unwrap()
 //! assert(wire.starts_with("HTTP/1.1 200 OK\r\n"), "the status line comes first")
 //! assert(wire.ends_with("\r\n\r\nhi"), "then a blank line and the body")
+//!
+//! // A pattern's `:id` takes the piece of the path it matched; the query
+//! // takes no part in matching.
+//! let post = bytes_from_string("GET /posts/7?tab=2 HTTP/1.1\r\n\r\n")
+//! let shown = app.dispatch(parse_request_head(post, Limits::default()).unwrap().unwrap())
+//! assert_eq(shown.body.to_string().unwrap(), "post 7")
 //! ```
 
 // Nova standard library -- HTTP/1.1, server side.
@@ -48,8 +59,10 @@
 // alias), found async` -- and a type alias of any kind is `E0900`, so
 // `Server` at the end of this file types each handler inline as
 // `fn(Request) -> Response`. A handler is therefore synchronous: it builds
-// its response without awaiting. Only GET routes ship, and there is no
-// client. `Server::listen` shuts down gracefully on SIGTERM or SIGINT
+// its response without awaiting. Routes by method, `:name` parameters
+// (`req.params`), `405`, and the form, query and cookie readers shipped in
+// Phase 4.7 (docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3); there is no client. `Server::listen` shuts down gracefully on SIGTERM or SIGINT
 // (Ctrl+Break or Ctrl+C on Windows); see its own comment and
 // docs/adr/0022-process-shutdown-signals.md. See also
 // docs/adr/0019-offset-table-intrinsic-boundary.md and section 6's own dated
@@ -256,8 +269,12 @@ impl Default for Limits {
 }
 
 // A parsed request. `body` is the bytes after the head, already bounded by
-// `Content-Length` and by `Limits::max_body_bytes`.
-/// An HTTP request: its method, target, headers and body.
+// `Content-Length` and by `Limits::max_body_bytes`. `params` is the router's
+// (spec docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.1), as `nova-spec/20-STDLIB.md` section 6 has it, `req.params.get("id")`,
+// rather than a second argument to every handler.
+/// An HTTP request: its method, target, headers and body, and the parameters
+/// the route that answers it took from its path.
 pub record Request {
     /// The request's method.
     pub method: Method,
@@ -271,6 +288,229 @@ pub record Request {
     /// The body: as many bytes as `Content-Length` says, or none without that
     /// header. Empty in a request from `parse_request_head`.
     pub body: Bytes,
+    /// What the pattern of the route that answers the request took from its
+    /// path, by name, decoded: `/posts/:id` matching `/posts/7` puts `7`
+    /// under `id`. `Server::dispatch` sets it before it calls the route's
+    /// handler. It is empty in a request from `parse_request_head` or
+    /// `read_request`, and in one a `fallback` handler gets.
+    pub params: Map<String, String>,
+}
+
+impl Request {
+    /// Returns the query of the request's target, the text after its first
+    /// `?`, by name, decoded as a browser encodes a form's fields
+    /// (`application/x-www-form-urlencoded`), as `std/ui/router`'s
+    /// `use_query` decodes a location's query.
+    ///
+    /// The text is split at each `&`, and an empty part is skipped. A part is
+    /// split at its first `=` into a name and a value; a part with no `=` is
+    /// a name whose value is `""`. In each half `+` is a space, and each `%`
+    /// followed by two hex digits is the byte they write, the bytes read as
+    /// UTF-8; a half that holds a `%` not followed by two hex digits, or
+    /// whose bytes are not UTF-8, is kept as written. Of two parts with the
+    /// same name, the last wins. A target with no `?` gives an empty map.
+    ///
+    /// ```
+    /// let raw = bytes_from_string("GET /search?q=nova+lang&tag=a%26b&tag=c&flag HTTP/1.1\r\n\r\n")
+    /// let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    /// let q = req.query()
+    /// assert_eq(q.get("q").unwrap(), "nova lang")
+    /// assert_eq(q.get("tag").unwrap(), "c") // the last of two wins
+    /// assert_eq(q.get("flag").unwrap(), "") // no `=`, no value
+    /// assert_eq(q.len(), 3)
+    /// ```
+    pub fn query(self) -> Map<String, String> {
+        match self.path.index_of("?") {
+            Some(at) => form_fields(self.path.slice(at + 1, self.path.len()))
+            None => {
+                let none: Map<String, String> = Map::new()
+                none
+            }
+        }
+    }
+
+    /// Returns the fields of the form the request's body holds, by name,
+    /// decoded as `query` decodes a query, when the body is a form a browser
+    /// sent: its `content-type` header's media type, the part before any
+    /// `;`, trimmed and read in any case, is
+    /// `application/x-www-form-urlencoded`, and the body is UTF-8. Any other
+    /// request, one with no `content-type` or a form sent as
+    /// `multipart/form-data` included, gives an empty map.
+    ///
+    /// ```
+    /// let mut headers: Map<String, String> = Map::new()
+    /// headers.insert("content-type", "application/x-www-form-urlencoded; charset=UTF-8")
+    /// let req = Request {
+    ///     method: Post,
+    ///     path: "/comments",
+    ///     headers: headers,
+    ///     body: bytes_from_string("name=Ada+L.&text=Hi%21+%E2%9C%93"),
+    ///     params: Map::new(),
+    /// }
+    /// let form = req.form()
+    /// assert_eq(form.get("name").unwrap(), "Ada L.")
+    /// assert_eq(form.get("text").unwrap(), "Hi! \u{2713}")
+    ///
+    /// // The same body as JSON is no form.
+    /// let mut json: Map<String, String> = Map::new()
+    /// json.insert("content-type", "application/json")
+    /// let other = Request { method: Post, path: "/comments", headers: json, body: req.body, params: Map::new() }
+    /// assert(other.form().is_empty(), "not a form")
+    /// ```
+    pub fn form(self) -> Map<String, String> {
+        let none: Map<String, String> = Map::new()
+        let media = match self.headers.get("content-type") {
+            Some(v) => {
+                match v.index_of(";") {
+                    Some(at) => v.slice(0, at).trim().to_lower()
+                    None => v.trim().to_lower()
+                }
+            }
+            None => return none
+        }
+        if media != "application/x-www-form-urlencoded" { return none }
+        match self.body.to_string() {
+            Some(text) => form_fields(text)
+            None => none
+        }
+    }
+
+    /// Returns the cookies the request's `cookie` header holds, by name.
+    ///
+    /// The header is split at each `;`, and each part trimmed, then split at
+    /// its first `=` into a name and a value. A part with no `=` is skipped,
+    /// and of two cookies with the same name the first is kept, since a
+    /// browser sends the one set for the longest path first. Values are
+    /// returned as sent, not decoded. A request with no `cookie` header gives
+    /// an empty map.
+    ///
+    /// ```
+    /// let raw = bytes_from_string("GET / HTTP/1.1\r\nCookie: sid=abc.123; theme=dark; sid=old\r\n\r\n")
+    /// let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    /// let cookies = req.cookies()
+    /// assert_eq(cookies.get("sid").unwrap(), "abc.123") // the first of two
+    /// assert_eq(cookies.get("theme").unwrap(), "dark")
+    /// assert_eq(cookies.len(), 2)
+    /// ```
+    pub fn cookies(self) -> Map<String, String> {
+        let mut out: Map<String, String> = Map::new()
+        let header = match self.headers.get("cookie") {
+            Some(v) => v
+            None => return out
+        }
+        let parts = header.split(";")
+        let mut i = 0
+        while i < parts.len() {
+            let part = parts[i].trim()
+            match part.index_of("=") {
+                Some(eq) => {
+                    let name = part.slice(0, eq)
+                    if !out.contains_key(name) {
+                        let _ = out.insert(name, part.slice(eq + 1, part.len()))
+                    }
+                }
+                None => {}
+            }
+            i = i + 1
+        }
+        out
+    }
+}
+
+// The fields of `text`, a query or a form's body, as `Request::query` says,
+// by `std/ui/router`'s `query_of` rules, which this copies since std/http
+// cannot import std/ui: `&`-separated parts, each `name=value` or a `name`
+// whose value is `""`, both halves decoded with `+` as a space, an empty part
+// skipped, and a name's last value winning. `query` and `form` share it
+// (spec §12, decision 4).
+fn form_fields(text: String) -> Map<String, String> {
+    let mut out: Map<String, String> = Map::new()
+    let parts = text.split("&")
+    let mut i = 0
+    while i < parts.len() {
+        let part = parts[i]
+        if part != "" {
+            let mut name = part
+            let mut value = ""
+            match part.index_of("=") {
+                Some(eq) => {
+                    name = part.slice(0, eq)
+                    value = part.slice(eq + 1, part.len())
+                }
+                None => {}
+            }
+            let _ = out.insert(form_decoded(name), form_decoded(value))
+        }
+        i = i + 1
+    }
+    out
+}
+
+// A half of a form's part: `+` is a space, then percent-decoding.
+fn form_decoded(text: String) -> String { percent_decoded(" ".join(text.split("+"))) }
+
+// `text` percent-decoded as UTF-8, or as written when a `%` is not followed
+// by two hex digits or the bytes are not UTF-8: `std/ui/router`'s `decoded`,
+// copied, so a server and its client read a path and a query alike.
+fn percent_decoded(text: String) -> String {
+    if !text.contains("%") { return text }
+    let bs = bytes_from_string(text).to_ints()
+    let mut out = [0; bs.len()]
+    let mut n = 0
+    let mut i = 0
+    while i < bs.len() {
+        if bs[i] == 37 {
+            if i + 2 >= bs.len() { return text }
+            let hi = hex_value(bs[i + 1])
+            let lo = hex_value(bs[i + 2])
+            if hi < 0 || lo < 0 { return text }
+            out[n] = hi * 16 + lo
+            i = i + 3
+        } else {
+            out[n] = bs[i]
+            i = i + 1
+        }
+        n = n + 1
+    }
+    bytes_from_ints(out).slice(0, n).to_string().unwrap_or(text)
+}
+
+// The value of the hex digit whose ASCII code is `b`, or -1.
+fn hex_value(b: Int) -> Int {
+    if b >= 48 && b <= 57 {
+        b - 48
+    } else if b >= 65 && b <= 70 {
+        b - 55
+    } else if b >= 97 && b <= 102 {
+        b - 87
+    } else {
+        -1
+    }
+}
+
+// The pieces of `path`, a request's path or a route's pattern: split at `/`,
+// with the empty ones dropped, each percent-decoded, or kept as written when
+// it does not decode -- `std/ui/router`'s `pieces_of`, copied, so a server's
+// route and a client's agree on what a path is (spec §3.1).
+fn path_pieces(path: String) -> [String] {
+    let parts = path.split("/")
+    let mut n = 0
+    let mut i = 0
+    while i < parts.len() {
+        if parts[i] != "" { n = n + 1 }
+        i = i + 1
+    }
+    let mut out = [""; n]
+    let mut k = 0
+    let mut j = 0
+    while j < parts.len() {
+        if parts[j] != "" {
+            out[k] = percent_decoded(parts[j])
+            k = k + 1
+        }
+        j = j + 1
+    }
+    out
 }
 
 // The raw offset table for `buf`, exactly as
@@ -392,7 +632,17 @@ pub fn parse_request_head(buf: Bytes, limits: Limits) -> Result<Option<Request>,
         headers.insert(name, value)
         i = i + 1
     }
-    Ok(Some(Request { method: method, path: path, headers: headers, body: bytes_from_string("") }))
+    Ok(
+        Some(
+            Request {
+                method: method,
+                path: path,
+                headers: headers,
+                body: bytes_from_string(""),
+                params: Map::new(),
+            },
+        ),
+    )
 }
 
 // The bytes `buf[start .. start+len]` as text, defaulting to the empty
@@ -844,6 +1094,7 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
             path: req.path,
             headers: req.headers,
             body: body.slice(0, want),
+            params: req.params,
         },
     )
 }
@@ -1002,19 +1253,22 @@ const SERVER_TICK_MS: Int = 100
 const SERVER_REQUEST_MS: Int = 10000
 
 // A routing table, and the handler of a `GET` no route matches. Build one
-// with `Server::new()`, `get` and `fallback`, then `listen` or `listen_on`.
-/// A router that serves GET routes over HTTP/1.1.
+// with `Server::new()`, a route method for each route, and `fallback`, then
+// `listen` or `listen_on`. Routes by method, patterns, `405` and `params`
+// are spec docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.1.
+/// A router that serves HTTP/1.1, sending each request to a handler by its
+/// method and path.
 ///
-/// Build one with `Server::new()` and a call to `get` for each route, then
-/// serve it with `listen`, or `listen_on` a listener already bound. A request
-/// goes to the handler of the route whose path equals the request's target
-/// exactly, query string included; any other `GET` goes to the `fallback`
-/// handler, when there is one; and any other request, any method but `GET`
-/// included, gets `Response::not_found()`.
+/// Build one with `Server::new()` and a call to `get`, `post`, `put`,
+/// `delete` or `route` for each route, and `fallback` for the `GET`s no route
+/// matches, then serve it with `listen`, or `listen_on` a listener already
+/// bound. `dispatch` says which handler answers a request.
 pub record Server { routes: Vec<Route>, unmatched: Option<fn(Request) -> Response> }
 
-// One GET route: an exact path, and the handler that answers it.
-record Route { path: String, handler: fn(Request) -> Response }
+// One route: the method it answers, its pattern's pieces, as `path_pieces`
+// splits it once when the route is added, and its handler.
+record Route { method: Method, pattern: [String], handler: fn(Request) -> Response }
 
 // A request read off a connection, and the bytes that followed it: a
 // pipelined next request, or the start of one.
@@ -1027,20 +1281,111 @@ impl Server {
     // Adds a GET route. Takes `self` rather than `mut self`, and returns
     // `Server` rather than section 6's `Self`: a `mut self` call on the
     // temporary `Server::new()` returns is `E0060`, and `Self` as a type in an
-    // impl block is `E0001`.
-    //
-    // The new server gets a copy of the route table, and `self` is left
-    // alone. A `Vec` is shared, not copied, on assignment, so pushing onto
-    // `self.routes` would add the route to every server built from the same
-    // base as well.
-    /// Returns a copy of this server with one more route: `GET` requests for
-    /// `path` go to `handler`.
+    // impl block is `E0001`. Before 4.7 it matched the whole target, query
+    // included; it takes a pattern now, as every route does (spec §12,
+    // decision 1).
+    /// Returns a copy of this server with one more route: `GET` requests
+    /// whose path matches `pattern` go to `handler`. It is
+    /// `route(Get, pattern, handler)`, which says how a pattern matches.
     ///
     /// `self` is left unchanged, so calls chain, as in
-    /// `Server::new().get("/", home).get("/about", about)`. `path` must equal
-    /// a request's target exactly: `/a` matches neither `/a/` nor `/a?x=1`. Of
-    /// two routes with the same path, the one added first answers.
-    pub fn get(self, path: String, handler: fn(Request) -> Response) -> Server {
+    /// `Server::new().get("/", home).get("/posts/:id", post)`. The query
+    /// takes no part: `/add` matches `/add?x=1`, and so does `/add/`.
+    ///
+    /// ```
+    /// let app = Server::new()
+    ///     .get("/", |_| Response::text(200, "home"))
+    ///     .get("/posts/:id", |r: Request| Response::text(200, "post ${r.params.get("id").unwrap()}"))
+    /// let get = |target: String| parse_request_head(
+    ///     bytes_from_string("GET ${target} HTTP/1.1\r\n\r\n"),
+    ///     Limits::default(),
+    /// ).unwrap().unwrap()
+    /// assert_eq(app.dispatch(get("/?ref=mail")).body.to_string().unwrap(), "home")
+    /// assert_eq(app.dispatch(get("/posts/a%20b/")).body.to_string().unwrap(), "post a b")
+    /// assert_eq(app.dispatch(get("/posts/7/edit")).status, 404)
+    /// ```
+    pub fn get(self, pattern: String, handler: fn(Request) -> Response) -> Server {
+        self.route(Get, pattern, handler)
+    }
+
+    /// Returns a copy of this server with one more route: `POST` requests
+    /// whose path matches `pattern` go to `handler`. It is
+    /// `route(Post, pattern, handler)`, which says how a pattern matches.
+    ///
+    /// ```
+    /// let app = Server::new()
+    ///     .get("/posts/:id", |_| Response::text(200, "the post"))
+    ///     .post("/posts/:id", |r: Request| Response::text(201, "saved ${r.params.get("id").unwrap()}"))
+    /// let raw = bytes_from_string("POST /posts/7 HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
+    /// let saved = app.dispatch(parse_request_head(raw, Limits::default()).unwrap().unwrap())
+    /// assert_eq(saved.status, 201)
+    /// assert_eq(saved.body.to_string().unwrap(), "saved 7")
+    /// ```
+    pub fn post(self, pattern: String, handler: fn(Request) -> Response) -> Server {
+        self.route(Post, pattern, handler)
+    }
+
+    /// Returns a copy of this server with one more route: `PUT` requests
+    /// whose path matches `pattern` go to `handler`. It is
+    /// `route(Put, pattern, handler)`, which says how a pattern matches.
+    ///
+    /// ```
+    /// let app = Server::new().put("/notes/:name", |r: Request| Response::text(200, "stored ${r.body.len()} bytes"))
+    /// let raw = bytes_from_string("PUT /notes/todo HTTP/1.1\r\n\r\n")
+    /// let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    /// assert_eq(app.dispatch(req).body.to_string().unwrap(), "stored 0 bytes")
+    /// ```
+    pub fn put(self, pattern: String, handler: fn(Request) -> Response) -> Server {
+        self.route(Put, pattern, handler)
+    }
+
+    /// Returns a copy of this server with one more route: `DELETE` requests
+    /// whose path matches `pattern` go to `handler`. It is
+    /// `route(Delete, pattern, handler)`, which says how a pattern matches.
+    ///
+    /// ```
+    /// let app = Server::new().delete("/notes/:name", |_| Response::text(204, ""))
+    /// let raw = bytes_from_string("DELETE /notes/todo HTTP/1.1\r\n\r\n")
+    /// let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    /// assert_eq(app.dispatch(req).status, 204)
+    /// ```
+    pub fn delete(self, pattern: String, handler: fn(Request) -> Response) -> Server {
+        self.route(Delete, pattern, handler)
+    }
+
+    // Adds a route. The new server gets a copy of the route table, and
+    // `self` is left alone. A `Vec` is shared, not copied, on assignment, so
+    // pushing onto `self.routes` would add the route to every server built
+    // from the same base as well.
+    /// Returns a copy of this server with one more route: requests whose
+    /// method is `method` and whose path matches `pattern` go to `handler`.
+    ///
+    /// `self` is left unchanged, so calls chain. A request's path is its
+    /// target before any `?`, split at each `/`, with the empty pieces
+    /// dropped and each piece percent-decoded, as `std/ui/router` reads a
+    /// location; a piece that does not decode, one with a `%` not followed by
+    /// two hex digits say, is kept as written. `pattern` is split the same
+    /// way, and each of its pieces is literal, matching a piece equal to it,
+    /// or `:name`, matching any one piece, which the handler finds in
+    /// `req.params` under `name`. A pattern matches a path with as many
+    /// pieces, each matching: `/posts/:id` matches `/posts/7`, `/posts/7/`
+    /// and `/posts/7?x=1`, with `id` set to `7`, but not `/posts` or
+    /// `/posts/7/edit`; and `/` matches only `/`. A method matches only
+    /// itself, as the request writes it: `Unknown("PURGE")` matches `PURGE`.
+    /// `dispatch` says which of several matching routes answers.
+    ///
+    /// ```
+    /// let app = Server::new().route(Patch, "/notes/:name", |r: Request| Response::text(200, "patched ${r.params.get("name").unwrap()}"))
+    /// let raw = bytes_from_string("PATCH /notes/to%2Fdo HTTP/1.1\r\n\r\n")
+    /// let req = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    /// assert_eq(app.dispatch(req).body.to_string().unwrap(), "patched to/do")
+    /// ```
+    pub fn route(
+        self,
+        method: Method,
+        pattern: String,
+        handler: fn(Request) -> Response,
+    ) -> Server {
         let mut rs: Vec<Route> = Vec::new()
         let mut i = 0
         while i < self.routes.len() {
@@ -1050,19 +1395,21 @@ impl Server {
             }
             i = i + 1
         }
-        rs.push(Route { path: path, handler: handler })
+        rs.push(Route { method: method, pattern: path_pieces(pattern), handler: handler })
         Server { routes: rs, unmatched: self.unmatched }
     }
 
-    // Sets the fallback. Like `get`, it takes `self` and returns a new
+    // Sets the fallback. Like `route`, it takes `self` and returns a new
     // server, so `self` keeps its own; the route table is shared between the
-    // two, which is safe since `get` copies it before it adds a route.
+    // two, which is safe since `route` copies it before it adds a route.
     /// Returns a copy of this server whose `handler` answers each `GET`
     /// request no route matches, in place of `Response::not_found()`.
     ///
-    /// `self` is left unchanged, and calls chain with `get`'s in any order:
-    /// a route still answers its own path. A second `fallback` replaces the
-    /// first. Any method but `GET` still gets `not_found`.
+    /// `self` is left unchanged, and calls chain with the route methods in
+    /// any order: a route still answers its own path. A second `fallback`
+    /// replaces the first. It never answers any method but `GET`, and a
+    /// `GET` of a path a route matches with another method gets `405`, as
+    /// `dispatch` says. The request it gets has no `params`.
     ///
     /// ```
     /// let app = Server::new()
@@ -1073,6 +1420,7 @@ impl Server {
     ///     path: path,
     ///     headers: Map::new(),
     ///     body: bytes_from_string(""),
+    ///     params: Map::new(),
     /// }
     /// assert_eq(app.dispatch(get("/")).body.to_string().unwrap(), "home")
     /// let missing = app.dispatch(get("/nope?x=1"))
@@ -1083,36 +1431,86 @@ impl Server {
         Server { routes: self.routes, unmatched: Some(handler) }
     }
 
-    // The response to `req`: the handler of the GET route whose path equals
-    // `req.path` exactly, else the fallback's for a GET, or
-    // `Response::not_found()` for any other path or method. Socket-free, so a
-    // test can call it directly.
-    /// Returns the response to `req`: what the handler of the route whose
-    /// path equals `req.path` returns, or if there is none what the
-    /// `fallback` handler returns, or `Response::not_found()` if there is no
-    /// fallback either.
+    // The response to `req`, by spec §3.1's dispatch: the first route whose
+    // method and pattern match, else `405` naming the methods of the routes
+    // whose pattern matches, else the fallback's for a GET, else
+    // `Response::not_found()`. Socket-free, so a test can call it directly.
+    /// Returns the response to `req`.
     ///
-    /// Only a `GET` request reaches a handler; any other method, `HEAD`
-    /// included, gets `not_found`. It touches no connection, so a test can
-    /// call it directly with a `Request` it builds.
+    /// The routes are tried in the order they were added, and the first
+    /// whose method and pattern both match `req` answers: its handler gets
+    /// `req` with `params` holding what the pattern took. Otherwise, when a
+    /// route's pattern matches but its method does not, the answer is
+    /// `405 Method Not Allowed`, with an `allow` header naming the methods of
+    /// the routes whose pattern matches, each once, in the order they were
+    /// added, as `GET, POST`. Otherwise a `GET` goes to the `fallback`
+    /// handler, when there is one, and any other request gets
+    /// `Response::not_found()`. `HEAD` is a method like any other, answered
+    /// only by a route added for it.
+    ///
+    /// It touches no connection, so a test can call it directly with a
+    /// `Request` it builds.
+    ///
+    /// ```
+    /// let app = Server::new()
+    ///     .get("/login", |_| Response::text(200, "the form"))
+    ///     .post("/login", |_| Response::text(200, "logged in"))
+    /// let raw = bytes_from_string("DELETE /login HTTP/1.1\r\n\r\n")
+    /// let refused = app.dispatch(parse_request_head(raw, Limits::default()).unwrap().unwrap())
+    /// assert_eq(refused.status, 405)
+    /// assert_eq(refused.headers.get("allow").unwrap(), "GET, POST")
+    /// ```
     pub fn dispatch(self, req: Request) -> Response {
-        match req.method {
-            Get => {
-                let mut i = 0
-                while i < self.routes.len() {
-                    match self.routes.get(i) {
-                        Some(r) => {
-                            if r.path == req.path {
+        let target = req.path
+        let path = match target.index_of("?") {
+            Some(at) => target.slice(0, at)
+            None => target
+        }
+        let pieces = path_pieces(path)
+        let mut allowed: Vec<String> = Vec::new()
+        let mut i = 0
+        while i < self.routes.len() {
+            match self.routes.get(i) {
+                Some(r) => {
+                    match params_of(r.pattern, pieces) {
+                        Some(params) => {
+                            let name = method_name(r.method)
+                            if name == method_name(req.method) {
                                 // Bound to a local first: calling a fn-typed
                                 // field directly, `r.handler(req)`, is `E0014`.
                                 let h = r.handler
-                                return h(req)
+                                return h(
+                                    Request {
+                                        method: req.method,
+                                        path: req.path,
+                                        headers: req.headers,
+                                        body: req.body,
+                                        params: params,
+                                    },
+                                )
                             }
+                            if !holds(allowed, name) { allowed.push(name) }
                         }
                         None => {}
                     }
-                    i = i + 1
                 }
+                None => {}
+            }
+            i = i + 1
+        }
+        if allowed.len() > 0 {
+            let mut names = [""; allowed.len()]
+            let mut k = 0
+            while k < allowed.len() {
+                names[k] = allowed.get(k).unwrap_or("")
+                k = k + 1
+            }
+            let mut refused = Response::text(405, "method not allowed")
+            refused.headers.insert("allow", ", ".join(names))
+            return refused
+        }
+        match req.method {
+            Get => {
                 match self.unmatched {
                     Some(h) => h(req)
                     None => Response::not_found()
@@ -1347,6 +1745,7 @@ async fn read_in_flight(
                 path: req.path,
                 headers: req.headers,
                 body: buf.slice(body_start, end),
+                params: req.params,
             },
             rest: buf.slice(end, buf.len()),
         },
@@ -1371,4 +1770,49 @@ async fn read_more(conn: TcpStream, max: Int, started: Instant) -> Option<Bytes>
 fn head_window(buf: Bytes, max: Int) -> Bytes {
     if buf.len() <= max { return buf }
     buf.slice(0, max)
+}
+
+// The parameters `pattern`, a route's pieces, takes from `pieces`, a
+// request path's, or `None` when it does not match them: `std/ui/router`'s
+// `params_of`, less its catch-all, which a server's pattern does not have
+// (spec §3.1).
+fn params_of(pattern: [String], pieces: [String]) -> Option<Map<String, String>> {
+    if pattern.len() != pieces.len() { return None }
+    let mut params: Map<String, String> = Map::new()
+    let mut i = 0
+    while i < pattern.len() {
+        let p = pattern[i]
+        if p.starts_with(":") {
+            let _ = params.insert(p.slice(1, p.len()), pieces[i])
+        } else if p != pieces[i] {
+            return None
+        }
+        i = i + 1
+    }
+    Some(params)
+}
+
+// `m` as a request line writes it, which is how two methods are compared and
+// how `allow` names one: `Method` has no `Eq`.
+fn method_name(m: Method) -> String {
+    match m {
+        Get => "GET"
+        Post => "POST"
+        Put => "PUT"
+        Delete => "DELETE"
+        Patch => "PATCH"
+        Head => "HEAD"
+        Options => "OPTIONS"
+        Unknown(name) => name
+    }
+}
+
+// Whether `names` holds `name`.
+fn holds(names: Vec<String>, name: String) -> Bool {
+    let mut i = 0
+    while i < names.len() {
+        if names.get(i).unwrap_or("") == name { return true }
+        i = i + 1
+    }
+    false
 }

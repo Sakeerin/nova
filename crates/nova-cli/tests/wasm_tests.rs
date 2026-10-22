@@ -2803,6 +2803,8 @@ const LEFT_OUT: &[(&str, &str)] = &[
     ("http_malformed", "std/http"),
     ("http_offsets", "std/http"),
     ("http_partial", "std/http"),
+    ("http_request_readers", "std/http"),
+    ("http_routes", "std/http"),
     ("http_serialise", "std/http"),
     ("http_listen_on", "std/http, std/net, std/process"),
     ("http_server_dispatch", "std/http"),

@@ -9646,6 +9646,24 @@ fn run_with_and_without_stress(name: &str) {
     }
 }
 
+/// `std/http`'s routes by method (spec
+/// `docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+/// §3.1), socket-free: `get`, `post`, `put`, `delete` and `route`, `:name`
+/// patterns and `req.params`, matched on the decoded path without its query,
+/// the first matching route answering, `405` with `allow` naming each method
+/// once in the order added, the fallback for `GET` only, and `404`.
+#[test]
+fn http_routes_run() {
+    run_with_and_without_stress("http_routes");
+}
+
+/// `Request::query`, `form` and its `content-type` rule, and `cookies` (spec
+/// 4.7 §3.2), socket-free.
+#[test]
+fn http_request_readers_run() {
+    run_with_and_without_stress("http_request_readers");
+}
+
 /// `std/process`'s `args()` under `nova run FILE -- ARGS`: index 0 is FILE as
 /// written, and an argument with spaces and an empty one each arrive whole.
 /// Run from the repository root so FILE is a fixed relative path. Design:
@@ -10735,7 +10753,10 @@ fn http_server_example_serves_and_exits_cleanly() {
     // A body is consumed exactly, so the connection stays usable (Review Focus 3).
     k.send("POST / HTTP/1.1\r\nhost: x\r\ncontent-length: 3\r\n\r\nabc");
     let post = http03_response(&mut server, &mut k, "POST / with a body");
-    assert_eq!(post.status, 404, "only GET routes ship");
+    // `/` is a `GET` route's path, so since 4.7 a `POST` to it is `405`
+    // (spec docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §3.1).
+    assert_eq!(post.status, 405, "only GET routes are added");
+    assert_eq!(post.headers.get("allow").map(String::as_str), Some("GET"));
     k.send("GET / HTTP/1.1\r\nhost: x\r\n\r\n");
     let again = http03_response(&mut server, &mut k, "GET / after a body");
     assert_eq!(again.body, "Hello from Nova!");

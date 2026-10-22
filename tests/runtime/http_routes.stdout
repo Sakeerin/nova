@@ -1,0 +1,60 @@
+-- each method
+GET / -> 200 home (0 params)
+GET /posts/7 -> 200 show post id=7 (1 params)
+POST /posts/7/comments -> 200 add comment id=7 (1 params)
+PUT /notes/todo -> 200 put note name=todo (1 params)
+DELETE /notes/todo -> 200 delete note name=todo (1 params)
+PATCH /notes/todo -> 200 patch note name=todo (1 params)
+PURGE /cache -> 200 purge (0 params)
+HEAD /health -> 200 head health (0 params)
+-- patterns and params
+GET /a/1/b/2 -> 200 two params a=1 b=2 (2 params)
+GET /admin/posts/9/edit -> 200 edit id=9 (1 params)
+GET /posts/7/ -> 200 show post id=7 (1 params)
+GET //posts//7 -> 200 show post id=7 (1 params)
+GET /posts/a%20b -> 200 show post id=a b (1 params)
+GET /posts/a%2Fb -> 200 show post id=a/b (1 params)
+GET /posts/100% -> 200 show post id=100% (1 params)
+GET /posts/%E2%9C%93 -> 200 show post id=✓ (1 params)
+GET /posts/%FF -> 200 show post id=%FF (1 params)
+GET /%70osts/7 -> 200 show post id=7 (1 params)
+GET /posts -> 404 not found
+GET /posts/7/edit -> 404 not found
+GET /Posts/7 -> 404 not found
+-- a query takes no part
+GET /?ref=x -> 200 home (0 params)
+GET /posts/7?tab=2 -> 200 show post id=7 (1 params)
+GET /posts/7/?a=1/2 -> 200 show post id=7 (1 params)
+get("/add"): GET /add?x=1 -> 200 add /add?x=1
+-- the first route to match answers
+GET /posts/new -> 200 new post (0 params)
+GET /posts/3 -> 200 post by id id=3 (1 params)
+GET /items/4 -> 200 get item id=4 (1 params)
+-- 405 and allow
+POST / -> 405 allow=[GET] method not allowed
+GET /posts/7/comments -> 405 allow=[POST] method not allowed
+POST /notes/todo -> 405 allow=[PUT, DELETE, PATCH] method not allowed
+GET /cache -> 405 allow=[PURGE] method not allowed
+HEAD / -> 405 allow=[GET] method not allowed
+GET /health -> 405 allow=[HEAD] method not allowed
+DELETE /form -> 405 allow=[POST, PURGE, PUT] method not allowed
+405 content-type: text/plain; charset=utf-8
+405 content-length: 18
+405 status line: HTTP/1.1 405 Method Not Allowed
+-- the fallback, for GET only
+GET /nope?x=1 -> 404 fallback /nope?x=1 (0 params)
+POST /nope -> 404 not found
+HEAD /nope -> 404 not found
+PUT /posts/7 -> 405 allow=[GET] method not allowed
+GET /posts/7 -> 200 show post id=7 (1 params)
+GET /posts/7/comments -> 405 allow=[POST] method not allowed
+-- 404
+GET /nope -> 404 not found
+POST /nope -> 404 not found
+empty server: GET / -> 404 not found
+-- a route method leaves its receiver alone
+base: POST /a -> 405 allow=[GET] method not allowed
+more: POST /a -> 200 post a (0 params)
+-- params are the router's
+parse_request_head: 0 params
+dispatched: 200 show post id=7 (1 params)

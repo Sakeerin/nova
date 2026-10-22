@@ -1,0 +1,163 @@
+// `std/http`'s routes by method (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.1), with no socket: `get`, `post`, `put`, `delete` and `route`; patterns
+// with `:name` and `req.params`, matched on the path before `?`, empty
+// pieces dropped and each piece percent-decoded; the order routes answer
+// in; `405` and its `allow`; the fallback, for `GET` only; and `404`.
+
+fn request(method: Method, target: String) -> Request {
+    Request {
+        method: method,
+        path: target,
+        headers: Map::new(),
+        body: bytes_from_string(""),
+        params: Map::new(),
+    }
+}
+
+fn body_text(r: Response) -> String {
+    match r.body.to_string() {
+        Some(s) => s
+        None => "<not utf-8>"
+    }
+}
+
+fn header(r: Response, name: String) -> String {
+    match r.headers.get(name) {
+        Some(v) => v
+        None => "<absent>"
+    }
+}
+
+// One line for `method` and `target` on `s`: the status, the `allow` header
+// when there is one, and the body.
+fn ask(s: Server, method: Method, target: String) -> String {
+    let r = s.dispatch(request(method, target))
+    let allow = match r.headers.get("allow") {
+        Some(v) => " allow=[${v}]"
+        None => ""
+    }
+    "${r.status}${allow} ${body_text(r)}"
+}
+
+// A handler that names itself and every parameter its request holds, in a
+// fixed order of names.
+fn named(name: String) -> fn(Request) -> Response {
+    |r: Request| {
+        let keys = ["id", "c", "name", "a", "b"]
+        let mut shown = ""
+        let mut i = 0
+        while i < keys.len() {
+            match r.params.get(keys[i]) {
+                Some(v) => shown = "${shown} ${keys[i]}=${v}"
+                None => {}
+            }
+            i = i + 1
+        }
+        Response::text(200, "${name}${shown} (${r.params.len()} params)")
+    }
+}
+
+fn main() {
+    let app = Server::new()
+        .get("/", named("home"))
+        .get("/posts/:id", named("show post"))
+        .post("/posts/:id/comments", named("add comment"))
+        .put("/notes/:name", named("put note"))
+        .delete("/notes/:name", named("delete note"))
+        .route(Patch, "/notes/:name", named("patch note"))
+        .route(Unknown("PURGE"), "/cache", named("purge"))
+        .route(Head, "/health", named("head health"))
+        .get("/admin/posts/:id/edit", named("edit"))
+        .get("/a/:a/b/:b", named("two params"))
+
+    println("-- each method")
+    println("GET / -> ${ask(app, Get, "/")}")
+    println("GET /posts/7 -> ${ask(app, Get, "/posts/7")}")
+    println("POST /posts/7/comments -> ${ask(app, Post, "/posts/7/comments")}")
+    println("PUT /notes/todo -> ${ask(app, Put, "/notes/todo")}")
+    println("DELETE /notes/todo -> ${ask(app, Delete, "/notes/todo")}")
+    println("PATCH /notes/todo -> ${ask(app, Patch, "/notes/todo")}")
+    println("PURGE /cache -> ${ask(app, Unknown("PURGE"), "/cache")}")
+    println("HEAD /health -> ${ask(app, Head, "/health")}")
+
+    println("-- patterns and params")
+    println("GET /a/1/b/2 -> ${ask(app, Get, "/a/1/b/2")}")
+    println("GET /admin/posts/9/edit -> ${ask(app, Get, "/admin/posts/9/edit")}")
+    println("GET /posts/7/ -> ${ask(app, Get, "/posts/7/")}")
+    println("GET //posts//7 -> ${ask(app, Get, "//posts//7")}")
+    println("GET /posts/a%20b -> ${ask(app, Get, "/posts/a%20b")}")
+    println("GET /posts/a%2Fb -> ${ask(app, Get, "/posts/a%2Fb")}")
+    println("GET /posts/100% -> ${ask(app, Get, "/posts/100%")}")
+    println("GET /posts/%E2%9C%93 -> ${ask(app, Get, "/posts/%E2%9C%93")}")
+    println("GET /posts/%FF -> ${ask(app, Get, "/posts/%FF")}")
+    println("GET /%70osts/7 -> ${ask(app, Get, "/%70osts/7")}")
+    println("GET /posts -> ${ask(app, Get, "/posts")}")
+    println("GET /posts/7/edit -> ${ask(app, Get, "/posts/7/edit")}")
+    println("GET /Posts/7 -> ${ask(app, Get, "/Posts/7")}")
+
+    println("-- a query takes no part")
+    println("GET /?ref=x -> ${ask(app, Get, "/?ref=x")}")
+    println("GET /posts/7?tab=2 -> ${ask(app, Get, "/posts/7?tab=2")}")
+    println("GET /posts/7/?a=1/2 -> ${ask(app, Get, "/posts/7/?a=1/2")}")
+    let adder = Server::new().get("/add", |r: Request| Response::text(200, "add ${r.path}"))
+    println("get(\"/add\"): GET /add?x=1 -> ${ask(adder, Get, "/add?x=1")}")
+
+    println("-- the first route to match answers")
+    let order = Server::new()
+        .get("/posts/new", named("new post"))
+        .get("/posts/:id", named("post by id"))
+        .get("/posts/:c", named("never"))
+        .post("/items/:id", named("post item"))
+        .get("/items/:id", named("get item"))
+    println("GET /posts/new -> ${ask(order, Get, "/posts/new")}")
+    println("GET /posts/3 -> ${ask(order, Get, "/posts/3")}")
+    println("GET /items/4 -> ${ask(order, Get, "/items/4")}")
+
+    println("-- 405 and allow")
+    println("POST / -> ${ask(app, Post, "/")}")
+    println("GET /posts/7/comments -> ${ask(app, Get, "/posts/7/comments")}")
+    println("POST /notes/todo -> ${ask(app, Post, "/notes/todo")}")
+    println("GET /cache -> ${ask(app, Get, "/cache")}")
+    println("HEAD / -> ${ask(app, Head, "/")}")
+    println("GET /health -> ${ask(app, Get, "/health")}")
+    let twice = Server::new()
+        .post("/form", named("first post"))
+        .route(Unknown("PURGE"), "/form", named("purge"))
+        .post("/:x", named("second post"))
+        .put("/form", named("put"))
+    println("DELETE /form -> ${ask(twice, Delete, "/form")}")
+    let refused = twice.dispatch(request(Delete, "/form"))
+    println("405 content-type: ${header(refused, "content-type")}")
+    println("405 content-length: ${header(refused, "content-length")}")
+    let wire = refused.to_bytes().to_string().unwrap_or("")
+    println("405 status line: ${wire.slice(0, wire.index_of("\r\n").unwrap_or(0))}")
+
+    println("-- the fallback, for GET only")
+    let fb = app.fallback(
+        |r: Request| Response::text(404, "fallback ${r.path} (${r.params.len()} params)"),
+    )
+    println("GET /nope?x=1 -> ${ask(fb, Get, "/nope?x=1")}")
+    println("POST /nope -> ${ask(fb, Post, "/nope")}")
+    println("HEAD /nope -> ${ask(fb, Head, "/nope")}")
+    println("PUT /posts/7 -> ${ask(fb, Put, "/posts/7")}")
+    println("GET /posts/7 -> ${ask(fb, Get, "/posts/7")}")
+    println("GET /posts/7/comments -> ${ask(fb, Get, "/posts/7/comments")}")
+
+    println("-- 404")
+    println("GET /nope -> ${ask(app, Get, "/nope")}")
+    println("POST /nope -> ${ask(app, Post, "/nope")}")
+    println("empty server: GET / -> ${ask(Server::new(), Get, "/")}")
+
+    println("-- a route method leaves its receiver alone")
+    let base = Server::new().get("/a", named("a"))
+    let more = base.post("/a", named("post a"))
+    println("base: POST /a -> ${ask(base, Post, "/a")}")
+    println("more: POST /a -> ${ask(more, Post, "/a")}")
+
+    println("-- params are the router's")
+    let raw = bytes_from_string("GET /posts/7 HTTP/1.1\r\n\r\n")
+    let parsed = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    println("parse_request_head: ${parsed.params.len()} params")
+    println("dispatched: ${ask(app, Get, parsed.path)}")
+}

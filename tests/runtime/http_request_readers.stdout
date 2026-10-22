@@ -1,0 +1,38 @@
+-- query
+no query: {}
+empty query: {}
+pairs: {page=[2], q=[nova]}
+plus and escapes: {q=[nova lang], sp=[ x+], tag=[a&b=c]}
+names decode too: {a b=[1], c=d=[2]}
+utf-8: {check=[✓], raw=[✓]}
+empty parts: {a=[1], b=[2]}
+no `=`: {flag=[], x=[]}
+first `=` splits: {eq=[a=b=c]}
+last of two wins: {tag=[c]}
+bad escape kept: {p=[100%], q=[%zz%41], r=[%4]}
+not utf-8 kept: {b=[%FF%FE]}
+only the first `?`: {a=[1?b=2]}
+-- form
+a form: {csrf=[ab12], name=[Ada L.], text=[Hi! ✓]}
+charset: {a=[1]}
+any case: {a=[1]}
+spaces: {a=[1]}
+last wins: {a=[2], b=[]}
+empty body: {}
+json: {}
+text: {}
+multipart: {}
+a longer type: {}
+no content-type: {}
+body not utf-8: {}
+query and form apart: {from=[query]} {from=[body]}
+-- cookies
+no header: {}
+two: {sid=[abc.123], theme=[dark]}
+first of two wins: {sid=[new]}
+trimmed: {a=[1], b=[2], c=[3]}
+no `=` skipped: {a=[1]}
+first `=` splits: {tok=[a=b]}
+empty value: {empty=[]}
+not decoded: {q=["x"], v=[a%20b+c]}
+from the wire: {sid=[1], theme=[light]}
