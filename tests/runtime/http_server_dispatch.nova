@@ -5,6 +5,12 @@
 // §8.3): it answers a GET no route matches, its query included, and nothing
 // else; a route still answers its own path, before or after it; a second one
 // replaces the first; and the server it is called on keeps none.
+//
+// Since 4.7 (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.1) `get` matches the path without its query, so `/echo?x=1` reaches
+// `/echo`'s handler, and a `POST` to `/`, a `GET` route's path, is `405`
+// with `allow: GET` where it was `404`. `http_routes.nova` holds the rest.
 
 fn status_ok() -> JsonValue {
     let mut m: Map<String, JsonValue> = Map::new()
@@ -13,7 +19,13 @@ fn status_ok() -> JsonValue {
 }
 
 fn request(method: Method, path: String) -> Request {
-    Request { method: method, path: path, headers: Map::new(), body: bytes_from_string("") }
+    Request {
+        method: method,
+        path: path,
+        headers: Map::new(),
+        body: bytes_from_string(""),
+        params: Map::new(),
+    }
 }
 
 fn body_text(r: Response) -> String {
@@ -46,10 +58,12 @@ fn main() {
     println("GET /health -> ${b.status} ${header(b, "content-type")} ${header(b, "content-length")} ${body_text(b)}")
     let c = app.dispatch(request(Get, "/echo"))
     println("GET /echo -> ${c.status} ${body_text(c)}")
+    let q = app.dispatch(request(Get, "/echo?x=1"))
+    println("GET /echo?x=1 -> ${q.status} ${body_text(q)}")
     let d = app.dispatch(request(Get, "/nope"))
     println("GET /nope -> ${d.status}")
     let e = app.dispatch(request(Post, "/"))
-    println("POST / -> ${e.status}")
+    println("POST / -> ${e.status} allow ${header(e, "allow")}")
 
     // `get` leaves its receiver alone, so two servers built from one base do
     // not share the routes added to each other.

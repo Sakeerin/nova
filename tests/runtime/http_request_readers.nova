@@ -1,0 +1,126 @@
+// `std/http`'s readers of a request (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.2): `query` and `form`, which share one decoder (`+` a space, `%XX` as
+// UTF-8, a half that does not decode kept as written, an empty part
+// skipped, a part with no `=` an empty value, the last of two names
+// winning), `form`'s `content-type` rule, and `cookies` (split on `;`, each
+// part trimmed, a part with no `=` skipped, the first of two names winning,
+// values not decoded). Each map is printed by its keys in sorted order, so
+// a `Map`'s own order never shows.
+
+fn target(t: String) -> Request {
+    Request {
+        method: Get,
+        path: t,
+        headers: Map::new(),
+        body: bytes_from_string(""),
+        params: Map::new(),
+    }
+}
+
+fn posted(content_type: Option<String>, body: Bytes) -> Request {
+    let mut h: Map<String, String> = Map::new()
+    match content_type {
+        Some(t) => h.insert("content-type", t)
+        None => None
+    }
+    Request { method: Post, path: "/form", headers: h, body: body, params: Map::new() }
+}
+
+fn with_cookie_header(value: String) -> Request {
+    let mut h: Map<String, String> = Map::new()
+    h.insert("cookie", value)
+    Request { method: Get, path: "/", headers: h, body: bytes_from_string(""), params: Map::new() }
+}
+
+// `m` as `{k=v, …}`, its keys in sorted order.
+fn shown(m: Map<String, String>) -> String {
+    let keys = m.keys()
+    let n = keys.len()
+    // An insertion sort: std has none.
+    let mut sorted = [""; n]
+    let mut i = 0
+    while i < n {
+        let k = keys[i]
+        let mut j = i
+        while j > 0 && after(sorted[j - 1], k) {
+            sorted[j] = sorted[j - 1]
+            j = j - 1
+        }
+        sorted[j] = k
+        i = i + 1
+    }
+    let mut parts = [""; n]
+    let mut p = 0
+    while p < n {
+        parts[p] = "${sorted[p]}=[${m.get(sorted[p]).unwrap_or("?")}]"
+        p = p + 1
+    }
+    "{${", ".join(parts)}}"
+}
+
+// Whether `a` sorts after `b`, by UTF-8 bytes.
+fn after(a: String, b: String) -> Bool {
+    match a.cmp(b) {
+        Greater => true
+        _ => false
+    }
+}
+
+fn form_of(content_type: String, body: String) -> String {
+    shown(posted(Some(content_type), bytes_from_string(body)).form())
+}
+
+fn main() {
+    println("-- query")
+    println("no query: ${shown(target("/search").query())}")
+    println("empty query: ${shown(target("/search?").query())}")
+    println("pairs: ${shown(target("/s?q=nova&page=2").query())}")
+    println("plus and escapes: ${shown(target("/s?q=nova+lang&tag=a%26b%3Dc&sp=%20x%2B").query())}")
+    println("names decode too: ${shown(target("/s?a+b=1&c%3Dd=2").query())}")
+    println("utf-8: ${shown(target("/s?check=%E2%9C%93&raw=✓").query())}")
+    println("empty parts: ${shown(target("/s?&&a=1&&b=2&").query())}")
+    println("no `=`: ${shown(target("/s?flag&x=").query())}")
+    println("first `=` splits: ${shown(target("/s?eq=a=b=c").query())}")
+    println("last of two wins: ${shown(target("/s?tag=a&tag=b&tag=c").query())}")
+    println("bad escape kept: ${shown(target("/s?p=100%&q=%zz%41&r=%4").query())}")
+    println("not utf-8 kept: ${shown(target("/s?b=%FF%FE").query())}")
+    println("only the first `?`: ${shown(target("/s?a=1?b=2").query())}")
+
+    println("-- form")
+    let urlencoded = "application/x-www-form-urlencoded"
+    println("a form: ${form_of(urlencoded, "name=Ada+L.&text=Hi%21+%E2%9C%93&csrf=ab12")}")
+    println("charset: ${form_of("application/x-www-form-urlencoded; charset=UTF-8", "a=1")}")
+    println("any case: ${form_of("Application/X-WWW-Form-URLEncoded", "a=1")}")
+    println("spaces: ${form_of("  application/x-www-form-urlencoded  ;charset=utf-8", "a=1")}")
+    println("last wins: ${form_of(urlencoded, "a=1&a=2&b")}")
+    println("empty body: ${form_of(urlencoded, "")}")
+    println("json: ${form_of("application/json", "a=1")}")
+    println("text: ${form_of("text/plain", "a=1")}")
+    println("multipart: ${form_of("multipart/form-data; boundary=x", "a=1")}")
+    println("a longer type: ${form_of("application/x-www-form-urlencoded-not", "a=1")}")
+    println("no content-type: ${shown(posted(None, bytes_from_string("a=1")).form())}")
+    let not_utf8 = posted(Some(urlencoded), bytes_from_ints([97, 61, 255]))
+    println("body not utf-8: ${shown(not_utf8.form())}")
+    let both = Request {
+        method: Post,
+        path: "/form?from=query",
+        headers: posted(Some(urlencoded), bytes_from_string("")).headers,
+        body: bytes_from_string("from=body"),
+        params: Map::new(),
+    }
+    println("query and form apart: ${shown(both.query())} ${shown(both.form())}")
+
+    println("-- cookies")
+    println("no header: ${shown(target("/").cookies())}")
+    println("two: ${shown(with_cookie_header("sid=abc.123; theme=dark").cookies())}")
+    println("first of two wins: ${shown(with_cookie_header("sid=new; sid=old").cookies())}")
+    println("trimmed: ${shown(with_cookie_header("  a=1 ;b=2;   c=3  ").cookies())}")
+    println("no `=` skipped: ${shown(with_cookie_header("flag; a=1; ;").cookies())}")
+    println("first `=` splits: ${shown(with_cookie_header("tok=a=b").cookies())}")
+    println("empty value: ${shown(with_cookie_header("empty=").cookies())}")
+    println("not decoded: ${shown(with_cookie_header("v=a%20b+c; q=\"x\"").cookies())}")
+    let raw = bytes_from_string("GET / HTTP/1.1\r\nCookie: sid=1; theme=light\r\n\r\n")
+    let parsed = parse_request_head(raw, Limits::default()).unwrap().unwrap()
+    println("from the wire: ${shown(parsed.cookies())}")
+}
