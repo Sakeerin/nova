@@ -708,6 +708,36 @@ Features required:
 
 **Gate:** All pages work, Lighthouse Performance > 95, full CRUD via admin UI, no XSS via untrusted input.
 
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):**
+`examples/07-fullstack-blog`, the package `fullstack-blog`, is built in 4.7
+and differs from the above where the user decided so (ADR 0046). Its posts
+and comments live in memory and are written to `data/blog.json`, a JSON
+file written whole and renamed into place, made from `data/seed.json` the
+first time, and its users are in `data/users.json`, which
+`fullstack-blog-server --set-password` writes the same way: not SQLite
+(ADR 0038). Its `src/` is flat, since a nested module path is E0900:
+`main.nova` is the client, built for WASM, which hydrates each page;
+`server.nova` is the server, a `std/http` `Server` beside the built site,
+which `nova build --ssr` builds into
+`target/<profile>/fullstack-blog-server`; `app.nova`, the pages `home`,
+`post`, `login` and `admin`, the components `header` and `post_card`, and
+`forms`, the checks, are shared; `store`, in place of `db.nova`, and `auth`
+are the server's; and `lib.nova` is the library its `tests/*.nova` reach
+the server's modules through. It also has `index.html` and
+`data/seed.json`, and its README follows §9. Every page hydrates whole, the
+post's included, and every form works without JavaScript; the login is
+checked in the client as it is typed and on the server against a
+PBKDF2-HMAC-SHA256 hash, which `fullstack-blog-server --set-password`
+writes; sessions are signed cookies, `HttpOnly` and `SameSite=Lax`; every
+form carries a CSRF token; and anyone may comment. CI's `browser` job
+drives it in Chromium (`tests/browser/blog.mjs`): every page hydrates in
+place, the admin creates, edits and deletes a post through its pages, a
+script in a title or a comment stays text, and a form without its token is
+refused with `403`. Lighthouse is 4.8's. Its client, built without
+`--release`, is 49,472 bytes gzipped
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+§6; ADR 0046).
+
 ---
 
 ## 8. Additional Examples (post-Phase 6)
@@ -851,3 +881,16 @@ gate's second clause. The CI job above does not exist in
 live in `crates/nova-cli/tests/run_tests.rs` too, for the first of the two
 reasons above. Whether any example meets this section is a check, not this
 note: `ls -d examples/*/tests/` against the CI job above.
+
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):** the
+first of the 2026-10-04 note's two reasons is stale: since Phase 3.3a,
+`nova test` in a project runs every top-level `tests/*.nova` as well as the
+tests of the `src/` files its program and its library reach (`40-TOOLING.md`
+§7). `examples/07-fullstack-blog` is the first example with a `tests/`
+folder: its four files hold 21 tests, which reach the server's modules
+through its `src/lib.nova`, and `run_tests.rs`'s
+`the_blog_example_passes_its_own_tests` runs `nova test` in a copy of it,
+in the ordinary `cargo test` step on all three operating systems. Its server
+is driven end to end over HTTP by `crates/nova-cli/tests/blog_tests.rs`,
+in the same step, and in Chromium by CI's `browser` job. The CI job above
+still does not exist (ADR 0046).

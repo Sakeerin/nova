@@ -116,6 +116,40 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A CI test of SSR and SSG in Chromium,** `tests/browser/ssr.mjs`: a
   server-rendered page and a statically generated one hydrate without
   making their nodes again.
+- **Routes by method in `std/http`:** `post`, `put`, `delete` and
+  `route(method, pattern, handler)` beside `get`, with patterns whose
+  `:name` pieces the handler finds in `req.params`, as in
+  `.get("/posts/:id", |req: Request| …)`. A path is matched without its
+  query, decoded, as `std/ui/router` reads one. A request whose path a
+  route matches with another method gets `405 Method Not Allowed`, with an
+  `allow` header (ADR 0046).
+- **`Request::query()`, `form()` and `cookies()`** read a request's query,
+  the fields of a form a browser posted, and its cookies, by name.
+- **Cookies and redirects:** `Cookie::new(name, value)`, `HttpOnly` and
+  `SameSite=Lax` unless changed, and `Cookie::expired(name)`;
+  `Response::with_cookie(c)`, one `set-cookie` header per cookie;
+  `Response::html(status, s)`; and `Response::redirect(location)`, a
+  `303 See Other`.
+- **`Dist` in `std/ui/ssr`:** the built site, for a server written by hand
+  that serves it beside routes of its own. `Dist::open(dir)` reads it,
+  `file(req)` answers a request for one of its files, and
+  `respond(status, page)` answers with a page (ADR 0046).
+- **`std/fs::rename`,** which replaces the file at its destination, on
+  Windows too.
+- **`pbkdf2_sha256` and `pbkdf2_sha256_verify`** in `std/crypto`, for
+  storing and checking a password, through `ring`, already a dependency.
+- **`Bytes::to_hex` and `bytes_from_hex`,** on both targets.
+- **`examples/07-fullstack-blog`,** a blog that a visitor reads and
+  comments on, and that its admin writes: a server on `std/http` that
+  renders every page, and a client that hydrates it, with plain HTML forms,
+  signed session cookies, CSRF tokens and PBKDF2 password hashes, and its
+  posts in a JSON file. `nova build --ssr` builds it, and
+  `fullstack-blog-server --set-password <name>` sets its admin's password
+  (ADR 0046).
+- **A CI test of the blog in Chromium,** `tests/browser/blog.mjs`: every
+  page hydrates in place, the admin creates, edits and deletes a post, a
+  script in a title or a comment stays text, and a form without its CSRF
+  token is refused.
 
 ### Changed
 
@@ -130,6 +164,17 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `view {` where an expression starts begins a view (ADR 0043).
 - **`examples/06-counter-spa`'s README runs it with `nova dev`**, where it
   built it and served `dist/` with another server.
+- **`Request` has a `params` field and `Response` a `cookies` field,** so
+  a `Request` or `Response` literal must name it (ADR 0046).
+- **`Server::get` takes a pattern, and the query no longer takes part:**
+  `/add` now matches `/add?x=1` and `/add/`, and `/posts/:id` matches
+  `/posts/7`.
+- **A request to a path a route serves with another method gets `405`,**
+  with an `allow` header, where it got `404`, `HEAD` included; and a `GET`
+  of a path only a route of another method matches no longer reaches the
+  `fallback`.
+- **The status line names 301, 302, 303, 401 and 403** by their reason
+  phrases, `303 See Other` where it was `303 Redirection`.
 
 ## [0.3.2] - 2026-10-14
 

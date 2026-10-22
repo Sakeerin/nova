@@ -77,6 +77,18 @@ static routes' pages. `std/ui` gains `render_hydratable`, `hydrate` and
 `docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
 §3 to §6 and §8 (ADR 0045).
 
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):
+`std/ui/ssr`** gains `Dist`, the built site a server written by hand
+serves beside routes of its own: `Dist::open(dir)` reads
+`<dir>/index.html` and `<dir>/manifest.json` once, with every check and
+error `serve` makes on them; `file(req)` answers a request for a file the
+manifest lists, or returns `None` for the program to answer; and
+`respond(status, page)` answers with the page put into the template, as
+`document` puts it, with `status`. `serve` is built on it, and does what
+it did. They are listed in
+`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md` §4
+(ADR 0046).
+
 ---
 
 ## 2. `std/core` — Foundational Types
@@ -467,6 +479,18 @@ impl Read for File { ... }
 impl Write for File { ... }
 ```
 
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):**
+`pub async fn rename(from: String, to: String) -> Result<(), IoError>`
+exists, an `async fn` that never suspends, like its neighbours, over a
+`fs_rename` builtin and Rust's `std::fs::rename`. It renames the file
+`from` to `to`, replacing the file at `to` when there is one, on Windows as
+on Unix, where the replacement is atomic: a file written whole beside its
+target, then renamed over it, leaves the old file or the new one at `to`,
+never half of one. Nothing at `from`, or no directory to hold `to`, is
+`NotFound`
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+§5; ADR 0046).
+
 ---
 
 ## 6. `std/http` (server + client)
@@ -548,6 +572,39 @@ behaves as before. `ui::ssr`'s `serve` is built on both. `post`, cookies
 and path parameters are still not shipped
 (`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
 §8.3; ADR 0045).
+
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):**
+`Server` routes by method: `get`, `post`, `put` and `delete`, each
+`(pattern, handler)`, and `route(method, pattern, handler)`, each returning
+a copy of the server with one more route. A pattern's pieces are literal, or
+`:name`, which matches any one piece; a request's path, its target before
+any `?`, is split at `/`, its empty pieces dropped and each percent-decoded,
+as `std/ui/router` reads a location, so `/posts/:id` matches `/posts/7`,
+`/posts/7/` and `/posts/7?x=1`. `get` takes a pattern too, and the query no
+longer takes part. `dispatch` tries the routes in the order they were added:
+the first whose method and pattern match answers, and its handler finds what
+the pattern took in `req.params`, a new field of `Request`, whose
+`get("id")` returns an `Option`; otherwise, when a route's pattern matches
+with another method, `405 Method Not Allowed`, with an `allow` header naming
+those routes' methods and the body `method not allowed`; otherwise a `GET`
+goes to the `fallback`, whose request has no `params`; otherwise `404`.
+`HEAD` is a method like any other. `Request::query()` and `form()` decode a
+query and a form's body as `application/x-www-form-urlencoded`, the last of
+two names winning, `form` only for that `content-type`; `cookies()` reads
+the `cookie` header, the first of two names winning. `Response` gains
+`cookies`, which `with_cookie(c)` adds to and `to_bytes` writes, one
+`set-cookie` line each, after the other headers. `Cookie::new(name, value)`
+has `Path=/`, `HttpOnly` and `SameSite=Lax`, and `Cookie::expired(name)`
+`Max-Age=0`; a cookie whose name is not a token, or whose value, path or
+`same_site` holds what a cookie cannot carry, is left out.
+`Response::html(status, s)` is `text`'s twin for HTML, and
+`Response::redirect(location)` is `303 See Other`. The reason phrases gain
+301, 302, 303, 401 and 403. A `Request` or `Response` literal must name the
+new field. A handler is still synchronous, `fn(Request) -> Response`;
+`use_middleware`, the `Handler` and `Middleware` aliases, and the client are
+still not shipped
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md` §3;
+ADR 0046).
 
 ```nova
 module std.http
@@ -1662,6 +1719,23 @@ degenerate range returning `min`.
 `encrypt` and `decrypt` below are unbuilt, and nothing in this increment is a
 step toward them. §7's own dated amendment above records what position 12 does
 and does not close.
+
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):**
+`pbkdf2_sha256(password, salt, iterations, length) -> Bytes` and
+`pbkdf2_sha256_verify(password, salt, iterations, expected) -> Bool` ship,
+where `password`, `salt` and `expected` are `Bytes`, and `iterations` and
+`length` `Int`s: PBKDF2-HMAC-SHA-256 (RFC 8018) over `ring::pbkdf2`, through
+two runtime intrinsics, so no crate is added. Each panics for an iteration
+count outside 1 to 4,294,967,295, and `pbkdf2_sha256` for a length outside 1
+to 65,536, `random_bytes`' cap. The verify derives a key of `expected`'s
+length and compares in constant time, a property inherited from `ring` and
+not demonstrated by a test, as `hmac_sha256_verify`'s is; so the start of
+the right key passes too, and a caller keeps and checks the whole key and
+its length. It runs on the calling task, and every other task waits: 600,000
+rounds took about 2.6 s with the runtime built for debugging, and `ring`
+built optimized took about 0.3 s
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md` §5;
+ADR 0046).
 
 ```nova
 module std.crypto
@@ -2888,3 +2962,13 @@ impl Eq for Bytes {
   `bytes_from_ints_rejects_a_value_above_the_range`,
   `bytes_from_ints_rejects_a_value_below_the_range` and
   `bytes_reserved_declaration_is_rejected`.
+
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):**
+`Bytes::to_hex(self) -> String` writes bytes as hexadecimal, two lower-case
+digits each, and `bytes_from_hex(s: String) -> Option<Bytes>` reads them
+back, taking the digits in either case and returning `None` for an odd
+length or any other character. Both are written in Nova, with no builtin,
+on both targets; `tests/runtime/bytes_hex.nova` runs natively, under
+`NOVA_GC_STRESS=1`, and in the WASM gate
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md` §5;
+ADR 0046).

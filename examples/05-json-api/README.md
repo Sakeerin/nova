@@ -5,9 +5,10 @@ A JSON API over `std/http`: list users, create one, fetch one by id.
 ## What this demonstrates
 
 - Routing without a router type: a `match` over `req.method` and a
-  `req.path.split("/")`. `std/http`'s `Server` (see `examples/03-http-server`)
-  routes exact paths and `GET` only, so this example's `POST /users` and its
-  `/users/:id` pattern still route by hand.
+  `req.path.split("/")`, over `read_request` rather than `std/http`'s
+  `Server`. `Server` now routes by method, with `:name` patterns (see
+  `examples/07-fullstack-blog`), but this example keeps the hand-written
+  routing it was written to show.
   **The split
   has to test the resource segment and not only the segment count** --
   `/users/1` splits to `["", "users", "1"]` and so does `/foo/1` to
