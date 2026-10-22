@@ -1,0 +1,86 @@
+//! `ui::ssr::Dist` with no socket (spec
+//! docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+//! §4): it opens the built site in the directory its first argument names,
+//! `dist` when there is none, printing the error and exiting with 3 when that
+//! fails; then prints what `file` answers for each target, and the page
+//! `respond` makes for `/posts/7` with the data, as `run_tests.rs` checks.
+
+import app::{App, data}
+import ui
+import ui::ssr::{Dist, page_with}
+
+fn get(target: String) -> Request {
+    Request {
+        method: Get,
+        path: target,
+        headers: Map::new(),
+        body: bytes_from_string(""),
+        params: Map::new(),
+    }
+}
+
+// What `file` answers for `target`: `None`, or the status, the content type,
+// `nosniff`, the body's length, whether `content-length` says it, and the
+// body itself when it is text.
+fn asked(dist: Dist, target: String) -> String {
+    match dist.file(get(target)) {
+        Some(r) => {
+            let kind = r.headers.get("content-type").unwrap_or("-")
+            let sniff = r.headers.get("x-content-type-options").unwrap_or("-")
+            let length = r.headers.get("content-length").unwrap_or("-") == "${r.body.len()}"
+            let head = "${r.status} ${kind} ${sniff} ${r.body.len()} bytes ${length}"
+            if kind.starts_with("text/") || kind.starts_with("image/svg") {
+                "${head} [${r.body.to_string().unwrap_or("<not utf-8>")}]"
+            } else {
+                head
+            }
+        }
+        None => "None"
+    }
+}
+
+async fn main() {
+    let dir = args().get(1).unwrap_or("dist")
+    let dist = match Dist::open(dir).await {
+        Ok(d) => d
+        Err(e) => {
+            eprintln(e.message)
+            exit(3)
+            return
+        }
+    }
+    let targets = [
+        "/app.js",
+        "/app%2ejs",
+        "/app.js?v=1",
+        "app.js",
+        "/assets/logo.svg",
+        "/app.wasm",
+        "/index.html",
+        "/gone.js",
+        "/../secret",
+        "/..%2fsecret",
+        "/secret.txt",
+        "/manifest.json",
+        "/",
+        "/posts/7",
+    ]
+    let mut i = 0
+    while i < targets.len() {
+        println("file ${targets[i]}: ${asked(dist, targets[i])}")
+        i = i + 1
+    }
+    let post = Request {
+        method: Post,
+        path: "/app.js",
+        headers: Map::new(),
+        body: bytes_from_string(""),
+        params: Map::new(),
+    }
+    println("file of a POST: ${dist.file(post).is_some()}")
+    let page = dist.respond(201, page_with("/posts/7", data(), App))
+    println(
+        "respond: ${page.status} ${page.headers.get("content-type").unwrap_or("-")} ${page.headers.get("content-length").unwrap_or("-") == "${page.body.len()}"}",
+    )
+    println(page.body.to_string().unwrap_or("<not utf-8>"))
+}

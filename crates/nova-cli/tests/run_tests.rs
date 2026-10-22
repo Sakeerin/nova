@@ -12299,6 +12299,136 @@ fn ssr_serve_reports_what_stops_it_starting() {
     );
 }
 
+/// `ui::ssr::Dist` (spec
+/// `docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
+/// §4), with no socket, through `tests/ssr/site`'s `src/dist.nova`: `file`
+/// answers a listed file, asked for as it is, with an escape, with a query
+/// or with no leading `/`, with its content type, `nosniff` and its
+/// `content-length`; a listed file not on disk with `404`; and `None` for a
+/// file in `dist/` the manifest does not list, for the manifest's path that
+/// would leave `dist/`, which it never reads, and for a page's path. It does
+/// not look at the method. `respond` puts a page into the template with its
+/// status, a template whose root holds an old page emptied first. Then
+/// `Dist::open`'s errors, each naming its file in `serve`'s words: no
+/// template, a template with no root, no manifest, and a manifest with no
+/// `files`.
+#[test]
+fn ssr_dist_answers_files_and_pages() {
+    let (site, home) = ssr_site("dist");
+    let run = |args: &[&str]| {
+        nova()
+            .current_dir(&site)
+            .env("NOVA_HOME", &home)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .args(["run", "src/dist.nova", "--"])
+            .args(args)
+            .assert()
+    };
+    let respond = "respond: 201 text/html; charset=utf-8 true\n";
+    let page_view = ssr_view("<p>Post 7</p>");
+
+    let a = run(&[]).success();
+    let out = String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n");
+    let (files, page) = out.split_once(respond).expect("the respond line");
+    let js = "200 text/javascript; charset=utf-8 nosniff 34 bytes true \
+              [export default function init() {}\n]";
+    let expected = [
+        format!("file /app.js: {js}"),
+        format!("file /app%2ejs: {js}"),
+        format!("file /app.js?v=1: {js}"),
+        format!("file app.js: {js}"),
+        "file /assets/logo.svg: 200 image/svg+xml nosniff 11 bytes true [<svg></svg>]".to_string(),
+        "file /app.wasm: 200 application/wasm nosniff 8 bytes true".to_string(),
+        format!(
+            "file /index.html: 200 text/html; charset=utf-8 nosniff {} bytes true [{SSR_TEMPLATE}]",
+            SSR_TEMPLATE.len()
+        ),
+        "file /gone.js: 404 text/plain; charset=utf-8 - 9 bytes true [not found]".to_string(),
+        "file /../secret: None".to_string(),
+        "file /..%2fsecret: None".to_string(),
+        "file /secret.txt: None".to_string(),
+        "file /manifest.json: None".to_string(),
+        "file /: None".to_string(),
+        "file /posts/7: None".to_string(),
+        "file of a POST: true".to_string(),
+    ];
+    assert_eq!(files, format!("{}\n", expected.join("\n")));
+    let page = page.strip_suffix('\n').unwrap_or(page).to_string();
+    assert!(
+        ssr_pages(SSR_TEMPLATE, &page_view).contains(&page),
+        "{page}"
+    );
+
+    // A template SSG filled: its root's page and data are dropped first.
+    let filled = site.join("filled");
+    std::fs::create_dir_all(&filled).expect("a directory");
+    std::fs::write(
+        filled.join("index.html"),
+        SSR_TEMPLATE.replacen(
+            "<div id=\"app\"></div>",
+            "<div id=\"app\"><p>old</p></div><script type=\"application/json\" id=\"nova-data\">[0]</script>",
+            1,
+        ),
+    )
+    .expect("a template");
+    std::fs::write(filled.join("manifest.json"), "{\"files\": {}}\n").expect("a manifest");
+    let a = run(&["filled"]).success();
+    let out = String::from_utf8_lossy(&a.get_output().stdout).replace("\r\n", "\n");
+    let (_, page) = out.split_once(respond).expect("the respond line");
+    let page = page.strip_suffix('\n').unwrap_or(page).to_string();
+    assert!(
+        ssr_pages(SSR_TEMPLATE, &page_view).contains(&page),
+        "{page}"
+    );
+
+    let rooted = "<div id=\"app\"></div>\n";
+    for (dir, template, manifest, says) in [
+        (
+            "missing",
+            None,
+            None,
+            "ssr: cannot read missing/index.html: ",
+        ),
+        (
+            "rootless",
+            Some("<div id=\"root\"></div>\n"),
+            Some("{\"files\": {}}\n"),
+            "ssr: rootless/index.html has no <div id=\"app\">\n",
+        ),
+        (
+            "unlisted",
+            Some(rooted),
+            None,
+            "ssr: cannot read unlisted/manifest.json: ",
+        ),
+        (
+            "fileless",
+            Some(rooted),
+            Some("{\"name\": \"site\"}\n"),
+            "ssr: fileless/manifest.json has no \"files\" object\n",
+        ),
+    ] {
+        let d = site.join(dir);
+        std::fs::create_dir_all(&d).expect("a directory");
+        if let Some(t) = template {
+            std::fs::write(d.join("index.html"), t).expect("a template");
+        }
+        if let Some(m) = manifest {
+            std::fs::write(d.join("manifest.json"), m).expect("a manifest");
+        }
+        let a = run(&[dir]).code(3);
+        let o = a.get_output();
+        assert_eq!(String::from_utf8_lossy(&o.stdout), "", "{dir}");
+        let err = String::from_utf8_lossy(&o.stderr).replace("\r\n", "\n");
+        if says.ends_with('\n') {
+            assert_eq!(err, says, "{dir}");
+        } else {
+            assert!(err.starts_with(says), "{dir}: {err}");
+        }
+    }
+}
+
 /// SSG (spec 4.6 §6.4): `serve` given `--ssg <dir>` binds nothing, and
 /// writes a page for each static route, `/` over the template it read, the
 /// others in directories it makes, skipping the route with a parameter and
