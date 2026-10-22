@@ -108,7 +108,15 @@ jobs:
   # in `$RUNNER_TEMP`, starts its server on port 0, and checks that a
   # server-rendered page, and a page SSG wrote, served by a static server,
   # hydrate in place: the server's nodes stay, and a click updates them. It
-  # kills the server at the end. Playwright, pinned, is installed here only,
+  # kills the server at the end. And 4.7's gate (spec
+  # docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+  # §7.5): `blog.mjs` builds `examples/07-fullstack-blog` with `nova build
+  # --ssr` in `$RUNNER_TEMP`, sets its admin's password, starts its server
+  # on port 0, and checks that every page hydrates in place, that the
+  # comment form's checks and post work, that the admin creates, edits and
+  # deletes a post, that a script in a title or a comment stays text, and
+  # that a form without its CSRF token is refused; it kills the server at
+  # the end. Playwright, pinned, is installed here only,
   # into a scratch directory; nothing in `cargo test` or `nova` installs a
   # package. Ubuntu only: one browser job suffices.
   browser:
@@ -148,6 +156,8 @@ jobs:
           node tests/browser/router.mjs target/debug/nova "$RUNNER_TEMP/router" "$RUNNER_TEMP/pw"
       - name: SSR and SSG in Chromium
         run: node tests/browser/ssr.mjs target/debug/nova "$RUNNER_TEMP/ssr" "$RUNNER_TEMP/pw"
+      - name: The blog in Chromium
+        run: node tests/browser/blog.mjs target/debug/nova "$RUNNER_TEMP/blog" "$RUNNER_TEMP/pw"
 
   fmt:
     name: Rustfmt
