@@ -12603,9 +12603,10 @@ fn ssr_ssg_writes_the_static_pages_and_refuses_a_bad_path() {
 /// `tests/*.nova` reach its server's modules through `src/lib.nova`, which
 /// the client never imports, and pass: the store's JSON both ways, and the
 /// users' in a file of their own, sessions and their tags, when ended
-/// sessions are dropped, CSRF tokens, a password hashed and checked with a
-/// low count, the rounds a name no user has costs, the form checks, the
-/// text the server keeps, paragraphs and the page's data.
+/// sessions are dropped, CSRF tokens, which are no cookie's tag, a
+/// password hashed and checked with a low count, the rounds a name no user
+/// has costs, the form checks, the text the server keeps, paragraphs and
+/// the page's data.
 #[test]
 fn the_blog_example_passes_its_own_tests() {
     let base = std::env::temp_dir().join("nova-blog-nova-test");
@@ -12635,6 +12636,7 @@ fn the_blog_example_passes_its_own_tests() {
         "store::the_users_have_a_file_of_their_own",
         "sessions::a_wrong_tag_is_no_session",
         "sessions::a_csrf_token_belongs_to_its_session",
+        "sessions::a_csrf_token_is_no_cookie_tag",
         "sessions::ended_sessions_are_dropped_once_the_table_has_doubled",
         "passwords::the_right_password_logs_in",
         "passwords::a_name_no_user_has_costs_the_most_rounds_a_user_has",
@@ -12648,7 +12650,7 @@ fn the_blog_example_passes_its_own_tests() {
         );
     }
     assert!(
-        out.ends_with("test result: ok. 21 passed; 0 failed; 0 trapped; 21 total\n"),
+        out.ends_with("test result: ok. 22 passed; 0 failed; 0 trapped; 22 total\n"),
         "{out}"
     );
 }

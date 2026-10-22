@@ -39,20 +39,26 @@
 //    `window.novaXss` and open a dialog posts too: neither happens, and its
 //    text shows as written;
 // 6. the comment form, its hidden `csrf` field removed, is answered `403`
-//    with the page saying the form has expired, and the comment is not
-//    added;
-// 7. it logs in through the form; `/admin`, `/admin/new` and an edit page
-//    hydrate in place; it creates a post whose title holds the same script,
-//    which shows as text on the admin's list, the home page and its own,
-//    and runs nothing; edits it; and deletes it, after which its page is
-//    `404`.
+//    with the page saying the form has expired, at `/posts/1/comments`,
+//    which hydrates in place, and the comment is not added;
+// 7. a login with a wrong password is answered `401` with the login's page
+//    at `/login`, which hydrates in place with the name kept and the
+//    form's error; then it logs in through the form; `/admin`, `/admin/new`
+//    and an edit page hydrate in place; it creates a post whose title holds
+//    the same script, which shows as text on the admin's list, the home
+//    page and its own, and runs nothing; an edit with a blank title, sent
+//    by the form's `submit()`, is answered `400` with the editor at
+//    `/admin/posts/<id>`, the path it was posted to, which hydrates in
+//    place with the body kept and the title's message; it edits the post
+//    from there; and deletes it, after which its page is `404`.
 // No page logs a console error, a hydration mismatch among them, but the
 // one Chromium logs for a document answered `4xx` that the step expects;
 // no page throws, and no dialog opens. The summary line says what it did,
-// the nodes each page kept, and the client's size, `app.wasm` and `app.js`
-// gzipped, printed and not limited. The server is killed at the end, pass
-// or fail. Every wait polls, for 30 seconds at most. Playwright is the
-// job's own install, as for `counter.mjs`.
+// the nodes each page kept, those of the four pages a form was answered
+// with at the path it was posted to among them, and the client's size,
+// `app.wasm` and `app.js` gzipped, printed and not limited. The server is
+// killed at the end, pass or fail. Every wait polls, for 30 seconds at
+// most. Playwright is the job's own install, as for `counter.mjs`.
 
 import { spawn } from "node:child_process";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
@@ -77,7 +83,8 @@ const EXE = process.platform === "win32" ? ".exe" : "";
 const NUL = String.fromCharCode(0);
 
 // Runs `command` in `dir` to its end, `input` on its stdin: its status and
-// its output.
+// its output. It answers on `close`, once the child's stdout and stderr
+// have closed, not on `exit`, which can come while output is still unread.
 function run(command, args, dir, env, input = null) {
   return new Promise((done, failed) => {
     const child = spawn(command, args, { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
@@ -89,7 +96,7 @@ function run(command, args, dir, env, input = null) {
       output += chunk;
     });
     child.on("error", failed);
-    child.on("exit", (code) => done({ code, output }));
+    child.on("close", (code) => done({ code, output }));
     child.stdin.end(input ?? "");
   });
 }
@@ -215,6 +222,16 @@ async function submits(page, selector, what) {
   return response.status();
 }
 
+// Runs `act`, which sends a form, and waits for the page it leads to to
+// load: the response, for `hydratesInPlace`'s `navigate`.
+async function answered(page, act) {
+  const [response] = await Promise.all([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: LIMIT }),
+    act(),
+  ]);
+  return response;
+}
+
 // The comment form's submit button is disabled, or not.
 const disabled = (page) =>
   page.evaluate(() => {
@@ -286,6 +303,8 @@ try {
     clean(what);
   };
   const kept = [];
+  // The pages a form was answered with at the path it was posted to.
+  const answers = [];
 
   // 1. Every page a visitor sees, in place.
   for (const [path, title, status] of [
@@ -332,13 +351,9 @@ try {
   await page.fill("#comment-form input[name=name]", "Katherine");
   await page.fill("#comment-form textarea[name=text]", "");
   expected.add(at("/posts/1/comments"));
-  const failed = await hydratesInPlace(page, at("/posts/1/comments"), "Hello from a Nova server", async () => {
-    const [response] = await Promise.all([
-      page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: LIMIT }),
-      page.evaluate(() => document.getElementById("comment-form").submit()),
-    ]);
-    return response;
-  });
+  const failed = await hydratesInPlace(page, at("/posts/1/comments"), "Hello from a Nova server", () =>
+    answered(page, () => page.evaluate(() => document.getElementById("comment-form").submit())),
+  );
   if (failed.status !== 400 || new URL(page.url()).pathname !== "/posts/1/comments") {
     throw new Error(`a comment with a blank text got ${failed.status} at ${page.url()}`);
   }
@@ -346,7 +361,7 @@ try {
   if (name !== "Katherine" || (await messages()).join("|") !== "|Write a comment.") {
     throw new Error(`the failed comment's form reads ${JSON.stringify(name)}, ${JSON.stringify(await messages())}`);
   }
-  kept.push(`/posts/1/comments ${failed.count}`);
+  answers.push(`a comment that fails a check, 400 at /posts/1/comments ${failed.count}`);
   clean("a comment that fails a check");
 
   // 4. A comment holding a NUL.
@@ -375,24 +390,40 @@ try {
   await page.waitForTimeout(500);
   await inert("a comment with a script");
 
-  // 6. A form without its token.
+  // 6. A form without its token, refused at the path it was posted to.
   const before = await page.$$eval("#comments .comment", (cs) => cs.length);
   await page.evaluate(() => document.querySelector("#comment-form input[name=csrf]").remove());
   await page.fill("#comment-form input[name=name]", "Eve");
   await page.fill("#comment-form textarea[name=text]", "No token");
-  const forged = await submits(page, "#comment-form button[type=submit]", "the refusal");
+  const forged = await hydratesInPlace(page, at("/posts/1/comments"), "Not sent", () =>
+    answered(page, () => page.click("#comment-form button[type=submit]")),
+  );
   const refusal = await page.evaluate(() => document.getElementById("refused")?.textContent ?? "");
-  if (forged !== 403 || !refusal.includes("expired")) {
-    throw new Error(`a comment without its token got ${forged}: ${JSON.stringify(refusal)}`);
+  if (forged.status !== 403 || new URL(page.url()).pathname !== "/posts/1/comments" || !refusal.includes("expired")) {
+    throw new Error(`a comment without its token got ${forged.status} at ${page.url()}: ${JSON.stringify(refusal)}`);
   }
+  answers.push(`a comment without its token, 403 at /posts/1/comments ${forged.count}`);
   clean("a comment without its token");
   await hydratesInPlace(page, at("/posts/1"), "Hello from a Nova server");
   const after = await page.$$eval("#comments .comment", (cs) => cs.length);
   if (after !== before) throw new Error(`the refused comment was added: ${before} comments became ${after}`);
 
-  // 7. The admin: log in, then create, edit and delete a post.
+  // 7. The admin: a wrong password, answered at `/login`; then log in, and
+  // create, edit and delete a post.
   await hydratesInPlace(page, at("/login"), "Log in");
   await page.fill("#login-form input[name=name]", "admin");
+  await page.fill("#login-form input[name=password]", "a wrong password");
+  expected.add(at("/login"));
+  const wrong = await hydratesInPlace(page, at("/login"), "Log in", () =>
+    answered(page, () => page.click("#login-form button[type=submit]")),
+  );
+  const error = await page.evaluate(() => document.getElementById("login-error")?.textContent ?? "");
+  const who = await page.inputValue("#login-form input[name=name]");
+  if (wrong.status !== 401 || new URL(page.url()).pathname !== "/login" || error !== "Wrong name or password." || who !== "admin") {
+    throw new Error(`a wrong password got ${wrong.status} at ${page.url()}, reading ${JSON.stringify(error)} for ${JSON.stringify(who)}`);
+  }
+  answers.push(`a wrong password, 401 at /login ${wrong.count}`);
+  clean("a wrong password");
   await page.fill("#login-form input[name=password]", PASSWORD);
   const logged = await submits(page, "#login-form button[type=submit]", "the admin's page");
   if (logged !== 200 || new URL(page.url()).pathname !== "/admin") {
@@ -427,6 +458,22 @@ try {
   await inert("the new post's page");
 
   await hydratesInPlace(page, at(`/admin/posts/${id}/edit`), "Edit a post");
+  // An edit that fails a check, at the path it was posted to.
+  await page.fill("#editor input[name=title]", "");
+  expected.add(at(`/admin/posts/${id}`));
+  const refused = await hydratesInPlace(page, at(`/admin/posts/${id}`), "Edit a post", () =>
+    answered(page, () => page.evaluate(() => document.getElementById("editor").submit())),
+  );
+  if (refused.status !== 400 || new URL(page.url()).pathname !== `/admin/posts/${id}`) {
+    throw new Error(`an edit with a blank title got ${refused.status} at ${page.url()}`);
+  }
+  const body = await page.inputValue("#editor textarea[name=body]");
+  const notes = await page.$$eval("#editor .message", (ps) => ps.map((p) => p.textContent));
+  if (body !== "Its first paragraph.\n\nIts second." || notes.join("|") !== "Give the post a title.|") {
+    throw new Error(`the failed edit's form reads ${JSON.stringify(body)}, ${JSON.stringify(notes)}`);
+  }
+  answers.push(`an edit that fails a check, 400 at /admin/posts/${id} ${refused.count}`);
+  clean("an edit that fails a check");
   await page.fill("#editor input[name=title]", "An edited post");
   await submits(page, "#editor button[type=submit]", "the admin's page after an edit");
   const edited = await page.$$eval(".row > a:first-child", (as) => as.map((a) => a.textContent));
@@ -452,7 +499,7 @@ try {
   }
 
   console.log(
-    `blog: every page hydrates in place (nodes kept: ${kept.join(", ")}), the comment form's button is disabled while a field is blank and the comment posts, a comment that fails a check gets 400 at /posts/1/comments, a comment holding a NUL comes back without it, a script in a comment and in a title stays text, a form without its token gets 403, and the admin logs in and creates, edits and deletes a post; the client is ${gzipped} bytes gzipped`,
+    `blog: every page hydrates in place (nodes kept: ${kept.join(", ")}), and so does each form's answer at the path it was posted to (nodes kept: ${answers.join("; ")}), the comment form's button is disabled while a field is blank and the comment posts, a comment holding a NUL comes back without it, a script in a comment and in a title stays text, a form without its token gets 403, and the admin logs in and creates, edits and deletes a post; the client is ${gzipped} bytes gzipped`,
   );
 } catch (e) {
   console.error(`the server's stderr:\n${server.stderr()}`);

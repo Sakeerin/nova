@@ -486,8 +486,11 @@ exists, an `async fn` that never suspends, like its neighbours, over a
 `from` to `to`, replacing the file at `to` when there is one, on Windows as
 on Unix, where the replacement is atomic: a file written whole beside its
 target, then renamed over it, leaves the old file or the new one at `to`,
-never half of one. Nothing at `from`, or no directory to hold `to`, is
-`NotFound`
+never half of one, if the program stops or its process dies in between.
+Nothing flushes the new file to disk before the rename, and `std/fs` has
+no call that would, so after a power loss or a crash of the system, a file
+system that does not flush before a rename can leave the file at `to`
+empty. Nothing at `from`, or no directory to hold `to`, is `NotFound`
 (`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
 §5; ADR 0046).
 

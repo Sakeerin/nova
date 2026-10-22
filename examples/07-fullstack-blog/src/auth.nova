@@ -2,22 +2,24 @@
 //!
 //! - **A session** is a random id, 32 bytes in hex, in a table in memory
 //!   from the id to who is logged in, if anyone, and when it started. The
-//!   cookie `sid` carries `<id>.<tag>`, the tag `hmac_sha256(key, id)` in
-//!   hex, checked with `hmac_sha256_verify`, which takes the same time
-//!   however much of a wrong tag matches. A cookie whose tag is wrong, or
-//!   whose id the table does not hold, or holds as ended, is no session. A
-//!   visitor's session ends after a day, a logged-in one after eight hours,
-//!   and a restart ends them all, since the table is in memory. The ended
-//!   ones are dropped from the table once it has grown to twice the size it
-//!   had after they were last dropped, and to at least 64 sessions, so it
-//!   holds at most twice the sessions live at the last scan, or 64 if that
-//!   is more; those that end after a burst stay until it doubles again.
-//!   Each scan is paid for by the sessions started since the last, so
-//!   starting one costs the same on average however many the table holds,
-//!   but the start that finds it doubled scans it all, in time linear in
-//!   its size.
+//!   cookie `sid` carries `<id>.<tag>`, the tag
+//!   `hmac_sha256(key, "sid:" + id)` in hex, checked with
+//!   `hmac_sha256_verify`, which takes the same time however much of a
+//!   wrong tag matches. A cookie whose tag is wrong, or whose id the table
+//!   does not hold, or holds as ended, is no session. A visitor's session
+//!   ends after a day, a logged-in one after eight hours, and a restart
+//!   ends them all, since the table is in memory. The ended ones are
+//!   dropped from the table once it has grown to twice the size it had
+//!   after they were last dropped, and to at least 64 sessions, so it holds
+//!   at most twice the sessions live at the last scan, or 64 if that is
+//!   more; those that end after a burst stay until it doubles again. Each
+//!   scan is paid for by the sessions started since the last, so starting
+//!   one costs the same on average however many the table holds, but the
+//!   start that finds it doubled scans it all, in time linear in its size.
 //! - **The CSRF token** of a session is `hmac_sha256(key, "csrf:" + id)` in
 //!   hex: nothing more to store, and worth nothing with any other session.
+//!   The two prefixes keep the tags and the tokens apart: no token is the
+//!   tag of any id, and no tag is a token.
 //! - **A password** is stored only as its PBKDF2-HMAC-SHA256 hash, with its
 //!   salt and its iteration count.
 //! - **The key** is 32 random bytes, written in hex to `<data>/secret` the
@@ -50,6 +52,12 @@ pub record Sessions {
     pub admin_life: Int,
     pub kept: Int,
 }
+
+// What a session id's tag signs: `sid:` and the id.
+fn signed_id(id: String) -> Bytes { bytes_from_string("sid:${id}") }
+
+// What a session's CSRF token signs: `csrf:` and its id.
+fn signed_token(id: String) -> Bytes { bytes_from_string("csrf:${id}") }
 
 // `n` random bytes in hex. The system's random source failing ends the
 // program: nothing here can go on without it.
@@ -103,8 +111,18 @@ impl Sessions {
         s
     }
 
-    /// The tag of the session id `id`, in hex.
-    pub fn tag(self, id: String) -> String { hmac_sha256(self.key, bytes_from_string(id)).to_hex() }
+    /// The tag of the session id `id`, in hex: `hmac_sha256` of `sid:` and
+    /// the id, so that a CSRF token, of `csrf:` and an id, is no tag.
+    pub fn tag(self, id: String) -> String { hmac_sha256(self.key, signed_id(id)).to_hex() }
+
+    /// Whether `tag`, in hex, is the tag of the session id `id`, compared in
+    /// constant time.
+    pub fn tag_ok(self, id: String, tag: String) -> Bool {
+        match bytes_from_hex(tag) {
+            Some(t) => hmac_sha256_verify(self.key, signed_id(id), t)
+            None => false
+        }
+    }
 
     /// The value of `s`'s cookie: its id, a `.` and its tag.
     pub fn cookie(self, s: Session) -> String { "${s.id}.${self.tag(s.id)}" }
@@ -117,11 +135,7 @@ impl Sessions {
             None => return None
         }
         let id = cookie.slice(0, dot)
-        let tag = match bytes_from_hex(cookie.slice(dot + 1, cookie.len())) {
-            Some(t) => t
-            None => return None
-        }
-        if !hmac_sha256_verify(self.key, bytes_from_string(id), tag) { return None }
+        if !self.tag_ok(id, cookie.slice(dot + 1, cookie.len())) { return None }
         match self.table.get(id) {
             Some(s) => { if self.ended(s) { None } else { Some(s) } }
             None => None
@@ -135,14 +149,12 @@ impl Sessions {
     }
 
     /// The CSRF token of `s`, in hex.
-    pub fn token(self, s: Session) -> String {
-        hmac_sha256(self.key, bytes_from_string("csrf:${s.id}")).to_hex()
-    }
+    pub fn token(self, s: Session) -> String { hmac_sha256(self.key, signed_token(s.id)).to_hex() }
 
     /// Whether `token` is `s`'s CSRF token, compared in constant time.
     pub fn token_ok(self, s: Session, token: String) -> Bool {
         match bytes_from_hex(token) {
-            Some(t) => hmac_sha256_verify(self.key, bytes_from_string("csrf:${s.id}"), t)
+            Some(t) => hmac_sha256_verify(self.key, signed_token(s.id), t)
             None => false
         }
     }
