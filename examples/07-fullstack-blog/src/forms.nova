@@ -1,0 +1,118 @@
+//! The checks both sides run on a form's fields: the server on every
+//! `POST`, which it answers with the form again and `400` when one fails;
+//! the client as the fields change, once the page has hydrated. Each check
+//! returns the field's message, or `""` when the value is good. A value is
+//! measured in characters as the server stores it, `cleaned`.
+//!
+//! Also the pieces every form is built from: the hidden CSRF field, a
+//! field's message, and the submit button, disabled while the form is not
+//! valid.
+
+import ui
+import ui::html::{attr, button, class, div, dyn_text, input, name, p, text, value}
+
+// The longest title, in characters.
+const TITLE_MAX: Int = 200
+
+// The longest body.
+const BODY_MAX: Int = 20000
+
+// The longest name on a comment.
+const NAME_MAX: Int = 60
+
+// The longest comment.
+const TEXT_MAX: Int = 2000
+
+// `what`'s message when `value`, cleaned, is empty or longer than `max`.
+fn sized(value: String, max: Int, blank: String, what: String) -> String {
+    let n = cleaned(value).len()
+    if n == 0 { return blank }
+    if n > max { return "${what} has at most ${max} characters; this one has ${n}." }
+    ""
+}
+
+/// A post's title: 1 to 200 characters.
+pub fn title_message(title: String) -> String {
+    sized(title, TITLE_MAX, "Give the post a title.", "A title")
+}
+
+/// A post's body: 1 to 20,000 characters.
+pub fn body_message(body: String) -> String {
+    sized(body, BODY_MAX, "Write something in the post.", "A post")
+}
+
+/// The name on a comment: 1 to 60 characters.
+pub fn name_message(name: String) -> String { sized(name, NAME_MAX, "Say who you are.", "A name") }
+
+/// A comment: 1 to 2,000 characters.
+pub fn text_message(text: String) -> String {
+    sized(text, TEXT_MAX, "Write a comment.", "A comment")
+}
+
+/// The name at the login: not blank.
+pub fn login_name_message(name: String) -> String {
+    if name.trim() == "" { "Give your name." } else { "" }
+}
+
+/// The password at the login: not blank. It is not trimmed when checked.
+pub fn password_message(password: String) -> String {
+    if password.trim() == "" { "Give your password." } else { "" }
+}
+
+/// Whether a post's title and body pass.
+pub fn post_ok(title: String, body: String) -> Bool {
+    title_message(title) == "" && body_message(body) == ""
+}
+
+/// Whether a comment's name and text pass.
+pub fn comment_ok(name: String, text: String) -> Bool {
+    name_message(name) == "" && text_message(text) == ""
+}
+
+/// Whether a login's name and password pass.
+pub fn login_ok(name: String, password: String) -> Bool {
+    login_name_message(name) == "" && password_message(password) == ""
+}
+
+/// `text` as the server stores it: with no NUL, which a browser's parser
+/// drops from a page's text and makes U+FFFD in a `textarea` or an
+/// attribute, so a page holding one would not be the page its data
+/// renders; with each carriage return and line feed pair as a line feed, as
+/// a browser sends a `textarea`'s lines; and trimmed.
+pub fn cleaned(text: String) -> String {
+    let kept = "".join(text.split("\0"))
+    "\n".join(kept.split("\r\n")).trim()
+}
+
+// --- The pieces of a form ---
+
+/// The hidden field that carries the session's CSRF token.
+pub fn csrf_field(token: String) -> View {
+    input([attr("type", "hidden"), name("csrf"), value(token)])
+}
+
+/// A field's message, under it: `check()`'s, while `shown` holds.
+pub fn message(shown: Signal<Bool>, check: fn() -> String) -> View {
+    p([class("message")], [dyn_text(|| if shown.value() { check() } else { "" })])
+}
+
+/// The submit button, enabled while `ok` holds and disabled otherwise.
+///
+/// `std/ui` writes every attribute it is given and never removes one, and
+/// `disabled` disables a button by being there at all, whatever its value.
+/// So the two states are two buttons, each under a `show`: the server's
+/// HTML holds the enabled one, which a page without JavaScript keeps, and
+/// the client swaps them as `ok` changes.
+pub fn submit(ok: Signal<Bool>, label: String) -> View {
+    let blocked = memo(|| !ok.value())
+    div(
+        [class("actions")],
+        [
+            show(ok, || button([attr("type", "submit")], [text(label)])),
+            show(
+                blocked,
+                || button([attr("type", "submit"), attr("disabled", "disabled")], [text(label)]),
+            ),
+        ],
+    )
+}

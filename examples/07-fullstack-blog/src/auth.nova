@@ -1,0 +1,230 @@
+//! Sessions, CSRF tokens and passwords.
+//!
+//! - **A session** is a random id, 32 bytes in hex, in a table in memory
+//!   from the id to who is logged in, if anyone, and when it started. The
+//!   cookie `sid` carries `<id>.<tag>`, the tag `hmac_sha256(key, id)` in
+//!   hex, checked with `hmac_sha256_verify`, which takes the same time
+//!   however much of a wrong tag matches. A cookie whose tag is wrong, or
+//!   whose id the table does not hold, or holds as ended, is no session. A
+//!   visitor's session ends after a day, a logged-in one after eight hours,
+//!   and a restart ends them all, since the table is in memory. The ended
+//!   ones are dropped from the table once it has grown to twice the size it
+//!   had after they were last dropped, and to at least 64 sessions, so it
+//!   holds at most twice the sessions live at the last scan, or 64 if that
+//!   is more; those that end after a burst stay until it doubles again.
+//!   Each scan is paid for by the sessions started since the last, so
+//!   starting one costs the same on average however many the table holds,
+//!   but the start that finds it doubled scans it all, in time linear in
+//!   its size.
+//! - **The CSRF token** of a session is `hmac_sha256(key, "csrf:" + id)` in
+//!   hex: nothing more to store, and worth nothing with any other session.
+//! - **A password** is stored only as its PBKDF2-HMAC-SHA256 hash, with its
+//!   salt and its iteration count.
+//! - **The key** is 32 random bytes, written in hex to `<data>/secret` the
+//!   first time the server starts, and read from there afterwards.
+//!
+//! Native only: `std/crypto` and `std/fs` are not on WASM.
+
+import store::{User}
+
+/// How long a visitor's session lasts, in seconds: a day.
+const VISITOR_LIFE: Int = 86400
+
+/// How long the admin's session lasts: eight hours.
+const ADMIN_LIFE: Int = 28800
+
+/// The fewest sessions the table holds before the ended ones are dropped.
+const FEWEST_TO_DROP: Int = 64
+
+/// A session: its id, who is logged in, `""` for a visitor, when it started
+/// and how many seconds it lasts.
+pub record Session { pub id: String, pub user: String, pub started: Instant, pub life: Int }
+
+/// The sessions, by id, and the key their cookies and tokens are signed
+/// with; `kept` is how many sessions the table held after the ended ones
+/// were last dropped.
+pub record Sessions {
+    pub key: Bytes,
+    pub table: Map<String, Session>,
+    pub visitor_life: Int,
+    pub admin_life: Int,
+    pub kept: Int,
+}
+
+// `n` random bytes in hex. The system's random source failing ends the
+// program: nothing here can go on without it.
+fn random_hex(n: Int) -> String {
+    match random_bytes(n) {
+        Ok(b) => b.to_hex()
+        Err(e) => panic("blog: the system gave no random bytes: ${e.message}")
+    }
+}
+
+impl Sessions {
+    /// No sessions, signed with `key`, lasting a day for a visitor and eight
+    /// hours for the admin.
+    pub fn new(key: Bytes) -> Sessions { Sessions::lasting(key, VISITOR_LIFE, ADMIN_LIFE) }
+
+    /// No sessions, signed with `key`, lasting `visitor` seconds for a
+    /// visitor and `admin` for the admin.
+    pub fn lasting(key: Bytes, visitor: Int, admin: Int) -> Sessions {
+        Sessions { key: key, table: Map::new(), visitor_life: visitor, admin_life: admin, kept: 0 }
+    }
+
+    /// How many sessions the table holds, ended or not.
+    pub fn len(self) -> Int { self.table.len() }
+
+    /// Whether `s` has ended.
+    pub fn ended(self, s: Session) -> Bool { s.started.elapsed().as_millis() >= s.life * 1000 }
+
+    /// Starts a session for `user`, `""` for a visitor, and returns it.
+    /// First, when the table holds at least 64 sessions, and at least twice
+    /// as many as it kept the last time the ended ones were dropped, it
+    /// drops the ended ones: at least half the sessions it then scans have
+    /// started since the last scan, so the scans cost the same per session
+    /// on average, however many the table holds; this start scans them all.
+    pub fn start(mut self, user: String) -> Session {
+        let mut table = self.table
+        if table.len() >= FEWEST_TO_DROP && table.len() >= self.kept * 2 {
+            let ids = table.keys()
+            let mut i = 0
+            while i < ids.len() {
+                match table.get(ids[i]) {
+                    Some(s) => { if self.ended(s) { let _ = table.remove(ids[i]) } }
+                    None => {}
+                }
+                i = i + 1
+            }
+            self.kept = table.len()
+        }
+        let life = if user == "" { self.visitor_life } else { self.admin_life }
+        let s = Session { id: random_hex(32), user: user, started: Instant::now(), life: life }
+        let _ = table.insert(s.id, s)
+        s
+    }
+
+    /// The tag of the session id `id`, in hex.
+    pub fn tag(self, id: String) -> String { hmac_sha256(self.key, bytes_from_string(id)).to_hex() }
+
+    /// The value of `s`'s cookie: its id, a `.` and its tag.
+    pub fn cookie(self, s: Session) -> String { "${s.id}.${self.tag(s.id)}" }
+
+    /// The session a cookie's value names: `None` unless it is `<id>.<tag>`
+    /// with the right tag, and the table holds the id, not ended.
+    pub fn find(self, cookie: String) -> Option<Session> {
+        let dot = match cookie.index_of(".") {
+            Some(at) => at
+            None => return None
+        }
+        let id = cookie.slice(0, dot)
+        let tag = match bytes_from_hex(cookie.slice(dot + 1, cookie.len())) {
+            Some(t) => t
+            None => return None
+        }
+        if !hmac_sha256_verify(self.key, bytes_from_string(id), tag) { return None }
+        match self.table.get(id) {
+            Some(s) => { if self.ended(s) { None } else { Some(s) } }
+            None => None
+        }
+    }
+
+    /// Ends the session `id`.
+    pub fn end(self, id: String) {
+        let mut table = self.table
+        let _ = table.remove(id)
+    }
+
+    /// The CSRF token of `s`, in hex.
+    pub fn token(self, s: Session) -> String {
+        hmac_sha256(self.key, bytes_from_string("csrf:${s.id}")).to_hex()
+    }
+
+    /// Whether `token` is `s`'s CSRF token, compared in constant time.
+    pub fn token_ok(self, s: Session, token: String) -> Bool {
+        match bytes_from_hex(token) {
+            Some(t) => hmac_sha256_verify(self.key, bytes_from_string("csrf:${s.id}"), t)
+            None => false
+        }
+    }
+}
+
+/// The user `name` with the password `password`, hashed over `iterations`
+/// rounds with 16 new random bytes of salt into 32 bytes.
+pub fn hash_password(name: String, password: String, iterations: Int) -> User {
+    let salt = match random_bytes(16) {
+        Ok(b) => b
+        Err(e) => panic("blog: the system gave no random bytes: ${e.message}")
+    }
+    let hash = pbkdf2_sha256(bytes_from_string(password), salt, iterations, 32)
+    User { name: name, salt: salt.to_hex(), iterations: iterations, hash: hash.to_hex() }
+}
+
+// The salt for a name no user has: fixed, so that a wrong name costs the
+// same rounds as a wrong password.
+fn no_salt() -> Bytes { bytes_from_string("fullstack-blog:no-such-user") }
+
+// Whether `n` is a count PBKDF2 takes.
+fn count_ok(n: Int) -> Bool { n >= 1 && n <= 4294967295 }
+
+/// The rounds a login with a name no user has spends: the largest count of
+/// `users`' hashes that PBKDF2 takes, or `otherwise` when there is none, so
+/// that such a login takes as long as one with the name of the user whose
+/// hash has the most rounds.
+pub fn no_user_rounds(users: Vec<User>, otherwise: Int) -> Int {
+    let mut most = 0
+    let mut i = 0
+    while i < users.len() {
+        let n = users.get(i).unwrap().iterations
+        if count_ok(n) && n > most { most = n }
+        i = i + 1
+    }
+    if most == 0 { otherwise } else { most }
+}
+
+/// Whether `password` is `found`'s. For a name no user has, `found` is
+/// `None`: the same work is done against a fixed salt with `iterations`
+/// rounds, `no_user_rounds`'s count, and the answer is `false`, so the two
+/// cases take as long and say the same. A stored hash that is not 32
+/// bytes never matches, since `pbkdf2_sha256_verify` would take its start
+/// for the whole.
+pub fn password_ok(found: Option<User>, password: String, iterations: Int) -> Bool {
+    let given = bytes_from_string(password)
+    match found {
+        Some(u) => {
+            let salt = bytes_from_hex(u.salt)
+            let hash = bytes_from_hex(u.hash)
+            if salt.is_none() || hash.is_none() || !count_ok(u.iterations) { return false }
+            let key = hash.unwrap()
+            if key.len() != 32 { return false }
+            pbkdf2_sha256_verify(given, salt.unwrap(), u.iterations, key)
+        }
+        None => {
+            let rounds = if count_ok(iterations) { iterations } else { 1 }
+            let _ = pbkdf2_sha256_verify(given, no_salt(), rounds, bytes_from_ints([0; 32]))
+            false
+        }
+    }
+}
+
+/// The key in `<dir>/secret`: 32 bytes in hex. When the file does not exist
+/// yet, 32 random bytes, written there first. An error names the file.
+pub async fn load_key(dir: String) -> Result<Bytes, String> {
+    let path = "${dir}/secret"
+    if exists(path).await {
+        let text = match read_to_string(path).await {
+            Ok(t) => t
+            Err(e) => return Err("cannot read ${path}: ${e.message}")
+        }
+        let key = bytes_from_hex(text.trim()).unwrap_or(bytes_from_ints([]))
+        if key.len() != 32 { return Err("${path} does not hold 32 bytes in hex") }
+        return Ok(key)
+    }
+    let key = match random_bytes(32) {
+        Ok(b) => b
+        Err(e) => return Err("the system gave no random bytes: ${e.message}")
+    }
+    match write_string(path, "${key.to_hex()}\n").await {
+        Ok(_) => Ok(key)
+        Err(e) => Err("cannot write ${path}: ${e.message}")
+    }
+}

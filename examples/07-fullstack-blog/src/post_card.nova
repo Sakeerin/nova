@@ -1,0 +1,72 @@
+//! A post as the home page lists it: its title, linked to its page, its
+//! date, and its first paragraph. And the rules for a post's text, which is
+//! plain: a blank line separates paragraphs, and each paragraph becomes a
+//! `<p>` whose text `std/ui` escapes.
+
+import app::{Post}
+import ui
+import ui::html::{a, article, class, div, h2, p, text}
+
+/// The paragraphs of `body`, in order: its lines, with a carriage return and
+/// line feed pair read as a line feed, cut at each line that is empty or
+/// only spaces, each paragraph's lines joined by line feeds and trimmed, and
+/// no paragraph empty.
+pub fn paragraphs(body: String) -> [String] {
+    let lines = "\n".join(body.split("\r\n")).split("\n")
+    let mut kept: Vec<String> = Vec::new()
+    let mut para = ""
+    let mut i = 0
+    while i < lines.len() {
+        let line = lines[i]
+        if line.trim() == "" {
+            if para.trim() != "" { kept.push(para.trim()) }
+            para = ""
+        } else if para == "" {
+            para = line
+        } else {
+            para = "${para}\n${line}"
+        }
+        i = i + 1
+    }
+    if para.trim() != "" { kept.push(para.trim()) }
+    let mut out = [""; kept.len()]
+    let mut k = 0
+    while k < kept.len() {
+        out[k] = kept.get(k).unwrap_or("")
+        k = k + 1
+    }
+    out
+}
+
+/// The first paragraph of `body`, or `""` when it has none.
+pub fn first_paragraph(body: String) -> String {
+    let all = paragraphs(body)
+    if all.len() == 0 { "" } else { all[0] }
+}
+
+/// The day of `when`, a time as `SystemTime::to_iso8601` writes it, such as
+/// `2026-10-21` for `2026-10-21T08:30:00.000Z`.
+pub fn day(when: String) -> String { if when.len() < 10 { when } else { when.slice(0, 10) } }
+
+/// `body`'s paragraphs, each a `<p>`, in a `div` of class `body`.
+pub fn body_view(body: String) -> View {
+    let all = paragraphs(body)
+    let mut views = [text(""); all.len()]
+    let mut i = 0
+    while i < all.len() {
+        views[i] = p([], [text(all[i])])
+        i = i + 1
+    }
+    div([class("body")], views)
+}
+
+/// A post on the home page.
+pub component PostCard(post: Post) {
+    view {
+        article(class: "card") {
+            h2 { a(href: "/posts/${post.id}") { text(post.title) } }
+            p(class: "date") { text(day(post.created)) }
+            p { text(first_paragraph(post.body)) }
+        }
+    }
+}
