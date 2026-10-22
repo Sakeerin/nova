@@ -13,6 +13,12 @@
 //! with `--ssg` and the client's output directory, which may be absolute,
 //! and the server writes a page there for each static route.
 //!
+//! A server that needs more than `serve`, routes of its own, a cookie, or a
+//! status a page decides, is `std/http`'s `Server` with its own routes, and
+//! `Dist` is the built site it serves beside them: `Dist::open` reads it,
+//! `file` answers a request for one of its files, and `respond` answers with
+//! a page.
+//!
 //! `page` renders the view at a location, `page_with` with the server's data
 //! beside it, and `document` puts a page into the built `index.html`, in its
 //! `<div id="app">`:
@@ -45,9 +51,14 @@
 // docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md
 // §6). The low level is three functions of strings: `page` and `page_with`
 // render a view at a location through `std/ui/router`'s `with_location`,
-// and `document` fills the template. `serve` is `std/http`'s `Server` with
-// one fallback that answers every `GET`: a file the build's manifest lists,
-// a 404 for any other name with a `.`, or a page. A file is read when it is
+// and `document` fills the template. `Dist` (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §4)
+// is what `serve` is made of, for a server written by hand: the template and
+// the manifest, read once by `Dist::open`; `file`, which answers for a file
+// the manifest lists; and `respond`, which answers with a page. `serve` is
+// `std/http`'s `Server` with one fallback, on a `Dist`, that answers every
+// `GET`: a file the build's manifest lists, a 404 for any other name with a
+// `.`, or a page. A file is read when it is
 // asked for, through the builtins `std/fs` is written on, since a handler
 // cannot await; no path outside the manifest is ever read, so there is no
 // traversal to refuse; and a manifest's path that would leave `dist`, with
@@ -269,28 +280,9 @@ pub async fn serve(site: Site) -> Result<(), IoError> {
         Some(dir) => return generate(site, dir).await
         None => {}
     }
-    let index = "${site.dist}/index.html"
-    let template = match read_to_string(index).await {
-        Ok(t) => {
-            match emptied(t) {
-                Some(t) => t
-                None => return Err(rootless("ssr", index))
-            }
-        }
-        Err(e) => return Err(unreadable("ssr", index, e))
-    }
-    let listing = "${site.dist}/manifest.json"
-    let text = match read_to_string(listing).await {
-        Ok(t) => t
-        Err(e) => return Err(unreadable("ssr", listing, e))
-    }
-    let files = match listed(text) {
-        Some(files) => files
-        None => {
-            return Err(
-                IoError { kind: InvalidData, message: "ssr: ${listing} has no \"files\" object" },
-            )
-        }
+    let dist = match Dist::open(site.dist).await {
+        Ok(d) => d
+        Err(e) => return Err(e)
     }
     // As `Server::listen` does before its `bind`: from here a signal stops
     // the server gracefully, even before `listen_on` runs.
@@ -312,63 +304,220 @@ pub async fn serve(site: Site) -> Result<(), IoError> {
     }
     println("ssr: serving http://${host_of(site.address)}:${port}/")
     let _ = stdout().flush().await
-    let served = Served {
-        dist: site.dist,
-        files: files,
-        template: template,
-        routes: site.routes,
-        render: site.render,
-    }
+    let served = Served { dist: dist, routes: site.routes, render: site.render }
     Server::new().fallback(|r: Request| answer(served, r)).listen_on(l).await
 }
 
-// What each request is answered from: the site, and what `serve` read when
-// it started.
-record Served {
-    dist: String,
-    files: Map<String, JsonValue>,
-    template: String,
-    routes: [Route],
-    render: fn(String) -> Page,
-}
+// What each request is answered from: what `serve` read when it started,
+// and the site's routes and pages.
+record Served { dist: Dist, routes: [Route], render: fn(String) -> Page }
 
-// The response to a `GET` of `req.path` (spec §6.3). `Server` sends any
+// The response to a `GET` of `req.path` (spec 4.6 §6.3). `Server` sends any
 // other method `not_found` before it asks.
 fn answer(s: Served, req: Request) -> Response {
-    let target = req.path
+    match s.dist.file(req) {
+        Some(listed) => return listed
+        None => {}
+    }
+    let pieces = site_path(req.path).split("/")
+    if pieces[pieces.len() - 1].contains(".") { return Response::not_found() }
+    let render = s.render
+    let status = if found(s.routes, req.path) { 200 } else { 404 }
+    s.dist.respond(status, render(req.path))
+}
+
+/// The site `nova build --ssr` built, as a server written by hand serves it:
+/// the template each page is put into, its `index.html`, and the files its
+/// `manifest.json` lists. `Dist::open` reads both, `file` answers a request
+/// for one of the files, and `respond` answers with a page.
+///
+/// A program's own `Server` serves it beside routes of its own, which can
+/// set a cookie, choose a status or redirect, by asking `file` first in its
+/// fallback:
+///
+/// ```ignore
+/// let app = Server::new()
+///     .get("/posts/:id", |req: Request| post_page(store, dist, req))
+///     .post("/posts/:id/comments", |req: Request| add_comment(store, req))
+///     .fallback(|req: Request| match dist.file(req) {
+///         Some(file) => file
+///         None => dist.respond(404, page_with(req.path, not_found_data(), App))
+///     })
+/// ```
+pub record Dist {
+    // The directory, as `open` was given it.
+    dir: String,
+    // The manifest's `files`, less those `inside` leaves out.
+    files: Map<String, JsonValue>,
+    // The template, emptied.
+    template: String,
+}
+
+impl Dist {
+    // `serve`'s reading of the template and the manifest (spec
+    // docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+    // §4), every check and every message as it was, so `serve`'s own tests
+    // pin this.
+    /// Reads the site `nova build --ssr` wrote into `dir`, such as `"dist"`:
+    /// `<dir>/index.html`, the template, and `<dir>/manifest.json`, whose
+    /// `files` are the files `file` serves.
+    ///
+    /// Returns an `IoError` naming the file when either cannot be read,
+    /// `ssr: cannot read <file>: ` and the reason, with the kind reading it
+    /// failed with; when the template has no `<div id="app">`,
+    /// `ssr: <dir>/index.html has no <div id="app">`; and when the manifest
+    /// has no `files` object, `ssr: <dir>/manifest.json has no "files"
+    /// object`, both of kind `InvalidData`. A template whose root holds a
+    /// page, as the one SSG writes for `/` does, or a placeholder, is a
+    /// template too: its root is emptied, and the data after it dropped, as
+    /// `document` empties it. A manifest's path with a piece that is empty,
+    /// `.` or `..`, or that holds `\` or NUL, which could name a file outside
+    /// `dir`, is left out, so `file` never serves it. No file is read again
+    /// but those `file` reads, so a change to the template or the manifest
+    /// takes effect once the program opens the site again.
+    ///
+    /// An `async fn` that never suspends, as `std/fs`'s functions are: call
+    /// it once, before serving.
+    ///
+    /// ```ignore
+    /// import ui
+    /// import ui::ssr::{Dist, page_with}
+    /// import app::{App, Data}
+    ///
+    /// async fn main() {
+    ///     let dist = match Dist::open("dist").await {
+    ///         Ok(d) => d
+    ///         Err(e) => {
+    ///             eprintln(e.message)
+    ///             exit(1)
+    ///             return
+    ///         }
+    ///     }
+    ///     let app = Server::new()
+    ///         .get("/", |req: Request| dist.respond(200, page_with(req.path, Data { names: [] }, App)))
+    ///         .fallback(|req: Request| dist.file(req).unwrap_or(Response::not_found()))
+    ///     app.listen("127.0.0.1:3000").await.unwrap()
+    /// }
+    /// ```
+    pub async fn open(dir: String) -> Result<Dist, IoError> {
+        let index = "${dir}/index.html"
+        let template = match read_to_string(index).await {
+            Ok(t) => {
+                match emptied(t) {
+                    Some(t) => t
+                    None => return Err(rootless("ssr", index))
+                }
+            }
+            Err(e) => return Err(unreadable("ssr", index, e))
+        }
+        let listing = "${dir}/manifest.json"
+        let text = match read_to_string(listing).await {
+            Ok(t) => t
+            Err(e) => return Err(unreadable("ssr", listing, e))
+        }
+        let files = match listed(text) {
+            Some(files) => files
+            None => {
+                return Err(
+                    IoError {
+                        kind: InvalidData,
+                        message: "ssr: ${listing} has no \"files\" object",
+                    },
+                )
+            }
+        }
+        Ok(Dist { dir: dir, files: files, template: template })
+    }
+
+    // The read is `std/fs`'s `read` without its `async`, which a handler
+    // cannot await: the builtin, then its slot, with nothing between.
+    /// Returns the answer to `req` when its path names a file the manifest
+    /// lists, and `None` when it names none, for the program to answer.
+    ///
+    /// The path is the request's target before any `?`, percent-decoded, less
+    /// its leading `/`, so `/app.js?v=2` and `/app%2Ejs` both name `app.js`.
+    /// A listed file is read now, and answered with `200`, the file, the
+    /// `Content-Type` its extension gives, in any case (`html`, `js` and
+    /// `mjs`, `wasm`, `css`, `json`, `svg`, `png`, `jpg`, `gif`, `webp`,
+    /// `ico`, `txt` and `woff2`; any other is `application/octet-stream`),
+    /// and `X-Content-Type-Options: nosniff`; or with `Response::not_found()`
+    /// when it cannot be read. No file the manifest does not list is ever
+    /// read. It does not look at the method: `Server` asks its fallback only
+    /// for a `GET`.
+    ///
+    /// ```
+    /// import ui
+    /// import ui::ssr::{Dist}
+    ///
+    /// async fn main() {
+    ///     let dir = "${temp_dir()}/nova-ssr-dist-file"
+    ///     create_dir_all(dir).await.unwrap()
+    ///     write_string("${dir}/index.html", "<div id=\"app\"></div>").await.unwrap()
+    ///     write_string("${dir}/manifest.json", "{\"files\": {\"app.js\": 3}}").await.unwrap()
+    ///     write_string("${dir}/app.js", "f()").await.unwrap()
+    ///     let dist = Dist::open(dir).await.unwrap()
+    ///     let get = |target: String| parse_request_head(
+    ///         bytes_from_string("GET ${target} HTTP/1.1\r\n\r\n"),
+    ///         Limits::default(),
+    ///     ).unwrap().unwrap()
+    ///
+    ///     let js = dist.file(get("/app.js?v=2")).unwrap()
+    ///     assert_eq(js.status, 200)
+    ///     assert_eq(js.headers.get("content-type").unwrap(), "text/javascript; charset=utf-8")
+    ///     assert_eq(js.body.to_string().unwrap(), "f()")
+    ///     assert(dist.file(get("/posts/7")).is_none(), "not a file: the program answers")
+    ///     # remove_dir_all(dir).await.unwrap()
+    /// }
+    /// ```
+    pub fn file(self, req: Request) -> Option<Response> {
+        let path = site_path(req.path)
+        if self.files.get(path).is_none() { return None }
+        if fs_read("${self.dir}/${path}") != 0 { return Some(Response::not_found()) }
+        let body = fs_take_bytes()
+        let mut h: Map<String, String> = Map::new()
+        h.insert("content-length", "${body.len()}")
+        h.insert("content-type", content_type(path))
+        h.insert("x-content-type-options", "nosniff")
+        Some(Response { status: 200, headers: h, body: body, cookies: [] })
+    }
+
+    /// Returns `page` put into the site's template, as `document` puts it,
+    /// with the status `status`, as an HTML response:
+    /// `Response::html(status, document(template, page))`, which a route can
+    /// add a cookie to.
+    ///
+    /// ```
+    /// import ui
+    /// import ui::ssr::{Dist, Page}
+    ///
+    /// async fn main() {
+    ///     let dir = "${temp_dir()}/nova-ssr-dist-respond"
+    ///     create_dir_all(dir).await.unwrap()
+    ///     write_string("${dir}/index.html", "<title>Blog</title><div id=\"app\"></div>").await.unwrap()
+    ///     write_string("${dir}/manifest.json", "{\"files\": {}}").await.unwrap()
+    ///     let dist = Dist::open(dir).await.unwrap()
+    ///
+    ///     let r = dist.respond(404, Page { body: "<p>No such post</p>", data: None })
+    ///     assert_eq(r.status, 404)
+    ///     assert_eq(r.headers.get("content-type").unwrap(), "text/html; charset=utf-8")
+    ///     assert_eq(r.body.to_string().unwrap(), "<title>Blog</title><div id=\"app\"><p>No such post</p></div>")
+    ///     # remove_dir_all(dir).await.unwrap()
+    /// }
+    /// ```
+    pub fn respond(self, status: Int, page: Page) -> Response {
+        Response::html(status, document(self.template, page))
+    }
+}
+
+// The path of the file `target`, a request's target, names in a built site:
+// all before any `?`, percent-decoded, less one leading `/` (spec 4.6 §6.3).
+fn site_path(target: String) -> String {
     let raw = match target.index_of("?") {
         Some(at) => target.slice(0, at)
         None => target
     }
-    let decoded_path = decoded(raw)
-    let path = if decoded_path.starts_with("/") {
-        decoded_path.slice(1, decoded_path.len())
-    } else {
-        decoded_path
-    }
-    if s.files.get(path).is_some() { return file(s.dist, path) }
-    let pieces = path.split("/")
-    if pieces[pieces.len() - 1].contains(".") { return Response::not_found() }
-    let render = s.render
-    let body = bytes_from_string(document(s.template, render(target)))
-    let mut h: Map<String, String> = Map::new()
-    h.insert("content-length", "${body.len()}")
-    h.insert("content-type", "text/html; charset=utf-8")
-    let status = if found(s.routes, target) { 200 } else { 404 }
-    Response { status: status, headers: h, body: body, cookies: [] }
-}
-
-// `200` and the file at `path` under `dist`, read now, or `404` when it
-// cannot be read. The read is `std/fs`'s `read` without its `async`, which
-// a handler cannot await: the builtin, then its slot, with nothing between.
-fn file(dist: String, path: String) -> Response {
-    if fs_read("${dist}/${path}") != 0 { return Response::not_found() }
-    let body = fs_take_bytes()
-    let mut h: Map<String, String> = Map::new()
-    h.insert("content-length", "${body.len()}")
-    h.insert("content-type", content_type(path))
-    h.insert("x-content-type-options", "nosniff")
-    Response { status: 200, headers: h, body: body, cookies: [] }
+    let path = decoded(raw)
+    if path.starts_with("/") { path.slice(1, path.len()) } else { path }
 }
 
 // The `Content-Type` of a file named `path`, by its extension in any case,
