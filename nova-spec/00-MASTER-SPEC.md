@@ -701,6 +701,14 @@ Implement std modules in order (each module is a doc in [20-STDLIB.md]):
 
 **Gate:** `examples/06-counter-spa` and `examples/07-fullstack-blog` work in browser, pass Lighthouse 95+.
 
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):**
+`examples/07-fullstack-blog` is built in 4.7: a server on `std/http` that
+renders every page with `ui::ssr` beside the built site, and a client that
+hydrates it, with signed session cookies, CSRF tokens and PBKDF2 password
+hashes, by the user's decisions of 2026-10-21 (ADR 0046), and a JSON file in
+place of SQLite (ADR 0038). CI's `browser` job drives it in Chromium; the
+Lighthouse run, for both examples, is 4.8's.
+
 ---
 
 ### Phase 5 — Self-hosting (week 81–104)

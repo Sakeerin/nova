@@ -410,6 +410,26 @@ for SSR; `HistoryRouter` is
 (`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
 §3 to §7; ADR 0045).
 
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):** a
+server written by hand, as `examples/07-fullstack-blog`'s is, builds on
+`ui::ssr`'s parts rather than on `serve`. `Dist::open(dir)` reads the built
+`dist/`'s `index.html` and `manifest.json` once, with `serve`'s checks. The
+program's own `std/http` `Server` routes each page by method and pattern,
+renders it with `page_with(location, data, App)`, and answers with
+`dist.respond(status, page)`, which puts the page into the template as
+`document` does, and to which a route can add a cookie with `with_cookie`;
+it answers a form's `POST` as well, as the blog's does with a `303` redirect
+once the form succeeds. Its `fallback` asks `dist.file(req)` for a file the
+manifest lists before it answers with its own not-found page. So each page
+can choose its status, read the request's cookies and form, and carry the
+data it needs, which the client reads with `hydrate_with`. Since
+`hydrate_with` reads one value for the whole app, once, such a server's
+pages link to each other with plain anchors, each page arriving from the
+server with its own data, rather than with a router's `link`. `serve` is
+rebuilt on `Dist`, and does what it did
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md` §4
+and §6; ADR 0046).
+
 ---
 
 ## 8. Dev Server (`nova dev`)

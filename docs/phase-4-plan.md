@@ -602,6 +602,31 @@ ADR 0045).
   - a script put into a title or a comment stays inert text;
   - a form without its CSRF token is refused.
 
+**Amended 2026-10-21 (branch `claude/loving-archimedes-frtf5q-47`):** by the
+user's decisions of 2026-10-21, std grows what the blog needs: `std/http`'s
+`Server` routes by method, with `:name` patterns (`req.params`) and `405`;
+`Request` reads a query, a form and cookies; `Response` sets cookies, with
+`Cookie` and `with_cookie`, and builds HTML and `303` redirects; `ui::ssr`
+gains `Dist`, the built site a server written by hand serves beside its
+own routes; `std/fs` gains `rename`; `std/crypto` gains `pbkdf2_sha256` and
+its verify, natively through `ring`, rather than written in Nova; and
+`std/bytes` gains hex. The blog's server, `fullstack-blog-server`, renders
+every page with `page_with` and the client hydrates it whole, with no
+islands; its forms are plain HTML forms, answered with `303` when they
+succeed and checked live once the page has hydrated; every visitor has a
+session, a signed random id in a table in memory, in a cookie `HttpOnly`
+and `SameSite=Lax`, from which each form's CSRF token is derived; anyone
+may comment; passwords are PBKDF2 hashes of 600,000 rounds, set by
+`--set-password` from standard input; the store is a JSON file written
+whole, then renamed into place; `src/` is flat; and `nova dev` does not
+change. The gate is `tests/browser/blog.mjs` in Chromium: every page
+hydrates in place, the comment form's checks and post work, the admin
+creates, edits and deletes a post through the UI, a script in a title or a
+comment stays text, and a form without its token gets `403`;
+`blog_tests.rs` drives the server over HTTP on all three systems
+(`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`;
+ADR 0046).
+
 ### 4.8 — The gate and `v0.4.0`
 - **The CI job's Lighthouse run** on both examples, and the size checks
   (decision 12).
