@@ -129,7 +129,7 @@ fn json_response(status: Int, body: String) -> Response {
     let mut h: Map<String, String> = Map::new()
     h.insert("content-length", "${b.len()}")
     h.insert("content-type", "application/json")
-    Response { status: status, headers: h, body: b }
+    Response { status: status, headers: h, body: b, cookies: [] }
 }
 
 fn error_json(msg: String) -> String { "{\"error\":${stringify(String(msg))}}" }

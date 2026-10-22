@@ -9664,6 +9664,23 @@ fn http_request_readers_run() {
     run_with_and_without_stress("http_request_readers");
 }
 
+/// `Cookie`, `with_cookie`, several `set-cookie` lines after the other
+/// headers, the cookies left out, `Response::html`, `Response::redirect` and
+/// the reason phrases (spec 4.7 §3.3), socket-free.
+#[test]
+fn http_responses_run() {
+    run_with_and_without_stress("http_responses");
+}
+
+/// The same over TCP on a port the program bound itself (spec 4.7 §3): a
+/// path parameter and a query, a form's `POST` with a cookie, answered with
+/// `303` and two `set-cookie` lines in order, a `405` with `allow`, and the
+/// fallback.
+#[test]
+fn http_server_wire_run() {
+    run_with_and_without_stress("http_server_wire");
+}
+
 /// `std/process`'s `args()` under `nova run FILE -- ARGS`: index 0 is FILE as
 /// written, and an argument with spaces and an empty one each arrive whole.
 /// Run from the repository root so FILE is a fixed relative path. Design:

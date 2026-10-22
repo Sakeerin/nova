@@ -1,0 +1,14 @@
+HTTP/1.1 200 OK
+  set-cookie: seen=1; Path=/; HttpOnly; SameSite=Lax
+  set-cookie: theme=dark; Path=/; HttpOnly; SameSite=Lax
+  body: <p>post a b, tab 2</p>
+HTTP/1.1 303 See Other
+  location: /admin?from=old.1&password=x&y z
+  set-cookie: sid=new.ada; Path=/; Max-Age=28800; HttpOnly; SameSite=Lax
+  set-cookie: visitor=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax
+  body: 
+HTTP/1.1 405 Method Not Allowed
+  allow: GET, POST
+  body: method not allowed
+HTTP/1.1 404 Not Found
+  body: no page at /nope?x=1

@@ -7,10 +7,11 @@
 //! listener already bound. A pattern such as `/posts/:id` puts the piece of
 //! the path it matched in the request's `params`. A handler is a plain
 //! function from a `Request` to a `Response`, so it cannot await anything.
-//! `Request`'s `query`, `form` and `cookies` read what a browser sends.
-//! `read_request`, `write_response` and `parse_request_head` are the parts
-//! underneath, for serving a `std/net` `TcpStream` yourself. There is no
-//! HTTP client. Every module sees these names without an import, and a
+//! `Request`'s `query`, `form` and `cookies` read what a browser sends, and
+//! `Response`'s `html`, `redirect` and `with_cookie` build what it is sent
+//! back. `read_request`, `write_response` and `parse_request_head` are the
+//! parts underneath, for serving a `std/net` `TcpStream` yourself. There is
+//! no HTTP client. Every module sees these names without an import, and a
 //! module's own definition of one of them shadows the one here.
 //!
 //! Only `Content-Length` says how long a request's body is: chunked transfer
@@ -729,12 +730,13 @@ fn method_from(token: String) -> Method {
 // cannot move instead: the exact status line, the exact tail (the blank line
 // and the body), and that each expected header line occurs somewhere
 // between them.
-/// An HTTP response: a status code, headers and a body.
+/// An HTTP response: a status code, headers, a body, and the cookies it
+/// sets.
 ///
-/// `ok`, `text`, `json` and `not_found` build the common ones, and each sets
-/// `content-length`. A response built by hand should set it too: `Server`
-/// keeps the connection open after a response, so without it a client cannot
-/// tell where the body ends.
+/// `ok`, `text`, `html`, `json`, `redirect` and `not_found` build the common
+/// ones, and each sets `content-length`. A response built by hand should set
+/// it too: `Server` keeps the connection open after a response, so without it
+/// a client cannot tell where the body ends.
 pub record Response {
     /// The status code, such as 200 or 404. It is written as given, without
     /// a check.
@@ -744,6 +746,10 @@ pub record Response {
     pub headers: Map<String, String>,
     /// The body.
     pub body: Bytes,
+    /// The cookies the response sets, in order, each written as a
+    /// `set-cookie` header of its own: a `Map` of headers holds one value
+    /// per name, so they cannot be headers. `with_cookie` adds one.
+    pub cookies: [Cookie],
 }
 
 impl Response {
@@ -753,7 +759,7 @@ impl Response {
     pub fn ok(body: Bytes) -> Response {
         let mut h: Map<String, String> = Map::new()
         h.insert("content-length", "${body.len()}")
-        Response { status: 200, headers: h, body: body }
+        Response { status: 200, headers: h, body: body, cookies: [] }
     }
 
     // `status` carrying `s` as UTF-8 text.
@@ -765,7 +771,84 @@ impl Response {
         let mut h: Map<String, String> = Map::new()
         h.insert("content-length", "${body.len()}")
         h.insert("content-type", "text/plain; charset=utf-8")
-        Response { status: status, headers: h, body: body }
+        Response { status: status, headers: h, body: body, cookies: [] }
+    }
+
+    // `text`'s twin for HTML (spec
+    // docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+    // §3.3). `s` is written as given: escaping is the caller's, as `std/ui`'s
+    // renderers do it.
+    /// Returns a response with status `status` carrying `s` as an HTML page,
+    /// with `content-type` set to `text/html; charset=utf-8` and
+    /// `content-length` to its length in bytes. `s` is sent as given, so
+    /// text from a visitor in it must already be escaped, as `std/ui`
+    /// escapes what it renders.
+    ///
+    /// ```
+    /// let r = Response::html(201, "<p>Saved</p>")
+    /// assert_eq(r.status, 201)
+    /// assert_eq(r.headers.get("content-type").unwrap(), "text/html; charset=utf-8")
+    /// assert_eq(r.headers.get("content-length").unwrap(), "12")
+    /// assert_eq(r.body.to_string().unwrap(), "<p>Saved</p>")
+    /// ```
+    pub fn html(status: Int, s: String) -> Response {
+        let body = bytes_from_string(s)
+        let mut h: Map<String, String> = Map::new()
+        h.insert("content-length", "${body.len()}")
+        h.insert("content-type", "text/html; charset=utf-8")
+        Response { status: status, headers: h, body: body, cookies: [] }
+    }
+
+    // `303 See Other`, the answer to a form's `POST` that succeeded, so the
+    // browser follows it with a `GET` (post, redirect, get).
+    /// Returns a `303 See Other` response sending the browser to `location`,
+    /// which it then asks for with a `GET`: the `location` header set to it,
+    /// `content-length` to `0`, and no body. A `location` holding a carriage
+    /// return or a line feed is left out by `to_bytes`, as any such header
+    /// is.
+    ///
+    /// ```
+    /// let r = Response::redirect("/posts/7#comments")
+    /// assert_eq(r.status, 303)
+    /// assert_eq(r.headers.get("location").unwrap(), "/posts/7#comments")
+    /// assert_eq(r.headers.get("content-length").unwrap(), "0")
+    /// assert(r.to_bytes().to_string().unwrap().starts_with("HTTP/1.1 303 See Other\r\n"), "303")
+    /// ```
+    pub fn redirect(location: String) -> Response {
+        let mut h: Map<String, String> = Map::new()
+        h.insert("location", location)
+        h.insert("content-length", "0")
+        Response { status: 303, headers: h, body: bytes_from_string(""), cookies: [] }
+    }
+
+    // A copy with one more cookie. The new array is built whole, so `self`'s
+    // own stays as it was, as `Server::get` leaves its receiver's routes.
+    /// Returns a copy of this response that also sets `c`, after the cookies
+    /// it already sets.
+    ///
+    /// `self` is left unchanged, so calls chain. Each cookie is written as a
+    /// `set-cookie` header of its own, after the other headers; one that
+    /// `Cookie` says cannot be written is left out.
+    ///
+    /// ```
+    /// let r = Response::redirect("/")
+    ///     .with_cookie(Cookie::new("sid", "abc.123"))
+    ///     .with_cookie(Cookie::expired("old"))
+    /// let wire = r.to_bytes().to_string().unwrap()
+    /// assert(wire.contains("\r\nset-cookie: sid=abc.123; Path=/; HttpOnly; SameSite=Lax\r\n"), wire)
+    /// assert(wire.contains("\r\nset-cookie: old=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax\r\n"), wire)
+    /// ```
+    pub fn with_cookie(self, c: Cookie) -> Response {
+        let n = self.cookies.len()
+        // `[c; n + 1]` holds `c` in every slot; each slot but the last is
+        // overwritten with the cookie already there.
+        let mut all = [c; n + 1]
+        let mut i = 0
+        while i < n {
+            all[i] = self.cookies[i]
+            i = i + 1
+        }
+        Response { status: self.status, headers: self.headers, body: self.body, cookies: all }
     }
 
     /// Returns a `404 Not Found` response whose body is the text `not found`.
@@ -788,7 +871,7 @@ impl Response {
         let mut h: Map<String, String> = Map::new()
         h.insert("content-length", "${body.len()}")
         h.insert("content-type", "application/json")
-        Response { status: 200, headers: h, body: body }
+        Response { status: 200, headers: h, body: body, cookies: [] }
     }
 
     // The response as it goes on the wire.
@@ -798,15 +881,18 @@ impl Response {
     // That is the design's decision rather than a gap -- see
     // docs/adr/0019-offset-table-intrinsic-boundary.md.
     /// Returns the response as it is sent: the status line, one line per
-    /// header, a blank line, and the body. Each line ends with a carriage
-    /// return and a line feed.
+    /// header, one `set-cookie` line per cookie, a blank line, and the body.
+    /// Each line ends with a carriage return and a line feed.
     ///
     /// The status line holds `HTTP/1.1`, the status code and a reason phrase:
-    /// the usual one for 200, 201, 204, 400, 404, 405, 413 and 500, and for
-    /// any other code a phrase for its class, such as `Client Error`. Each
-    /// header is written `name: value`. A header whose name or value holds a
-    /// carriage return or a line feed is left out, so it cannot add lines of
-    /// its own. Nothing else is added: no header the response does not hold.
+    /// the usual one for 200, 201, 204, 301, 302, 303, 400, 401, 403, 404,
+    /// 405, 413 and 500, and for any other code a phrase for its class, such
+    /// as `Client Error`. Each header is written `name: value`. A header
+    /// whose name or value holds a carriage return or a line feed is left
+    /// out, so it cannot add lines of its own. The cookies come after the
+    /// headers, in order, each written as `Cookie` says, and one it says
+    /// cannot be written is left out. Nothing else is added: no header the
+    /// response does not hold.
     pub fn to_bytes(self) -> Bytes {
         let mut head = "HTTP/1.1 ${self.status} ${reason_phrase(self.status)}\r\n"
         let names = self.headers.keys()
@@ -824,8 +910,192 @@ impl Response {
             }
             i = i + 1
         }
+        // After the headers, so the order of the cookies, which a `Map` does
+        // not decide, is the order they were added in.
+        let mut c = 0
+        while c < self.cookies.len() {
+            match cookie_line(self.cookies[c]) {
+                Some(line) => head = "${head}set-cookie: ${line}\r\n"
+                None => {}
+            }
+            c = c + 1
+        }
         bytes_from_string("${head}\r\n").concat(self.body)
     }
+}
+
+// A cookie a response sets: one `Set-Cookie` header (RFC 6265 section 4.1),
+// a field of `Response` of its own rather than a header map holding several
+// values (spec docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+// §3.3 and §12, decision 5). `Cookie::new`'s defaults are the safe ones
+// (decision 6). There is no `Domain` and no `Expires`: a cookie is the
+// host's own, and `Max-Age` says how long it lasts, since std/time writes no
+// HTTP date.
+//
+// **What is refused, and why each rule is the one it is.** The serialiser
+// is the right layer to refuse a cookie that would forge a header or an
+// attribute, for the reason `is_crlf_free` gives for headers: it cannot see
+// where a value came from. A name must be an HTTP token (RFC 9110 section
+// 5.6.2), as RFC 6265's cookie-name is; a value must be RFC 6265's
+// `*cookie-octet`, so no space, `"`, `,`, `;` or `\`, no control character
+// and nothing outside ASCII -- the quoted form RFC 6265 also allows is not
+// written, a choice that keeps one rule; a path must be RFC 6265's
+// path-value, any CHAR but a control character or `;`; and `same_site`,
+// which the spec leaves open, must be empty or a token, so it cannot carry
+// a `;` and an attribute of its own either.
+/// A cookie for a response to set, with `Response::with_cookie`.
+///
+/// `Cookie::new` gives the safe attributes, which the fields can change
+/// afterwards in a `let mut` binding. `Response::to_bytes` writes a cookie
+/// as one `set-cookie` header: `name=value`, then each attribute that
+/// applies, in this order: `Path` when `path` is not empty, `Max-Age` when
+/// `max_age` holds a number, `HttpOnly`, `SameSite` when `same_site` is not
+/// empty, and `Secure`. There is no `Domain` and no `Expires`.
+///
+/// A cookie is left out, as a header holding a carriage return or a line
+/// feed is, when one of its parts holds what a cookie cannot carry:
+///
+/// - a name that is not an HTTP token: one or more characters, each an ASCII
+///   letter or digit or one of ``!#$%&'*+-.^_`|~``;
+/// - a value holding anything but RFC 6265's cookie-octets, the ASCII
+///   characters from `!` to `~` less `"`, `,`, `;` and `\`: so no space, no
+///   control character and nothing outside ASCII. An empty value is a
+///   value, and one in double quotes is refused;
+/// - a path holding a control character (U+0000 to U+001F, or U+007F), a
+///   `;`, or anything outside ASCII;
+/// - a `same_site` that is neither empty nor a token.
+///
+/// A value that needs other characters can be encoded first, as
+/// `Bytes::to_hex` encodes bytes.
+pub record Cookie {
+    /// The cookie's name, such as `sid`.
+    pub name: String,
+    /// Its value, written as given.
+    pub value: String,
+    /// The path whose requests the browser sends it with, and those below
+    /// it: `/` for every path. `""` writes no `Path`, and the browser takes
+    /// the directory of the page that set it.
+    pub path: String,
+    /// How many seconds the cookie lasts, written as `Max-Age`; `Some(0)`
+    /// removes it. `None` writes no `Max-Age`, so it lasts until the
+    /// browser's session ends.
+    pub max_age: Option<Int>,
+    /// Whether the page's scripts are kept from reading it: `HttpOnly`.
+    pub http_only: Bool,
+    /// When the browser sends it with a request another site starts:
+    /// `"Strict"`, `"Lax"` or `"None"`, written as `SameSite`. `""` writes no
+    /// `SameSite`.
+    pub same_site: String,
+    /// Whether the browser sends it only over HTTPS: `Secure`.
+    pub secure: Bool,
+}
+
+impl Cookie {
+    /// Returns the cookie `name` holding `value`, with the safe attributes:
+    /// path `/`, no `Max-Age`, so it lasts until the browser's session ends,
+    /// `HttpOnly`, `SameSite=Lax`, and not `Secure`, so it is sent over HTTP
+    /// too.
+    ///
+    /// ```
+    /// let c = Cookie::new("theme", "dark")
+    /// assert_eq(c.path, "/")
+    /// assert(c.max_age.is_none(), "a cookie for the browser's session")
+    /// assert(c.http_only && !c.secure, "HttpOnly, and not only over HTTPS")
+    /// assert_eq(c.same_site, "Lax")
+    ///
+    /// // Fields change in a `let mut` binding: a cookie that lasts a day.
+    /// let mut day = Cookie::new("seen", "1")
+    /// day.max_age = Some(86400)
+    /// let wire = Response::ok(bytes_from_string("")).with_cookie(day).to_bytes().to_string().unwrap()
+    /// assert(wire.contains("set-cookie: seen=1; Path=/; Max-Age=86400; HttpOnly; SameSite=Lax\r\n"), wire)
+    /// ```
+    pub fn new(name: String, value: String) -> Cookie {
+        Cookie {
+            name: name,
+            value: value,
+            path: "/",
+            max_age: None,
+            http_only: true,
+            same_site: "Lax",
+            secure: false,
+        }
+    }
+
+    /// Returns the cookie that removes the cookie `name` from the browser:
+    /// `Cookie::new(name, "")` with `Max-Age=0`. A cookie is replaced only by
+    /// one of the same name and path, so this one's path, `/`, must be the
+    /// path the cookie was set with.
+    ///
+    /// ```
+    /// let c = Cookie::expired("sid")
+    /// assert_eq(c.value, "")
+    /// assert_eq(c.max_age.unwrap(), 0)
+    /// assert_eq(c.path, "/")
+    /// ```
+    pub fn expired(name: String) -> Cookie {
+        let mut c = Cookie::new(name, "")
+        c.max_age = Some(0)
+        c
+    }
+}
+
+// `c` as a `Set-Cookie` header's value, or `None` when a part of it holds
+// what a cookie cannot carry (`Cookie`'s comment).
+fn cookie_line(c: Cookie) -> Option<String> {
+    if !is_token(c.name) { return None }
+    if !all_chars(c.value, is_cookie_octet) { return None }
+    if !all_chars(c.path, is_path_char) { return None }
+    if c.same_site != "" && !is_token(c.same_site) { return None }
+    let mut line = "${c.name}=${c.value}"
+    if c.path != "" { line = "${line}; Path=${c.path}" }
+    match c.max_age {
+        Some(n) => line = "${line}; Max-Age=${n}"
+        None => {}
+    }
+    if c.http_only { line = "${line}; HttpOnly" }
+    if c.same_site != "" { line = "${line}; SameSite=${c.same_site}" }
+    if c.secure { line = "${line}; Secure" }
+    Some(line)
+}
+
+// Whether `s` is an HTTP token (RFC 9110 section 5.6.2): one or more
+// `tchar`s, ASCII letters and digits and ``!#$%&'*+-.^_`|~``.
+fn is_token(s: String) -> Bool { s != "" && all_chars(s, is_tchar) }
+
+fn is_tchar(code: Int) -> Bool {
+    // Digits, then upper- and lower-case letters.
+    if code >= 48 && code <= 57 { return true }
+    if code >= 65 && code <= 90 { return true }
+    if code >= 97 && code <= 122 { return true }
+    // ! # $ % & ' * + - . ^ _ ` | ~
+    if code == 33 || (code >= 35 && code <= 39) || code == 42 || code == 43 { return true }
+    if code == 45 || code == 46 || code == 94 || code == 95 || code == 96 { return true }
+    code == 124 || code == 126
+}
+
+// RFC 6265's cookie-octet: %x21, %x23-2B, %x2D-3A, %x3C-5B and %x5D-7E,
+// which leaves out controls, space, `"`, `,`, `;`, `\`, DEL and all beyond
+// ASCII.
+fn is_cookie_octet(code: Int) -> Bool {
+    if code == 33 || (code >= 35 && code <= 43) || (code >= 45 && code <= 58) { return true }
+    // A line may not start with `(`: it would call the `if` above.
+    let upper = code >= 60 && code <= 91
+    upper || (code >= 93 && code <= 126)
+}
+
+// RFC 6265's path-value: any CHAR (US-ASCII) but a control character or
+// `;`, so U+0020 to U+007E less `;`.
+fn is_path_char(code: Int) -> Bool { code >= 32 && code <= 126 && code != 59 }
+
+// Whether `ok` holds for the code of each character of `s`.
+fn all_chars(s: String, ok: fn(Int) -> Bool) -> Bool {
+    let cs = s.chars()
+    let mut i = 0
+    while i < cs.len() {
+        if !ok(char_to_int(cs[i])) { return false }
+        i = i + 1
+    }
+    true
 }
 
 // Whether `s` contains no CR and no LF, and so is safe to place verbatim in
@@ -871,7 +1141,12 @@ fn reason_phrase(status: Int) -> String {
     if status == 200 { return "OK" }
     if status == 201 { return "Created" }
     if status == 204 { return "No Content" }
+    if status == 301 { return "Moved Permanently" }
+    if status == 302 { return "Found" }
+    if status == 303 { return "See Other" }
     if status == 400 { return "Bad Request" }
+    if status == 401 { return "Unauthorized" }
+    if status == 403 { return "Forbidden" }
     if status == 404 { return "Not Found" }
     if status == 405 { return "Method Not Allowed" }
     if status == 413 { return "Payload Too Large" }
@@ -1314,12 +1589,12 @@ impl Server {
     ///
     /// ```
     /// let app = Server::new()
-    ///     .get("/posts/:id", |_| Response::text(200, "the post"))
-    ///     .post("/posts/:id", |r: Request| Response::text(201, "saved ${r.params.get("id").unwrap()}"))
+    ///     .get("/posts/:id", |_| Response::html(200, "<form method=post>…</form>"))
+    ///     .post("/posts/:id", |r: Request| Response::redirect("/posts/${r.params.get("id").unwrap()}"))
     /// let raw = bytes_from_string("POST /posts/7 HTTP/1.1\r\nContent-Length: 0\r\n\r\n")
     /// let saved = app.dispatch(parse_request_head(raw, Limits::default()).unwrap().unwrap())
-    /// assert_eq(saved.status, 201)
-    /// assert_eq(saved.body.to_string().unwrap(), "saved 7")
+    /// assert_eq(saved.status, 303)
+    /// assert_eq(saved.headers.get("location").unwrap(), "/posts/7")
     /// ```
     pub fn post(self, pattern: String, handler: fn(Request) -> Response) -> Server {
         self.route(Post, pattern, handler)
@@ -1453,8 +1728,8 @@ impl Server {
     ///
     /// ```
     /// let app = Server::new()
-    ///     .get("/login", |_| Response::text(200, "the form"))
-    ///     .post("/login", |_| Response::text(200, "logged in"))
+    ///     .get("/login", |_| Response::html(200, "<form>…</form>"))
+    ///     .post("/login", |_| Response::redirect("/admin"))
     /// let raw = bytes_from_string("DELETE /login HTTP/1.1\r\n\r\n")
     /// let refused = app.dispatch(parse_request_head(raw, Limits::default()).unwrap().unwrap())
     /// assert_eq(refused.status, 405)
