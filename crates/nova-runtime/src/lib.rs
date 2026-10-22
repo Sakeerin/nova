@@ -1096,6 +1096,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             "nova_rt_fs_remove_dir_all",
             fs::nova_rt_fs_remove_dir_all as *const u8,
         ),
+        ("nova_rt_fs_rename", fs::nova_rt_fs_rename as *const u8),
         ("nova_rt_fs_read_dir", fs::nova_rt_fs_read_dir as *const u8),
         (
             "nova_rt_fs_take_string_array",
@@ -1206,6 +1207,14 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         (
             "nova_rt_crypto_random_int",
             crypto::nova_rt_crypto_random_int as *const u8,
+        ),
+        (
+            "nova_rt_crypto_pbkdf2_sha256",
+            crypto::nova_rt_crypto_pbkdf2_sha256 as *const u8,
+        ),
+        (
+            "nova_rt_crypto_pbkdf2_sha256_verify",
+            crypto::nova_rt_crypto_pbkdf2_sha256_verify as *const u8,
         ),
         (
             "nova_rt_time_now_nanos",

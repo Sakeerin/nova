@@ -1,5 +1,6 @@
 //! `std/crypto`'s intrinsics: SHA-256, SHA-512, HMAC-SHA-256 and its
-//! constant-time check, plus random bytes and a bounded random integer.
+//! constant-time check, PBKDF2-HMAC-SHA-256 and its constant-time check,
+//! plus random bytes and a bounded random integer.
 //!
 //! # The boundary
 //!
@@ -25,7 +26,8 @@ use crate::bytes::{as_bytes, gc_bytes};
 use crate::fs::{stash, Slot};
 use crate::NovaStr;
 use ring::rand::SecureRandom;
-use ring::{digest, hmac, rand};
+use ring::{digest, hmac, pbkdf2, rand};
+use std::num::NonZeroU32;
 
 /// Which operation `nova_rt_crypto_hash` performs.
 ///
@@ -71,6 +73,14 @@ const ERR_ENTROPY_UNAVAILABLE: i64 = 1;
 const ERR_INVALID_LENGTH: i64 = 2;
 const ERR_REQUEST_TOO_LARGE: i64 = 3;
 const ERR_INVALID_RANGE: i64 = 4;
+/// PBKDF2's iteration count is outside `1..=u32::MAX`, the range
+/// `ring::pbkdf2` takes as a `NonZeroU32`. Returned by the two PBKDF2
+/// intrinsics only, which `std/crypto` turns into a panic rather than a
+/// `CryptoErrorKind`.
+const ERR_INVALID_ITERATIONS: i64 = 5;
+/// PBKDF2's output length is outside `1..=MAX_PBKDF2_BYTES`. Returned by
+/// `nova_rt_crypto_pbkdf2_sha256` only, and turned into a panic the same way.
+const ERR_INVALID_OUTPUT_LENGTH: i64 = 6;
 
 /// The largest `random_bytes` request served.
 ///
@@ -82,6 +92,15 @@ const ERR_INVALID_RANGE: i64 = 4;
 /// (`docs/adr/0024-gc-stack-bounds-on-unix.md` names the platforms); on any
 /// other platform allocations still leak until exit.
 const MAX_RANDOM_BYTES: usize = 64 * 1024;
+
+/// The longest key `nova_rt_crypto_pbkdf2_sha256` derives, the same cap as
+/// [`MAX_RANDOM_BYTES`] and for the same reason: it is checked before the
+/// output is allocated, so no length a Nova program passes can ask for an
+/// allocation the process cannot make. It also keeps the length far below
+/// `ring::pbkdf2::derive`'s own limit, `u32::MAX` blocks of 32 bytes, past
+/// which that function unwraps an error -- so `derive` cannot fail for
+/// anything this intrinsic hands it. A password hash is 32 bytes.
+const MAX_PBKDF2_BYTES: usize = 64 * 1024;
 
 /// Status for the tag-check operation when the tag does not match.
 ///
@@ -209,6 +228,117 @@ pub unsafe extern "C" fn nova_rt_crypto_hash(
         // An unknown op means the Nova side and this file disagree, which no
         // caller can cause and no error kind describes.
         None => crate::task::abort_with("nova_rt_crypto_hash: unknown operation"),
+    }
+}
+
+/// The iteration count `iterations`, as `ring::pbkdf2` takes it, or `None`
+/// when it is outside `1..=u32::MAX`.
+fn iterations_of(iterations: i64) -> Option<NonZeroU32> {
+    NonZeroU32::new(u32::try_from(iterations).ok()?)
+}
+
+/// The PBKDF2-HMAC-SHA-256 key of `length` bytes derived from `password`
+/// and `salt` over `iterations` rounds.
+///
+/// `ring::pbkdf2::derive` returns nothing and unwraps its errors inside:
+/// a secret or salt near 2^61 bytes, which no Nova `Bytes` reaches, or an
+/// output longer than `u32::MAX` blocks, which `MAX_PBKDF2_BYTES` rules out
+/// before this is called.
+fn derive_key(password: &[u8], salt: &[u8], iterations: NonZeroU32, length: usize) -> Vec<u8> {
+    let mut out = vec![0u8; length];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        salt,
+        password,
+        &mut out,
+    );
+    out
+}
+
+/// Whether `expected` is the PBKDF2-HMAC-SHA-256 key derived from
+/// `password` and `salt` over `iterations` rounds.
+///
+/// `ring::pbkdf2::verify` compares in constant time, inherited here and not
+/// demonstrated by any test in this crate; an empty `expected` is a
+/// mismatch, never an error.
+fn verify_key(password: &[u8], salt: &[u8], iterations: NonZeroU32, expected: &[u8]) -> bool {
+    pbkdf2::verify(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        salt,
+        password,
+        expected,
+    )
+    .is_ok()
+}
+
+/// PBKDF2-HMAC-SHA-256 (RFC 8018 section 5.2) through `ring`: the key of
+/// `length` bytes derived from `password` and `salt` over `iterations`
+/// rounds, into `Slot::Buffer`.
+///
+/// Returns `0`, or `-ERR_INVALID_ITERATIONS` for `iterations` outside
+/// `1..=u32::MAX` and `-ERR_INVALID_OUTPUT_LENGTH` for `length` outside
+/// `1..=MAX_PBKDF2_BYTES`, each checked before anything is derived or
+/// allocated. It runs for as long as `iterations` says, on the calling
+/// thread: measured on 2026-10-21, about 0.5 ms per thousand rounds for a
+/// 32-byte key with `ring` built optimized, and about 4.4 ms in this crate's
+/// debug build.
+///
+/// # Safety
+/// `password` and `salt` must each be a valid, non-null `NovaStr` pointer,
+/// which is what the compiler emits for a `Bytes` argument.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_crypto_pbkdf2_sha256(
+    password: *const NovaStr,
+    salt: *const NovaStr,
+    iterations: i64,
+    length: i64,
+) -> i64 {
+    let Some(rounds) = iterations_of(iterations) else {
+        return -ERR_INVALID_ITERATIONS;
+    };
+    let want = match usize::try_from(length) {
+        Ok(n) if (1..=MAX_PBKDF2_BYTES).contains(&n) => n,
+        _ => return -ERR_INVALID_OUTPUT_LENGTH,
+    };
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { as_bytes(password) };
+    let s = unsafe { as_bytes(salt) };
+    stash(Slot::Buffer, gc_bytes(&derive_key(p, s, rounds, want)));
+    0
+}
+
+/// PBKDF2-HMAC-SHA-256's constant-time check of `expected` against the key
+/// derived from `password` and `salt` over `iterations` rounds, of
+/// `expected`'s own length.
+///
+/// Returns `0` for a match, `TAG_MISMATCH` for a mismatch, an empty
+/// `expected` included, and `-ERR_INVALID_ITERATIONS` for `iterations`
+/// outside `1..=u32::MAX`.
+///
+/// # Safety
+/// `password`, `salt` and `expected` must each be a valid, non-null
+/// `NovaStr` pointer, which is what the compiler emits for a `Bytes`
+/// argument.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_crypto_pbkdf2_sha256_verify(
+    password: *const NovaStr,
+    salt: *const NovaStr,
+    iterations: i64,
+    expected: *const NovaStr,
+) -> i64 {
+    let Some(rounds) = iterations_of(iterations) else {
+        return -ERR_INVALID_ITERATIONS;
+    };
+    // SAFETY: forwarding this function's own contract.
+    let p = unsafe { as_bytes(password) };
+    let s = unsafe { as_bytes(salt) };
+    let e = unsafe { as_bytes(expected) };
+    if verify_key(p, s, rounds, e) {
+        0
+    } else {
+        TAG_MISMATCH
     }
 }
 
@@ -441,6 +571,61 @@ mod tests {
         );
         assert!(!verify_tag(&key, b"Hi There", &tag[..31]), "truncated tag");
         assert!(!verify_tag(&key, b"Hi There", &[]), "empty tag");
+    }
+
+    /// RFC 7914 section 11's two PBKDF2-HMAC-SHA-256 vectors, each 64
+    /// bytes. Both are also asserted from Nova by
+    /// `tests/runtime/crypto_pbkdf2.nova`.
+    #[test]
+    fn pbkdf2_matches_rfc_7914s_vectors() {
+        let one = iterations_of(1).expect("1 is a valid count");
+        assert_eq!(
+            hex(&derive_key(b"passwd", b"salt", one, 64)),
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc\
+             49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
+        );
+        let many = iterations_of(80_000).expect("80,000 is a valid count");
+        assert_eq!(
+            hex(&derive_key(b"Password", b"NaCl", many, 64)),
+            "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56\
+             a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"
+        );
+    }
+
+    #[test]
+    fn pbkdf2_verify_accepts_its_key_and_rejects_others() {
+        let rounds = iterations_of(2).expect("2 is a valid count");
+        let key = derive_key(b"pw", b"salt", rounds, 32);
+        assert!(verify_key(b"pw", b"salt", rounds, &key));
+        assert!(
+            !verify_key(b"pW", b"salt", rounds, &key),
+            "another password"
+        );
+        assert!(!verify_key(b"pw", b"salT", rounds, &key), "another salt");
+        let other = iterations_of(3).expect("3 is a valid count");
+        assert!(!verify_key(b"pw", b"salt", other, &key), "another count");
+        // A key is derived of `expected`'s own length, and PBKDF2's shorter
+        // output is its longer output's start, so the start of the key
+        // matches: `std/crypto`'s doc tells a caller to check the length.
+        assert!(
+            verify_key(b"pw", b"salt", rounds, &key[..31]),
+            "the key's start"
+        );
+        let mut longer = key.clone();
+        longer.push(0);
+        assert!(!verify_key(b"pw", b"salt", rounds, &longer), "a longer key");
+        assert!(!verify_key(b"pw", b"salt", rounds, &[]), "an empty key");
+    }
+
+    #[test]
+    fn pbkdf2_iteration_counts_outside_u32_are_refused() {
+        assert!(iterations_of(0).is_none());
+        assert!(iterations_of(-1).is_none());
+        assert!(iterations_of(i64::from(u32::MAX) + 1).is_none());
+        assert_eq!(
+            iterations_of(i64::from(u32::MAX)).map(NonZeroU32::get),
+            Some(u32::MAX)
+        );
     }
 
     fn hex(v: &[u8]) -> String {

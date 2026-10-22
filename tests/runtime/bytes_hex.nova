@@ -1,0 +1,47 @@
+// `std/bytes`'s hex (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §5),
+// on both targets: `Bytes::to_hex`, two lower-case digits per byte, and
+// `bytes_from_hex`, which reads either case back, and refuses an odd length
+// or any character that is not a hex digit.
+
+fn shown(b: Option<Bytes>) -> String {
+    match b {
+        Some(bytes) => "Some(${bytes.to_hex()})"
+        None => "None"
+    }
+}
+
+fn main() {
+    println("empty: [${bytes_from_string("").to_hex()}]")
+    println(
+        "every nibble: ${bytes_from_ints([0, 1, 9, 10, 15, 16, 127, 128, 160, 254, 255]).to_hex()}",
+    )
+    println("text: ${bytes_from_string("Nova ✓").to_hex()}")
+    let mut all = [0; 256]
+    let mut i = 0
+    while i < 256 {
+        all[i] = i
+        i = i + 1
+    }
+    let every = bytes_from_ints(all)
+    let written = every.to_hex()
+    println(
+        "256 bytes: ${written.len()} digits, round trip ${bytes_from_hex(written).unwrap().eq(every)}",
+    )
+    println("upper case read: ${bytes_from_hex(written.to_upper()).unwrap().eq(every)}")
+
+    println("from empty: ${shown(bytes_from_hex(""))}")
+    println("lower: ${shown(bytes_from_hex("00ff7f"))}")
+    println("upper: ${shown(bytes_from_hex("ABCDEF"))}")
+    println("mixed: ${shown(bytes_from_hex("aBcD"))}")
+    println("odd length: ${shown(bytes_from_hex("abc"))}")
+    println("one digit: ${shown(bytes_from_hex("a"))}")
+    println("g: ${shown(bytes_from_hex("0g"))}")
+    println("G: ${shown(bytes_from_hex("G0"))}")
+    println("space: ${shown(bytes_from_hex("00 ff"))}")
+    println("leading 0x: ${shown(bytes_from_hex("0x00"))}")
+    println("minus: ${shown(bytes_from_hex("-1"))}")
+    println("non-ascii: ${shown(bytes_from_hex("é0"))}")
+    println("bad last digit: ${shown(bytes_from_hex("00f:"))}")
+    println("bad first digit: ${shown(bytes_from_hex("/0"))}")
+}

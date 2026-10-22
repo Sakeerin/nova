@@ -1,0 +1,8 @@
+renamed over the old file
+target holds: {"posts": 2}
+temporary still there: false
+renamed to a free name
+moved holds: {"posts": 2}, old name there: false
+missing source: NotFound, message empty: false
+missing directory: NotFound, moved still there: true
+left in the directory: moved.json

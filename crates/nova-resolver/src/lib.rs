@@ -360,6 +360,11 @@ builtins! {
     /// as [`Builtin::FsReadToString`]. Backs `std/fs`'s `remove_dir_all`.
     /// Std-only.
     FsRemoveDirAll,
+    /// `fs_rename(from: String, to: String) -> Int` — rename the file
+    /// `from` to `to`, replacing `to` when it exists, on Windows too. A
+    /// status code, for the same reason as [`Builtin::FsReadToString`].
+    /// Backs `std/fs`'s `rename`. Std-only.
+    FsRename,
     /// `fs_read_dir(path: String) -> Int` — list `path`'s entry names,
     /// sorted. A status code, for the same reason as
     /// [`Builtin::FsReadToString`]; on success the names are waiting in
@@ -854,6 +859,31 @@ builtins! {
     /// `nova_rt_crypto_random_int`
     /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
     CryptoRandomInt,
+    /// `crypto_pbkdf2_sha256(password: Bytes, salt: Bytes, iterations: Int,
+    /// length: Int) -> Int` — `std/crypto`'s PBKDF2-HMAC-SHA-256 intrinsic,
+    /// `ring::pbkdf2::derive`. Nova has no way to reach a vetted
+    /// implementation from source, and one written in Nova runs far too slow
+    /// for the iteration counts a password needs, so this crosses into Rust.
+    ///
+    /// **The return is a status word, not the key.** `0` on success, with
+    /// the `length` derived bytes waiting in [`Builtin::FsTakeBytes`];
+    /// otherwise **negative**, naming one of `crypto.rs`'s `ERR_*` kinds:
+    /// `iterations` outside `1..=u32::MAX`, or `length` outside
+    /// `1..=65,536`. `std/crypto` turns either into a panic. Runtime symbol
+    /// `nova_rt_crypto_pbkdf2_sha256`
+    /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
+    CryptoPbkdf2Sha256,
+    /// `crypto_pbkdf2_sha256_verify(password: Bytes, salt: Bytes,
+    /// iterations: Int, expected: Bytes) -> Int` — `ring::pbkdf2::verify`,
+    /// whose comparison is constant-time (inherited, not demonstrated here).
+    ///
+    /// **The return is a status word.** `0` when `expected` is the key
+    /// derived from the password, `1` when it is not (an answer, not an
+    /// error, as [`Builtin::CryptoHash`]'s tag check gives it), and negative
+    /// for `iterations` outside `1..=u32::MAX`, which `std/crypto` turns into
+    /// a panic. Runtime symbol `nova_rt_crypto_pbkdf2_sha256_verify`
+    /// (`crates/nova-runtime/src/crypto.rs`). Std-only.
+    CryptoPbkdf2Sha256Verify,
     /// `time_now_nanos() -> Int` — nanoseconds since the runtime's single
     /// process epoch, monotonic and never negative.
     ///
@@ -1026,6 +1056,7 @@ impl Builtin {
             Builtin::FsCreateDirAll => "fs_create_dir_all",
             Builtin::FsRemoveFile => "fs_remove_file",
             Builtin::FsRemoveDirAll => "fs_remove_dir_all",
+            Builtin::FsRename => "fs_rename",
             Builtin::FsReadDir => "fs_read_dir",
             Builtin::FsTakeStringArray => "fs_take_string_array",
             Builtin::FsKind => "fs_kind",
@@ -1071,6 +1102,8 @@ impl Builtin {
             Builtin::CryptoHash => "crypto_hash",
             Builtin::CryptoRandomBytes => "crypto_random_bytes",
             Builtin::CryptoRandomInt => "crypto_random_int",
+            Builtin::CryptoPbkdf2Sha256 => "crypto_pbkdf2_sha256",
+            Builtin::CryptoPbkdf2Sha256Verify => "crypto_pbkdf2_sha256_verify",
             Builtin::TimeNowNanos => "time_now_nanos",
             Builtin::TimeNowEpochNanos => "time_now_epoch_nanos",
             Builtin::LogConfigLevel => "log_config_level",
@@ -1126,7 +1159,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 87] = [
+    pub const STD_ONLY: [Builtin; 90] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1160,6 +1193,7 @@ impl Builtin {
         Builtin::FsCreateDirAll,
         Builtin::FsRemoveFile,
         Builtin::FsRemoveDirAll,
+        Builtin::FsRename,
         Builtin::FsReadDir,
         Builtin::FsTakeStringArray,
         Builtin::FsKind,
@@ -1199,6 +1233,8 @@ impl Builtin {
         Builtin::CryptoHash,
         Builtin::CryptoRandomBytes,
         Builtin::CryptoRandomInt,
+        Builtin::CryptoPbkdf2Sha256,
+        Builtin::CryptoPbkdf2Sha256Verify,
         Builtin::TimeNowNanos,
         Builtin::TimeNowEpochNanos,
         Builtin::LogConfigLevel,

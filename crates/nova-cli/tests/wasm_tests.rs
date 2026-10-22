@@ -1869,6 +1869,7 @@ mod gate {
         strings,
         // Bytes.
         bytes_basics,
+        bytes_hex,
         // Formatting.
         fmt_float_edge,
         fmt_float_fixed,
@@ -2777,6 +2778,8 @@ fn ui_imports_check_on_both_targets() {
 const LEFT_OUT: &[(&str, &str)] = &[
     ("bytes_reserved", "E0089 (its error is the point)"),
     ("crypto_hashes", "std/crypto"),
+    ("crypto_pbkdf2", "std/crypto"),
+    ("crypto_pbkdf2_refused", "std/crypto, std/process"),
     ("crypto_random", "std/crypto"),
     ("extern_ffi", "E0090 (an extern block)"),
     ("file_errors", "std/fs, std/io"),
@@ -2792,6 +2795,7 @@ const LEFT_OUT: &[(&str, &str)] = &[
     ("fs_not_found", "std/fs, std/io"),
     ("fs_permission_denied", "std/fs, std/io"),
     ("fs_read_dir", "std/fs"),
+    ("fs_rename", "std/fs, std/io"),
     ("fs_roundtrip", "std/fs"),
     ("fs_write_then_read", "std/fs"),
     ("http_keepalive", "std/http, std/net"),

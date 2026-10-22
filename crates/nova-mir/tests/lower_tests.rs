@@ -1221,7 +1221,8 @@ fn http_parse_request_lowers_to_a_runtime_call() {
     );
 }
 
-/// `crypto_hash`, `crypto_random_bytes` and `crypto_random_int` are all
+/// `crypto_hash`, `crypto_random_bytes`, `crypto_random_int`,
+/// `crypto_pbkdf2_sha256` and `crypto_pbkdf2_sha256_verify` are all
 /// `STD_ONLY` (`crates/nova-resolver/src/lib.rs`), so pinning that a Nova call
 /// reaches each one's `RtFunc` needs the same `resolve_program`/`extra_std`
 /// machinery as `http_parse_request_lowers_to_a_runtime_call` above — read
@@ -1236,14 +1237,15 @@ fn http_parse_request_lowers_to_a_runtime_call() {
 /// diagnostic, the call in `main` would resolve to the real function
 /// instead, and this test would keep passing while pinning nothing. That is
 /// why each stub below is named `lower_tests_crypto_*_stub` rather than
-/// `hash`, `random_bytes` or `random_int` — the names `std/crypto` itself is
-/// expected to export.
+/// `hash`, `random_bytes`, `random_int`, `pbkdf2_sha256` or
+/// `pbkdf2_sha256_verify` — the names `std/crypto` itself is expected to
+/// export.
 ///
-/// Three separate `resolve_program` calls, each under its own `$test.*` key,
-/// rather than one wrapper module holding all three stubs: the point of the
+/// Separate `resolve_program` calls, each under its own `$test.*` key,
+/// rather than one wrapper module holding all the stubs: the point of the
 /// synthetic module is to isolate this test from everything unrelated to the
-/// one builtin it is checking, and folding all three into one module would
-/// let a change to one intrinsic's wrapper affect the others' resolution.
+/// one builtin it is checking, and folding them into one module would let a
+/// change to one intrinsic's wrapper affect the others' resolution.
 #[test]
 fn crypto_builtins_reach_their_runtime_functions() {
     use nova_mir::{RtFunc, Stmt};
@@ -1332,6 +1334,30 @@ fn crypto_builtins_reach_their_runtime_functions() {
         "fn main() { let _ = lower_tests_crypto_random_int_stub(0, 9) }",
         "lower_tests_crypto_random_int_stub",
         RtFunc::CryptoRandomInt,
+    );
+
+    assert_stub_reaches(
+        "$test.crypto_pbkdf2_sha256_stub",
+        "pub fn lower_tests_crypto_pbkdf2_sha256_stub(p: Bytes, s: Bytes, n: Int, len: Int) -> Int { crypto_pbkdf2_sha256(p, s, n, len) }\n",
+        "fn main() {\n\
+             let p = bytes_from_ints([])\n\
+             let s = bytes_from_ints([])\n\
+             let _ = lower_tests_crypto_pbkdf2_sha256_stub(p, s, 1, 32)\n\
+         }",
+        "lower_tests_crypto_pbkdf2_sha256_stub",
+        RtFunc::CryptoPbkdf2Sha256,
+    );
+
+    assert_stub_reaches(
+        "$test.crypto_pbkdf2_sha256_verify_stub",
+        "pub fn lower_tests_crypto_pbkdf2_sha256_verify_stub(p: Bytes, s: Bytes, n: Int, e: Bytes) -> Int { crypto_pbkdf2_sha256_verify(p, s, n, e) }\n",
+        "fn main() {\n\
+             let p = bytes_from_ints([])\n\
+             let s = bytes_from_ints([])\n\
+             let _ = lower_tests_crypto_pbkdf2_sha256_verify_stub(p, s, 1, p)\n\
+         }",
+        "lower_tests_crypto_pbkdf2_sha256_verify_stub",
+        RtFunc::CryptoPbkdf2Sha256Verify,
     );
 }
 

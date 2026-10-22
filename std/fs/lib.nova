@@ -4,8 +4,9 @@
 //!
 //! Paths are `String`s, and a relative path is resolved against the process's
 //! current directory. `read_to_string` and `write_string` move a whole file
-//! as text, and `read` and `write` as `Bytes`. `open` returns a `File`, which
-//! reads and writes through `std/io`'s `Read` and `Write`. Failures are
+//! as text, and `read` and `write` as `Bytes`. `rename` moves a file into
+//! place, replacing what is there. `open` returns a `File`, which reads and
+//! writes through `std/io`'s `Read` and `Write`. Failures are
 //! `std/io`'s `IoError`s. Every module sees these names without an import,
 //! and a module's own definition of one of them shadows the one here.
 //!
@@ -239,6 +240,46 @@ pub async fn remove_file(path: String) -> Result<(), IoError> {
 /// finishes.
 pub async fn remove_dir_all(path: String) -> Result<(), IoError> {
     let status = fs_remove_dir_all(path)
+    if status == 0 { return Ok(()) }
+    Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
+}
+
+// Rename the file `from` to `to`, replacing `to` (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §5):
+// a whole file written beside its target, then renamed over it, so the
+// target is never half written.
+/// Renames the file `from` to `to`, replacing the file at `to` when there is
+/// one, on Windows as on other systems.
+///
+/// Writing a file whole under another name, then renaming it over the one
+/// it replaces, leaves the old file or the new one at `to`, never half of
+/// one, should the program stop in between; on Unix the replacement itself
+/// is atomic. Returns an `IoError` of kind `NotFound` if nothing exists at
+/// `from` or the directory to hold `to` does not exist, and
+/// `PermissionDenied` if the system denies the rename. Renaming to another
+/// file system, or a file over a directory, fails with a kind that depends
+/// on the system.
+///
+/// An `async fn` that never suspends: it blocks every task until it
+/// finishes.
+///
+/// ```
+/// async fn main() {
+///     let dir = "${temp_dir()}/nova-std-fs-rename"
+///     create_dir_all(dir).await.unwrap()
+///     let path = "${dir}/data.json"
+///     write_string(path, "{\"n\": 1}").await.unwrap()
+///
+///     // The new contents, whole, beside the old, then moved over them.
+///     write_string("${path}.tmp", "{\"n\": 2}").await.unwrap()
+///     rename("${path}.tmp", path).await.unwrap()
+///     assert_eq(read_to_string(path).await.unwrap(), "{\"n\": 2}")
+///     assert(!exists("${path}.tmp").await, "the temporary name is gone")
+///     # remove_dir_all(dir).await.unwrap()
+/// }
+/// ```
+pub async fn rename(from: String, to: String) -> Result<(), IoError> {
+    let status = fs_rename(from, to)
     if status == 0 { return Ok(()) }
     Err(IoError { kind: io_error_kind_of(status), message: fs_last_error_message() })
 }

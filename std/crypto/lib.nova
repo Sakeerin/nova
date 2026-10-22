@@ -1,11 +1,13 @@
 //! Hashes, message authentication codes and secure random values.
 //!
 //! `sha256` and `sha512` hash `Bytes`, `hmac_sha256` computes an HMAC-SHA-256
-//! tag, and `hmac_sha256_verify` checks one. `random_bytes` and `random_int`
-//! draw from the operating system's cryptographically secure random source.
-//! Hashes and tags are raw `Bytes`: nothing here encodes them as hex or
-//! base64. Every module sees these names without an import, and a module's
-//! own definition of one of them shadows the one here.
+//! tag, and `hmac_sha256_verify` checks one. `pbkdf2_sha256` derives a key
+//! from a password, for storing a password's hash, and
+//! `pbkdf2_sha256_verify` checks a password against one. `random_bytes` and
+//! `random_int` draw from the operating system's cryptographically secure
+//! random source. Hashes and tags are raw `Bytes`: `Bytes::to_hex` writes
+//! them as hex. Every module sees these names without an import, and a
+//! module's own definition of one of them shadows the one here.
 //!
 //! There is no encryption, no hash other than SHA-256 and SHA-512, and no way
 //! to hash input that arrives in pieces: each function takes all of its
@@ -34,7 +36,8 @@
 //! assert_eq(random_bytes(16).unwrap().len(), 16)
 //! ```
 
-// `std/crypto`: hashes, HMAC and random, over three runtime intrinsics.
+// `std/crypto`: hashes, HMAC, PBKDF2 and random, over five runtime
+// intrinsics.
 //
 // **Digest lengths are documented, not typed.** `nova-spec/20-STDLIB.md`
 // section 8 declares these as `[u8; 32]` and `[u8; 64]`; neither is
@@ -146,6 +149,87 @@ pub fn hmac_sha256(key: Bytes, data: Bytes) -> Bytes {
 /// guarantee.
 pub fn hmac_sha256_verify(key: Bytes, data: Bytes, tag: Bytes) -> Bool {
     crypto_hash(OP_HMAC_SHA256_VERIFY, key, data, tag) == 0
+}
+
+// PBKDF2-HMAC-SHA-256 (spec
+// docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md §5),
+// over `ring::pbkdf2`: written in Nova it ran about 0.84 s per 100,000
+// iterations, during which a single-threaded server answers nothing. The
+// runtime checks the iteration count and the length, and returns these two
+// statuses, which `crates/nova-runtime/src/crypto.rs` defines as well; each
+// is a caller's error, so a panic, as `bytes_from_ints` panics on a value
+// out of range, rather than a `CryptoError` every call would have to unwrap.
+const PBKDF2_BAD_ITERATIONS: Int = -5
+
+const PBKDF2_BAD_LENGTH: Int = -6
+
+// The panics both functions share, for the statuses above.
+fn pbkdf2_refused(name: String, status: Int, iterations: Int, length: Int) {
+    if status == PBKDF2_BAD_ITERATIONS {
+        panic("${name}: iterations must be from 1 to 4294967295, not ${iterations}")
+    }
+    if status == PBKDF2_BAD_LENGTH {
+        panic("${name}: length must be from 1 to 65536, not ${length}")
+    }
+    panic("${name}: the runtime refused it with status ${status}")
+}
+
+/// Returns the key of `length` bytes that PBKDF2-HMAC-SHA-256 (RFC 8018)
+/// derives from `password` and `salt` over `iterations` rounds.
+///
+/// It is made for storing a password: keep the key, the salt, which should
+/// be random and differ from one password to the next, as from
+/// `random_bytes(16)`, and the count, and check a password later with
+/// `pbkdf2_sha256_verify`. Each round makes the key costlier to guess:
+/// OWASP recommends 600,000 for a password. It runs on the calling task for
+/// as long as the count says, and every other task waits.
+///
+/// Panics when `iterations` is below 1 or above 4,294,967,295, with
+/// `pbkdf2_sha256: iterations must be from 1 to 4294967295, not <n>`, and
+/// when `length` is below 1 or above 65,536, with
+/// `pbkdf2_sha256: length must be from 1 to 65536, not <n>`.
+///
+/// ```
+/// // RFC 7914's first PBKDF2-HMAC-SHA-256 vector, its first 32 bytes.
+/// let key = pbkdf2_sha256(bytes_from_string("passwd"), bytes_from_string("salt"), 1, 32)
+/// assert_eq(key.to_hex(), "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc")
+/// ```
+pub fn pbkdf2_sha256(password: Bytes, salt: Bytes, iterations: Int, length: Int) -> Bytes {
+    let status = crypto_pbkdf2_sha256(password, salt, iterations, length)
+    if status != 0 { pbkdf2_refused("pbkdf2_sha256", status, iterations, length) }
+    fs_take_bytes()
+}
+
+// Constant-time, and that property is INHERITED from `ring::pbkdf2::verify`
+// rather than demonstrated here, as `hmac_sha256_verify`'s is.
+/// Returns `true` if `expected` is the key PBKDF2-HMAC-SHA-256 derives from
+/// `password` and `salt` over `iterations` rounds, of `expected`'s own
+/// length, as `pbkdf2_sha256` derives it.
+///
+/// The comparison is made in constant time, as `ring`'s is, so how long it
+/// takes does not reveal how much of a wrong key matched. An empty
+/// `expected` gives `false`. A shorter key is the start of a longer one, so
+/// the start of the right key gives `true` too: keep and check the whole
+/// key, and its length.
+///
+/// Panics when `iterations` is below 1 or above 4,294,967,295, with
+/// `pbkdf2_sha256_verify: iterations must be from 1 to 4294967295, not <n>`.
+///
+/// ```
+/// let salt = random_bytes(16).unwrap()
+/// let stored = pbkdf2_sha256(bytes_from_string("correct horse"), salt, 1000, 32)
+/// assert(pbkdf2_sha256_verify(bytes_from_string("correct horse"), salt, 1000, stored), "the password")
+/// assert(!pbkdf2_sha256_verify(bytes_from_string("wrong horse"), salt, 1000, stored), "another")
+/// ```
+pub fn pbkdf2_sha256_verify(
+    password: Bytes,
+    salt: Bytes,
+    iterations: Int,
+    expected: Bytes,
+) -> Bool {
+    let status = crypto_pbkdf2_sha256_verify(password, salt, iterations, expected)
+    if status < 0 { pbkdf2_refused("pbkdf2_sha256_verify", status, iterations, expected.len()) }
+    status == 0
 }
 
 // `n` cryptographically random bytes.

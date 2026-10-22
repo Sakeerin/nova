@@ -5,8 +5,9 @@
 //! `bytes_from_string` and `bytes_from_ints` make a `Bytes`, and its methods
 //! measure, index, slice, join and search it, all counting in bytes; none
 //! changes it. `to_string` turns bytes that are valid UTF-8 back into a
-//! `String`. `Bytes` implements `Eq`: `a.eq(b)` compares two buffers byte for
-//! byte.
+//! `String`, and `to_hex` writes any bytes as hex, which `bytes_from_hex`
+//! reads back. `Bytes` implements `Eq`: `a.eq(b)` compares two buffers byte
+//! for byte.
 //!
 //! Making `Bytes` from a string and from integers, measuring, slicing,
 //! joining and searching them, and turning them back into a `String`:
@@ -121,6 +122,67 @@ impl Bytes {
     /// Returns `true` if `needle` occurs in these bytes. An empty `needle`
     /// always does.
     pub fn contains(self, needle: Bytes) -> Bool { self.index_of(needle).is_some() }
+
+    // Hex in Nova, on both targets (spec
+    // docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md
+    // §5): two characters per byte need no intrinsic, and a key or a tag is
+    // tens of bytes.
+    /// Returns the bytes written in hexadecimal, two lower-case digits per
+    /// byte, most significant first: `0x0a 0xff` is `"0aff"`. Empty bytes
+    /// give `""`. `bytes_from_hex` reads it back.
+    ///
+    /// ```
+    /// assert_eq(bytes_from_ints([0, 10, 255]).to_hex(), "000aff")
+    /// assert_eq(bytes_from_string("hi").to_hex(), "6869")
+    /// ```
+    pub fn to_hex(self) -> String {
+        let digits = "0123456789abcdef".chars()
+        let bs = self.to_ints()
+        let mut out = [""; bs.len()]
+        let mut i = 0
+        while i < bs.len() {
+            out[i] = "${digits[bs[i] / 16]}${digits[bs[i] % 16]}"
+            i = i + 1
+        }
+        "".join(out)
+    }
+}
+
+// Hex read back, in Nova, as `Bytes::to_hex` writes it.
+/// Returns the bytes `s` writes in hexadecimal, two digits per byte, most
+/// significant first, as `Bytes::to_hex` writes them; the digits `a` to `f`
+/// may be in either case. Returns `None` when `s` has an odd number of
+/// characters, or holds any character other than a hex digit, a space or a
+/// `0x` included. `""` gives empty bytes.
+///
+/// ```
+/// assert(bytes_from_hex("000aFF").unwrap().eq(bytes_from_ints([0, 10, 255])), "either case")
+/// assert(bytes_from_hex("abc").is_none(), "an odd length")
+/// assert(bytes_from_hex("0g").is_none(), "not a hex digit")
+/// ```
+pub fn bytes_from_hex(s: String) -> Option<Bytes> {
+    // Each byte of `s`'s UTF-8 is checked, so a character outside ASCII,
+    // whose bytes are all 0x80 or more, is refused like any other.
+    let cs = bytes_from_string(s).to_ints()
+    if cs.len() % 2 != 0 { return None }
+    let mut out = [0; cs.len() / 2]
+    let mut i = 0
+    while i < out.len() {
+        let hi = hex_digit_value(cs[2 * i])
+        let lo = hex_digit_value(cs[2 * i + 1])
+        if hi < 0 || lo < 0 { return None }
+        out[i] = hi * 16 + lo
+        i = i + 1
+    }
+    Some(bytes_from_ints(out))
+}
+
+// The value of the hex digit whose ASCII code is `b`, in either case, or -1.
+fn hex_digit_value(b: Int) -> Int {
+    if b >= 48 && b <= 57 { return b - 48 }
+    if b >= 65 && b <= 70 { return b - 55 }
+    if b >= 97 && b <= 102 { return b - 87 }
+    0 - 1
 }
 
 // A `Bytes` holding `s`'s UTF-8 bytes.
