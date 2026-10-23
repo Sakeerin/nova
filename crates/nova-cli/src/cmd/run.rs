@@ -75,8 +75,9 @@ pub struct BuildCmd {
 
     /// Optimizing build via the LLVM backend (emits LLVM IR and compiles it
     /// with a discovered `clang`/`llc`); the default is the fast Cranelift
-    /// backend. With `--target wasm`, runs `wasm-opt -Oz` on app.wasm when
-    /// `wasm-opt` is on PATH. With `--ssr` or `--ssg`, both builds.
+    /// backend. With `--target wasm`, optimizes app.wasm for size with
+    /// binaryen's `wasm-opt` when it is on PATH. With `--ssr` or `--ssg`,
+    /// both builds.
     #[arg(long)]
     release: bool,
 
