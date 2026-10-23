@@ -116,9 +116,22 @@ jobs:
   # comment form's checks and post work, that the admin creates, edits and
   # deletes a post, that a script in a title or a comment stays text, and
   # that a form without its CSRF token is refused; it kills the server at
-  # the end. Playwright, pinned, is installed here only,
-  # into a scratch directory; nothing in `cargo test` or `nova` installs a
-  # package. Ubuntu only: one browser job suffices.
+  # the end. And 4.8's, Phase 4's gate measured (spec
+  # docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md
+  # §3 and §4): 06 and 07 are built with `--release` and binaryen's
+  # `wasm-opt`, which must run and shrink both clients, and `spa.mjs` and
+  # `blog.mjs` drive those builds; `lighthouse.test.mjs` tests the rules
+  # `lighthouse.mjs` applies, under `node --test`, without Lighthouse; and
+  # `lighthouse.mjs` builds 06 and 07 in `$RUNNER_TEMP`, serves both on
+  # port 0, runs Lighthouse three times, mobile, on 06's `/` and 07's `/`,
+  # `/posts/1` and `/login`, fails when a run fails or a page's median
+  # Performance score is under 95, and stops both servers at the end. The
+  # release builds come before Lighthouse, so that a Lighthouse failure
+  # does not hide their result, and the rules' test and Lighthouse run
+  # after a failure of the release builds too, so that it does not hide
+  # theirs. Playwright, Lighthouse and binaryen, each pinned, are installed
+  # here only, into a scratch directory; nothing in `cargo test` or `nova`
+  # installs a package. Ubuntu only: one browser job suffices.
   browser:
     name: Browser (Chromium)
     runs-on: ubuntu-latest
@@ -141,9 +154,9 @@ jobs:
           target/debug/nova build --target wasm tests/dom/counter.nova -o "$RUNNER_TEMP/counter"
           target/debug/nova build --target wasm tests/dom/ui_counter.nova -o "$RUNNER_TEMP/ui_counter"
           (cd examples/06-counter-spa && ../../target/debug/nova build --target wasm -o "$RUNNER_TEMP/counter-spa")
-      - name: Install Playwright and Chromium
+      - name: Install Playwright, Chromium, Lighthouse and binaryen
         run: |
-          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.56.1
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 lighthouse@13.5.0 binaryen@132.0.0
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
       - name: Click the counters in Chromium
         run: |
@@ -158,6 +171,40 @@ jobs:
         run: node tests/browser/ssr.mjs target/debug/nova "$RUNNER_TEMP/ssr" "$RUNNER_TEMP/pw"
       - name: The blog in Chromium
         run: node tests/browser/blog.mjs target/debug/nova "$RUNNER_TEMP/blog" "$RUNNER_TEMP/pw"
+      # binaryen's `wasm-opt` is on PATH in this step alone, so the other
+      # steps build as `nova` does where there is none. `blog.mjs --release`
+      # builds the server with `--release` too, through the runner's
+      # `clang`. `shrank` compares each release `app.wasm` with the debug
+      # build's the steps above drove.
+      - name: Release builds with binaryen's wasm-opt
+        id: release
+        run: |
+          export PATH="$RUNNER_TEMP/pw/node_modules/.bin:$PATH"
+          wasm-opt --version
+          (cd examples/06-counter-spa && ../../target/debug/nova build --target wasm --release -o "$RUNNER_TEMP/counter-spa-release")
+          node tests/browser/spa.mjs "$RUNNER_TEMP/counter-spa-release" "$RUNNER_TEMP/pw" --release
+          node tests/browser/blog.mjs target/debug/nova "$RUNNER_TEMP/blog-release" "$RUNNER_TEMP/pw" --release
+          shrank() {
+            debug=$(stat -c %s "$1/app.wasm")
+            release=$(stat -c %s "$2/app.wasm")
+            echo "$2/app.wasm: $release bytes, from $debug in the debug build"
+            test "$release" -lt "$debug"
+          }
+          shrank "$RUNNER_TEMP/counter-spa" "$RUNNER_TEMP/counter-spa-release"
+          shrank "$RUNNER_TEMP/blog/fullstack-blog/dist" "$RUNNER_TEMP/blog-release/fullstack-blog/dist"
+      # The rules' test, and Lighthouse once the rules pass, run after a
+      # failure of the release builds too, but not after an earlier step's:
+      # `success()` is true while no step has failed, and the release step's
+      # outcome is `failure` only when it ran and failed (a step skipped
+      # after an earlier failure is `skipped`). `!cancelled()` keeps a
+      # cancelled run from starting either.
+      - name: The Lighthouse gate's rules
+        id: rules
+        if: success() || (!cancelled() && steps.release.outcome == 'failure')
+        run: node --test tests/browser/lighthouse.test.mjs
+      - name: Lighthouse on both examples
+        if: steps.rules.outcome == 'success' && !cancelled()
+        run: node tests/browser/lighthouse.mjs target/debug/nova "$RUNNER_TEMP/lighthouse" "$RUNNER_TEMP/pw"
 
   fmt:
     name: Rustfmt
