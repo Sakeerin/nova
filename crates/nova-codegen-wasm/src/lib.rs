@@ -1362,10 +1362,16 @@ mod tests {
         }
     }
 
-    /// Compile and validate, returning the module's bytes.
+    /// Compile and validate, returning the module's bytes. The validator
+    /// takes the MVP and bulk memory alone, the one feature `nova build
+    /// --release` enables for `wasm-opt` (`WASM_OPT_FLAGS` in
+    /// `crates/nova-cli/src/bundle.rs`; the 4.8 spec
+    /// `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+    /// §4): a module that needs another fails here, and its flag goes there.
     fn valid(m: &Module) -> Output {
         let out = compile_module(m).expect("compiles");
-        wasmparser::Validator::new()
+        let features = wasmparser::WasmFeatures::MVP | wasmparser::WasmFeatures::BULK_MEMORY;
+        wasmparser::Validator::new_with_features(features)
             .validate_all(&out.wasm)
             .expect("a valid module");
         out

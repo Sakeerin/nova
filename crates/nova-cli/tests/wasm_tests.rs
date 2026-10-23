@@ -852,8 +852,9 @@ fn a_public_that_leads_outside_is_not_copied() {
         .contains("x.txt"));
 }
 
-/// A stand-in for `wasm-opt`: it copies its input, the argument after
-/// `-Oz`, to its output, the one after `-o`, and prints its arguments.
+/// A stand-in for `wasm-opt`: it prints its arguments, and copies its
+/// input, the argument before `-o`, to its output, the last, after `-o`,
+/// whatever flags come first.
 const WASM_OPT: &str = "fn main() { block_on(go()) }
 
 async fn go() {
@@ -868,8 +869,8 @@ async fn go() {
         i = i + 1
     }
     println(line)
-    match argv.get(2) {
-        Some(input) => match argv.get(4) {
+    match argv.get(argv.len() - 3) {
+        Some(input) => match argv.get(argv.len() - 1) {
             Some(output) => match read(input).await {
                 Ok(bytes) => {
                     let _ = write(output, bytes).await
@@ -883,8 +884,11 @@ async fn go() {
 }
 ";
 
-/// `--release` runs `wasm-opt -Oz` when it is on `PATH`, says so in one
-/// line when it is not, and fails when it fails (spec 4.4 §7, §9.3).
+/// `--release` runs `wasm-opt -Oz --enable-bulk-memory` when it is on
+/// `PATH`, says so in one line when it is not, and fails when it fails
+/// (spec 4.4 §7, §9.3; the flag, the 4.8 spec
+/// `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+/// §4).
 #[test]
 fn release_runs_wasm_opt_when_it_is_on_path() {
     let dir = fresh("release");
@@ -934,14 +938,15 @@ fn release_runs_wasm_opt_when_it_is_on_path() {
         "{manifest}"
     );
 
-    // The stand-in: run with `-Oz` on `app.wasm`, in `dist/`.
+    // The stand-in: run with `-Oz` and bulk memory, which the backend's
+    // `memory.copy` and `memory.fill` need, on `app.wasm`, in `dist/`.
     let a = nova_at(&dir, &home)
         .env("PATH", path_with("bin-ok"))
         .args(build)
         .assert()
         .success();
     assert!(
-        stdout(&a).contains("wasm-opt: -Oz app.wasm -o app.wasm\n"),
+        stdout(&a).contains("wasm-opt: -Oz --enable-bulk-memory app.wasm -o app.wasm\n"),
         "{}",
         stdout(&a)
     );

@@ -285,11 +285,29 @@ fn quote(s: &str) -> String {
     out
 }
 
-/// `wasm-opt -Oz app.wasm -o app.wasm` in `out`, when `wasm-opt` is on
-/// `PATH`: whether it ran. One that fails fails the build.
+/// What [`wasm_opt`] passes before its file: `-Oz`, and the flag of each
+/// WASM feature beyond the MVP that `nova-codegen-wasm` writes, since
+/// binaryen refuses an input that uses a feature it has not enabled (the
+/// 4.8 spec
+/// `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+/// §4):
+/// - `--enable-bulk-memory`: the backend writes `memory.copy` and
+///   `memory.fill`.
+///
+/// The backend writes no other such feature: no sign-extension or
+/// saturating float-to-int instruction, no global, at most one result, one
+/// table and one memory; `nova-codegen-wasm`'s tests validate its modules
+/// with the MVP and bulk memory alone. binaryen's own defaults, sign
+/// extension and mutable globals, stay as they are.
+const WASM_OPT_FLAGS: [&str; 2] = ["-Oz", "--enable-bulk-memory"];
+
+/// `wasm-opt -Oz --enable-bulk-memory app.wasm -o app.wasm` in `out`
+/// ([`WASM_OPT_FLAGS`]), when `wasm-opt` is on `PATH`: whether it ran. One
+/// that fails fails the build.
 fn wasm_opt(out: &Path) -> Result<bool> {
     let status = std::process::Command::new("wasm-opt")
-        .args(["-Oz", "app.wasm", "-o", "app.wasm"])
+        .args(WASM_OPT_FLAGS)
+        .args(["app.wasm", "-o", "app.wasm"])
         .current_dir(out)
         .status();
     match status {
