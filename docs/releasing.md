@@ -124,7 +124,9 @@ A pull request whose last commit is the release commit:
    From a checkout of `main`, on a new branch:
 
    ```sh
-   old=0.2.0   # the version main has now
+   # the version main has now
+   old=$(perl -ne 'print $1 if /^version = "(.*)"$/' Cargo.toml)
+   echo "$old"
    perl -pi -e "s/^version = \"\Q$old\E\"\$/version = \"$version\"/; s/version = \"=\Q$old\E\"/version = \"=$version\"/" Cargo.toml
    perl -pi -e "s/^  \"version\": \"\Q$old\E\",\$/  \"version\": \"$version\",/" tools/vscode-nova/package.json
    perl -0pi -e "s/(\"name\": \"vscode-nova\",\n\s*\"version\": )\"\Q$old\E\"/\$1\"$version\"/g" tools/vscode-nova/package-lock.json
@@ -133,7 +135,7 @@ A pull request whose last commit is the release commit:
    ```
 
    `cargo update --workspace` moves only the workspace's own 23 packages
-   in `Cargo.lock` (add `--offline` without a network). The diff shows 20
+   in `Cargo.lock` (add `--offline` without a network). The diff shows 21
    lines changed in `Cargo.toml`, 23 in `Cargo.lock`, 1 in `package.json`
    and 2 in `package-lock.json`. `npm version` is not used: it rewrites
    `package.json`'s layout. Then:
@@ -324,6 +326,12 @@ nothing published.
    next release adds one crate, `nova-codegen-wasm`
    (`docs/superpowers/specs/2026-10-14-phase-4-0-foundations-design.md`
    §8), so its token keeps **publish-new** as well.
+
+   **Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):**
+   `v0.4.0` is that release: one new crate, `nova-codegen-wasm`, and 19
+   new versions of crates that exist. The new crate falls within the
+   burst of 5, so its upload takes minutes, as `0.3.1`'s and `0.3.2`'s
+   did, not the 2 h 20 min of 19 new crates above.
 5. Check what crates.io serves:
 
    ```sh
@@ -503,6 +511,16 @@ data and extensions directories.
   suggestions, each marked `abc`, keywords included.
 - **With it,** and after **Nova: Restart Language Server**, completion
   after `p.` offered the fields `x` and `y`.
+
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):**
+step 5 below cannot run again: `shapes` 0.1.0 is in the index, where a
+published version stays (section 5). `0.3.1` and `0.3.2` ran the Release
+gate and an install of the extension from a store in place of this run.
+For `v0.4.0`, by the user's decision of 2026-10-22, the maintainer installs
+the published `nova` and builds and opens both Phase 4 examples with it,
+by their READMEs, in place of this run (spec
+`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`,
+decision 6; `docs/adr/0047-phase-4-boundary.md`).
 
 The commands, in order, each with what it should show:
 

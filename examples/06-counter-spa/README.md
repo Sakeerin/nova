@@ -40,9 +40,11 @@ away: three clicks of `+` and one of `-` leave `Count: 2`.
 - It differs from `nova-spec/60-EXAMPLES.md` §6 in three places, each the
   API 4.3 built: `import ui` and `import ui::html::{button, div}`,
   `count.value()`, and `mount("#app", Counter)`.
-- `nova build --target wasm --release` runs `wasm-opt -Oz` on `app.wasm`
-  when `wasm-opt` is on `PATH`; the gate's size, under 50 KB of `app.wasm`
-  and `app.js` gzipped, is measured without it.
+- `nova build --target wasm --release` runs binaryen's `wasm-opt -Oz
+  --enable-bulk-memory` on `app.wasm` when `wasm-opt` is on `PATH`, which
+  takes `app.wasm` and `app.js` from 20,997 bytes gzipped (by zlib at
+  level 9) to 11,974 with binaryen 132; the gate's size, under 50 KiB, is
+  measured without it.
 - `cargo test` clicks it under a fake DOM, and CI's `browser` job in
   Chromium (`tests/browser/spa.mjs`); the 4.4 spec is
   `docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`.
@@ -50,3 +52,8 @@ away: three clicks of `+` and one of `-` leave `Count: 2`.
   counts, an edit reloads it, and a type error shows the overlay until the
   fix; the 4.5 spec is
   `docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md`.
+- The same job runs Lighthouse on its page three times, mobile, and needs
+  a median Performance score of 95 or more
+  (`tests/browser/lighthouse.mjs`), and drives its `--release` build with
+  binaryen's `wasm-opt`; the 4.8 spec is
+  `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`.

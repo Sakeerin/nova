@@ -336,6 +336,18 @@ fails. An output directory that holds the project or lies inside `public/`
 is refused, and a link at a name the build writes, symbolic or, on Unix,
 hard, is removed first (`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md` §7; ADR 0043).
 
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):** step 4
+of §7.2 runs `wasm-opt -Oz --enable-bulk-memory`, since the backend writes
+`memory.copy` and `memory.fill`, which binaryen's `wasm-opt` refuses
+without bulk memory: 4.4's `-Oz` alone failed every build with binaryen on
+`PATH`. With binaryen 132, `06-counter-spa`'s `app.wasm` and `app.js` come
+to 11,974 bytes gzipped by zlib at level 9, from 20,997, and
+`07-fullstack-blog`'s client to 27,510, from 49,472. §11's Lighthouse
+target is met as ADR 0047 reads it, a median Performance score of 95 or
+more over three mobile runs, measured in CI's `browser` job
+(`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+§3, §4; ADR 0047).
+
 ### 7.1 Output Layout
 ```
 dist/

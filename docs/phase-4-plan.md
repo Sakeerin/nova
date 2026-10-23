@@ -642,6 +642,30 @@ ADR 0046).
     first.
   - Every publish waits for the user's word.
 
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):** by the
+user's decisions of 2026-10-22, Lighthouse runs in a new step of CI's
+`browser` job, `tests/browser/lighthouse.mjs`, on Playwright's Chromium with
+`lighthouse@13.5.0` pinned: its mobile preset, with the default simulated
+throttling, three runs on each of 06's `/` and 07's `/`, `/posts/1` and
+`/login`, and a page passes when the median of its Performance scores is 95
+or more. Debug builds are measured, as the size checks measure them. The
+size checks stand: hello world under 30 KB and 06 under 50 KB, a KB being
+1,024 bytes, and 07's size printed with no limit. `nova build --release`
+passes `--enable-bulk-memory` to `wasm-opt` as well as `-Oz`, since
+binaryen refuses the backend's `memory.copy` and `memory.fill` without it,
+and CI builds and drives both examples with binaryen's own `wasm-opt`;
+`gate.sh` builds its project for WASM too. Phase 4 is complete before the
+tag, as Phase 2 was: the 4.8 pull request holds the gate, the fix, the
+documentation and ADR 0047; the user then opens both examples from `main`,
+by their READMEs; the release pull request makes the version `0.4.0`; and a
+records pull request adds the publishes' run IDs. Of the two crates above,
+`nova-codegen-wasm` is in the 20 `publish-crates.sh` lists since 4.0, and
+first reaches crates.io with `v0.4.0`; nothing depends on `nova-bundler`,
+which stays a stub, and the bundle stays `nova-cli`'s. The extension is
+published at 0.4.0 to both stores
+(`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`;
+ADR 0047).
+
 ## 5. Cross-cutting
 
 - **Testing.**
