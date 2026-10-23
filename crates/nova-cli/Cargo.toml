@@ -6,9 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "The Nova programming language: compiler, formatter, language server, package manager and documentation generator"
+description = "The Nova programming language: compiler to native code and to WebAssembly for the web, dev server, formatter, language server, package manager and documentation generator"
 readme = "README.md"
-keywords = ["nova", "programming-language", "compiler", "lsp", "formatter"]
+keywords = ["nova", "programming-language", "compiler", "wasm", "lsp"]
 categories = ["compilers", "command-line-utilities", "development-tools"]
 
 [[bin]]

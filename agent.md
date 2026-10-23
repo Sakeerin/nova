@@ -118,14 +118,14 @@ These are from `nova-spec/00-MASTER-SPEC.md §5`. Violating them will cause CI f
 | `nova-mir` | 3-address IR | `nova-hir` |
 | `nova-codegen-cranelift` | Debug-mode object files | `cranelift` |
 | `nova-codegen-llvm` | Release-mode object files | — (textual LLVM IR, compiled by `clang` or `llc`) |
-| `nova-codegen-wasm` | WASM modules | `wasm-encoder`, `walrus` |
+| `nova-codegen-wasm` | WASM modules, and the JS shim that runs them (ADR 0039) | `wasm-encoder` (no `walrus`) |
 | `nova-runtime` | GC + async runtime (Rust, linked) | `httparse`, `ring`; its own single-threaded executor (ADR 0009) |
 | `nova-driver` | Pipeline orchestration | all crates above |
 | `nova-cli` | `nova` binary, CLI arg parsing | `nova-driver`, `clap` |
 | `nova-fmt` | Opinionated formatter | `nova-ast` |
 | `nova-lsp` | LSP server | `tower-lsp` |
 | `nova-pm` | Package manager | `nova-diagnostics`, `nova-lexer`, `toml_edit` |
-| `nova-bundler` | Frontend bundler | `nova-codegen-wasm` |
+| `nova-bundler` | A stub, `publish = false`; a WASM build's bundle is `nova-cli`'s `bundle.rs` (ADR 0047) | — |
 | `nova-doc` | Doc generator | `nova-ast` |
 | `nova-test` | A stub; the test runner is `nova-cli`'s `cmd/test.rs` | — |
 

@@ -122,6 +122,24 @@ src/server.nova` runs the server
 (`docs/superpowers/specs/2026-10-19-phase-4-6-ssr-hydration-and-ssg-design.md`
 §7; ADR 0045).
 
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):** the
+2026-10-14 note's refusal is gone. Since 4.4, `nova build --target wasm
+--release` builds: it runs `wasm-opt` on `app.wasm` when `wasm-opt` is on
+`PATH`, says so in one line when it is not, fails when `wasm-opt` fails, and
+`manifest.json` says whether it ran
+(`docs/superpowers/specs/2026-10-17-phase-4-4-component-syntax-design.md`
+§7; ADR 0043). Since 4.8 it runs `wasm-opt -Oz --enable-bulk-memory app.wasm
+-o app.wasm` in the output directory: the backend writes `memory.copy` and
+`memory.fill`, which binaryen's `wasm-opt` refuses without the flag, so with
+binaryen on `PATH` every such build failed, where 4.4's test had run a
+stand-in. `--ssr` and `--ssg` with `--release` do the same for the client.
+CI's `browser` job builds both Phase 4 examples that way, with binaryen 132,
+and drives them in Chromium; nothing installs `wasm-opt` for a user. `nova
+build --help` says `--release` optimizes `app.wasm` for size with binaryen's
+`wasm-opt`
+(`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+§4; ADR 0047).
+
 ### 1.2 Project Template (`nova new`)
 
 ```

@@ -669,6 +669,23 @@ restores the file and sees the overlay go and the page count again
 as `wasm_tests.rs` measures them
 (`docs/superpowers/specs/2026-10-18-phase-4-5-router-and-nova-dev-design.md` §5.4; ADR 0044).
 
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):** the
+Phase 4 gate's Lighthouse run measures this example in CI's `browser` job
+(`tests/browser/lighthouse.mjs`): built with `nova build --target wasm`, a
+debug build, and served from a static server, `/` gets three runs of
+Lighthouse 13.5.0's mobile preset, with its simulated throttling, for the
+Performance category alone, and passes when the median of the three scores
+is 95 or more. Where 4.8 was built, its median was 100: the prototype's
+three runs each scored 100, with median FCP 679 ms, LCP 1,054 ms, TBT 0 ms
+and CLS 0, and so did each of this page's runs when the step was run again.
+The size limit is 50 KiB, 51,200 bytes, as `wasm_tests.rs` has measured it
+since 4.4: 21,070 bytes there, by `flate2`, and 20,997 by zlib at the same
+level. With `--release` and binaryen's `wasm-opt` on `PATH`, `app.wasm`
+drops from 40,491 bytes to 16,525, and the client to 11,974 by zlib;
+CI drives that build too
+(`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+§3, §4; ADR 0047).
+
 ---
 
 ## 7. `07-fullstack-blog` (Phase 4 gate)
@@ -737,6 +754,25 @@ refused with `403`. Lighthouse is 4.8's. Its client, built without
 `--release`, is 49,472 bytes gzipped
 (`docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`
 §6; ADR 0046).
+
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):**
+"Lighthouse Performance > 95" is measured in CI's `browser` job
+(`tests/browser/lighthouse.mjs`), with the bar the master spec's gate sets,
+a median of 95 or more (ADR 0047): built with `nova build --ssr`, a debug
+build, its server started on port 0 with the admin's password set, `/`,
+`/posts/1` and `/login` each get three runs of Lighthouse 13.5.0's mobile
+preset, with its simulated throttling, for the Performance category alone.
+`/admin` needs the admin's session and is not measured. Where 4.8 was
+built, each page's median was 100: the prototype's runs all scored 100,
+with median LCP 1,803 ms for `/`, 1,652 ms for `/posts/1` and 1,651 ms for
+`/login`, TBT at most 6 ms, and CLS at most 0.001; when the step was run
+again, one run of `/` scored 93. The example has no size limit, by the
+user's decision of 2026-10-22, and `blog.mjs` prints its client's size.
+With `nova build --ssr --release` and binaryen's `wasm-opt` on `PATH`, its
+`app.wasm` drops from 116,579 bytes to 57,179, and the client from 49,472
+bytes gzipped by zlib to 27,510; CI drives that build through `blog.mjs` too
+(`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+§3, §4; ADR 0047).
 
 ---
 

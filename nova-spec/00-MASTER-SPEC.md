@@ -709,6 +709,21 @@ hashes, by the user's decisions of 2026-10-21 (ADR 0046), and a JSON file in
 place of SQLite (ADR 0038). CI's `browser` job drives it in Chromium; the
 Lighthouse run, for both examples, is 4.8's.
 
+**Amended 2026-10-22 (branch `claude/loving-archimedes-frtf5q-48`):**
+Phase 4's boundary is `docs/adr/0047-phase-4-boundary.md`. Its inventory
+takes Phase 4's promises from the list above, `docs/phase-4-plan.md` and
+`nova-spec/60-EXAMPLES.md` §6 and §7, and says whether each shipped,
+shipped differently or was left out, and where each is recorded; position
+2's bundler is `nova-cli`'s, and `crates/nova-bundler` stays a stub. The
+gate's "Lighthouse 95+" is a step of CI's `browser` job,
+`tests/browser/lighthouse.mjs`: three runs of Lighthouse's mobile preset on
+each of 06's `/` and 07's `/`, `/posts/1` and `/login`, each page's median
+Performance score 95 or more, by the user's decisions of 2026-10-22. Where
+4.8 was built, every median was 100. The job's other steps drive both
+examples in Chromium, and the user opens both from `main` before the tag;
+the release pull request records CI's run and the user's check in that
+ADR. Tagging `v0.4.0` completes Phase 4 within that boundary.
+
 ---
 
 ### Phase 5 — Self-hosting (week 81–104)

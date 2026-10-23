@@ -150,6 +150,34 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   page hydrates in place, the admin creates, edits and deletes a post, a
   script in a title or a comment stays text, and a form without its CSRF
   token is refused.
+- **Lighthouse in CI, Phase 4's gate measured,**
+  `tests/browser/lighthouse.mjs`: the `browser` job installs Lighthouse
+  13.5.0 and runs it three times on each of 06's `/` and 07's `/`,
+  `/posts/1` and `/login`, with its mobile preset, and fails when a page's
+  median Performance score is under 95, a run fails, or a page gets other
+  than three runs; each page's line gives its runs' benchmark indexes,
+  Lighthouse's measure of the host's speed. The rules it
+  applies, the pages, the runs, the median and the verdict, are tested
+  first without Lighthouse, under `node --test`
+  (`tests/browser/lighthouse.test.mjs`). Where 4.8 was built, every
+  page's median was 100: the prototype's runs all scored 100, and the step
+  run again, 94 runs in all, gave one 93, a run of 07's `/` (ADR 0047).
+- **A CI test of release builds with binaryen's `wasm-opt`:** the same job
+  builds 06 and 07 with `--release`, checks that `wasm-opt` ran and made
+  each `app.wasm` smaller, and drives both builds in Chromium.
+- **`gate.sh` builds its new project for WASM** too, so CI's install and
+  package jobs, the release's smoke test and the Release gate test a
+  packaged and an installed `nova` on WASM: `dist/` holds the page, the
+  shim, the module, the manifest and the `package.json` that makes the
+  shim a module to Node, the module begins with WASM's magic number, and,
+  where `node` is on PATH, `node dist/app.js` prints what the native
+  build prints. With `--node`, which CI's install and package jobs
+  and the release's smoke test pass, and the Release gate when the tag's
+  `gate.sh` takes it, from `v0.4.0` on, a PATH without `node` fails it.
+- **A "Web" section in the README and in `nova-cli`'s README,** which
+  crates.io shows: `nova build --target wasm`, `nova dev`, `--release` and
+  `wasm-opt`, `--ssr` and `--ssg`, `std/ui` and its modules, `std/dom`,
+  which std's documentation site leaves out, and the two examples.
 
 ### Changed
 
@@ -175,6 +203,20 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fallback`.
 - **The status line names 301, 302, 303, 401 and 403** by their reason
   phrases, `303 See Other` where it was `303 Redirection`.
+- **`nova build --help`** says that `--release` optimizes `app.wasm` for
+  size with binaryen's `wasm-opt`, where it named `wasm-opt -Oz`.
+- **`nova-cli`'s description and keywords on crates.io** name WebAssembly
+  and the web; the keyword `wasm` replaces `formatter`.
+
+### Fixed
+
+- **`nova build --target wasm --release` with binaryen's `wasm-opt` on
+  PATH** failed for every program: it passed `-Oz` alone, and `wasm-opt`
+  refuses the `memory.copy` and `memory.fill` the backend writes unless
+  bulk memory is enabled. It now passes `--enable-bulk-memory` too, and
+  `--ssr` and `--ssg` with `--release` build their client the same way.
+  With binaryen 132, 06's client is 11,974 bytes gzipped by zlib at level
+  9, from 20,997, and 07's 27,510, from 49,472 (ADR 0047).
 
 ## [0.3.2] - 2026-10-14
 

@@ -77,6 +77,48 @@ them after the library's other tests, and `nova test --doc` runs them
 alone. A line of an example that starts with `# ` runs but is not
 shown.
 
+### Web
+
+`nova build --target wasm` compiles a program to WebAssembly, with no
+other toolchain: `dist/` holds the page (the project's own `index.html`,
+or a generated one), `app.js`, `app.wasm`, `manifest.json`, a
+`package.json` that makes `app.js` a module to Node, and `public/` copied
+into `assets/`. Any static server can serve it, with `app.wasm` as
+`application/wasm`, and `node dist/app.js` runs a program that does not
+touch the page. `nova dev` builds the same page and serves it on
+`http://127.0.0.1:3000/`; when a source changes it builds again and
+reloads the page, or shows the build's errors over it. `--port` chooses
+another port, and `--open` opens a browser.
+
+With `--release`, a build for WASM also runs binaryen's `wasm-opt` on
+`app.wasm`, as `wasm-opt -Oz --enable-bulk-memory`, when `wasm-opt` is on
+your PATH (CI tests binaryen 132, from npm's `binaryen`); without it, it
+says so in one line and leaves `app.wasm` as a build without `--release`
+makes it.
+
+In a project with `src/server.nova` beside `src/main.nova`, `nova build
+--ssr` builds the client from `src/main.nova` into `dist/`, and the server
+natively into `target/debug/<name>-server`, which needs the C linker `nova
+build` needs. A server that renders its pages with `ui::ssr` sends HTML
+that the client adopts with `hydrate`. `nova build --ssg` also runs the
+server once, and `ui::ssr::serve` then writes `dist/<path>/index.html` for
+each route other than `*` with no parameters.
+
+A program reaches the page through std modules it imports: `import ui`
+(signals, effects, memos, `mount` and `hydrate`), `import ui::html` (the
+element builders a `view { … }` calls), `import ui::router` (`Router`,
+`HistoryRouter`, `link` and `navigate`) and, natively, `import ui::ssr`
+(`serve`, `page` and `Dist`, for the server). std's documentation site
+documents all four. `import dom`, the WASM-only layer beneath them
+(elements, listeners, `location` and `history`, timers, `fetch`), is not
+on the site: its documentation is its source, `std/dom/lib.nova`.
+
+Two examples put it together: `examples/06-counter-spa`, a counter written
+as a component, runs with `nova dev` in its directory; and
+`examples/07-fullstack-blog`, a blog whose server renders every page, with
+sessions, forms and an admin, builds with `nova build --ssr`, then sets its
+admin's password and starts its server, as its README shows.
+
 ---
 
 ## How to use this bundle

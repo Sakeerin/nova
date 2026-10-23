@@ -149,3 +149,10 @@ to delete it, and `Write a new post` opens the editor.
   (`run_tests.rs`); CI's `browser` job drives it in Chromium
   (`tests/browser/blog.mjs`). The 4.7 spec is
   `docs/superpowers/specs/2026-10-21-phase-4-7-fullstack-blog-design.md`.
+- The same job runs Lighthouse three times, mobile, on `/`, `/posts/1` and
+  `/login`, and needs a median Performance score of 95 or more for each
+  (`tests/browser/lighthouse.mjs`). It also builds the blog with
+  `nova build --ssr --release` and binaryen's `wasm-opt` on `PATH`, which
+  takes the client from 49,472 bytes gzipped (by zlib at level 9) to
+  27,510 with binaryen 132, and drives that build; the 4.8 spec is
+  `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`.

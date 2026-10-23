@@ -114,10 +114,10 @@ the budget (`docs/adr/0029-the-language-server.md`).
 
 | Skill | Notes |
 |---|---|
-| `wasm-encoder` | Low-level WASM binary encoding |
-| `walrus` | Higher-level WASM IR and transforms |
+| `wasm-encoder` | Low-level WASM binary encoding; there is no `walrus` (ADR 0039) |
+| `wasmparser` | Validating the modules tests build |
 | WebAssembly spec | Modules, types, memory model, tables |
-| JS interop | ABI for calling JS from WASM and vice versa |
+| JS interop | The JS shim, and `extern "js"` declarations in std (ADRs 0039, 0041) |
 
 ---
 
@@ -204,11 +204,10 @@ assets (`docs/adr/0031-package-index-and-publishing.md`).
 | Skill | Notes |
 |---|---|
 | Signals / fine-grained reactivity | SolidJS model — no virtual DOM |
-| DOM bindings | `web-sys`-style descriptor bindgen |
-| SSR / SSG | Render-to-string on native, hydrate on WASM |
-| Bundler / tree-shaking | Module graph, dead-code elimination |
-| HMR (hot module replacement) | Dev server WebSocket protocol |
-| `wasm-bindgen` concepts | ABI between WASM and JS |
+| DOM bindings | A written subset, `std/dom`, over `extern "js"` (ADR 0041) |
+| SSR / SSG | Hydratable HTML rendered natively, hydrated on WASM (ADR 0045) |
+| Bundler / tree-shaking | `nova-cli`'s bundle; monomorphization keeps only what `main` reaches (ADR 0047) |
+| Live reload | `nova dev`'s rebuilds, and Server-Sent Events to the page (ADR 0044) |
 
 ---
 
