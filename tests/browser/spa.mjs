@@ -9,14 +9,43 @@
 // opens the page, checks the count reads 0, clicks `+` three times and `-`
 // once, finding the buttons by their text, and checks the count reads 2 and
 // the console holds no error. Playwright is the job's own install, as for `counter.mjs`.
+//
+// With `--release` after the two, as CI's step of release builds runs it on
+// a `nova build --target wasm --release` with binaryen's `wasm-opt` on
+// `PATH` (spec
+// docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md
+// §4), it first checks that `dist/manifest.json` says the build is a
+// release build that `wasm-opt` optimized, and its line ends with that and
+// the client's size, `app.wasm` and `app.js` gzipped at the best level, as
+// `blog.mjs` measures its own. Without it, nothing changes.
 
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { extname, join, resolve, sep } from "node:path";
+import { gzipSync } from "node:zlib";
 
-const [dist, modules] = process.argv.slice(2).map((p) => resolve(p));
+const [dist, modules] = process.argv.slice(2, 4).map((p) => resolve(p));
+const release = process.argv[4] === "--release";
+if (process.argv.length > 5 || (process.argv.length === 5 && !release)) {
+  throw new Error("usage: node tests/browser/spa.mjs <dist> <dir holding node_modules/playwright> [--release]");
+}
 const { chromium } = createRequire(join(modules, "noop.js"))("playwright");
+
+// Under `--release`: what the line adds, once the manifest says the build
+// is a release build that `wasm-opt` optimized.
+let built = "";
+if (release) {
+  const manifest = JSON.parse(await readFile(join(dist, "manifest.json"), "utf8"));
+  if (manifest.release !== true || manifest.wasm_opt !== true) {
+    throw new Error(`dist/manifest.json says release ${manifest.release} and wasm_opt ${manifest.wasm_opt}, not a release build that wasm-opt optimized`);
+  }
+  let gzipped = 0;
+  for (const name of ["app.wasm", "app.js"]) {
+    gzipped += gzipSync(await readFile(join(dist, name)), { level: 9 }).length;
+  }
+  built = `; the client is ${gzipped} bytes gzipped, from a release build that wasm-opt optimized`;
+}
 
 const types = {
   ".html": "text/html",
@@ -64,7 +93,7 @@ try {
   for (const label of ["+", "+", "+", "-"]) await button(label).click();
   await reads("Count: 2");
   if (errors.length > 0) throw new Error(`the console has errors: ${errors.join("; ")}`);
-  console.log("counter-spa: +, +, +, -, and the count reads 2");
+  console.log(`counter-spa: +, +, +, -, and the count reads 2${built}`);
 } finally {
   await browser.close();
   server.close();

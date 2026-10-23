@@ -59,6 +59,14 @@
 // `app.wasm` and `app.js` gzipped, printed and not limited. The server is
 // killed at the end, pass or fail. Every wait polls, for 30 seconds at
 // most. Playwright is the job's own install, as for `counter.mjs`.
+//
+// With `--release` after the three, as CI's step of release builds runs it
+// with binaryen's `wasm-opt` on `PATH` (spec
+// docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md
+// §4), it builds with `nova build --ssr --release`, checks that
+// `dist/manifest.json` says the client is a release build that `wasm-opt`
+// optimized, runs the server from `target/release/`, and its line ends
+// with that after the client's size. Without it, nothing changes.
 
 import { spawn } from "node:child_process";
 import { cp, mkdir, readFile, rm } from "node:fs/promises";
@@ -68,7 +76,11 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
-const [nova, work, modules] = process.argv.slice(2).map((p) => resolve(p));
+const [nova, work, modules] = process.argv.slice(2, 5).map((p) => resolve(p));
+const release = process.argv[5] === "--release";
+if (process.argv.length > 6 || (process.argv.length === 6 && !release)) {
+  throw new Error("usage: node tests/browser/blog.mjs <nova> <work dir> <dir holding node_modules/playwright> [--release]");
+}
 const { chromium } = createRequire(join(modules, "noop.js"))("playwright");
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const LIMIT = 30000;
@@ -79,6 +91,8 @@ const XSS = `<script>window.novaXss = 1; alert("xss")</script><img src=x onerror
 // The same, short enough for a comment's name, of 60 characters at most.
 const NAME_XSS = `<img src=x onerror="window.novaXss=3;alert(3)">`;
 const EXE = process.platform === "win32" ? ".exe" : "";
+// Where `nova build --ssr` puts the server.
+const PROFILE = release ? "release" : "debug";
 // The character a browser's parser drops from a page's text.
 const NUL = String.fromCharCode(0);
 
@@ -103,7 +117,7 @@ function run(command, args, dir, env, input = null) {
 
 // The server in `dir`: its URL, its stderr so far, and a kill.
 async function startServer(dir, env) {
-  const exe = join(dir, "target", "debug", `fullstack-blog-server${EXE}`);
+  const exe = join(dir, "target", PROFILE, `fullstack-blog-server${EXE}`);
   const child = spawn(exe, ["--address", "127.0.0.1:0"], { cwd: dir, env, stdio: ["ignore", "pipe", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => {
@@ -258,9 +272,16 @@ await cp(example, dir, {
   filter: (from) => !left.some((l) => relative(example, from) === l || relative(example, from).startsWith(l + sep)),
 });
 
-const build = await run(nova, ["build", "--ssr"], dir, env);
-if (build.code !== 0) throw new Error(`nova build --ssr exited with ${build.code}:\n${build.output}`);
-const exe = join(dir, "target", "debug", `fullstack-blog-server${EXE}`);
+const flags = release ? ["--ssr", "--release"] : ["--ssr"];
+const build = await run(nova, ["build", ...flags], dir, env);
+if (build.code !== 0) throw new Error(`nova build ${flags.join(" ")} exited with ${build.code}:\n${build.output}`);
+if (release) {
+  const manifest = JSON.parse(await readFile(join(dir, "dist", "manifest.json"), "utf8"));
+  if (manifest.release !== true || manifest.wasm_opt !== true) {
+    throw new Error(`dist/manifest.json says release ${manifest.release} and wasm_opt ${manifest.wasm_opt}, not a release build that wasm-opt optimized`);
+  }
+}
+const exe = join(dir, "target", PROFILE, `fullstack-blog-server${EXE}`);
 const set = await run(exe, ["--set-password", "admin", "--iterations", "1000"], dir, env, `${PASSWORD}\n`);
 if (set.code !== 0 || set.output.trim() !== "blog: set the password of admin") {
   throw new Error(`--set-password exited with ${set.code}:\n${set.output}`);
@@ -499,7 +520,7 @@ try {
   }
 
   console.log(
-    `blog: every page hydrates in place (nodes kept: ${kept.join(", ")}), and so does each form's answer at the path it was posted to (nodes kept: ${answers.join("; ")}), the comment form's button is disabled while a field is blank and the comment posts, a comment holding a NUL comes back without it, a script in a comment and in a title stays text, a form without its token gets 403, and the admin logs in and creates, edits and deletes a post; the client is ${gzipped} bytes gzipped`,
+    `blog: every page hydrates in place (nodes kept: ${kept.join(", ")}), and so does each form's answer at the path it was posted to (nodes kept: ${answers.join("; ")}), the comment form's button is disabled while a field is blank and the comment posts, a comment holding a NUL comes back without it, a script in a comment and in a title stays text, a form without its token gets 403, and the admin logs in and creates, edits and deletes a post; the client is ${gzipped} bytes gzipped${release ? ", from a release build that wasm-opt optimized" : ""}`,
   );
 } catch (e) {
   console.error(`the server's stderr:\n${server.stderr()}`);
