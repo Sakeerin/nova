@@ -90,8 +90,8 @@ The user decided on 2026-10-22, and approved with the 4.8 spec:
 | `nova dev`, a dev server with HMR | position 7; decision 9 | shipped differently: a full build in a child process, and a reload over Server-Sent Events, with an overlay for the build's errors | ADRs 0038, 0044 |
 | SSR: render to a string natively, hydrate in WASM | position 8; decision 10 | shipped differently: `nova build --ssr` builds the project's own server, which renders with `render_hydratable`; `hydrate` adopts the server's nodes, and builds the view again on a mismatch | ADR 0045 |
 | SSG: compile-time route enumeration | position 9 | shipped differently: `nova build --ssg` runs the built server once, which writes a page for each route with no parameter | ADR 0045 |
-| The gate: both examples "work in browser" | the master spec's Phase 4 gate | met in Chromium, in CI's `browser` job; the user's own check is to come | "The gate's record" |
-| The gate: "pass Lighthouse 95+" | the master spec's Phase 4 gate; 60-EXAMPLES §7; 30-FRONTEND §11; decision 12 | met where 4.8 was built, every median 100; CI's run is to be recorded | decided here; "The gate's record" |
+| The gate: both examples "work in browser" | the master spec's Phase 4 gate | met in Chromium, in CI's `browser` job, and by the user's own check, from `main`; both recorded | "The gate's record" |
+| The gate: "pass Lighthouse 95+" | the master spec's Phase 4 gate; 60-EXAMPLES §7; 30-FRONTEND §11; decision 12 | met where 4.8 was built and in the 4.8 pull request's CI run, every median 100; both recorded | decided here; "The gate's record" |
 | 06: `nova dev` opens a browser, and the counter responds to clicks | 60-EXAMPLES §6 | met: `nova dev --open` opens one, and CI's `browser` job clicks the counter under `nova dev` | ADR 0044 |
 | 06: under 50 KiB gzipped | 60-EXAMPLES §6; 30-FRONTEND §11; decision 12 | met: 21,070 bytes by `flate2` at level 9 where 4.8 was built, by a test that runs on all three systems | ADR 0043; "The gate's record" |
 | Hello world under 30 KiB gzipped | 30-FRONTEND §11; decision 12 | met: 5,006 bytes by `flate2` at level 9 where 4.8 was built, by a test that runs on all three systems | ADR 0039; "The gate's record" |
@@ -100,7 +100,7 @@ The user decided on 2026-10-22, and approved with the 4.8 spec:
 | 07: hydration for the comments | 60-EXAMPLES §7 | shipped differently: every page hydrates whole; no islands | ADR 0046 |
 | 07: `routes/` and `components/` | 60-EXAMPLES §7 | shipped differently: a flat `src/` | ADR 0046 |
 | A CI job: Lighthouse, the gzipped sizes, Playwright | decision 12 | shipped: Playwright and Lighthouse in the `browser` job, the sizes in the `test` job on all three systems | "The gate's record" |
-| The user opens both examples in their own browser | decision 12 | to come, from `main`, after the 4.8 pull request merges | "The gate's record" |
+| The user opens both examples in their own browser | decision 12 | done, from `main`, after the 4.8 pull request merged: both work, as the user reported; recorded | "The gate's record" |
 | std per target, and std modules a program imports | decisions 5 and 6 | shipped: `dom`, `ui`, `ui::html`, `ui::router` and, natively, `ui::ssr` | ADRs 0040, 0041, 0042, 0044, 0045 |
 | Async on the browser's event loop, with no `block_on` on WASM | decision 4 | shipped differently: `block_on` works, and holds the page while it waits | ADR 0040 |
 | `wasm-opt` under `--release`, never required | decision 2 | shipped in 4.4; fixed here for binaryen's own `wasm-opt` | ADR 0043; "Found outside this boundary" |
@@ -113,7 +113,7 @@ The user decided on 2026-10-22, and approved with the 4.8 spec:
 | 4.6: SSR, hydration and SSG | 4.6 | shipped; its gate met in Chromium | ADR 0045 |
 | 4.7: `examples/07-fullstack-blog` | 4.7 | shipped; its gate met in Chromium, and over HTTP on all three systems | ADR 0046 |
 | 4.8: the CI job's Lighthouse run, and the size checks | 4.8 | shipped | this ADR |
-| 4.8: the user opens both examples | 4.8 | to come | "The gate's record" |
+| 4.8: the user opens both examples | 4.8 | done: both work, as the user reported; recorded | "The gate's record" |
 | 4.8: the records | 4.8 | done: the READMEs' "Web" sections, the dated notes, `CHANGELOG.md` and this ADR | this ADR |
 | 4.8: `v0.4.0`, by the runbook | 4.8 | to come: the release pull request, then each publish on the user's word | the user's decision 5 |
 | 4.8: `nova-codegen-wasm` and `nova-bundler` published if `nova-cli` depends on them | 4.8 | decided: `nova-codegen-wasm` is in the publish list since 4.0, and first reaches crates.io with `v0.4.0`; nothing depends on `nova-bundler`, which stays unpublished | ADR 0039; decided here |
@@ -315,14 +315,51 @@ build is 5,006 bytes and 06's 21,070.
 | 06's client | 20,997 (40,491) | 11,974 (16,525) | 50 KiB, 51,200 |
 | 07's client | 49,472 (116,579) | 27,510 (57,179) | none; printed |
 
-**The 4.8 pull request's CI run.** It had not run when this ADR was
-written. The release pull request adds its address here, with the lines
-its `browser` job printed: the Lighthouse step's page lines and its
-`lighthouse:` line, and the sizes the release builds' step printed.
+**The 4.8 pull request's CI run,**
+https://github.com/Sakeerin/nova/actions/runs/39891767287, on the pull
+request's head `09548e1`, on 2026-10-23: all 24 checks passed, with
+`release.yml`'s run 39891767288, whose "Publish the release" is skipped
+on a pull request. All nine of its runs of `gate.sh` printed `gate: the
+WASM build prints Hello, Nova! under Node` and `gate: passed`: the
+`install` and `package` jobs' on Linux, macOS and Windows, and the
+release's smoke test on three of its four targets, `x86_64-apple-darwin`'s
+being skipped by design. The `browser` job (job 120212941991) passed
+every step, the rules' test with `# tests 9`, `# pass 9`, `# fail 0`.
+Its release builds' step and its Lighthouse step printed these lines,
+shortened where marked `…`, the release build's `blog:` line and the
+runner's paths:
 
-**The user's check.** To come: after the 4.8 pull request merges, the user
-builds both examples from `main`, by their READMEs, and opens each in
-their own browser. The release pull request adds what they report.
+```text
+wasm-opt version 132 (version_132)
+built …/counter-spa-release
+counter-spa: +, +, +, -, and the count reads 2; the client is 11974 bytes gzipped, from a release build that wasm-opt optimized
+blog: every page hydrates in place (nodes kept: / 37, /posts/1 48, /login 24, /nowhere 15, /posts/99 15, /admin 53, /admin/new 29, /admin/posts/2/edit 30), … the client is 27510 bytes gzipped, from a release build that wasm-opt optimized
+…/counter-spa-release/app.wasm: 16525 bytes, from 40491 in the debug build
+…/blog-release/fullstack-blog/dist/app.wasm: 57179 bytes, from 116579 in the debug build
+06 /: scores 100, 100, 100, median 100; medians FCP 679 ms, LCP 1054 ms, TBT 0 ms, CLS 0.000, SI 679 ms; benchmark index 2438, 2457, 2434
+07 /: scores 100, 100, 100, median 100; medians FCP 902 ms, LCP 1652 ms, TBT 0 ms, CLS 0.000, SI 902 ms; benchmark index 2456, 2390, 2440
+07 /posts/1: scores 100, 100, 100, median 100; medians FCP 901 ms, LCP 1652 ms, TBT 0 ms, CLS 0.000, SI 901 ms; benchmark index 2395, 2435, 2445
+07 /login: scores 100, 100, 100, median 100; medians FCP 902 ms, LCP 1052 ms, TBT 0 ms, CLS 0.001, SI 902 ms; benchmark index 2445, 2450, 2458
+lighthouse: 06's / and 07's /, /posts/1 and /login, 3 runs each, mobile, every median 95 or more (06 / 100, 07 / 100, 07 /posts/1 100, 07 /login 100); Lighthouse 13.5.0, HeadlessChrome/141.0.0.0, Node 22.23.3
+```
+
+Every median is 100, as where 4.8 was built, and the release builds'
+sizes are the table's above, to the byte.
+
+**The user's check,** on 2026-10-23, after the 4.8 pull request merged:
+the user installed `nova` from `main` (`1afbaf8`) with `cargo install
+--locked --path crates/nova-cli`, ran both examples by their READMEs on
+their own machine, and opened each in their own browser. They reported
+both working, in their words "06 และ 07 เสร็จแล้วครับ" ("06 and 07 are
+done"), with two screenshots:
+- 06 at `http://127.0.0.1:3000/`, under `nova dev`: the page titled
+  "Counter", reading `Count: 2`, with its `+` and `-` buttons;
+- 07's Admin page, logged in, its header reading "Admin" and "Log out
+  admin": "Write a new post", and the three seeded posts, "Sessions,
+  tokens and passwords" (2026-10-21), "How the forms work" (2026-10-20)
+  and "Hello from a Nova server" (2026-10-19), each with Edit and Delete.
+
+Their system was not stated.
 
 **The publishes.** To come: the records pull request adds the runs of the
 tag's Release workflow, of "Publish to crates.io" and of "Release gate",
@@ -413,12 +450,12 @@ recorded, not decided.
 ## Consequences
 
 - The master spec's §7 Definition of Done, item by item:
-  1. the crates compile and pass CI: the 4.8 pull request's run, which the
-     release pull request records here;
+  1. the crates compile and pass CI: the 4.8 pull request's run, recorded
+     in "The gate's record";
   2. the gate is met with reproducible commands: the `browser` job's
-     steps and the size tests, measured above where 4.8 was built, with
-     CI's run and the user's check to be recorded here by the release pull
-     request;
+     steps and the size tests, measured where 4.8 was built and in the
+     4.8 pull request's CI run, with the user's own check, all recorded in
+     "The gate's record";
   3. the new public surface is documented: the "Web" sections of the root
      README and `nova-cli`'s, std's documentation site for `std/ui` and its
      modules, `std/dom`'s own source, the examples' READMEs, and the dated
