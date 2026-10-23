@@ -71,9 +71,18 @@ jobs:
             echo "::error::nova version printed '$first', not 'nova $VERSION'"
             exit 1
           fi
+      # --node, so the WASM build must run under the runner's `node`, when
+      # the tag's gate.sh takes it: from v0.4.0 on; earlier tags' do not.
+      # The grep's string is gate.sh's own `--node)` line, which
+      # release_manifests.rs checks; the step prints the flags it passes.
       - name: The installed nova makes, runs, builds and tests a project
         shell: bash
-        run: bash .github/scripts/gate.sh "$RUNNER_TEMP/crates-io/bin/nova" "$RUNNER_TEMP/gate" --test
+        run: |
+          set -euo pipefail
+          flags=(--test)
+          if grep -qF -- '--node) with_node=--node' .github/scripts/gate.sh; then flags+=(--node); fi
+          echo "gate.sh ${flags[*]}"
+          bash .github/scripts/gate.sh "$RUNNER_TEMP/crates-io/bin/nova" "$RUNNER_TEMP/gate" "${flags[@]}"
       # gate.sh made the project with `nova new demo` in its WORKDIR. The
       # templates are written in nova fmt's layout, so the check finds
       # nothing to change.
@@ -149,8 +158,14 @@ jobs:
             exit 1
           fi
           echo "nova=$nova" >> "$GITHUB_OUTPUT"
+      # --node when the tag's gate.sh takes it, as in the job above.
       - name: The installed nova makes, runs, builds and tests a project
         shell: bash
         env:
           INSTALLED: ${{ steps.installed.outputs.nova }}
-        run: bash .github/scripts/gate.sh "$INSTALLED" "$RUNNER_TEMP/gate" --test
+        run: |
+          set -euo pipefail
+          flags=(--test)
+          if grep -qF -- '--node) with_node=--node' .github/scripts/gate.sh; then flags+=(--node); fi
+          echo "gate.sh ${flags[*]}"
+          bash .github/scripts/gate.sh "$INSTALLED" "$RUNNER_TEMP/gate" "${flags[@]}"
