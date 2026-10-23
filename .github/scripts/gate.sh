@@ -79,7 +79,7 @@ if [ "$built" != "Hello, Nova!" ]; then
 fi
 
 "$nova" build --target wasm
-for file in index.html app.js app.wasm manifest.json; do
+for file in index.html app.js app.wasm manifest.json package.json; do
   if [ ! -s "dist/$file" ]; then
     echo "gate: nova build --target wasm wrote no dist/$file" >&2
     exit 1

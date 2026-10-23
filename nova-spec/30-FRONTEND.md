@@ -343,8 +343,10 @@ without bulk memory: 4.4's `-Oz` alone failed every build with binaryen on
 `PATH`. With binaryen 132, `06-counter-spa`'s `app.wasm` and `app.js` come
 to 11,974 bytes gzipped by zlib at level 9, from 20,997, and
 `07-fullstack-blog`'s client to 27,510, from 49,472. §11's Lighthouse
-target is met as ADR 0047 reads it, a median Performance score of 95 or
-more over three mobile runs, measured in CI's `browser` job
+target, as ADR 0047 reads it, a median Performance score of 95 or more
+over three mobile runs, was met where 4.8 was built, every median 100;
+CI's `browser` job measures it, and the release pull request records that
+job's run in ADR 0047
 (`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
 §3, §4; ADR 0047).
 

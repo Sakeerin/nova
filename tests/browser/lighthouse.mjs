@@ -40,7 +40,9 @@
 //
 // The pages, the number of runs, what a failed run is, the median and the
 // verdict are `lighthouse-rules.mjs`'s, which `lighthouse.test.mjs` tests
-// without Lighthouse; this script runs Lighthouse and applies them.
+// without Lighthouse; this script runs Lighthouse and applies them. `run`,
+// which builds the examples, is `lighthouse-run.mjs`'s, which that test
+// also tests.
 
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -52,6 +54,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { PASS, RUNS, judge, pages, runOf } from "./lighthouse-rules.mjs";
+import { run } from "./lighthouse-run.mjs";
 
 const [nova, work, modules] = process.argv.slice(2).map((p) => resolve(p));
 const lighthouse = join(modules, "node_modules", "lighthouse", "cli", "index.js");
@@ -70,29 +73,6 @@ const types = {
   ".wasm": "application/wasm",
   ".css": "text/css",
 };
-
-// Runs `command` in `dir` to its end, `input` on its stdin: its status, its
-// output and its stderr alone, once its stdout and stderr have closed. A
-// child that exits before it reads its stdin breaks the pipe; the write's
-// EPIPE is ignored, since the status says how the run went.
-function run(command, args, dir, env, input = null) {
-  return new Promise((done, failed) => {
-    const child = spawn(command, args, { cwd: dir, env, stdio: ["pipe", "pipe", "pipe"] });
-    let output = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      output += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      output += chunk;
-      stderr += chunk;
-    });
-    child.on("error", failed);
-    child.on("close", (code) => done({ code, output, stderr }));
-    child.stdin.on("error", () => {});
-    child.stdin.end(input ?? "");
-  });
-}
 
 // The reason a build or a server failed, from its stderr (or its output,
 // when its stderr is empty): the first line that begins `error`, which
@@ -174,7 +154,11 @@ async function startServer(dir, env) {
         }
       });
       // "close", not "exit": its stderr has been read to the end by then.
-      child.on("close", (code) => failed(new Error(`the blog's server exited with ${code}`)));
+      // The timer goes too, or it would hold the script for its 30 s.
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        failed(new Error(`the blog's server exited with ${code}`));
+      });
     });
   } catch (e) {
     child.kill();

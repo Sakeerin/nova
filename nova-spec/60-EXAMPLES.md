@@ -677,7 +677,8 @@ Lighthouse 13.5.0's mobile preset, with its simulated throttling, for the
 Performance category alone, and passes when the median of the three scores
 is 95 or more. Where 4.8 was built, its median was 100: the prototype's
 three runs each scored 100, with median FCP 679 ms, LCP 1,054 ms, TBT 0 ms
-and CLS 0, and so did each of this page's runs when the step was run again.
+and CLS 0. When the step was run again, every median was 100, though single
+runs went as low as 94 on this page and 93 on 07's `/`.
 The size limit is 50 KiB, 51,200 bytes, as `wasm_tests.rs` has measured it
 since 4.4: 21,070 bytes there, by `flate2`, and 20,997 by zlib at the same
 level. With `--release` and binaryen's `wasm-opt` on `PATH`, `app.wasm`

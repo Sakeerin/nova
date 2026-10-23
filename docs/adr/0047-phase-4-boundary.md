@@ -93,8 +93,8 @@ The user decided on 2026-10-22, and approved with the 4.8 spec:
 | The gate: both examples "work in browser" | the master spec's Phase 4 gate | met in Chromium, in CI's `browser` job; the user's own check is to come | "The gate's record" |
 | The gate: "pass Lighthouse 95+" | the master spec's Phase 4 gate; 60-EXAMPLES §7; 30-FRONTEND §11; decision 12 | met where 4.8 was built, every median 100; CI's run is to be recorded | decided here; "The gate's record" |
 | 06: `nova dev` opens a browser, and the counter responds to clicks | 60-EXAMPLES §6 | met: `nova dev --open` opens one, and CI's `browser` job clicks the counter under `nova dev` | ADR 0044 |
-| 06: under 50 KB gzipped | 60-EXAMPLES §6; 30-FRONTEND §11; decision 12 | met: 21,070 bytes where 4.8 was built, by a test that runs on all three systems | ADR 0043; "The gate's record" |
-| Hello world under 30 KB gzipped | 30-FRONTEND §11; decision 12 | met: 5,006 bytes where 4.8 was built, by a test that runs on all three systems | ADR 0039; "The gate's record" |
+| 06: under 50 KiB gzipped | 60-EXAMPLES §6; 30-FRONTEND §11; decision 12 | met: 21,070 bytes by `flate2` at level 9 where 4.8 was built, by a test that runs on all three systems | ADR 0043; "The gate's record" |
+| Hello world under 30 KiB gzipped | 30-FRONTEND §11; decision 12 | met: 5,006 bytes by `flate2` at level 9 where 4.8 was built, by a test that runs on all three systems | ADR 0039; "The gate's record" |
 | 07: pages that work, a login, the admin's create, edit and delete, sessions in cookies, CSRF tokens, no XSS | 60-EXAMPLES §7; decision 11 | shipped | ADR 0046 |
 | 07: SQLite, through `std/db` | 60-EXAMPLES §7 | replaced: JSON files, each written whole, then renamed into place | ADRs 0038, 0046 |
 | 07: hydration for the comments | 60-EXAMPLES §7 | shipped differently: every page hydrates whole; no islands | ADR 0046 |
@@ -253,7 +253,9 @@ These rows have no section above:
   `lighthouse.mjs` applies, from `lighthouse-rules.mjs`, under
   `node --test`, without Lighthouse: the four pages, three runs each, the
   median of three, and a page failed by a median under 95, a failed run, a
-  run with no score, or other than three runs;
+  run with no score, or other than three runs; and `lighthouse-run.mjs`'s
+  `run`, which builds the examples, given a child that exits before it
+  reads its stdin;
 - **Lighthouse** (`lighthouse.mjs`), as decided above, once the rules'
   test has passed.
 
@@ -458,6 +460,7 @@ recorded, not decided.
 - `docs/releasing.md`
 - ADRs 0025, 0037, and 0038 to 0046
 - Pull requests #117 to #124
-- `tests/browser/lighthouse.mjs`, `lighthouse-rules.mjs` and
-  `lighthouse.test.mjs`, `.github/workflows/ci.yml`'s `browser` job,
-  `.github/scripts/gate.sh`, and `crates/nova-cli/tests/wasm_tests.rs`
+- `tests/browser/lighthouse.mjs`, `lighthouse-rules.mjs`,
+  `lighthouse-run.mjs` and `lighthouse.test.mjs`,
+  `.github/workflows/ci.yml`'s `browser` job, `.github/scripts/gate.sh`,
+  and `crates/nova-cli/tests/wasm_tests.rs`

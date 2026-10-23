@@ -5,15 +5,20 @@
 // median of three, and the verdict over a page's runs, a run that failed or
 // gave no score, and runs other than three in number, among them. Every
 // page here scores 100 or nearly, so `lighthouse.mjs`'s own runs would not
-// notice a wrong median or a dropped failure; these do. Node's own test
-// runner runs them, as CI's `browser` job does before the measurement:
+// notice a wrong median or a dropped failure; these do. And
+// `lighthouse-run.mjs`'s `run`, which `lighthouse.mjs` builds with, given
+// a child that exits before it reads its stdin. Node's own test runner
+// runs them, as CI's `browser` job does before the measurement:
 //
 //     node --test tests/browser/lighthouse.test.mjs
 
 import assert from "node:assert/strict";
+import { dirname } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { PASS, RUNS, judge, median, pages, runOf } from "./lighthouse-rules.mjs";
+import { run as runChild } from "./lighthouse-run.mjs";
 
 // A run that scored `score`, as `runOf` returns one.
 function run(score) {
@@ -119,6 +124,11 @@ test("a run fails when Lighthouse exits other than 0, leaves no report, or repor
   assert.equal(ok.version, "13.5.0");
   assert.equal(ok.browser, "HeadlessChrome/141.0.0.0");
   assert.deepEqual(runOf(exited(1), report(1), "r.json"), { failure: "Lighthouse exited with 1", bench: 2312.5 });
+  // 130 is Lighthouse's own exit on SIGINT, which the 180-second limit sends.
+  assert.deepEqual(runOf(exited(130), report(1), "r.json"), {
+    failure: "Lighthouse exited with 130",
+    bench: 2312.5,
+  });
   assert.deepEqual(runOf({ code: null, signal: "SIGKILL" }, null, "r.json"), {
     failure: "Lighthouse exited with SIGKILL",
     bench: undefined,
@@ -132,4 +142,12 @@ test("a run fails when Lighthouse exits other than 0, leaves no report, or repor
   assert.deepEqual(runOf(exited(0), report(null), "r.json"), { failure: "no Performance score", bench: 2312.5 });
   const other = { ...report(1), categories: { accessibility: { score: 1 } } };
   assert.deepEqual(runOf(exited(0), other, "r.json"), { failure: "no Performance score", bench: 2312.5 });
+});
+
+test("run gives a child's status when the child exits before it reads its stdin", async () => {
+  // 1 MiB is more than a pipe holds, so the write is still under way when
+  // the child exits, and fails with EPIPE, which `run` ignores.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const done = await runChild(process.execPath, ["-e", "process.exit(3)"], here, process.env, "x".repeat(1 << 20));
+  assert.equal(done.code, 3);
 });
