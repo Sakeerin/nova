@@ -9,6 +9,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-23
+
+**Phase 4, "Frontend / WASM", is complete**, within the boundary
+`docs/adr/0047-phase-4-boundary.md` records. This is the `v0.{phase}.0`
+milestone `nova-spec/00-MASTER-SPEC.md` §7 reserves for a completed phase.
+Nova builds a program for WebAssembly, with `std/dom`, `std/ui` and its
+router, components, `nova dev`, and server rendering, hydration and
+static generation, as far as that ADR's inventory records. The gate
+examples `examples/06-counter-spa` and `examples/07-fullstack-blog` work
+in Chromium, in CI's `browser` job, and in the maintainer's own browser,
+built from `main`. Lighthouse's median Performance score is 100 on each
+of their public pages, three runs each with its mobile preset; CI's run
+of the 4.8 pull request printed the medians as
+`06 / 100, 07 / 100, 07 /posts/1 100, 07 /login 100`
+(https://github.com/Sakeerin/nova/actions/runs/39891767287). Each item
+the ADR lists as left out is on its backlog. `nova --version` now reports
+0.4.0.
+
 ### Added
 
 - **`nova build --target wasm`, and its alias `nova bundle`,** compile a

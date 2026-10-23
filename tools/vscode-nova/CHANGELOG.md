@@ -6,6 +6,25 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 The extension's version is always the version of Nova it is released
 with.
 
+## [0.4.0] - 2026-10-23
+
+Released with Nova 0.4.0, whose language gained components, written
+with `component` and `view { … }`.
+
+### Added
+
+- **`component` and `view` are coloured as keywords where they are
+  ones:** `component` before a component's name and its `(`, the name
+  coloured as a function's, and `view` before its `{`. Neither word is
+  reserved, so elsewhere both stay names.
+- **With `nova` 0.4.0, `nova lsp` tells them from names:** semantic
+  highlighting marks `component` and `view` as keywords only where the
+  parser reads them as keywords, so a local named `view` stays a local,
+  even in `if view { … }`; and hover shows a component as it is
+  written, `component Card(title: String)`, with its `///` docs.
+
+Nothing else in the extension changed.
+
 ## [0.3.2] - 2026-10-14
 
 The first version in the Marketplace and Open VSX.
