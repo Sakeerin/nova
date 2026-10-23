@@ -5,8 +5,9 @@
 # crates.io would check them; each packaged Cargo.lock names only what the
 # workspace's names, at the same versions; `nova` installs from the unpacked
 # packages as `cargo install nova-cli` would from crates.io, a release build
-# that embeds the runtime; and that nova passes gate.sh --test. CI's
-# `package` job runs it, from the repository's root, on all three systems.
+# that embeds the runtime; and that nova passes gate.sh --test --node, its
+# WASM build run under Node, which every runner has. CI's `package` job runs
+# it, from the repository's root, on all three systems.
 #
 # Usage: package-gate.sh WORKDIR
 #   WORKDIR  where to package, unpack and install; it must not exist yet
@@ -137,7 +138,7 @@ step_done "installing nova from the packages"
 
 # 4. The installed nova carries its runtime, and makes, runs, builds and
 #    tests a project.
-bash .github/scripts/gate.sh "$workdir/root/bin/nova" "$workdir/gate" --test
+bash .github/scripts/gate.sh "$workdir/root/bin/nova" "$workdir/gate" --test --node
 step_done "the gate"
 
 echo "package-gate: passed in $((SECONDS - began)) s"

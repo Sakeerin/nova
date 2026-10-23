@@ -7,6 +7,9 @@
 //! workspace's version, `publish-crates.sh` uploads them in dependency
 //! order, each tarball carries a README and both licence texts, and the
 //! VS Code extension has the same version, and its lock the same name.
+//! And the Release gate passes `--node` to a `gate.sh` that takes it (spec
+//! `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
+//! §8).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -317,4 +320,92 @@ fn the_extension_has_the_workspace_version_and_its_name() {
         &lock["packages"][""]["name"], name,
         "package-lock.json's packages[\"\"] name"
     );
+}
+
+/// The first line of `step`, a step of the Release gate, that `wanted`
+/// accepts; `what` names it in the panic when there is none.
+fn line_of(step: &[&str], what: &str, wanted: impl Fn(&str) -> bool) -> usize {
+    step.iter()
+        .position(|line| wanted(line))
+        .unwrap_or_else(|| panic!("release-gate.yml: a step with no {what}: {step:?}"))
+}
+
+/// The Release gate runs the `gate.sh` of the tag it checks, and its two
+/// steps that run it pass `--node` only when that `gate.sh` takes it: each
+/// greps the script for a fixed string, its `--node)` line, prints the
+/// flags and passes them. A `gate.sh` whose line drifted from that string
+/// would be run without `--node`, and would pass with its Node run skipped,
+/// so the string must be in `gate.sh`, and both steps must look for it and
+/// pass what they found.
+#[test]
+fn the_release_gate_passes_node_to_a_gate_sh_that_takes_it() {
+    let workflow_path = root()
+        .join(".github")
+        .join("workflows")
+        .join("release-gate.yml");
+    let workflow = read(&workflow_path);
+    let gate_path = root().join(".github").join("scripts").join("gate.sh");
+    let gate = read(&gate_path);
+
+    // A step begins at a `- ` six spaces in and holds the lines indented
+    // further; its lines are kept trimmed.
+    let mut steps: Vec<Vec<&str>> = Vec::new();
+    let mut step: Option<Vec<&str>> = None;
+    for line in workflow.lines() {
+        if let Some(first) = line.strip_prefix("      - ") {
+            steps.extend(step.replace(vec![first.trim()]));
+        } else if line.starts_with("        ") {
+            if let Some(step) = step.as_mut() {
+                step.push(line.trim());
+            }
+        } else if !line.trim().is_empty() {
+            steps.extend(step.take());
+        }
+    }
+    steps.extend(step);
+    let gating: Vec<&Vec<&str>> = steps
+        .iter()
+        .filter(|step| {
+            step.iter()
+                .any(|line| line.starts_with("bash .github/scripts/gate.sh "))
+        })
+        .collect();
+    assert_eq!(
+        gating.len(),
+        2,
+        "{}: the steps that run gate.sh",
+        workflow_path.display()
+    );
+
+    let grep = "if grep -qF -- '";
+    let found = ".github/scripts/gate.sh; then flags+=(--node); fi";
+    let mut strings = BTreeSet::new();
+    for step in gating {
+        let start = line_of(step, "`flags=(--test)`", |line| line == "flags=(--test)");
+        let test = line_of(step, "grep of gate.sh", |line| {
+            line.starts_with(grep) && line.ends_with(found)
+        });
+        let echo = line_of(step, "echo of the flags", |line| {
+            line == r#"echo "gate.sh ${flags[*]}""#
+        });
+        let call = line_of(step, "run of gate.sh with the flags", |line| {
+            line.starts_with("bash .github/scripts/gate.sh ") && line.ends_with(r#" "${flags[@]}""#)
+        });
+        assert!(
+            start < test && test < echo && echo < call,
+            "{}: a step out of order: {step:?}",
+            workflow_path.display()
+        );
+        let string = step[test][grep.len()..]
+            .split('\'')
+            .next()
+            .expect("the grep's string");
+        assert!(
+            gate.lines().any(|line| line.contains(string)),
+            "{}: no line holds {string:?}, which release-gate.yml greps for",
+            gate_path.display()
+        );
+        strings.insert(string);
+    }
+    assert_eq!(strings.len(), 1, "the two steps grep for {strings:?}");
 }

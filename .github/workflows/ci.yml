@@ -343,9 +343,13 @@ jobs:
             nova|nova.exe) ;;
             *) echo "::error::the install put more than nova into bin/"; exit 1 ;;
           esac
+      # --node: the runner has `node`, so the WASM build must run under it
+      # (spec
+      # docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md
+      # §8).
       - name: The installed nova makes, runs, builds and tests a project
         shell: bash
-        run: bash .github/scripts/gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/gate" --test
+        run: bash .github/scripts/gate.sh "$RUNNER_TEMP/nova/bin/nova" "$RUNNER_TEMP/gate" --test --node
       # The Phase 3.3a gate (spec
       # docs/superpowers/specs/2026-10-08-phase-3-3a-local-packages-design.md §8).
       - name: The installed nova builds a program against a path library
