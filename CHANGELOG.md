@@ -27,6 +27,18 @@ of the 4.8 pull request printed the medians as
 the ADR lists as left out is on its backlog. `nova --version` now reports
 0.4.0.
 
+**Recorded 2026-10-25 (branch
+`claude/loving-archimedes-frtf5q-48-records`):** `v0.4.0` is published:
+- the tag `v0.4.0` and its GitHub release (run 40063515984);
+- the 20 crates, `nova-codegen-wasm` on crates.io for the first time
+  (run 40074121811);
+- the VS Code extension 0.4.0, in the Marketplace and Open VSX;
+- "Release gate", which passed all six jobs (run 40107204392).
+
+The maintainer installed the published `nova` and built both examples
+with it. `docs/adr/0047-phase-4-boundary.md`'s "The gate's record" has
+each run and the check.
+
 ### Added
 
 - **`nova build --target wasm`, and its alias `nova bundle`,** compile a

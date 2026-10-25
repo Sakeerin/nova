@@ -115,7 +115,7 @@ The user decided on 2026-10-22, and approved with the 4.8 spec:
 | 4.8: the CI job's Lighthouse run, and the size checks | 4.8 | shipped | this ADR |
 | 4.8: the user opens both examples | 4.8 | done: both work, as the user reported; recorded | "The gate's record" |
 | 4.8: the records | 4.8 | done: the READMEs' "Web" sections, the dated notes, `CHANGELOG.md` and this ADR | this ADR |
-| 4.8: `v0.4.0`, by the runbook | 4.8 | to come: the release pull request, then each publish on the user's word | the user's decision 5 |
+| 4.8: `v0.4.0`, by the runbook | 4.8 | done: the release pull request, #126, then the tag, the GitHub release, crates.io, both stores and the Release gate, each on the user's word, and the user's check of the published `nova`; recorded | the user's decision 5; "The gate's record" |
 | 4.8: `nova-codegen-wasm` and `nova-bundler` published if `nova-cli` depends on them | 4.8 | decided: `nova-codegen-wasm` is in the publish list since 4.0, and first reaches crates.io with `v0.4.0`; nothing depends on `nova-bundler`, which stays unpublished | ADR 0039; decided here |
 | Examples 08 to 10 | 30-FRONTEND §12 | left out | ADR 0038; backlog |
 | Code splitting with `lazy()` | position 2; 30-FRONTEND §7.3 | left out | ADR 0038; backlog |
@@ -361,10 +361,64 @@ done"), with two screenshots:
 
 Their system was not stated.
 
-**The publishes.** To come: the records pull request adds the runs of the
-tag's Release workflow, of "Publish to crates.io" and of "Release gate",
-the extension's two listings, and the published `nova` tried again on
-both examples, in place of the runbook's step 6.2.
+**The publishes,** from the tag `v0.4.0`, on `eab7da8`, which the user
+made and pushed on 2026-10-24, each on the user's word:
+- **The Release workflow,**
+  https://github.com/Sakeerin/nova/actions/runs/40063515984, passed on
+  2026-10-24. Its GitHub release, "Nova 0.4.0", is neither a draft nor a
+  prerelease, and its notes are `CHANGELOG.md`'s `[0.4.0]`. It has eight
+  assets and `SHA256SUMS`, each named for `0.4.0`: `install.ps1`,
+  `install.sh`, the archives for `aarch64-apple-darwin`,
+  `x86_64-apple-darwin`, `x86_64-pc-windows-msvc` and
+  `x86_64-unknown-linux-gnu`, `nova-std-docs-0.4.0.tar.gz` and
+  `nova-vscode-0.4.0.vsix`. All eight were downloaded and checked:
+  `sha256sum --check SHA256SUMS` printed `OK` for each, and each sum
+  equals the digest GitHub's API gives the asset. `releases/latest`
+  redirects to `…/releases/tag/v0.4.0`.
+- **"Publish to crates.io",**
+  https://github.com/Sakeerin/nova/actions/runs/40074121811, from the
+  tag, passed on 2026-10-24. Its package check printed `package-gate: 20
+  packages, 1693099 bytes`, `gate: the WASM build prints Hello, Nova!
+  under Node` and `gate: passed`. Its owner check printed
+  `nova-codegen-wasm: not on crates.io`, and for each of the 19 others
+  `on crates.io, owned by` the repository's owner. No line said `rate
+  limited`: each crate was published at its first attempt, and the
+  summary lists all 20 `published`, none skipped. The index's last line
+  for each of the 20 names `"vers":"0.4.0"`; `nova-codegen-wasm` is on
+  crates.io for the first time.
+- **The extension,** 0.4.0, in both stores on 2026-10-24: the release's
+  `nova-vscode-0.4.0.vsix`, its line of `SHA256SUMS` checked `OK`, went
+  to the Marketplace and to Open VSX, where `ovsx` 1.3.0 printed
+  `Published sakeerin.vscode-nova v0.4.0`. The user's screenshots of the
+  two listings:
+  - **Open VSX's:** Nova Language Tools by `sakeerin`, version 0.4.0,
+    with the version alias `latest`, and the README;
+  - **the Marketplace's:** version 0.4.0, last updated 10/24/2026, the
+    unique identifier `sakeerin.vscode-nova`, the README, and the links
+    Issues, Repository, Homepage, License and Changelog.
+- **"Release gate",**
+  https://github.com/Sakeerin/nova/actions/runs/40107204392, version
+  `0.4.0`, on `main` at `eab7da8`: all six jobs passed, "From crates.io"
+  and "From the install script", each on Ubuntu, macOS and Windows, each
+  running `gate.sh --test --node`. On Ubuntu, "From crates.io" printed
+  `Installed package nova-cli v0.4.0`, `nova 0.4.0`, `gate: the WASM
+  build prints Hello, Nova! under Node`, `gate: passed`, `packages-gate:
+  passed` and `doc-gate: passed`; "From the install script" printed
+  `nova: checked nova-0.4.0-x86_64-unknown-linux-gnu.tar.gz against
+  SHA256SUMS`, the same Node line and `gate: passed`. Neither log has a
+  skip line.
+- **The user's check of the published `nova`,** on 2026-10-25, in place
+  of the runbook's step 6.2 (its note of 2026-10-22), on Windows, in Git
+  Bash: `cargo install nova-cli --locked` built `nova-cli` 0.4.0 from
+  crates.io in 3m 54s, replacing their 0.3.2 build from the checkout, and
+  `nova --version` printed `nova 0.4.0`. In 06, `nova dev` printed
+  `rebuilt in 186 ms` and `nova dev: serving http://127.0.0.1:3000/`,
+  and the browser's "Counter" page read `Count: 2`. In 07, `nova build
+  --ssr` printed `built dist` and
+  `built target\debug\fullstack-blog-server.exe`. They reported both
+  done, in their words "เรียบร้อยครับ" ("all done"), with three
+  screenshots; none shows the blog running this time. Step 6.2's step 5,
+  publishing `shapes`, did not run again.
 
 ### The backlog
 
@@ -460,10 +514,11 @@ recorded, not decided.
      README and `nova-cli`'s, std's documentation site for `std/ui` and its
      modules, `std/dom`'s own source, the examples' READMEs, and the dated
      notes of `40-TOOLING.md` and `30-FRONTEND.md`;
-  4. `CHANGELOG.md`'s Unreleased section holds Phase 4, and the release
-     pull request makes it `[0.4.0]`;
+  4. `CHANGELOG.md`'s `[0.4.0]` holds Phase 4, made from its Unreleased
+     section by the release pull request, with the publishes' runs;
   5. ADRs 0038 to 0046 and this one record the deviations;
-  6. the tag `v0.4.0` is the release's.
+  6. the tag `v0.4.0`, on `eab7da8`, is the release's, and its publishes
+     are recorded in "The gate's record".
 - What a `v0.4.0` user can rely on is the "shipped" rows, within the
   limits their records state.
 - The backlog promises nothing.
@@ -483,11 +538,11 @@ recorded, not decided.
   corrected in place, and the upload's time and step 6.2 get dated notes.
 - `CHANGELOG.md`'s Unreleased section gains the Lighthouse step, `gate.sh`'s
   WASM build, the "Web" documentation, and the fix to `--release`.
-- The release pull request adds to this ADR the 4.8 pull request's CI run
-  and the user's check; the records pull request adds the publishes' runs
-  and the published `nova`'s check.
+- The release pull request added to this ADR the 4.8 pull request's CI
+  run and the user's check; the records pull request added the publishes'
+  runs and the published `nova`'s check.
 
-**Tagging `v0.4.0` completes Phase 4 within this boundary.**
+**Tagged as `v0.4.0`, Phase 4 is complete within this boundary.**
 
 ## References
 
@@ -496,7 +551,9 @@ recorded, not decided.
   `nova-spec/60-EXAMPLES.md` §6 and §7; `nova-spec/30-FRONTEND.md`
 - `docs/releasing.md`
 - ADRs 0025, 0037, and 0038 to 0046
-- Pull requests #117 to #124
+- Pull requests #117 to #124, and the release's, #126
+- The workflow runs: Release 40063515984; Publish to crates.io
+  40074121811; Release gate 40107204392
 - `tests/browser/lighthouse.mjs`, `lighthouse-rules.mjs`,
   `lighthouse-run.mjs` and `lighthouse.test.mjs`,
   `.github/workflows/ci.yml`'s `browser` job, `.github/scripts/gate.sh`,
