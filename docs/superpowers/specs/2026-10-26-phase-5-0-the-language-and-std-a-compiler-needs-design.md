@@ -1,7 +1,7 @@
 # Phase 5.0, "The language and std a compiler needs": design
 
 - **Date:** 2026-10-26.
-- **Status:** a draft for approval.
+- **Status:** approved by the user (2026-10-26).
 - **The user's decisions, 2026-10-26:**
   1. **Three pull requests, built in order: 5.0a, 5.0b, 5.0c.**
      - 5.0a, the small language and CI: ADR 0048, the golden suite
