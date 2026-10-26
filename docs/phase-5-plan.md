@@ -1,6 +1,6 @@
 # Phase 5 Plan — Self-hosting
 
-> Status: **a draft for approval** (2026-10-26). Derived from
+> Status: **approved** by the user (2026-10-26). Derived from
 > `nova-spec/00-MASTER-SPEC.md` §3 (Phase 5), §1 ("Self-hosting target")
 > and §7, `nova-spec/14-CODEGEN.md` §2.2 and its note of 2026-10-06,
 > `nova-spec/13-RUNTIME.md` §6, and `docs/adr/0001-native-aot.md`. The
