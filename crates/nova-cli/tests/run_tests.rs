@@ -1808,44 +1808,63 @@ const RELEASE_GOLDEN_STDIN: &[(&str, &str)] = &[("io_streams", "hello-stdin")];
 /// not 0: a program that panics after printing its `.stdout` aborts.
 const RELEASE_GOLDEN_STATUS: &[(&str, i32)] = &[];
 
-/// How long one release binary may run.
+/// How long one `nova build --release`, or one release binary, may run.
 const RELEASE_GOLDEN_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// What one release binary did: its standard output and its exit status,
-/// or why it has none.
-fn run_release_binary(
-    exe: &std::path::Path,
-    tmp: &std::path::Path,
+/// How much of a process's standard error a failure quotes: its last
+/// `RELEASE_GOLDEN_STDERR` characters.
+const RELEASE_GOLDEN_STDERR: usize = 2000;
+
+/// `stderr` for a failure's message: its end, where a panic's message is,
+/// cut to `RELEASE_GOLDEN_STDERR` characters, or a note that it is empty.
+fn quoted_stderr(stderr: &str) -> String {
+    let stderr = stderr.trim_end();
+    if stderr.is_empty() {
+        return "\n--- stderr: empty ---".to_string();
+    }
+    let count = stderr.chars().count();
+    if count <= RELEASE_GOLDEN_STDERR {
+        return format!("\n--- stderr ---\n{stderr}");
+    }
+    let tail: String = stderr.chars().skip(count - RELEASE_GOLDEN_STDERR).collect();
+    format!("\n--- stderr, its last {RELEASE_GOLDEN_STDERR} of {count} characters ---\n{tail}")
+}
+
+/// What `command` did within `RELEASE_GOLDEN_LIMIT`, given `stdin` or a
+/// closed standard input: its standard output, its standard error and its
+/// exit status, or why it has none, with its standard error quoted.
+fn run_within_limit(
+    mut command: std::process::Command,
     stdin: Option<&str>,
-) -> Result<(String, Option<i32>), String> {
+) -> Result<(String, String, Option<i32>), String> {
     use std::io::{Read, Write};
     use std::process::Stdio;
-    let mut child = std::process::Command::new(exe)
-        // Each program's temporary files go in a directory of its own, so
-        // none races the same fixture's `run` test.
-        .env("TMPDIR", tmp)
-        .env("TMP", tmp)
-        .env("TEMP", tmp)
-        .env_remove("NOVA_GC_STRESS")
+    fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = pipe.read_to_end(&mut out);
+            out
+        })
+    }
+    let mut child = command
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot start: {e}"))?;
+    let out = drain(child.stdout.take().expect("piped stdout"));
+    let err = drain(child.stderr.take().expect("piped stderr"));
     if let Some(text) = stdin {
         let mut pipe = child.stdin.take().expect("piped stdin");
         let _ = pipe.write_all(text.as_bytes());
     }
-    let mut pipe = child.stdout.take().expect("piped stdout");
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = pipe.read_to_end(&mut out);
-        out
-    });
+    let text = |h: std::thread::JoinHandle<Vec<u8>>| {
+        String::from_utf8_lossy(&h.join().expect("a reader thread")).replace('\r', "")
+    };
     let start = std::time::Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -1853,15 +1872,36 @@ fn run_release_binary(
             Ok(None) if start.elapsed() > RELEASE_GOLDEN_LIMIT => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {RELEASE_GOLDEN_LIMIT:?}"));
+                let _ = text(out);
+                let stderr = text(err);
+                return Err(format!(
+                    "timed out after {RELEASE_GOLDEN_LIMIT:?}{}",
+                    quoted_stderr(&stderr)
+                ));
             }
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
             Err(e) => return Err(format!("cannot wait: {e}")),
         }
     };
-    let out = reader.join().expect("the reader thread");
-    let out = String::from_utf8_lossy(&out).replace('\r', "");
-    Ok((out, status.code()))
+    Ok((text(out), text(err), status.code()))
+}
+
+/// What one release binary did: its standard output, its standard error
+/// and its exit status, or why it has none.
+fn run_release_binary(
+    exe: &std::path::Path,
+    tmp: &std::path::Path,
+    stdin: Option<&str>,
+) -> Result<(String, String, Option<i32>), String> {
+    let mut command = std::process::Command::new(exe);
+    // Each program's temporary files go in a directory of its own, so none
+    // races the same fixture's `run` test.
+    command
+        .env("TMPDIR", tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .env_remove("NOVA_GC_STRESS");
+    run_within_limit(command, stdin)
 }
 
 /// Every golden program of `tests/runtime/` built with `--release`, through
@@ -1951,22 +1991,31 @@ fn release_golden_suite() {
                 let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
                 let tmp = dir.join(format!("{name}.tmp"));
                 std::fs::create_dir_all(&tmp).expect("a temporary directory");
-                let built = std::process::Command::new(&nova_exe)
+                let mut build = std::process::Command::new(&nova_exe);
+                build
                     .arg("build")
                     .arg("--release")
                     .arg(&source)
                     .arg("-o")
                     .arg(&exe)
                     .env("NO_COLOR", "1")
-                    .env("RUST_BACKTRACE", "0")
-                    .output()
-                    .expect("nova runs");
-                if !built.status.success() {
-                    failures.lock().unwrap().push(format!(
-                        "{name}: `nova build --release` failed:\n{}",
-                        String::from_utf8_lossy(&built.stderr)
-                    ));
-                    continue;
+                    .env("RUST_BACKTRACE", "0");
+                match run_within_limit(build, None) {
+                    Ok((_, _, Some(0))) => {}
+                    Ok((_, stderr, status)) => {
+                        failures.lock().unwrap().push(format!(
+                            "{name}: `nova build --release` failed, exit status {status:?}{}",
+                            quoted_stderr(&stderr)
+                        ));
+                        continue;
+                    }
+                    Err(why) => {
+                        failures
+                            .lock()
+                            .unwrap()
+                            .push(format!("{name}: `nova build --release` {why}"));
+                        continue;
+                    }
                 }
                 let stdin = RELEASE_GOLDEN_STDIN
                     .iter()
@@ -1983,15 +2032,17 @@ fn release_golden_suite() {
                 let _ = std::fs::remove_file(&exe);
                 match ran {
                     Err(why) => failures.lock().unwrap().push(format!("{name}: {why}")),
-                    Ok((out, status)) => {
+                    Ok((out, stderr, status)) => {
                         if status != Some(want_status) {
                             failures.lock().unwrap().push(format!(
-                                "{name}: exit status {status:?}, expected {want_status}"
+                                "{name}: exit status {status:?}, expected {want_status}{}",
+                                quoted_stderr(&stderr)
                             ));
                         } else if out != expected {
                             failures.lock().unwrap().push(format!(
                                 "{name}: standard output differs\n--- expected ---\n{expected}\
-                                 --- got ---\n{out}"
+                                 --- got ---\n{out}{}",
+                                quoted_stderr(&stderr)
                             ));
                         }
                     }

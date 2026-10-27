@@ -57,8 +57,9 @@ server with the runner's.
    program of `tests/runtime/` but the nine its exclusion table names,
    with `--release`, and runs it, and fails if that `clang` cannot run, or
    if it would skip. Elsewhere it says it did not run and passes.
-   When the runner image is retired, or `apt` ships another build, the
-   version step fails and a new ADR moves the pin.
+   When `apt` ships another build, the version step fails; when GitHub
+   retires the `ubuntu-24.04` image, the leg finds no runner and never
+   starts, so no step runs. Either way a new ADR moves the pin.
 5. **5.0's three parts,** which amend the phase plan's 5.0a and 5.0b
    (the 5.0 spec's decision 1):
    - **5.0a, the small language and CI:** this ADR, the golden suite
@@ -77,8 +78,10 @@ server with the runner's.
   backend in CI** from 5.0a on, so each program 5.0b and 5.0c add runs
   there too, unless the table excludes it with its reason. GC stress stays
   out of that walk: two programs time out under it on both backends.
-- **The pin is a maintenance cost:** a retired image fails the version
-  step loudly, and moving the pin takes an ADR.
+- **The pin is a maintenance cost:** another build of `clang-18` fails
+  the version step, and a retired image leaves the Linux leg with no
+  runner, so it never starts; both are loud, and moving the pin takes an
+  ADR.
 - **The backlog grows** by item 2's list, which Phase 5's closing ADR
   keeps.
 

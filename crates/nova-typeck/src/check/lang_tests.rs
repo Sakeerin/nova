@@ -484,6 +484,27 @@ fn a_split_after_a_bare_return_warns() {
 }
 
 #[test]
+fn a_closures_bare_return_before_a_parenthesis_or_bracket_warns_once() {
+    // One split at the `(` or `[`, so one warning with one note, not the
+    // `return`'s note and the call's or index's beside it.
+    for (line, message) in [
+        ("(5)", "this value is not used"),
+        ("[1, 2].len()", "a line break ends this `return` or `break`"),
+    ] {
+        let all: Vec<Diagnostic> = diags(&format!(
+            "fn main() {{\n    let h = || return\n    {line}\n    println(\"x\")\n}}\n"
+        ))
+        .into_iter()
+        .filter(|d| d.code == "E0103")
+        .collect();
+        assert_eq!(all.len(), 1, "{line}: {all:?}");
+        assert_eq!(all[0].message, message, "{line}");
+        assert_eq!(all[0].notes.len(), 1, "{line}: {all:?}");
+        assert!(all[0].notes[0].contains("takes no value"), "{all:?}");
+    }
+}
+
+#[test]
 fn a_written_semicolon_silences_the_split() {
     assert!(
         e0103_messages("fn net(a: Int, b: Int) -> Int {\n    a;\n    -b\n}\nfn main() {}\n")

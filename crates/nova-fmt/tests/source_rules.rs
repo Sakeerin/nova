@@ -183,6 +183,25 @@ fn a_value_less_return_keeps_the_authors_semicolon() {
     assert_stable("fn f() {\n    return\n    x = 1\n}\n");
 }
 
+/// A statement that ends in a bare `return` or `break` nested in it, a
+/// closure's body or an assignment's value, keeps the author's `;` too.
+#[test]
+fn a_nested_value_less_return_or_break_keeps_the_authors_semicolon() {
+    assert_formats(
+        "fn main() { let f = || return;\n foo() }\n",
+        "fn main() {\n    let f = || return;\n    foo()\n}\n",
+    );
+    assert_formats(
+        "fn main() { while true { x = break;\n foo() } }\n",
+        "fn main() {\n    while true {\n        x = break;\n        foo()\n    }\n}\n",
+    );
+    // Before a line that starts with `{`, where fmt puts a `;` after any
+    // other statement, it adds none after a bare keyword, as in a view.
+    assert_stable("fn f(p: Int) {\n    return\n    { p }\n}\n");
+    assert_stable("fn f() {\n    let g = || return\n    { 1 }\n}\n");
+    assert_stable("fn f() -> Html {\n    view {\n        return\n        (1)\n    }\n}\n");
+}
+
 #[test]
 fn a_view_child_starting_with_a_parenthesis_keeps_its_semicolon() {
     assert_formats(

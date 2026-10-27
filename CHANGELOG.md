@@ -23,7 +23,8 @@ Phase 5.0a, the small language and CI (spec
   converts. It is E0098 on any other type, a program's own `Option`
   included, and E0099 in a function that returns neither, or the other of
   the two, with a note that suggests `.ok_or(err)?` or says that `main`
-  and `@test` functions return `()`. It works on every backend, WASM
+  and `@test` functions return `()`, and in a constant's initializer,
+  though not in a closure inside one. It works on every backend, WASM
   included.
 - **`+=` and its kin on fields and elements:** `self.pos += 1`,
   `self.counts[k] -= 1`, `grid[i][j] *= 2`, with all ten operators. The
@@ -61,10 +62,13 @@ Phase 5.0a, the small language and CI (spec
   that starts with `(`, `[` or `-` and meant to continue the line before
   now begins a statement; E0103 warns at each such place. No file in the
   repository changes, and every `.nova` file in it parses to the same
-  tree and warns nowhere.
+  tree, with no split for E0103 to warn at; of the two new warnings,
+  only E0102 fires, twice, at the parser fixture `sum_type.nova`, whose
+  variants hide std's.
 - **`nova fmt`** keeps a `;` the author wrote before a statement that
-  starts with `(`, `[` or `-`, and after a bare `return` or `break`, and
-  adds none where there was none, so a program's statements and warnings
+  starts with `(`, `[` or `-`, and after a statement that ends in a bare
+  `return` or `break`, however deep (`let f = || return;`), and adds none
+  where there was none, so a program's statements and warnings
   are as they were; it no longer prints a `,` before an arm that starts
   with `(`, `[` or `-`. A long chain with a `-` in it now breaks after
   each operator, so no line starts with `-`; other chains still break
@@ -76,8 +80,8 @@ Phase 5.0a, the small language and CI (spec
   Ubuntu's `clang-18` and asserts that it is 18.1.3. With
   `NOVA_REQUIRE_CLANG=1` and `NOVA_CLANG=clang-18`, a new test,
   `release_golden_suite`, builds every golden program of `tests/runtime/`
-  with `--release`, through `clang`, runs it and compares its output;
-  elsewhere it skips (ADR 0048).
+  but the nine its exclusion table names with `--release`, through
+  `clang`, runs it and compares its output; elsewhere it skips (ADR 0048).
 
 ### Fixed
 
