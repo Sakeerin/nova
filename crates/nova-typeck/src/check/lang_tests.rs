@@ -1,6 +1,7 @@
 //! The checker's tests of 5.0a's language (spec
 //! `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
-//! §3.3): `?` and its codes E0098 and E0099.
+//! §3.3 and §3.4): `?` and its codes E0098 and E0099, and `+=` on
+//! fields and elements.
 
 use super::*;
 use nova_diagnostics::FileId;
@@ -20,6 +21,10 @@ fn diags(src: &str) -> Vec<Diagnostic> {
     let mut all = resolved.diagnostics;
     all.extend(checked.diagnostics);
     all
+}
+
+fn codes(src: &str) -> Vec<String> {
+    diags(src).into_iter().map(|d| d.code).collect()
 }
 
 /// The one diagnostic of `src` with `code`.
@@ -256,4 +261,92 @@ fn try_desugars_to_a_match_in_hir() {
     assert_eq!(arms.len(), 2);
     assert!(matches!(arms[1].body.kind, hir::ExprKind::Return(Some(_))));
     assert_eq!(init.ty, Ty::Int);
+}
+
+// --- `+=` on fields and elements ---
+
+#[test]
+fn every_compound_operator_on_a_field_and_an_element_checks() {
+    for op in ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="] {
+        clean(&format!(
+            "record R {{ n: Int, a: [Int] }}\n\
+             fn main() {{\n    let mut r = R {{ n: 1, a: [1, 2] }}\n    r.n {op} 3\n    r.a[1] {op} 2\n    println(\"${{r.n}}\")\n}}\n"
+        ));
+    }
+}
+
+#[test]
+fn compound_assignment_on_nested_places_checks() {
+    clean(
+        "record G { cells: [[Int]] }\nrecord W { g: G }\n\
+         fn main() {\n    let mut w = W { g: G { cells: [[1]] } }\n    w.g.cells[0][0] += 1\n    let mut a = [[1, 2], [3, 4]]\n    a[1][0] -= 1\n}\n",
+    );
+}
+
+#[test]
+fn compound_assignment_on_an_immutable_root_is_e0060() {
+    let d = only(
+        "record R { n: Int }\nfn main() {\n    let r = R { n: 1 }\n    r.n += 1\n}\n",
+        "E0060",
+    );
+    assert!(d.message.contains("`r`"), "{d:?}");
+    let d = only(
+        "fn main() {\n    let a = [1, 2]\n    a[0] *= 2\n}\n",
+        "E0060",
+    );
+    assert!(d.message.contains("`a`"), "{d:?}");
+}
+
+#[test]
+fn compound_assignment_with_a_bad_operand_type_is_e0013_or_e0010() {
+    assert!(codes(
+        "record R { b: Bool }\nfn main() {\n    let mut r = R { b: true }\n    r.b += true\n}\n"
+    )
+    .contains(&"E0013".to_string()));
+    assert!(codes(
+        "record R { n: Int }\nfn main() {\n    let mut r = R { n: 1 }\n    r.n += \"x\"\n}\n"
+    )
+    .contains(&"E0010".to_string()));
+}
+
+#[test]
+fn compound_assignment_evaluates_the_index_once() {
+    // `a[f()] += 1` binds the index to a local: one call in the HIR.
+    let file_id = FileId::DUMMY;
+    let src = "fn f() -> Int { 0 }\nfn main() {\n    let mut a = [1]\n    a[f()] += 1\n}\n";
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let resolved = resolve(&ast.expect("an AST"));
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let main = checked
+        .module
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    let text = format!("{:?}", main.body);
+    assert_eq!(text.matches("Call {").count(), 1, "{text}");
+}
+
+#[test]
+fn compound_assignment_on_a_field_evaluates_the_receiver_once() {
+    // `rs[f()].n += 1`: the receiver, `rs[f()]`, is bound to a local, so
+    // its call is in the HIR once.
+    let file_id = FileId::DUMMY;
+    let src = "record R { n: Int }\nfn f() -> Int { 0 }\n\
+               fn main() {\n    let mut rs = [R { n: 1 }]\n    rs[f()].n += 1\n}\n";
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let resolved = resolve(&ast.expect("an AST"));
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let main = checked
+        .module
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("main");
+    let text = format!("{:?}", main.body);
+    assert_eq!(text.matches("Call {").count(), 1, "{text}");
 }
