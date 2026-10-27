@@ -1779,6 +1779,241 @@ fn release_builds_and_runs_when_clang_available() {
     let _ = std::fs::remove_file(&exe);
 }
 
+/// The programs of `tests/runtime/` that `release_golden_suite` leaves out,
+/// each with why: what their own tests set up, which a built binary run
+/// alone does not have (5.0 spec §3.2).
+const RELEASE_GOLDEN_EXCLUDED: &[(&str, &str)] = &[
+    (
+        "process_args",
+        "prints `args()`, whose index 0 is the file as `nova run` was given it",
+    ),
+    ("file_open_dir", "its test makes the directory it opens"),
+    (
+        "fs_permission_denied",
+        "its test makes a file it cannot read, and skips as root",
+    ),
+    ("net_interleave", "its test serves the port it connects to"),
+    ("net_lifetime", "its test serves the port it connects to"),
+    ("net_refused", "its test reserves the port it connects to"),
+    ("net_roundtrip", "its test serves the port it connects to"),
+    ("net_timeout", "its test serves the port it connects to"),
+    ("nova_test", "a `@test` file, which `nova test` runs"),
+];
+
+/// The standard input `release_golden_suite` gives a program; every other
+/// program's is closed.
+const RELEASE_GOLDEN_STDIN: &[(&str, &str)] = &[("io_streams", "hello-stdin")];
+
+/// The exit status `release_golden_suite` expects of a program, where it is
+/// not 0: a program that panics after printing its `.stdout` aborts.
+const RELEASE_GOLDEN_STATUS: &[(&str, i32)] = &[];
+
+/// How long one release binary may run.
+const RELEASE_GOLDEN_LIMIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What one release binary did: its standard output and its exit status,
+/// or why it has none.
+fn run_release_binary(
+    exe: &std::path::Path,
+    tmp: &std::path::Path,
+    stdin: Option<&str>,
+) -> Result<(String, Option<i32>), String> {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+    let mut child = std::process::Command::new(exe)
+        // Each program's temporary files go in a directory of its own, so
+        // none races the same fixture's `run` test.
+        .env("TMPDIR", tmp)
+        .env("TMP", tmp)
+        .env("TEMP", tmp)
+        .env_remove("NOVA_GC_STRESS")
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot start: {e}"))?;
+    if let Some(text) = stdin {
+        let mut pipe = child.stdin.take().expect("piped stdin");
+        let _ = pipe.write_all(text.as_bytes());
+    }
+    let mut pipe = child.stdout.take().expect("piped stdout");
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        let _ = pipe.read_to_end(&mut out);
+        out
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() > RELEASE_GOLDEN_LIMIT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("timed out after {RELEASE_GOLDEN_LIMIT:?}"));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+            Err(e) => return Err(format!("cannot wait: {e}")),
+        }
+    };
+    let out = reader.join().expect("the reader thread");
+    let out = String::from_utf8_lossy(&out).replace('\r', "");
+    Ok((out, status.code()))
+}
+
+/// Every golden program of `tests/runtime/` built with `--release`, through
+/// `clang`, and run (5.0 spec §3.2; ADR 0048): its standard output must be
+/// its `.stdout` file and its exit status the one the table expects.
+///
+/// It runs only under `NOVA_REQUIRE_CLANG=1`, as CI's Ubuntu leg sets it,
+/// and then fails when the `clang` that `nova` would use (`NOVA_CLANG`, or
+/// `clang`) cannot run; elsewhere it says so and passes. CI's step, not
+/// this test, asserts `clang`'s version.
+#[test]
+fn release_golden_suite() {
+    let required = std::env::var("NOVA_REQUIRE_CLANG").as_deref() == Ok("1");
+    if std::env::var("NOVA_REQUIRE_CLANG").as_deref() != Ok("1") {
+        // Under NOVA_REQUIRE_CLANG=1 the suite fails rather than skip, so a
+        // skip that slipped past the condition above cannot pass in CI.
+        assert!(
+            !required,
+            "NOVA_REQUIRE_CLANG=1, but release_golden_suite was about to skip"
+        );
+        eprintln!("release golden: not run (set NOVA_REQUIRE_CLANG=1 to run it)");
+        return;
+    }
+    let clang = std::env::var("NOVA_CLANG").unwrap_or_else(|_| "clang".to_string());
+    let version = std::process::Command::new(&clang)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        });
+    let Some(version) = version else {
+        panic!("NOVA_REQUIRE_CLANG=1, but `{clang} --version` does not run");
+    };
+
+    let runtime = repo_root().join("tests/runtime");
+    let mut programs: Vec<String> = std::fs::read_dir(&runtime)
+        .expect("tests/runtime")
+        .filter_map(|e| {
+            let path = e.expect("a directory entry").path();
+            let stem = path.file_stem()?.to_str()?.to_string();
+            let is_nova = path.extension().and_then(|x| x.to_str()) == Some("nova");
+            (is_nova && path.with_extension("stdout").exists()).then_some(stem)
+        })
+        .collect();
+    programs.sort();
+    for (name, _) in RELEASE_GOLDEN_EXCLUDED {
+        assert!(
+            programs.iter().any(|p| p == name),
+            "the exclusion table names `{name}`, which has no golden program"
+        );
+    }
+    let walk: Vec<String> = programs
+        .iter()
+        .filter(|p| !RELEASE_GOLDEN_EXCLUDED.iter().any(|(n, _)| n == p))
+        .cloned()
+        .collect();
+    // A floor, 5.0a's count: a walk that found fewer programs would pass
+    // having checked less than it should.
+    assert!(
+        walk.len() >= 131,
+        "the walk found {} programs, fewer than 5.0a's 131",
+        walk.len()
+    );
+
+    let dir = std::env::temp_dir().join("nova-release-golden");
+    std::fs::create_dir_all(&dir).expect("the golden directory");
+    let nova_exe = assert_cmd::cargo::cargo_bin("nova");
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some(name) = walk.get(i) else { break };
+                let source = runtime.join(format!("{name}.nova"));
+                let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                let tmp = dir.join(format!("{name}.tmp"));
+                std::fs::create_dir_all(&tmp).expect("a temporary directory");
+                let built = std::process::Command::new(&nova_exe)
+                    .arg("build")
+                    .arg("--release")
+                    .arg(&source)
+                    .arg("-o")
+                    .arg(&exe)
+                    .env("NO_COLOR", "1")
+                    .env("RUST_BACKTRACE", "0")
+                    .output()
+                    .expect("nova runs");
+                if !built.status.success() {
+                    failures.lock().unwrap().push(format!(
+                        "{name}: `nova build --release` failed:\n{}",
+                        String::from_utf8_lossy(&built.stderr)
+                    ));
+                    continue;
+                }
+                let stdin = RELEASE_GOLDEN_STDIN
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, t)| *t);
+                let want_status = RELEASE_GOLDEN_STATUS
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map_or(0, |(_, c)| *c);
+                let expected = std::fs::read_to_string(source.with_extension("stdout"))
+                    .expect("the .stdout file")
+                    .replace('\r', "");
+                let ran = run_release_binary(&exe, &tmp, stdin);
+                let _ = std::fs::remove_file(&exe);
+                match ran {
+                    Err(why) => failures.lock().unwrap().push(format!("{name}: {why}")),
+                    Ok((out, status)) => {
+                        if status != Some(want_status) {
+                            failures.lock().unwrap().push(format!(
+                                "{name}: exit status {status:?}, expected {want_status}"
+                            ));
+                        } else if out != expected {
+                            failures.lock().unwrap().push(format!(
+                                "{name}: standard output differs\n--- expected ---\n{expected}\
+                                 --- got ---\n{out}"
+                            ));
+                        }
+                    }
+                }
+            });
+        }
+    });
+    let failures = failures.into_inner().unwrap();
+    println!(
+        "release golden: {} passed, {} excluded, {version}",
+        walk.len() - failures.len(),
+        RELEASE_GOLDEN_EXCLUDED.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {} release golden programs failed:\n\n{}",
+        failures.len(),
+        walk.len(),
+        failures.join("\n\n")
+    );
+}
+
 #[test]
 fn build_hello_world_standalone() {
     let out = build_and_run("examples/01-hello-world/src/main.nova", "hello");
