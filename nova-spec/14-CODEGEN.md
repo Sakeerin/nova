@@ -49,6 +49,16 @@ world is built and run in release, by a test that passes without running
 anything when `clang` is not on `PATH`. Parity with the Cranelift backend is
 deferred: `docs/adr/0025-phase-2-boundary.md`.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the
+LLVM backend's parity is now tested: every golden program of
+`tests/runtime/` but the nine an exclusion table names is built with
+`--release`, through Ubuntu's `clang-18`
+18.1.3, pinned on CI's `ubuntu-24.04` leg, run, and compared with its
+`.stdout`, in `release_golden_suite`
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.2; ADR 0048, which also makes textual `.ll` through `clang` the backend
+of Phase 5's compiler). The hello-world test stays.
+
 ### 2.3 WASM (browser target)
 - Crates: `wasm-encoder` (write modules), `walrus` (manipulate)
 - Target: `nova build --target wasm` and `nova bundle`

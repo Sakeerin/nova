@@ -198,6 +198,28 @@ Future      — async result
 
 `Copy` and `Clone` are auto-derivable: `@derive(Copy, Clone)` attribute.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the
+operator traits above are not std's yet: `binary_result_ty` decides each
+operator by its operands' types. 5.0a adds `String + String`, a new `String`
+holding `a` then `b`, which MIR lowers to the runtime's concatenation; `+=`
+follows on a local, a field or an element. `String + Char` and `String +
+Int` stay E0010, with a note that suggests interpolation
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.6).
+
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** `e?`
+works on std/core's `Option` and `Result`, found by their `DefId`s, not by
+the names in scope
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.3). On `Option<T>`, `Some(v)` gives `v` and `None` returns `None`; on
+`Result<T, E>`, `Ok(v)` gives `v` and `Err(x)` returns `Err(x)`, re-wrapped.
+**Nothing is converted:** the enclosing function, the nearest `fn` or
+closure, must return the same sum with the same `E`, and `map_err` converts.
+There is no `From` trait, since generic traits do not exist. The checker
+desugars `e?` to a flat `match`, so no backend changes. Its errors are
+E0098, E0099, and E0010 with a note pointing at `map_err` when the error
+types differ.
+
 ---
 
 ## 8. Error Catalog (sample — full list grows)
@@ -221,8 +243,31 @@ Future      — async result
 | E0031 | Cycle in trait inheritance |
 | E0040 | Cannot return reference to local |
 | E0050 | Async/await mismatch |
+| E0098 | `?` needs an `Option` or a `Result` (added 2026-10-26, Phase 5.0a) |
+| E0099 | `?` cannot return from this function (added 2026-10-26, Phase 5.0a) |
+| E0102 | A variant hides one of std's; a warning (added 2026-10-26, Phase 5.0a) |
+| E0103 | This value is not used, or a line break ended a statement; a warning (added 2026-10-26, Phase 5.0a) |
 
 Each gets a fully detailed error in `nova-diagnostics::messages` with example, suggestion, and link.
+
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the
+four codes 5.0a adds
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§6). E0098 is `?` on any other type, a program's own sum named `Option`
+included; a note names the type. E0099 is `?` in a function whose return
+type is neither sum, or the other of the two; a note suggests `.ok_or(err)?`
+for an `Option` in a function that returns a `Result`, and another says that
+`main` and `@test` functions return `()`, another that the function's
+`Option` or `Result` is the program's own; `?` in a constant's initializer
+is E0099 too, since a constant is no function. E0102 warns at a variant of the
+package's own sum, or a path dependency's, whose name is also a variant std
+brings into every module; std's own modules are never warned about. E0103
+warns at a statement, not a block's tail, whose value can only be discarded:
+a unary or binary operator other than an assignment, `&&` or `||`, a
+literal, a name, or a parenthesised, tuple or array expression; and at each
+place the newline rule (`11-PARSER.md` §2) ends a statement the parser
+before it would have continued, unless a `;` is written there. E0100 and
+E0101 are 5.0b's.
 
 ---
 

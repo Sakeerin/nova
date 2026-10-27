@@ -38,6 +38,22 @@ Location: `tests/runtime/`
 - Adjacent `.stdout` (or `.stdout.json`) is expected output
 - Covers behavior, not just types
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** every
+program of `tests/runtime/` with a `.stdout` also runs through the LLVM
+backend, in `release_golden_suite` (`crates/nova-cli/tests/run_tests.rs`;
+`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.2; ADR 0048). It builds each with `nova build --release` into
+`nova-release-golden/` in the temporary directory, on up to four threads,
+runs each with its standard input closed (or given, by its table) and a time
+limit of 60 s, and compares its standard output, without `\r`, with the
+`.stdout` file and its exit status with its table's. An exclusion table
+names each program left out and why: those whose tests set up arguments, a
+directory, a file or a port. It runs only under `NOVA_REQUIRE_CLANG=1`,
+which CI's Linux leg sets with `NOVA_CLANG=clang-18`, and then fails if that
+`clang` cannot run, if it would skip, or if its walk finds fewer than 131
+programs; a step before it asserts that Ubuntu's `clang-18` is
+18.1.3. It prints `release golden: <n> passed, <m> excluded, <clang>`.
+
 ### 1.4 Stdlib tests
 Location: per-module: `std/<module>/tests/`
 - Written in Nova

@@ -64,6 +64,14 @@ These are NOT up for debate. If a tradeoff appears mid-implementation, prefer th
 - **TypeScript / Swift inspired** — curly braces, expression-oriented
 - **Significant whitespace: NO** (curly braces win every time)
 - **Semicolons: optional** (newline terminates statement; semicolons allowed for one-liners)
+  **Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the
+  parser now implements "newline terminates statement" by the newline rule
+  of the 5.0 spec
+  (`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+  §3.5): in a block, a line break ends an expression before a `(`, a `[`
+  or a binary `-`, and a `return` or `break` at the end of a line takes no
+  value; every other operator, and `.`, continue the line before.
+  `11-PARSER.md` §2 and §6 have the details.
 - **String interpolation:** `"Hello, ${name}"` (TS-style)
 - **Comments:** `//` line, `/* */` block, `///` doc
 
@@ -358,6 +366,12 @@ language feature: the router's `Handler` type alias still does not parse,
 `@derive` is not implemented, and there is no `?` operator and no turbofish.
 `Map` still has `keys()` and no `values()`. The example routes around each of
 those rather than removing any of them.
+
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the
+`?` operator exists, on `Option` and `Result`, in 5.0a
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.3). It converts nothing: the error types must be the same, and `map_err`
+converts. `@derive` and turbofish are still absent.
 
 **AMENDED 2026-09-11: the gate's two criteria, recorded above as able to
 disagree in either direction, now both have a measured figure — and they

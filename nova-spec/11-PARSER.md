@@ -244,6 +244,35 @@ view_arg     = ( ident | keyword ) ":" expr | expr ;
 - A `;` may end a view's child, so the next can begin with `(`, `[` or
   `{`.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** **the
+newline rule**
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.5; ADR 0043, whose lexer skips line breaks, and ADR 0028 §5, whose `;`
+fmt printed around it). The grammar above writes `;` after each statement;
+the parser has never needed one, and now implements the master spec's
+"newline terminates statement" as follows. The lexer marks each token that
+follows a line break, a comment holding one included. **In statement
+context, a line break ends the expression before a `(` (a call), a `[` (an
+index) or a binary `-`;** the token begins the next statement or match arm.
+Every other operator, and `.`, continue the expression, as before.
+
+**Statement context** is the expression of a statement, a block's tail, a
+`let`'s value, a `return`'s or `break`'s value, and a match arm's body. It
+is off inside `(` and `)`, `[` and `]`, argument lists, record literals'
+braces, interpolation holes, a view's children and an element's arguments, a
+guard, and the heads of `if`, `while`, `for` and `match`, which end at their
+`{`; a block anywhere, and a match's arms, turn it back on. A `{` on a new
+line keeps its meaning. **A `return` or `break` at the end of a line takes
+no value,** wherever it is.
+
+So `let z = x`, then `-y` on the next line, is two statements;
+`if c { 1 } else { 2 }`, then `(a, b)`, is not a call of the `if`. The
+parser records each such split, where the parser before the rule would
+have continued, and the checker warns at each (E0103), but at the next arm
+after an arm's body; a `;` written at the end of the line before says the
+break is meant, so there is no split to record. A view's children keep
+their own rule: a `;` ends a child before a `(` or `[`.
+
 ---
 
 ## 3. AST Node Definitions (Rust)
@@ -409,6 +438,16 @@ Every error → `ParseError` with span + expected/found info → diagnostics cra
 | 13 (assign, right-assoc) | `=` `+=` `-=` `*=` `/=` `%=` `\|=` `&=` `^=` `<<=` `>>=` | Right |
 
 Comparison operators (==, !=, <, etc.) are non-chainable: `a < b < c` is an error with helpful suggestion.
+
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** a
+postfix `(` or `[`, and a binary `-`, after a line break in statement
+context begin the next statement (§2's newline rule). Compound assignment
+works on any place plain assignment accepts, a field (`self.f += x`) and an
+element (`a[i] -= 1`) included, as this table always allowed: the receiver
+and the index are evaluated once
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.4). The postfix `?` works on `Option` and `Result` (`12-TYPESYSTEM.md`
+§7).
 
 ---
 

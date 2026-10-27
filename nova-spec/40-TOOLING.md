@@ -60,6 +60,23 @@ file that would change, or 2 on any error. ADR 0028 reads the master spec's
 "only `--check`" as "no style options"
 (`docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §7).
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** with
+the newline rule (`11-PARSER.md` §2;
+`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.5), `nova fmt` prints the `;` before a statement that starts with `(`,
+`[` or `-`, and after a bare `return` or `break`, only where the author
+wrote one, since there the newline rule ends the statement and E0103 warns
+unless a `;` is written; it no longer prints the `,` before a match arm
+that starts with one of them. ADR 0028 §5 had it print all of them because
+the parser read across line breaks. It still prints the `;` before `{`,
+`*`, `&`, `|` and `||`, and in a view's children, which keep their rule. **A long
+binary chain with a `-` in it breaks after each operator,** so that no line
+starts with `-`, which in statement context would begin a new statement; a
+chain with no `-` still breaks before each operator. The rule is the same in
+every context, so the printer need not track statement context, and it adds
+no token, as parentheses around the chain would. Every file of the corpus
+reformats to the same tree.
+
 **Amended 2026-10-09 (branch `phase-3-3b-index-publishing`):** `nova
 add <pkg>[@<req>]`, `nova update [pkg]`, `nova publish` and `nova login`
 exist, with two commands this list lacks. `nova fetch` downloads what
