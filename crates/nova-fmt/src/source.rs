@@ -4,8 +4,8 @@
 //! (§5.3).
 
 use nova_ast::File;
-use nova_diagnostics::{render, Diagnostic, FileDb, Span, Spanned};
-use nova_lexer::{Comment, Token};
+use nova_diagnostics::{render, Diagnostic, FileDb, Span};
+use nova_lexer::{Comment, Token, Tokens};
 
 use crate::FormatError;
 
@@ -14,7 +14,7 @@ use crate::FormatError;
 pub(crate) struct Source<'t> {
     pub text: &'t str,
     pub file: File,
-    pub tokens: Vec<Spanned<Token>>,
+    pub tokens: Tokens,
     pub comments: Vec<Comment>,
 }
 

@@ -21,7 +21,7 @@ impl<'a> FileText<'a> {
         let (tokens, comments, _) = nova_lexer::lex_with_comments(text, file);
         FileText {
             text,
-            tokens,
+            tokens: tokens.into_vec(),
             comments,
         }
     }

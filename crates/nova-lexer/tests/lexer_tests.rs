@@ -623,11 +623,90 @@ fn lex_and_lex_with_comments_agree_on_every_nova_file() {
         let file = db.add("<corpus>", text.as_str());
         let (plain, _) = lex(&text, file);
         let (with, _, _) = lex_with_comments(&text, file);
-        let pairs = |toks: Vec<nova_diagnostics::Spanned<Token>>| {
+        let pairs = |toks: nova_lexer::Tokens| {
             toks.into_iter()
                 .map(|t| (t.value, t.span))
                 .collect::<Vec<_>>()
         };
         assert_eq!(pairs(plain), pairs(with), "{}", path.display());
     }
+}
+
+// --- The line-break mark (5.0 spec §3.5) ---
+
+/// Each token's mark, by its source text, for `src`, `Eof` left out.
+fn marks(src: &str) -> Vec<(String, bool)> {
+    let mut db = FileDb::new();
+    let file = db.add("<marks>", src);
+    let (tokens, errors) = lex(src, file);
+    assert!(errors.is_empty(), "{errors:?}");
+    tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.value != Token::Eof)
+        .map(|(i, t)| {
+            let text = src[t.span.start as usize..t.span.end as usize].to_string();
+            (text, tokens.line_break_before(i))
+        })
+        .collect()
+}
+
+#[test]
+fn a_token_after_a_line_break_is_marked() {
+    let m = marks("a\n(b)\r\n  - c");
+    let want: Vec<(String, bool)> = [
+        ("a", false),
+        ("(", true),
+        ("b", false),
+        (")", false),
+        ("-", true),
+        ("c", false),
+    ]
+    .iter()
+    .map(|(t, b)| (t.to_string(), *b))
+    .collect();
+    assert_eq!(m, want);
+}
+
+#[test]
+fn the_first_token_is_marked_only_after_a_line_break() {
+    assert!(!marks("x")[0].1);
+    assert!(marks("\n\nx")[0].1);
+}
+
+#[test]
+fn a_line_comment_marks_the_token_after_it() {
+    let m = marks("a // note\nb");
+    assert_eq!(m[1], ("b".to_string(), true));
+}
+
+#[test]
+fn a_block_comment_marks_the_token_after_it_only_when_it_holds_a_line_break() {
+    assert_eq!(marks("a /* x\n y */ b")[1], ("b".to_string(), true));
+    assert_eq!(marks("a /* x */ b")[1], ("b".to_string(), false));
+}
+
+#[test]
+fn a_line_break_inside_a_string_marks_nothing() {
+    let m = marks("f(\"a\nb\") (c)");
+    assert!(m.iter().all(|(_, b)| !b), "{m:?}");
+}
+
+#[test]
+fn the_marks_leave_the_tokens_as_they_were() {
+    let src = "fn main() {\n    let x = 1\n    -x\n}\n";
+    let mut db = FileDb::new();
+    let file = db.add("<marks>", src);
+    let (tokens, _) = lex(src, file);
+    let (with, _, _) = lex_with_comments(src, file);
+    assert_eq!(tokens.len(), with.len());
+    let plain: Vec<_> = tokens.clone().into_vec();
+    assert_eq!(plain.len(), tokens.len());
+    assert!((0..tokens.len()).all(|i| tokens.line_break_before(i) == with.line_break_before(i)));
+    assert!(!tokens.line_break_before(tokens.len() + 5));
+}
+
+#[test]
+fn a_lone_carriage_return_is_a_line_break() {
+    assert_eq!(marks("b\r(d)")[1], ("(".to_string(), true));
 }

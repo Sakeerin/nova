@@ -169,6 +169,51 @@ fn a_value_less_return_keeps_its_semicolon() {
     );
 }
 
+/// A broken chain with a `-` in it breaks after each operator, so no line
+/// starts with `-`, which the newline rule would read as a new statement
+/// (5.0 plan's decision); the output parses to the same tree, which
+/// `format`'s self-check asserts.
+#[test]
+fn a_broken_chain_with_a_minus_ends_each_line_with_its_operator() {
+    let a = "first_operand_of_the_chain";
+    let b = "second_operand_of_the_chain";
+    let c = "third_operand_of_the_chain";
+    let d = "fourth_operand_of_the_chain";
+    assert_formats(
+        &format!("fn f() -> Int {{ let x = {a} + {b} - {c} + {d}\n x }}\n"),
+        &format!("fn f() -> Int {{\n    let x = {a} +\n        {b} -\n        {c} +\n        {d}\n    x\n}}\n"),
+    );
+    // As a tail, and as a statement whose value is discarded.
+    assert_formats(
+        &format!("fn f() -> Int {{ {a} - {b} - {c} - {d} }}\n"),
+        &format!("fn f() -> Int {{\n    {a} -\n        {b} -\n        {c} -\n        {d}\n}}\n"),
+    );
+    // Inside parentheses too: the rule is one rule.
+    assert_formats(
+        &format!("fn f() -> Int {{ g({a} - {b} - {c} - {d}) }}\n"),
+        &format!("fn f() -> Int {{\n    g(\n        {a} -\n            {b} -\n            {c} -\n            {d},\n    )\n}}\n"),
+    );
+}
+
+/// A chain with no `-` still breaks before each operator (spec §6).
+#[test]
+fn a_broken_chain_without_a_minus_breaks_before_each_operator() {
+    let a = "first_operand_of_the_chain";
+    let b = "second_operand_of_the_chain";
+    let c = "third_operand_of_the_chain";
+    let d = "fourth_operand_of_the_chain";
+    assert_formats(
+        &format!("fn f() -> Int {{ {a} + {b} + {c} + {d} }}\n"),
+        &format!("fn f() -> Int {{\n    {a}\n        + {b}\n        + {c}\n        + {d}\n}}\n"),
+    );
+}
+
+/// A flat chain with a `-` is laid out as before.
+#[test]
+fn a_flat_chain_with_a_minus_is_unchanged() {
+    assert_stable("fn f(a: Int, b: Int) -> Int { a - b + 1 }\n");
+}
+
 #[test]
 fn width_counts_characters_not_bytes() {
     // 4 + `report("` + 86 Thai letters + `")` is exactly 100 characters, and
