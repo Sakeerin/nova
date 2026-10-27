@@ -1,7 +1,7 @@
 //! The checker's tests of 5.0a's language (spec
 //! `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
-//! §3.3 and §3.4): `?` and its codes E0098 and E0099, and `+=` on
-//! fields and elements.
+//! §3.3, §3.4 and §3.6): `?` and its codes E0098 and E0099, `+=` on
+//! fields and elements, and `String + String`.
 
 use super::*;
 use nova_diagnostics::FileId;
@@ -349,4 +349,34 @@ fn compound_assignment_on_a_field_evaluates_the_receiver_once() {
         .expect("main");
     let text = format!("{:?}", main.body);
     assert_eq!(text.matches("Call {").count(), 1, "{text}");
+}
+
+#[test]
+fn string_compound_assignment_on_a_field_checks() {
+    clean(
+        "record R { s: String }\nfn main() {\n    let mut r = R { s: \"a\" }\n    r.s += \"b\"\n    let mut v = [\"x\"]\n    v[0] += \"y\"\n}\n",
+    );
+}
+
+// --- `String + String` ---
+
+#[test]
+fn string_plus_string_is_a_string() {
+    clean("fn main() {\n    let s: String = \"a\" + \"b\"\n    let mut t = s\n    t += \"c\"\n    println(t)\n}\n");
+}
+
+#[test]
+fn string_plus_char_or_int_is_refused_with_a_note() {
+    for rhs in ["'c'", "1"] {
+        let d = only(
+            &format!("fn main() {{\n    let s = \"a\" + {rhs}\n    println(s)\n}}\n"),
+            "E0010",
+        );
+        assert!(d.notes.iter().any(|n| n.contains("interpolate")), "{d:?}");
+    }
+}
+
+#[test]
+fn string_minus_string_is_still_e0013() {
+    assert!(codes("fn main() {\n    let s = \"a\" - \"b\"\n}\n").contains(&"E0013".to_string()));
 }

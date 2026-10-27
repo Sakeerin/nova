@@ -1011,6 +1011,18 @@ impl<'a> Lowerer<'a> {
             self.push(Stmt::Not { dst: ne, src: eq });
             return ne;
         }
+        // `String + String` (5.0 spec §3.6) is one call of the runtime's
+        // concatenation, as a two-part interpolation is. Without this arm it
+        // would fall to the integer path below and add the two pointers.
+        if matches!(lhs.ty, Ty::String) && matches!(op, hir::BinOp::Add) {
+            let t = self.new_temp(MirTy::Ptr);
+            self.push(Stmt::CallRuntime {
+                dst: Some(t),
+                func: RtFunc::StrConcat,
+                args: vec![l, r],
+            });
+            return t;
+        }
         // Unit comparison is a constant.
         if matches!(lhs.ty, Ty::Unit) {
             let t = self.new_temp(MirTy::I8);
