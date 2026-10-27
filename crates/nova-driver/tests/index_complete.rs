@@ -244,8 +244,10 @@ fn every_name_in_the_corpora_is_indexed() {
     // 9 examples, 155 top-level runtime programs and the modules program,
     // on 2026-10-21, after 4.7 added `http_routes`, `http_request_readers`,
     // `http_responses`, `http_server_wire`, `fs_rename`, `crypto_pbkdf2`,
-    // `crypto_pbkdf2_refused` and `bytes_hex`, and `07-fullstack-blog`.
-    assert_eq!(programs.len(), 165, "{programs:#?}");
+    // `crypto_pbkdf2_refused` and `bytes_hex`, and `07-fullstack-blog`;
+    // 157 runtime programs on 2026-10-26, after 5.0a added `try_operator`
+    // and `try_async`.
+    assert_eq!(programs.len(), 167, "{programs:#?}");
     let mut files = 0;
     let mut failures: Vec<String> = Vec::new();
     for (k, path) in programs.iter().enumerate() {
@@ -272,11 +274,11 @@ fn every_name_in_the_corpora_is_indexed() {
             every_name_is_covered(&a, file, &mut failures);
         }
     }
-    // 9 + 155 + 3 files of user code, 05-geometry's library's 2, the 8
+    // 9 + 157 + 3 files of user code, 05-geometry's library's 2, the 8
     // modules 07-fullstack-blog's client reaches from its `main.nova` (not
     // the server's 4, which only `server.nova` and `lib.nova` reach), and
     // native std's 22, `std/ui/ssr` among them.
-    assert_eq!(files, 199);
+    assert_eq!(files, 201);
     failures.sort();
     failures.dedup();
     assert!(

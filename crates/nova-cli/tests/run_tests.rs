@@ -12654,3 +12654,45 @@ fn the_blog_example_passes_its_own_tests() {
         "{out}"
     );
 }
+
+/// A golden program under `nova run`, under `nova build`, and, where
+/// `gc_stress`, under `nova run` with `NOVA_GC_STRESS=1` (collect on every
+/// allocation). The `--release` build is `release_golden_suite`'s.
+fn golden_three_ways(name: &str, gc_stress: bool) {
+    let source = format!("tests/runtime/{name}.nova");
+    let expected =
+        std::fs::read_to_string(repo_root().join(format!("tests/runtime/{name}.stdout")))
+            .expect("expected-output fixture exists")
+            .replace("\r\n", "\n");
+    nova()
+        .arg("run")
+        .arg(repo_root().join(&source))
+        .assert()
+        .success()
+        .stdout(expected.clone());
+    let built = build_and_run(&source, name);
+    assert_eq!(built.replace("\r\n", "\n"), expected, "nova build");
+    if gc_stress {
+        nova()
+            .env("NOVA_GC_STRESS", "1")
+            .arg("run")
+            .arg(repo_root().join(&source))
+            .assert()
+            .success()
+            .stdout(expected);
+    }
+}
+
+/// `?` on `Option` and `Result` (5.0 spec §3.3): both sums, chains, a
+/// closure whose return type `?` infers, a loop and a `match` scrutinee.
+#[test]
+fn try_operator_runs() {
+    golden_three_ways("try_operator", false);
+}
+
+/// `?` in `async fn`s, with `.await?`, also under GC stress, since its
+/// values live across `.await`s (5.0 spec §3.3).
+#[test]
+fn try_async_runs() {
+    golden_three_ways("try_async", true);
+}

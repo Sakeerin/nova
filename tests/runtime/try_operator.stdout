@@ -1,0 +1,16 @@
+Some(hello)
+None
+Some(c)
+None
+None
+Ok(6)
+Err(not a digit: x)
+Ok(zero)
+Ok(many)
+Err(not a digit: 9)
+Ok(20)
+Err(18)
+Some(3)
+None
+Ok(4)
+Err(not a digit: z)
