@@ -19,9 +19,28 @@ use crate::comments::Comments;
 use crate::doc::{concat, if_break, nest, text, Doc};
 use crate::source::Source;
 
-/// Tokens that would continue the statement or match arm before them, since
-/// the parser ignores line breaks (spec §5.6).
-const CONTINUES: [Token; 8] = [
+/// Tokens that would continue the statement or match arm before them across
+/// a line break (spec §5.6). The newline rule (5.0 spec
+/// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+/// §3.5) ends a statement or an arm before a `(`, a `[` or a `-` on a new
+/// line, so those three are not here.
+const CONTINUES: [Token; 5] = [
+    Token::LBrace,
+    Token::Star,
+    Token::Amp,
+    Token::Pipe,
+    Token::PipePipe,
+];
+
+/// Tokens that begin a new statement after a line break under the newline
+/// rule, where a `;` the author wrote says the break is meant: fmt keeps
+/// the author's `;` before them, and adds none.
+const SPLITS: [Token; 3] = [Token::LParen, Token::LBracket, Token::Minus];
+
+/// Tokens that would continue the view child before them: a view's children
+/// keep the rule they had before the newline rule, so a child that starts
+/// with `(` or `[` still needs a `;` before it.
+const VIEW_CONTINUES: [Token; 8] = [
     Token::LParen,
     Token::LBracket,
     Token::LBrace,

@@ -105,28 +105,41 @@ fn a_record_pattern_ending_in_rest_takes_no_trailing_comma() {
     );
 }
 
+/// The newline rule (5.0 spec
+/// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+/// §3.5) ends a statement before a `(`, a `[` or a `-` on a new line, and
+/// a `;` the author wrote there says the break is meant: fmt keeps the
+/// author's `;`, and adds none where there was none, so the program stays
+/// as it was.
 #[test]
-fn a_statement_starting_with_a_parenthesis_keeps_its_semicolon() {
+fn a_statement_starting_with_a_parenthesis_keeps_the_authors_semicolon() {
     assert_formats(
         "fn main() { f(); (a, b).show() }\n",
         "fn main() {\n    f();\n    (a, b).show()\n}\n",
     );
+    assert_stable("fn main() {\n    f()\n    (a, b).show()\n}\n");
+}
+
+#[test]
+fn a_statement_starting_with_a_bracket_or_a_minus_keeps_the_authors_semicolon() {
+    assert_formats(
+        "fn main() { f(); [1, 2].len() }\n",
+        "fn main() {\n    f();\n    [1, 2].len()\n}\n",
+    );
+    assert_formats(
+        "fn main() { let x = y; -z }\n",
+        "fn main() {\n    let x = y;\n    -z\n}\n",
+    );
+    assert_stable("fn main() {\n    f()\n    [1, 2].len()\n}\n");
+    assert_stable("fn main() {\n    let x = y\n    -z\n}\n");
 }
 
 #[test]
 fn each_token_that_could_continue_a_statement_keeps_its_semicolon() {
     for (input, expected) in [
         (
-            "fn main() { f(); [1, 2].len() }\n",
-            "fn main() {\n    f();\n    [1, 2].len()\n}\n",
-        ),
-        (
             "fn main() { let x = y; { z } }\n",
             "fn main() {\n    let x = y;\n    { z }\n}\n",
-        ),
-        (
-            "fn main() { let x = y; -z }\n",
-            "fn main() {\n    let x = y;\n    -z\n}\n",
         ),
         (
             "fn main() { let x = y; *p = 1 }\n",
@@ -150,15 +163,15 @@ fn each_token_that_could_continue_a_statement_keeps_its_semicolon() {
 }
 
 #[test]
-fn a_match_arm_starting_with_a_parenthesis_keeps_its_comma() {
+fn a_match_arm_starting_with_a_parenthesis_needs_no_comma() {
     assert_formats(
         "fn main() { match p { a => 1, (b, c) => 2 } }\n",
-        "fn main() {\n    match p {\n        a => 1,\n        (b, c) => 2\n    }\n}\n",
+        "fn main() {\n    match p {\n        a => 1\n        (b, c) => 2\n    }\n}\n",
     );
 }
 
 #[test]
-fn a_value_less_return_keeps_its_semicolon() {
+fn a_value_less_return_keeps_the_authors_semicolon() {
     assert_formats(
         "fn f() { return; x = 1 }\n",
         "fn f() {\n    return;\n    x = 1\n}\n",
@@ -166,6 +179,15 @@ fn a_value_less_return_keeps_its_semicolon() {
     assert_formats(
         "fn main() { while true { break; x = 1 } }\n",
         "fn main() {\n    while true {\n        break;\n        x = 1\n    }\n}\n",
+    );
+    assert_stable("fn f() {\n    return\n    x = 1\n}\n");
+}
+
+#[test]
+fn a_view_child_starting_with_a_parenthesis_keeps_its_semicolon() {
+    assert_formats(
+        "fn f() -> Html { view { text(\"a\"); (text(\"b\")) } }\n",
+        "fn f() -> Html {\n    view {\n        text(\"a\");\n        (text(\"b\"))\n    }\n}\n",
     );
 }
 
