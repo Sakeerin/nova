@@ -108,9 +108,9 @@ fn a_record_pattern_ending_in_rest_takes_no_trailing_comma() {
 /// The newline rule (5.0 spec
 /// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
 /// §3.5) ends a statement before a `(`, a `[` or a `-` on a new line, and
-/// a `;` the author wrote there says the break is meant: fmt keeps the
-/// author's `;`, and adds none where there was none, so the program stays
-/// as it was.
+/// warns there (E0103) unless the author wrote `;`: fmt keeps the author's
+/// `;`, and adds none where there was none, so the program and its warnings
+/// stay as they were.
 #[test]
 fn a_statement_starting_with_a_parenthesis_keeps_the_authors_semicolon() {
     assert_formats(
@@ -234,6 +234,17 @@ fn a_broken_chain_without_a_minus_breaks_before_each_operator() {
 #[test]
 fn a_flat_chain_with_a_minus_is_unchanged() {
     assert_stable("fn f(a: Int, b: Int) -> Int { a - b + 1 }\n");
+}
+
+/// A file the newline rule splits, laid out otherwise than fmt prints it:
+/// fmt formats it, and keeps its splits (5.0 spec §3.5), whose places move
+/// with the layout.
+#[test]
+fn an_unformatted_file_with_a_split_formats_keeping_it() {
+    assert_formats(
+        "fn f(a: Int, b: Int) -> Int {\n    let  c = a\n    c\n    - b\n}\n",
+        "fn f(a: Int, b: Int) -> Int {\n    let c = a\n    c\n    -b\n}\n",
+    );
 }
 
 #[test]

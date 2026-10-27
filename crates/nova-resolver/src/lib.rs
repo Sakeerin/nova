@@ -2074,6 +2074,12 @@ pub fn resolve_program_for(
         import_std_module(&mut definitions, std_exports, mid, from);
     }
 
+    // E0102 (5.0 spec §3.7): a variant of a program's own sum that hides a
+    // variant std brings into every module. Std's modules are never warned
+    // about; a registry package's warnings are dropped by the driver, so
+    // what is left is the package's own and its path dependencies'.
+    diagnostics.extend(variant_shadowing(&definitions, &exports, &all, std_start));
+
     // Spec 3.4b §4.6: what a fix needs to know.
     definitions.importable = all
         .iter()
@@ -2091,12 +2097,88 @@ pub fn resolve_program_for(
     definitions.missing = missing_names(target);
 
     ProgramResolution {
-        file: File { items: merged },
+        // The newline rule's splits of the user's modules, for E0103; std's
+        // are std's own.
+        file: File {
+            items: merged,
+            newline_splits: all[..std_start.min(all.len())]
+                .iter()
+                .flat_map(|m| m.file.newline_splits.iter().copied())
+                .collect(),
+        },
         definitions,
         diagnostics,
         tests,
         imports,
     }
+}
+
+/// The variants std brings into every module, by name: each public variant
+/// of a std module whose names glob into user modules, with its sum's name.
+/// The first module to export a name wins, as std's glob does.
+fn std_globbed_variants(
+    definitions: &Definitions,
+    exports: &[Exports],
+    all: &[ModuleSource],
+    std_start: usize,
+) -> FxHashMap<String, String> {
+    let mut out: FxHashMap<String, String> = FxHashMap::default();
+    for (mid, e) in exports.iter().enumerate().skip(std_start) {
+        let name = all[mid].name.as_str();
+        if IMPORTED_STD.iter().any(|&(_, m)| m == name) || STD_INTERNAL.contains(&name) {
+            continue;
+        }
+        let mut variants: Vec<(&String, &Res)> = e.values.iter().collect();
+        variants.sort_by(|a, b| a.0.cmp(b.0));
+        for (variant, res) in variants {
+            if let Res::Variant(sum, _) = res {
+                out.entry(variant.clone())
+                    .or_insert_with(|| definitions.def(*sum).name.clone());
+            }
+        }
+    }
+    out
+}
+
+/// E0102, a warning at each variant of a non-std module's sum whose name is
+/// also a variant std brings into every module (5.0 spec §3.7): in that
+/// module, the bare name now means the program's own variant.
+fn variant_shadowing(
+    definitions: &Definitions,
+    exports: &[Exports],
+    all: &[ModuleSource],
+    std_start: usize,
+) -> Vec<Diagnostic> {
+    let std_variants = std_globbed_variants(definitions, exports, all, std_start);
+    let mut out = Vec::new();
+    for m in &all[..std_start.min(all.len())] {
+        for item in &m.file.items {
+            let Item::Type(t) = &item.value else {
+                continue;
+            };
+            let TypeDef::Sum(variants) = &t.def else {
+                continue;
+            };
+            for v in variants {
+                let Some(sum) = std_variants.get(&v.name.value) else {
+                    continue;
+                };
+                let name = &v.name.value;
+                out.push(
+                    Diagnostic::warning(
+                        "E0102",
+                        format!("variant `{name}` hides std's `{sum}::{name}`"),
+                    )
+                    .with_primary_label(v.name.span, "this variant")
+                    .with_note(format!(
+                        "in this module the bare name `{name}` now means this variant; \
+                             std's is `{sum}::{name}`"
+                    )),
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Each public name of each std module `target` does not compile, mapped to
@@ -2279,11 +2361,12 @@ fn std_module(src: &str, file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
         .map(|e| Diagnostic::error("L0001", e.to_string()).with_primary_label(e.span(), "here"))
         .collect();
     let (ast, parse_errors) = nova_parser::parse(&tokens, file_id);
-    diags.extend(
-        parse_errors.iter().map(|e| {
-            Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here")
-        }),
-    );
+    diags.extend(parse_errors.iter().map(|e| {
+        e.notes().into_iter().fold(
+            Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here"),
+            |d, n| d.with_note(n),
+        )
+    }));
     (ast, diags)
 }
 
@@ -4069,7 +4152,14 @@ mod tests {
             "import lib\nfn main() { }\n",
             "pub type Status = | Ok | Fail\n",
         );
-        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        // Only 5.0a's warning that `lib`'s `Ok` hides std's (E0102), at its
+        // definition: no error.
+        assert_eq!(
+            error_codes(&p.diagnostics),
+            ["E0102"],
+            "{:?}",
+            p.diagnostics
+        );
         // `Ok` resolves (to the imported Status variant), not rejected.
         assert!(p.definitions.resolve_value(ModuleId(0), "Ok").is_some());
     }
@@ -4335,5 +4425,89 @@ mod tests {
             Some(Res::Builtin(_))
         ));
         assert!(d.is_std_module(ModuleId(2)) && !d.is_std_module(ModuleId(1)));
+    }
+
+    // === 5.0a: E0102, a variant that hides one of std's (spec
+    // docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md
+    // §3.7) ===
+
+    fn e0102(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
+        diags.iter().filter(|d| d.code == "E0102").collect()
+    }
+
+    #[test]
+    fn a_variant_named_as_one_of_stds_is_e0102() {
+        let r = resolve_src("type Token =\n    | Number(Int)\n    | Word(String)\nfn main() {}\n");
+        let hits = e0102(&r.diagnostics);
+        assert_eq!(hits.len(), 1, "{:?}", r.diagnostics);
+        let d = hits[0];
+        assert_eq!(d.severity, nova_diagnostics::Severity::Warning);
+        assert_eq!(
+            d.message,
+            "variant `Number` hides std's `JsonValue::Number`"
+        );
+        assert!(d.notes[0].contains("the bare name `Number` now means this variant"));
+        assert!(d.notes[0].contains("std's is `JsonValue::Number`"));
+    }
+
+    #[test]
+    fn each_hidden_variant_is_reported() {
+        let r =
+            resolve_src("type Mine =\n    | Some(Int)\n    | None\n    | NotFound\nfn main() {}\n");
+        let messages: Vec<&str> = e0102(&r.diagnostics)
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "variant `Some` hides std's `Option::Some`",
+                "variant `None` hides std's `Option::None`",
+                "variant `NotFound` hides std's `IoErrorKind::NotFound`",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_qualified_use_of_stds_variant_is_fine() {
+        // The warning is at the definition only: a use of std's variant by
+        // its qualified name adds nothing.
+        let r = resolve_src(
+            "type Token =\n    | Number(Int)\n\
+             fn main() {\n    let j = JsonValue::Number(1.0)\n    let t = Number(1)\n}\n",
+        );
+        assert_eq!(error_codes(&r.diagnostics), ["E0102"]);
+    }
+
+    #[test]
+    fn a_name_that_is_not_one_of_stds_variants_is_not_reported() {
+        // `Token` and `Word` are no variant of std's, and a function, a
+        // record or a type that shadows a std name is not reported.
+        let r = resolve_src(
+            "type Token =\n    | Word(String)\nrecord JsonValue { x: Int }\nfn args() -> Int { 1 }\nfn main() {}\n",
+        );
+        assert!(e0102(&r.diagnostics).is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn std_itself_is_never_reported() {
+        let r = resolve_src("fn main() {}\n");
+        assert!(e0102(&r.diagnostics).is_empty(), "{:?}", r.diagnostics);
+    }
+
+    #[test]
+    fn another_modules_variant_is_reported_too() {
+        // A second module of the program. A path dependency's modules come
+        // before `std_start` too, and the driver shows their warnings
+        // (`nova-driver`'s `a_path_dependencys_warning_is_still_shown`).
+        let r = resolve_two(
+            "fn main() {}\n",
+            "pub type Answer =\n    | Ok\n    | Maybe\n",
+        );
+        let messages: Vec<&str> = e0102(&r.diagnostics)
+            .iter()
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(messages, ["variant `Ok` hides std's `Result::Ok`"]);
     }
 }

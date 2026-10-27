@@ -33,7 +33,7 @@ const CONTINUES: [Token; 5] = [
 ];
 
 /// Tokens that begin a new statement after a line break under the newline
-/// rule, where a `;` the author wrote says the break is meant: fmt keeps
+/// rule, which warns there (E0103) unless the author wrote a `;`: fmt keeps
 /// the author's `;` before them, and adds none.
 const SPLITS: [Token; 3] = [Token::LParen, Token::LBracket, Token::Minus];
 

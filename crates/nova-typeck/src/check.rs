@@ -215,6 +215,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         }
     }
     checker.check_const_cycles(&functions);
+    checker.warn_newline_splits();
     // Closure and bare-fn-wrapper functions synthesized while checking.
     functions.append(&mut checker.extra_functions);
 
@@ -3364,6 +3365,12 @@ impl<'a> Checker<'a> {
                 }
                 ast::Stmt::Expr(e) => {
                     stmts.push(self.check_expr(fcx, e));
+                    if let Some(what) = unused_value(e) {
+                        self.diagnostics.push(
+                            Diagnostic::warning("E0103", "this value is not used")
+                                .with_primary_label(e.span, format!("this {what} is discarded")),
+                        );
+                    }
                 }
                 ast::Stmt::Item(_) => {
                     self.unsupported(stmt.span, "items nested inside function bodies");
@@ -4897,6 +4904,64 @@ impl<'a> Checker<'a> {
                 .iter()
                 .position(|v| v.name == "None" && v.fields.is_empty())? as u32,
         })
+    }
+
+    /// E0103 at each place the newline rule ended a statement the parser
+    /// before it would have continued (5.0 spec §3.5; the user's ruling of
+    /// 2026-10-27): the parser records them, and a `;` written there means
+    /// the author ended the statement, so none is recorded. Where the new
+    /// statement is also a value nobody uses, its "this value is not used"
+    /// takes the note instead of a second warning.
+    fn warn_newline_splits(&mut self) {
+        for split in &self.file.newline_splits {
+            let note = match split.kind {
+                ast::SplitKind::Value => {
+                    "a `return` or `break` at the end of a line takes no value: to return \
+                     this line's value, put it on the same line; to keep this line a \
+                     statement of its own, write `;` after the `return` or `break`"
+                }
+                ast::SplitKind::Call | ast::SplitKind::Index | ast::SplitKind::Minus => {
+                    "a line that starts with `(`, `[` or `-` begins a new statement: to \
+                     continue the line before, end that line with the operator, or put the \
+                     `(` or `[` on it; to keep two statements, end that line with `;`"
+                }
+            };
+            let unused = self.diagnostics.iter_mut().find(|d| {
+                d.code == "E0103"
+                    && d.labels.first().is_some_and(|l| {
+                        l.span.file == split.at.file && l.span.start == split.at.start
+                    })
+            });
+            if let Some(d) = unused {
+                d.notes.push(format!(
+                    "a line break ended the statement before this one; {note}"
+                ));
+                continue;
+            }
+            let (message, label) = match split.kind {
+                ast::SplitKind::Value => (
+                    "a line break ends this `return` or `break`",
+                    "this line is not its value",
+                ),
+                ast::SplitKind::Call => (
+                    "a line break ends the statement before this `(`",
+                    "this `(` begins a new statement",
+                ),
+                ast::SplitKind::Index => (
+                    "a line break ends the statement before this `[`",
+                    "this `[` begins a new statement",
+                ),
+                ast::SplitKind::Minus => (
+                    "a line break ends the statement before this `-`",
+                    "this `-` begins a new statement",
+                ),
+            };
+            self.diagnostics.push(
+                Diagnostic::warning("E0103", message)
+                    .with_primary_label(split.at, label)
+                    .with_note(note.to_string()),
+            );
+        }
     }
 
     /// The `DefId` of std/core's sum named `name` (`Option` or `Result`),
@@ -8300,6 +8365,39 @@ fn lit_expr(lit: &ast::Literal, span: Span) -> hir::Expr {
         ast::Literal::Bool(v) => (hir::ExprKind::BoolLit(*v), Ty::Bool),
     };
     hir::Expr { kind, ty, span }
+}
+
+/// What a statement `e` is, when its value can only be discarded: E0103
+/// (5.0 spec §3.5), which reports what the newline rule leaves behind, such
+/// as a `-y` or a `(w)` on a line of its own. Calls, assignments, `&&`,
+/// `||`, blocks, `if`, `match` and the rest are not reported, nor is a
+/// block's tail, which is not a statement.
+fn unused_value(e: &Spanned<ast::Expr>) -> Option<&'static str> {
+    use ast::Expr as E;
+    // The span of a parenthesised expression starts at its `(`, before the
+    // operand it starts with.
+    let paren = |first: &Spanned<ast::Expr>| e.span.start < first.span.start;
+    match &e.value {
+        E::Lit(_) | E::StringInterp(_) => Some("literal"),
+        E::Path(_) => Some("name"),
+        E::Unary { .. } => Some("operator expression"),
+        E::Binary { op, .. } if !matches!(op, ast::BinOp::And | ast::BinOp::Or) => {
+            Some("operator expression")
+        }
+        E::Tuple(items) if !items.is_empty() => Some("tuple"),
+        E::Array(_) | E::ArrayRepeat { .. } => Some("array"),
+        E::Call { callee: first, .. }
+        | E::Field { target: first, .. }
+        | E::Index { target: first, .. }
+        | E::Try(first)
+        | E::Await(first)
+        | E::Cast { expr: first, .. }
+            if paren(first) =>
+        {
+            Some("parenthesised expression")
+        }
+        _ => None,
+    }
 }
 
 /// A read of `local`, of type `ty`.
@@ -14065,7 +14163,7 @@ mod tests {
         // `self.impls`, or any other field a full `check()` pass would
         // populate, so this needs only enough of a `Checker` to compile --
         // mirroring `check()`'s own construction above.
-        let file = ast::File { items: Vec::new() };
+        let file = ast::File::default();
         let checker = Checker {
             file: &file,
             defs: &resolved.definitions,
@@ -14142,7 +14240,7 @@ mod tests {
             "resolve errors: {:?}",
             resolved.diagnostics
         );
-        let file = ast::File { items: Vec::new() };
+        let file = ast::File::default();
         let checker = Checker {
             file: &file,
             defs: &resolved.definitions,

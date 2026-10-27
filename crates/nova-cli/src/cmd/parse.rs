@@ -49,8 +49,11 @@ pub fn run(cmd: ParseCmd) -> Result<()> {
     let parse_diags: Vec<_> = parse_errors
         .iter()
         .map(|e| {
-            nova_diagnostics::Diagnostic::error("P0001", e.to_string())
-                .with_primary_label(e.span(), "here")
+            e.notes().into_iter().fold(
+                nova_diagnostics::Diagnostic::error("P0001", e.to_string())
+                    .with_primary_label(e.span(), "here"),
+                |d, n| d.with_note(n),
+            )
         })
         .collect();
     if !parse_diags.is_empty() {

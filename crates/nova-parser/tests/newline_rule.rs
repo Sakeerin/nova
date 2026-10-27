@@ -7,7 +7,7 @@
 
 use nova_ast::expr::{BinOp, Expr, Literal, StringPart, UnOp};
 use nova_ast::pattern::Pattern;
-use nova_ast::{Block, Item, Stmt};
+use nova_ast::{Block, Item, SplitKind, Stmt};
 use nova_diagnostics::FileDb;
 use nova_lexer::lex;
 use nova_parser::parse;
@@ -482,4 +482,114 @@ fn the_rule_is_off_in_a_nested_items_signature_and_value() {
     // A nested `const`'s value continues across a line break, as a
     // top-level one does; its body-less item is not statement context.
     assert_eq!(body(&f("const C: Int = a\n-1\nC")), ["item", "tail:C"]);
+}
+
+// --- the splits the parser records for E0103 (the user's ruling of 2026-10-27) ---
+
+/// Each split of `f`'s body `stmts`: the text of the token the line break
+/// cut off, and what it would have been.
+fn splits(stmts: &str) -> Vec<(String, SplitKind)> {
+    let src = f(stmts);
+    let mut db = FileDb::new();
+    let id = db.add("splits.nova", src.as_str());
+    let (tokens, _) = lex(&src, id);
+    let (file, errors) = parse(&tokens, id);
+    assert!(errors.is_empty(), "{src}\n{errors:?}");
+    file.expect("a file")
+        .newline_splits
+        .iter()
+        .map(|s| {
+            (
+                src[s.at.start as usize..s.at.end as usize].to_string(),
+                s.kind,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn each_split_the_rule_makes_is_recorded() {
+    assert_eq!(splits("g\n(1)"), [("(".to_string(), SplitKind::Call)]);
+    assert_eq!(splits("g\n[1]"), [("[".to_string(), SplitKind::Index)]);
+    assert_eq!(
+        splits("let z = x\n-y"),
+        [("-".to_string(), SplitKind::Minus)]
+    );
+    assert_eq!(
+        splits("return a\n- b"),
+        [("-".to_string(), SplitKind::Minus)]
+    );
+    assert_eq!(splits("return\ng()"), [("g".to_string(), SplitKind::Value)]);
+    assert_eq!(
+        splits("while true {\n    break\n    x\n}"),
+        [("x".to_string(), SplitKind::Value)]
+    );
+}
+
+#[test]
+fn a_written_semicolon_records_no_split() {
+    assert!(splits("g;\n(1)").is_empty());
+    assert!(splits("let z = x;\n-y").is_empty());
+    assert!(splits("return;\ng()").is_empty());
+}
+
+#[test]
+fn what_the_old_parser_could_not_have_continued_records_no_split() {
+    // The next arm after an arm's body, and a `let` or an item after a bare
+    // `return`, were never part of the statement before.
+    assert!(splits("match x {\n    A => g\n    (a) => h\n}").is_empty());
+    assert!(splits("match x {\n    A => return\n    B => h\n}").is_empty());
+    assert!(splits("return\nlet y = 1").is_empty());
+    assert!(splits("return\nfn g() {}").is_empty());
+    // A line break where the rule is off is no split either.
+    assert!(splits("let z = (x\n-y)").is_empty());
+}
+
+#[test]
+fn a_split_after_a_bare_return_is_recorded_once() {
+    // The line after a bare `return` is no operand of it: no call, index or
+    // `-` takes the keyword, so one split, of the value.
+    assert_eq!(
+        splits("return\n(g)(1)"),
+        [("(".to_string(), SplitKind::Value)]
+    );
+    assert_eq!(splits("return\n-1"), [("-".to_string(), SplitKind::Value)]);
+    assert_eq!(body(&f("return\n(g)(1)")), ["return", "tail:g(1)"]);
+}
+
+#[test]
+fn a_bare_return_ending_an_arm_records_no_split() {
+    assert!(splits("match x {\n    0 => return\n    (1) => 2\n    _ => 3\n}").is_empty());
+}
+
+#[test]
+fn a_value_ending_an_arm_records_no_split_however_often_it_is_met() {
+    // A `return`'s value or a closure's body ends at the `(`, and so does
+    // the expression that holds it: both meet the split, and the arm drops
+    // each.
+    for body in ["return a", "break a", "|y| y", "return { a }"] {
+        let src = format!("match x {{\n    0 => {body}\n    (1) => 2\n    _ => 3\n}}");
+        assert!(splits(&src).is_empty(), "{body}");
+    }
+}
+
+#[test]
+fn a_bare_return_before_a_token_no_expression_starts_with_reads_as_before() {
+    // `g(return` then `)`: as before the rule, the `)` is read as the
+    // value's start, a parse error, and no split is recorded.
+    assert!(!errors("g(return\n)").is_empty());
+    assert!(!errors("let v = [return\n]").is_empty());
+}
+
+#[test]
+fn a_parse_error_at_an_arm_the_rule_began_names_the_rule() {
+    let errs = errors("match x {\n    0 => a\n    - 1,\n    _ => 2\n}");
+    assert!(!errs.is_empty());
+    assert!(
+        errs[0]
+            .notes()
+            .iter()
+            .any(|n| n.contains("begins the next match arm")),
+        "{errs:?}"
+    );
 }

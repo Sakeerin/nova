@@ -32,7 +32,10 @@ impl<'t> Source<'t> {
             .map(|e| Diagnostic::error("L0001", e.to_string()).with_primary_label(e.span(), "here"))
             .collect();
         diagnostics.extend(parse_errors.iter().map(|e| {
-            Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here")
+            e.notes().into_iter().fold(
+                Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here"),
+                |d, n| d.with_note(n),
+            )
         }));
         match file {
             Some(file) if diagnostics.is_empty() => Ok(Self {
