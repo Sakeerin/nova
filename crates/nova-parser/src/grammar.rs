@@ -18,7 +18,7 @@ use nova_ast::{
     Block, File, Item, Path, Stmt,
 };
 use nova_diagnostics::{FileId, Span, Spanned};
-use nova_lexer::Token;
+use nova_lexer::{Token, Tokens};
 
 use crate::ParseError;
 
@@ -32,7 +32,7 @@ const MISPLACED_DOC: &str =
 // ---------------------------------------------------------------------------
 
 struct Parser<'a> {
-    tokens: &'a [Spanned<Token>],
+    tokens: &'a Tokens,
     pos: usize,
     file: FileId,
     errors: Vec<ParseError>,
@@ -40,6 +40,15 @@ struct Parser<'a> {
     /// literal. Set by scrutinee positions (if/while/for/match conditions) to
     /// avoid ambiguity with the following `{ block }`.
     no_struct_literal: bool,
+    /// Whether the parser is in statement context, where the newline rule
+    /// holds (spec
+    /// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+    /// §3.5): a line break ends the expression before a `(`, a `[` or a
+    /// binary `-`. On for a block's statements and tail and a match arm's
+    /// body; off inside parentheses, brackets, arguments, record literals,
+    /// interpolation holes, views, items, and the heads of `if`, `while`,
+    /// `for` and `match`. Saved and restored like `no_struct_literal`.
+    stmt_ctx: bool,
     /// Count of closing `>` "borrowed" from a `>>` token while closing nested
     /// generic argument lists (`Option<Option<Int>>`). The lexer glues `>>`
     /// into one token, so closing an inner list splits it: one `>` closes the
@@ -53,13 +62,14 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(tokens: &'a [Spanned<Token>], file: FileId) -> Self {
+    fn new(tokens: &'a Tokens, file: FileId) -> Self {
         Self {
             tokens,
             pos: 0,
             file,
             errors: Vec::new(),
             no_struct_literal: false,
+            stmt_ctx: false,
             pending_gt: 0,
             dropped: Vec::new(),
         }
@@ -77,13 +87,49 @@ impl<'a> Parser<'a> {
     /// Run `f` with `no_struct_literal = false`, then restore the previous
     /// value. Used for a `${…}` interpolation hole: the ambiguity that motivates
     /// the flag cannot arise there, because the hole's own `}` is a distinct
-    /// `InterpClose` token and no `{ block }` can follow it.
+    /// `InterpClose` token and no `{ block }` can follow it. The hole is
+    /// delimited, so it is not statement context either.
     fn in_struct_ok_ctx<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         let prev = self.no_struct_literal;
         self.no_struct_literal = false;
-        let result = f(self);
+        let result = self.in_stmt_ctx(false, f);
         self.no_struct_literal = prev;
         result
+    }
+
+    /// Run `f` for the head of an `if`, `while`, `for` or `match`, which
+    /// ends at its `{`: no record literal, and not statement context.
+    fn in_head_ctx<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.in_no_struct_ctx(|p| p.in_stmt_ctx(false, f))
+    }
+
+    /// Run `f` with `stmt_ctx = on`, then restore the previous value.
+    fn in_stmt_ctx<R>(&mut self, on: bool, f: impl FnOnce(&mut Self) -> R) -> R {
+        let prev = self.stmt_ctx;
+        self.stmt_ctx = on;
+        let result = f(self);
+        self.stmt_ctx = prev;
+        result
+    }
+
+    /// Whether a line break comes before the token at the cursor.
+    fn line_break_here(&self) -> bool {
+        self.tokens.line_break_before(self.pos)
+    }
+
+    /// Whether the newline rule ends the expression before the token at the
+    /// cursor: a line break before it, in statement context. The callers
+    /// ask it of a `(`, a `[` and a binary `-`.
+    fn newline_ends_expr(&self) -> bool {
+        self.stmt_ctx && self.line_break_here()
+    }
+
+    /// Whether a `return` or `break` just read takes no value: the next
+    /// token ends a statement or a block, or a line break comes before it,
+    /// in any context.
+    fn bare_keyword_ends(&self) -> bool {
+        matches!(self.peek(), Token::Semicolon | Token::RBrace | Token::Eof)
+            || self.line_break_here()
     }
 
     // --- Token access ---
@@ -325,15 +371,12 @@ impl<'a> Parser<'a> {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse_file(
-    tokens: &[Spanned<Token>],
-    file: FileId,
-) -> (Option<File>, Vec<ParseError>) {
+pub(crate) fn parse_file(tokens: &Tokens, file: FileId) -> (Option<File>, Vec<ParseError>) {
     let parsed = parse_recovering(tokens, file);
     (Some(parsed.file), parsed.errors)
 }
 
-pub(crate) fn parse_recovering(tokens: &[Spanned<Token>], file: FileId) -> crate::Parsed {
+pub(crate) fn parse_recovering(tokens: &Tokens, file: FileId) -> crate::Parsed {
     let mut p = Parser::new(tokens, file);
     let ast_file = p.parse_file();
     crate::Parsed {
@@ -1415,6 +1458,11 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_block(&mut self, ctx: &str) -> Option<Spanned<Block>> {
+        // A block anywhere turns statement context on (spec §3.5).
+        self.in_stmt_ctx(true, |p| p.parse_block_inner(ctx))
+    }
+
+    fn parse_block_inner(&mut self, ctx: &str) -> Option<Spanned<Block>> {
         let start = self.peek_span();
         self.expect(&Token::LBrace, ctx)?;
         let mut stmts = Vec::new();
@@ -1479,7 +1527,7 @@ impl<'a> Parser<'a> {
 
         // Nested items, documented or not (spec §4)
         if self.is_item_start_at(self.docs_end()) {
-            let item = self.try_parse_item()?;
+            let item = self.in_stmt_ctx(false, |p| p.try_parse_item())?;
             let span = item.span;
             return Some(Spanned::new(Stmt::Item(Box::new(item.value)), span));
         }
@@ -1761,6 +1809,9 @@ impl<'a> Parser<'a> {
         loop {
             let op = match self.peek() {
                 Token::Plus => BinOp::Add,
+                // A `-` after a line break in statement context begins the
+                // next statement (spec §3.5).
+                Token::Minus if self.newline_ends_expr() => break,
                 Token::Minus => BinOp::Sub,
                 _ => break,
             };
@@ -1883,18 +1934,24 @@ impl<'a> Parser<'a> {
         loop {
             let cur_span = expr.span;
             match self.peek().clone() {
+                // A `(` or `[` after a line break in statement context
+                // begins the next statement (spec §3.5).
+                Token::LParen | Token::LBracket if self.newline_ends_expr() => break,
                 Token::LParen => {
                     // Function call
                     self.advance();
-                    let mut args = Vec::new();
-                    while !self.check(&Token::RParen) && !self.is_at_end() {
-                        if let Some(a) = self.parse_expr(ctx) {
-                            args.push(a);
+                    let args = self.in_stmt_ctx(false, |p| {
+                        let mut args = Vec::new();
+                        while !p.check(&Token::RParen) && !p.is_at_end() {
+                            if let Some(a) = p.parse_expr(ctx) {
+                                args.push(a);
+                            }
+                            if p.eat(&Token::Comma).is_none() {
+                                break;
+                            }
                         }
-                        if self.eat(&Token::Comma).is_none() {
-                            break;
-                        }
-                    }
+                        args
+                    });
                     self.expect(&Token::RParen, "call arguments")?;
                     let end = self
                         .tokens
@@ -1912,7 +1969,7 @@ impl<'a> Parser<'a> {
                 Token::LBracket => {
                     // Index
                     self.advance();
-                    let index = self.parse_expr(ctx)?;
+                    let index = self.in_stmt_ctx(false, |p| p.parse_expr(ctx))?;
                     self.expect(&Token::RBracket, "index expression")?;
                     let end = self
                         .tokens
@@ -2022,84 +2079,10 @@ impl<'a> Parser<'a> {
             }
 
             // Parenthesised / tuple
-            Token::LParen => {
-                self.advance();
-                if self.eat(&Token::RParen).is_some() {
-                    // Unit `()`
-                    let end = self
-                        .tokens
-                        .get(self.pos.saturating_sub(1))
-                        .map(|s| s.span)
-                        .unwrap_or(start);
-                    return Some(Spanned::new(Expr::Tuple(vec![]), start.merge(end)));
-                }
-                let first = self.parse_expr(ctx)?;
-                if self.eat(&Token::RParen).is_some() {
-                    // Just a parenthesised expression
-                    let end = self
-                        .tokens
-                        .get(self.pos.saturating_sub(1))
-                        .map(|s| s.span)
-                        .unwrap_or(start);
-                    return Some(Spanned::new(first.value, start.merge(end)));
-                }
-                // Tuple
-                let mut elems = vec![first];
-                while self.eat(&Token::Comma).is_some() && !self.check(&Token::RParen) {
-                    if let Some(e) = self.parse_expr(ctx) {
-                        elems.push(e);
-                    }
-                }
-                self.expect(&Token::RParen, "tuple")?;
-                let end = self
-                    .tokens
-                    .get(self.pos.saturating_sub(1))
-                    .map(|s| s.span)
-                    .unwrap_or(start);
-                Some(Spanned::new(Expr::Tuple(elems), start.merge(end)))
-            }
+            Token::LParen => self.in_stmt_ctx(false, |p| p.parse_paren(start, ctx)),
 
             // Array literal — either `[a, b, c]` or the repeat form `[init; n]`
-            Token::LBracket => {
-                self.advance();
-                let mut elems = Vec::new();
-                let mut first = true;
-                while !self.check(&Token::RBracket) && !self.is_at_end() {
-                    if let Some(e) = self.parse_expr(ctx) {
-                        // `[init; n]`: a `;` after the *first* element switches
-                        // to the repeat form, whose second operand is a length
-                        // rather than another element.
-                        if first && self.eat(&Token::Semicolon).is_some() {
-                            let len = self.parse_expr(ctx)?;
-                            self.expect(&Token::RBracket, "repeat array literal")?;
-                            let end = self
-                                .tokens
-                                .get(self.pos.saturating_sub(1))
-                                .map(|s| s.span)
-                                .unwrap_or(start);
-                            return Some(Spanned::new(
-                                Expr::ArrayRepeat {
-                                    init: Box::new(e),
-                                    len: Box::new(len),
-                                },
-                                start.merge(end),
-                            ));
-                        }
-                        elems.push(e);
-                    }
-                    first = false;
-                    if self.eat(&Token::Comma).is_none() {
-                        break;
-                    }
-                }
-                self.expect(&Token::RBracket, "array literal")?;
-                let end = self
-                    .tokens
-                    .get(self.pos.saturating_sub(1))
-                    .map(|s| s.span)
-                    .unwrap_or(start);
-                Some(Spanned::new(Expr::Array(elems), start.merge(end)))
-            }
+            Token::LBracket => self.in_stmt_ctx(false, |p| p.parse_array_literal(start, ctx)),
 
             // Block expression
             Token::LBrace => {
@@ -2117,7 +2100,7 @@ impl<'a> Parser<'a> {
             // While
             Token::While => {
                 self.advance();
-                let cond = self.in_no_struct_ctx(|p| p.parse_expr(ctx))?;
+                let cond = self.in_head_ctx(|p| p.parse_expr(ctx))?;
                 let body = self.parse_block(ctx)?;
                 let span = start.merge(body.span);
                 Some(Spanned::new(
@@ -2134,7 +2117,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let pattern = self.parse_pattern(ctx)?;
                 self.expect(&Token::In, "for loop")?;
-                let iter = self.in_no_struct_ctx(|p| p.parse_expr(ctx))?;
+                let iter = self.in_head_ctx(|p| p.parse_expr(ctx))?;
                 let body = self.parse_block(ctx)?;
                 let span = start.merge(body.span);
                 Some(Spanned::new(
@@ -2150,8 +2133,8 @@ impl<'a> Parser<'a> {
             // Return
             Token::Return => {
                 self.advance();
-                // Optional expression
-                let val = if !matches!(self.peek(), Token::Semicolon | Token::RBrace | Token::Eof) {
+                // Optional expression; none at the end of a line (spec §3.5).
+                let val = if !self.bare_keyword_ends() {
                     Some(Box::new(self.parse_expr(ctx)?))
                 } else {
                     None
@@ -2163,7 +2146,7 @@ impl<'a> Parser<'a> {
             // Break
             Token::Break => {
                 self.advance();
-                let val = if !matches!(self.peek(), Token::Semicolon | Token::RBrace | Token::Eof) {
+                let val = if !self.bare_keyword_ends() {
                     Some(Box::new(self.parse_expr(ctx)?))
                 } else {
                     None
@@ -2222,6 +2205,87 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// `()`, `(e)` or a tuple, at `(`, which began at `start`.
+    fn parse_paren(&mut self, start: Span, ctx: &str) -> Option<Spanned<Expr>> {
+        self.advance();
+        if self.eat(&Token::RParen).is_some() {
+            // Unit `()`
+            let end = self
+                .tokens
+                .get(self.pos.saturating_sub(1))
+                .map(|s| s.span)
+                .unwrap_or(start);
+            return Some(Spanned::new(Expr::Tuple(vec![]), start.merge(end)));
+        }
+        let first = self.parse_expr(ctx)?;
+        if self.eat(&Token::RParen).is_some() {
+            // Just a parenthesised expression
+            let end = self
+                .tokens
+                .get(self.pos.saturating_sub(1))
+                .map(|s| s.span)
+                .unwrap_or(start);
+            return Some(Spanned::new(first.value, start.merge(end)));
+        }
+        // Tuple
+        let mut elems = vec![first];
+        while self.eat(&Token::Comma).is_some() && !self.check(&Token::RParen) {
+            if let Some(e) = self.parse_expr(ctx) {
+                elems.push(e);
+            }
+        }
+        self.expect(&Token::RParen, "tuple")?;
+        let end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|s| s.span)
+            .unwrap_or(start);
+        Some(Spanned::new(Expr::Tuple(elems), start.merge(end)))
+    }
+
+    /// An array literal, `[a, b, c]` or `[init; n]`, at `[`, which began at
+    /// `start`.
+    fn parse_array_literal(&mut self, start: Span, ctx: &str) -> Option<Spanned<Expr>> {
+        self.advance();
+        let mut elems = Vec::new();
+        let mut first = true;
+        while !self.check(&Token::RBracket) && !self.is_at_end() {
+            if let Some(e) = self.parse_expr(ctx) {
+                // `[init; n]`: a `;` after the *first* element switches
+                // to the repeat form, whose second operand is a length
+                // rather than another element.
+                if first && self.eat(&Token::Semicolon).is_some() {
+                    let len = self.parse_expr(ctx)?;
+                    self.expect(&Token::RBracket, "repeat array literal")?;
+                    let end = self
+                        .tokens
+                        .get(self.pos.saturating_sub(1))
+                        .map(|s| s.span)
+                        .unwrap_or(start);
+                    return Some(Spanned::new(
+                        Expr::ArrayRepeat {
+                            init: Box::new(e),
+                            len: Box::new(len),
+                        },
+                        start.merge(end),
+                    ));
+                }
+                elems.push(e);
+            }
+            first = false;
+            if self.eat(&Token::Comma).is_none() {
+                break;
+            }
+        }
+        self.expect(&Token::RBracket, "array literal")?;
+        let end = self
+            .tokens
+            .get(self.pos.saturating_sub(1))
+            .map(|s| s.span)
+            .unwrap_or(start);
+        Some(Spanned::new(Expr::Array(elems), start.merge(end)))
+    }
+
     fn parse_string_expr(&mut self) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
         self.expect(&Token::StrStart, "string literal")?;
@@ -2272,7 +2336,7 @@ impl<'a> Parser<'a> {
     fn parse_if_expr(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
         self.expect(&Token::If, "if expression")?;
-        let cond = self.in_no_struct_ctx(|p| p.parse_expr(ctx))?;
+        let cond = self.in_head_ctx(|p| p.parse_expr(ctx))?;
         let then = self.parse_block(ctx)?;
         let else_ = if self.eat(&Token::Else).is_some() {
             if self.check(&Token::If) {
@@ -2300,7 +2364,7 @@ impl<'a> Parser<'a> {
     fn parse_match_expr(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
         self.expect(&Token::Match, "match expression")?;
-        let scrutinee = self.in_no_struct_ctx(|p| p.parse_expr(ctx))?;
+        let scrutinee = self.in_head_ctx(|p| p.parse_expr(ctx))?;
         self.expect(&Token::LBrace, "match body")?;
         let mut arms = Vec::new();
         while !self.check(&Token::RBrace) && !self.is_at_end() {
@@ -2330,13 +2394,16 @@ impl<'a> Parser<'a> {
 
     fn parse_match_arm(&mut self, ctx: &str) -> Option<MatchArm> {
         let pattern = self.parse_pattern(ctx)?;
+        // A guard ends at its `=>`, as a head ends at its `{`.
         let guard = if self.eat(&Token::If).is_some() {
-            Some(self.parse_expr(ctx)?)
+            Some(self.in_stmt_ctx(false, |p| p.parse_expr(ctx))?)
         } else {
             None
         };
         self.expect(&Token::FatArrow, "match arm")?;
-        let body = self.parse_expr(ctx)?;
+        // An arm's body is statement context, so a line that starts with
+        // `(` begins the next arm (spec §3.5).
+        let body = self.in_stmt_ctx(true, |p| p.parse_expr(ctx))?;
         self.eat(&Token::Comma);
         Some(MatchArm {
             pattern,
@@ -2404,8 +2471,10 @@ impl<'a> Parser<'a> {
     /// `view { child* }` (RFC 0001), at `view`.
     fn parse_view(&mut self) -> Option<Spanned<Expr>> {
         let start = self.peek_span();
-        self.advance(); // `view`
-        let children = self.parse_view_children()?;
+        // A view's children keep their `;` rule: the newline rule is off in
+        // them, as in an element's arguments.
+        self.advance();
+        let children = self.in_stmt_ctx(false, |p| p.parse_view_children())?;
         let span = start.merge(self.prev_span_or(start));
         Some(Spanned::new(Expr::View(children), span))
     }
@@ -2550,6 +2619,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_record_literal(&mut self, path: Path, start: Span) -> Option<Spanned<Expr>> {
+        self.in_stmt_ctx(false, |p| p.parse_record_literal_inner(path, start))
+    }
+
+    fn parse_record_literal_inner(&mut self, path: Path, start: Span) -> Option<Spanned<Expr>> {
         self.expect(&Token::LBrace, "record literal")?;
         let mut fields = Vec::new();
         let mut base = None;

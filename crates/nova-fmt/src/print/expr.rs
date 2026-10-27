@@ -673,18 +673,32 @@ impl<'s, 't> Printer<'s, 't> {
 
     /// A chain of one precedence level: flat when it fits, otherwise broken
     /// before each operator, indented once (spec §6, "Binary expressions").
+    ///
+    /// A chain with a `-` in it breaks after each operator instead, so no
+    /// line starts with `-`: in statement context the newline rule would
+    /// read that line as a new statement (5.0 spec §3.5). The rule is the
+    /// same in every context, so the printer need not know which one it is
+    /// in, and it adds no token, as parentheses around the chain would.
     fn binary(&mut self, e: &Spanned<Expr>) -> Doc {
         let Expr::Binary { op, .. } = &e.value else {
             unreachable!("binary is only called on a binary expression")
         };
         let mut operands = Vec::new();
         self.flatten(e, precedence(*op), true, &mut operands);
+        let after = operands
+            .iter()
+            .any(|&(op, _)| matches!(op, Some(BinOp::Sub)));
         let first = self.expr(operands[0].1);
         let mut rest = Vec::new();
         for &(op, x) in &operands[1..] {
             let op = op.expect("every operand after the first has an operator");
-            rest.push(Doc::Line);
-            rest.push(text(format!("{} ", bin_op(op))));
+            if after {
+                rest.push(text(format!(" {}", bin_op(op))));
+                rest.push(Doc::Line);
+            } else {
+                rest.push(Doc::Line);
+                rest.push(text(format!("{} ", bin_op(op))));
+            }
             rest.push(self.expr(x));
         }
         group(concat(vec![first, nest(concat(rest))]))

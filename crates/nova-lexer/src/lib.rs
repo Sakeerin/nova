@@ -1,6 +1,7 @@
 //! Lexer for the Nova programming language.
 //!
-//! Converts Nova source text into a `Vec<Spanned<Token>>`. Uses `logos` for
+//! Converts Nova source text into [`Tokens`]: the tokens, each marked with
+//! whether a line break comes before it. Uses `logos` for
 //! the core token recognition and a hand-written state machine wrapper for
 //! string interpolation (`"Hello, ${name}!"`).
 //!
@@ -24,9 +25,11 @@
 
 mod error;
 mod token;
+mod tokens;
 
 pub use error::LexError;
 pub use token::Token;
+pub use tokens::Tokens;
 
 /// Every keyword, in the order the lexer declares its tokens: the words
 /// completion offers, and the extension's grammar colours (spec
@@ -45,22 +48,20 @@ use nova_diagnostics::{FileId, Span, Spanned};
 ///
 /// Errors are non-fatal: the lexer continues after a bad character and collects
 /// all errors in the returned `Vec`.
-pub fn lex(source: &str, file: FileId) -> (Vec<Spanned<Token>>, Vec<LexError>) {
+pub fn lex(source: &str, file: FileId) -> (Tokens, Vec<LexError>) {
     let mut lexer = Lexer::new(source, file);
-    lexer.tokenize()
+    let (tokens, errors) = lexer.tokenize();
+    (Tokens::marked(tokens, source), errors)
 }
 
 /// [`lex`], plus every comment it skipped, in source order: what the
 /// formatter needs to keep them (spec
 /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §3.1).
 /// The tokens and errors are exactly `lex`'s.
-pub fn lex_with_comments(
-    source: &str,
-    file: FileId,
-) -> (Vec<Spanned<Token>>, Vec<Comment>, Vec<LexError>) {
+pub fn lex_with_comments(source: &str, file: FileId) -> (Tokens, Vec<Comment>, Vec<LexError>) {
     let mut lexer = Lexer::new(source, file);
     let (tokens, errors) = lexer.tokenize();
-    (tokens, lexer.comments, errors)
+    (Tokens::marked(tokens, source), lexer.comments, errors)
 }
 
 /// A comment the lexer skipped.

@@ -1,6 +1,9 @@
 //! Parser for the Nova programming language.
 //!
-//! Converts a `Vec<Spanned<Token>>` (from `nova-lexer`) into an `ast::File`.
+//! Converts the [`Tokens`] `nova-lexer` produces into an `ast::File`. The
+//! tokens' line-break marks drive the newline rule (spec
+//! `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+//! §3.5).
 //! A hand-written recursive-descent parser: after an error it skips to the next
 //! item or statement boundary and keeps going.
 //!
@@ -25,14 +28,14 @@ pub use error::ParseError;
 
 use nova_ast::File;
 use nova_diagnostics::{FileId, Spanned};
-use nova_lexer::Token;
+use nova_lexer::Tokens;
 
 /// Parse a token stream into a `File` AST.
 ///
 /// Returns `Some(File)` even when errors are present: the parser skips to the
 /// next item or statement boundary after an error and keeps going. It
 /// currently never returns `None`.
-pub fn parse(tokens: &[Spanned<Token>], file: FileId) -> (Option<File>, Vec<ParseError>) {
+pub fn parse(tokens: &Tokens, file: FileId) -> (Option<File>, Vec<ParseError>) {
     grammar::parse_file(tokens, file)
 }
 
@@ -51,6 +54,6 @@ pub struct Parsed {
 /// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §3.2).
 /// The language server's analysis calls this; every other caller uses
 /// [`parse`], whose result is the same file and errors.
-pub fn parse_recovering(tokens: &[Spanned<Token>], file: FileId) -> Parsed {
+pub fn parse_recovering(tokens: &Tokens, file: FileId) -> Parsed {
     grammar::parse_recovering(tokens, file)
 }
