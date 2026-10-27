@@ -305,6 +305,25 @@ From 5.1 on, each gate has two parts: N's dump equals S0's on the corpus
 ### 5.0 — The language and std that a compiler needs
 May split into 5.0a and 5.0b, as its spec decides.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** 5.0
+is built as **three parts, in order,** by the user's decision of
+2026-10-26
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+decision 1; ADR 0048), in place of the 5.0a and 5.0b below:
+- **5.0a, the small language and CI:** ADR 0048; the golden suite
+  through the LLVM backend in CI, on a pinned `clang` (from 5.0b's list);
+  `?`; `+=` on fields and elements; the newline rule, a fix in the
+  parser; `String + String` (from the builder's question); and the
+  warnings E0102, for a variant that hides one of std's, and E0103, for
+  a statement whose value is unused;
+- **5.0b, tuples and patterns** (from 5.0a's list): tuples on every
+  backend, WASM included, and nested patterns with guards, or-patterns,
+  and `Char` and range patterns, past the list on the user's word;
+- **5.0c, std** (5.0b's list but CI): the builder, conversions,
+  `parse_int` and `parse_float`, array helpers, `OrderedMap`, and
+  `std/process` with `run`, `status`, `env` and `current_exe`; and
+  `Float.to_bits`.
+
 - **ADR 0048**, the scope and the backend (decisions 1 and 2).
 - **5.0a, the language,** in S0's lexer, parser, type checker, MIR and both
   native backends, with `nova fmt` and the language server following:

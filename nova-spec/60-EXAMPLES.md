@@ -247,6 +247,13 @@ gap — see `docs/benchmarks/README.md` for the procedure used instead and
 produced. The listing below stays as written, as the aspiration it always
 was.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the `?`
+operator exists, on `Option` and `Result`, in 5.0a
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.3); it converts nothing, so the error types must be the same, and
+`map_err` converts. Turbofish, `@derive` and the `Handler` alias are still
+absent.
+
 **AMENDED 2026-09-10 (branch `examples-05-json-api`): the example now exists,
 and the gate this section names is still NOT met.** `examples/05-json-api/`
 holds `src/main.nova`, a `README.md` and a `BENCHMARK.md`. It serves the same
@@ -348,6 +355,13 @@ sites. That is the population searched — tracked files, both spellings
 (hyphenated and not), flattened first because this repo's prose wraps — and not
 a claim that no other record says it.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the `?`
+operator exists, on `Option` and `Result`, in 5.0a
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.3); it converts nothing, so the error types must be the same, and
+`map_err` converts. Turbofish, `@derive` and the `Handler` alias are still
+absent.
+
 **What the amendment above still has right, and this increment left open.**
 `@derive` is not implemented — an unknown attribute is `E0082`, and the message
 lists what the resolver's `KNOWN_ATTRIBUTES` holds — `test` alone at this
@@ -357,6 +371,13 @@ rather than this sentence. `Map` has `keys()` and no `values()`
 ids ascending from 1 instead of iterating values. The `Handler` type alias
 still does not parse, so there is nothing for `Server.get`/`.post` to be built
 on. There is no `?` operator. None of those moved here.
+
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the `?`
+operator exists, on `Option` and `Result`, in 5.0a
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.3); it converts nothing, so the error types must be the same, and
+`map_err` converts. Turbofish, `@derive` and the `Handler` alias are still
+absent.
 
 **Recorded 2026-10-04 (branch `examples-03-04-inventory`): the `Handler` alias
 is not what stands between `std/http` and a `Server.get`.** It still does not

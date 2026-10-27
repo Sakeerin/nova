@@ -1308,6 +1308,14 @@ above. Shipped call style is unqualified — `stringify(v)`,
 `Bool::from_json(v)` — since every `STD_MODULES` entry is glob-imported into
 every module.
 
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):** the
+`?` operator exists, in 5.0a
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.3). It converts nothing, so a `?` on a `Result<T, JsonError>` needs a
+function whose error type is `JsonError`, or a `map_err` first. `@derive`
+and the `module` line still do not parse, so the example block still does
+not compile as written.
+
 **The amendment-marker set in this file, regrepped rather than copied
 forward.** Before this increment there were **16**; this increment adds
 **two** — this one, and §12's, recording `Map::keys` — for **18**. That is
@@ -2779,6 +2787,15 @@ shipped in Phase 2.2b
 (`docs/superpowers/specs/2026-07-27-phase-2-2b-strings-design.md`) with no
 section here. Its whole surface is one `impl String` block in
 `std/strings/lib.nova`, glob-imported into every module.
+
+**Amended 2026-10-26 (branch `claude/loving-archimedes-frtf5q-50`):**
+`String + String` is a new `String`, `a` then `b`, and `s += t` follows, on
+a local, a field or an element
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3.6). It is a call of the runtime's concatenation, which copies both, so
+appending in a loop is quadratic, as interpolation is; 5.0c's
+`StringBuilder` is the linear way. `String + Char` and `String + Int` stay
+errors, whose note suggests interpolation.
 
 ```nova
 impl String {

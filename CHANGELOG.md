@@ -9,6 +9,81 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+Phase 5.0a, the small language and CI (spec
+`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§3; ADR 0048, Phase 5's scope and backend).
+
+### Added
+
+- **`?` on `Option` and `Result`.** `e?` gives the value inside `Some` or
+  `Ok`, and otherwise returns `None`, or the same `Err`, from the
+  enclosing function: the nearest `fn` or closure, whose declared return
+  type it uses in an `async fn`, and which it infers in a closure.
+  Nothing is converted: the error types must be the same, and `map_err`
+  converts. It is E0098 on any other type, a program's own `Option`
+  included, and E0099 in a function that returns neither, or the other of
+  the two, with a note that suggests `.ok_or(err)?` or says that `main`
+  and `@test` functions return `()`. It works on every backend, WASM
+  included.
+- **`+=` and its kin on fields and elements:** `self.pos += 1`,
+  `self.counts[k] -= 1`, `grid[i][j] *= 2`, with all ten operators. The
+  receiver and the index are evaluated once, then the old value, then the
+  right-hand side; the errors are those of plain assignment (E0060) and of
+  the operator (E0010, E0013).
+- **`String + String`,** a new `String`, so `s += t` works on a local, a
+  field or an element. Each `+` copies both strings, so appending in a
+  loop is quadratic, as interpolation is. `String + Char` and `String +
+  Int` are still errors, now with a note that suggests interpolation.
+- **E0102, a warning:** a variant of a program's own sum, or of a path
+  dependency's, whose name is also a variant std brings into every
+  module, as `Number` is `JsonValue::Number`'s. In that module the bare
+  name means the program's own variant.
+- **E0103, a warning, "this value is not used":** a statement, not a
+  block's tail, that is an operator expression other than an assignment,
+  `&&` or `||`, a literal, a name, or a parenthesised, tuple or array
+  expression. **E0103 also warns at each place the newline rule ends a
+  statement the parser before it would have continued:** a line that
+  starts with `(`, `[` or `-`, and a line after a `return` or `break` at
+  the end of a line. A `;` written at the end of the line before says the
+  break is meant, and silences it.
+
+### Changed
+
+- **The newline rule.** In a block, a line break ends an expression
+  before a `(`, a `[` or a binary `-`: the token begins the next
+  statement or match arm. A `return` or `break` at the end of a line
+  takes no value, wherever it is, so `(return` / `x)` no longer parses.
+  Every other operator, and `.`, continue the line before, as before, and
+  inside parentheses, brackets, arguments, record literals and the heads
+  of `if`, `while`, `for` and `match` a `(`, `[` or `-` on a new line
+  continues as before. This implements the master spec's "newline
+  terminates statement". **One way a program changes meaning:** a line
+  that starts with `(`, `[` or `-` and meant to continue the line before
+  now begins a statement; E0103 warns at each such place. No file in the
+  repository changes, and every `.nova` file in it parses to the same
+  tree and warns nowhere.
+- **`nova fmt`** keeps a `;` the author wrote before a statement that
+  starts with `(`, `[` or `-`, and after a bare `return` or `break`, and
+  adds none where there was none, so a program's statements and warnings
+  are as they were; it no longer prints a `,` before an arm that starts
+  with `(`, `[` or `-`. A long chain with a `-` in it now breaks after
+  each operator, so no line starts with `-`; other chains still break
+  before each operator. A `view`'s children keep their `;` rule.
+- **The lexer marks each token that follows a line break,** a comment
+  holding one included, and a lone `\r` counting as one: `lex` returns
+  `Tokens`, which reads as a slice of the tokens, and `parse` takes it.
+- **CI:** the `test` job's Linux leg runs on `ubuntu-24.04`, installs
+  Ubuntu's `clang-18` and asserts that it is 18.1.3. With
+  `NOVA_REQUIRE_CLANG=1` and `NOVA_CLANG=clang-18`, a new test,
+  `release_golden_suite`, builds every golden program of `tests/runtime/`
+  with `--release`, through `clang`, runs it and compares its output;
+  elsewhere it skips (ADR 0048).
+
+### Fixed
+
+- **`return` inside a closure** checks against the closure's return
+  type, not the enclosing function's.
+
 ## [0.4.0] - 2026-10-23
 
 **Phase 4, "Frontend / WASM", is complete**, within the boundary
