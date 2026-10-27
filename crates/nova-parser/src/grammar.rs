@@ -66,8 +66,8 @@ struct Parser<'a> {
     /// no operator, call or index there takes the bare keyword as its
     /// operand. Cleared when the expression that holds it ends.
     halt: Option<usize>,
-    /// The split, before a `(`, `[` or `-`, that ended the last match arm's
-    /// body: a P0001 at the next arm's start gets a note naming the rule.
+    /// The split that ended the last match arm's body: a P0001 in the head
+    /// of the arm that begins there gets a note naming the rule.
     arm_end_split: Option<NewlineSplit>,
 }
 
@@ -170,34 +170,51 @@ impl<'a> Parser<'a> {
         self.halt == Some(self.pos)
     }
 
-    /// A P0001 at the start of an arm that the newline rule began, by ending
-    /// the arm before at a line break before a `(`, `[` or `-`: a note says
-    /// so, since the parser before the rule read that line as part of the
-    /// body.
-    fn note_arm_split(&mut self, prior: Option<NewlineSplit>) {
-        let Some(split) = prior else {
+    /// A P0001 in the head of an arm that the newline rule began, by ending
+    /// the arm before at a line break: the first error the arm gave, from
+    /// `first` on, wherever it lands, gets a note naming the rule, since the
+    /// parser before the rule read that line into the body. An error in
+    /// the body of an arm whose head parsed is not the rule's doing: the
+    /// base would have met that `=>` after an expression, an error too.
+    fn note_arm_split(&mut self, begun: Option<NewlineSplit>, first: usize) {
+        let Some(split) = begun else {
             return;
         };
-        let Some(last) = self.errors.pop() else {
-            return;
-        };
-        if last.span().start != split.at.start {
-            self.errors.push(last);
+        if first >= self.errors.len() {
             return;
         }
-        self.errors.push(ParseError::Noted {
-            error: Box::new(last),
-            note: "a line that starts with `(`, `[` or `-` begins the next match arm \
-                   (the newline rule); to continue the arm's body, end the line before \
-                   with the operator"
-                .to_string(),
-        });
+        let note = match split.kind {
+            SplitKind::Value => {
+                "a `return` or `break` at the end of a line takes no value, so the \
+                 next line begins the next match arm (the newline rule); to return \
+                 that line's value, put it on the same line as the `return` or `break`"
+            }
+            _ => {
+                "a line that starts with `(`, `[` or `-` begins the next match arm \
+                 (the newline rule); to continue the arm's body, end the line before \
+                 with the operator"
+            }
+        };
+        let error = self.errors.remove(first);
+        self.errors.insert(
+            first,
+            ParseError::Noted {
+                error: Box::new(error),
+                note: note.to_string(),
+            },
+        );
     }
 
     /// Record that the newline rule ends a statement before the token at
     /// the cursor, which the parser before the rule would have continued.
+    /// One split a token: the first recorded there stands, so a closure's
+    /// bare `return` (a `Value`) and the call or index the expression
+    /// around it then declines (`Call` or `Index`) give one warning.
     fn record_split(&mut self, kind: SplitKind) {
         let at = self.peek_span();
+        if self.splits.iter().any(|s| s.at == at) {
+            return;
+        }
         self.splits.push(NewlineSplit { at, kind });
     }
 
@@ -505,7 +522,6 @@ impl<'a> Parser<'a> {
         }
         let mut newline_splits = std::mem::take(&mut self.splits);
         newline_splits.sort_by_key(|s| s.at.start);
-        newline_splits.dedup();
         File {
             items,
             newline_splits,
@@ -1664,12 +1680,16 @@ impl<'a> Parser<'a> {
 impl<'a> Parser<'a> {
     fn parse_expr(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
         let expr = self.parse_assign(ctx);
-        // The expression that holds a bare `return` or `break` ends here;
-        // what follows reads the token again.
+        self.end_halt();
+        expr
+    }
+
+    /// The expression that holds a bare `return` or `break` ends here: what
+    /// follows reads the token again.
+    fn end_halt(&mut self) {
         if self.halted() {
             self.halt = None;
         }
-        expr
     }
 
     fn parse_assign(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
@@ -2466,11 +2486,9 @@ impl<'a> Parser<'a> {
             if self.reject_docs() {
                 continue;
             }
-            let prior = self.arm_end_split.take();
             if let Some(arm) = self.parse_match_arm(ctx) {
                 arms.push(arm);
             } else {
-                self.note_arm_split(prior);
                 self.sync_to_stmt_boundary();
             }
         }
@@ -2490,6 +2508,42 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_match_arm(&mut self, ctx: &str) -> Option<MatchArm> {
+        // The split that ended the arm before, if this arm begins at it.
+        let start = self.peek_span().start;
+        let begun = self.arm_end_split.take().filter(|s| s.at.start == start);
+        let errors = self.errors.len();
+        let Some((pattern, guard)) = self.parse_match_arm_head(ctx) else {
+            self.note_arm_split(begun, errors);
+            return None;
+        };
+        // An arm's body is statement context, so a line that starts with
+        // `(` begins the next arm (spec §3.5).
+        let splits = self.splits.len();
+        let body = self.in_stmt_ctx(true, |p| p.parse_expr(ctx))?;
+        // A split at the body's end begins the next arm: no warning for it,
+        // however many times it was met (a `return`'s value and the
+        // `return` around it each meet it; `record_split` keeps one). Where
+        // the parser before the rule read that line into the body, the next
+        // arm cannot parse (it needs a pattern and `=>`, and no expression
+        // is followed by `=>`), and its P0001 gets a note naming the rule.
+        let end = self.peek_span().start;
+        self.arm_end_split = None;
+        while self.splits.len() > splits && self.splits.last().map(|s| s.at.start) == Some(end) {
+            self.arm_end_split = self.splits.pop();
+        }
+        self.eat(&Token::Comma);
+        Some(MatchArm {
+            pattern,
+            guard,
+            body,
+        })
+    }
+
+    /// An arm's pattern, its guard if any, and its `=>`.
+    fn parse_match_arm_head(
+        &mut self,
+        ctx: &str,
+    ) -> Option<(Spanned<Pattern>, Option<Spanned<Expr>>)> {
         let pattern = self.parse_pattern(ctx)?;
         // A guard ends at its `=>`, as a head ends at its `{`.
         let guard = if self.eat(&Token::If).is_some() {
@@ -2498,29 +2552,7 @@ impl<'a> Parser<'a> {
             None
         };
         self.expect(&Token::FatArrow, "match arm")?;
-        // An arm's body is statement context, so a line that starts with
-        // `(` begins the next arm (spec §3.5).
-        let splits = self.splits.len();
-        let body = self.in_stmt_ctx(true, |p| p.parse_expr(ctx))?;
-        // A split at the body's end begins the next arm, which the parser
-        // before the rule could not have read as part of the body: no
-        // warning for it, however many times it was met (a `return`'s value
-        // and the `return` around it each meet it). A P0001 there gets a
-        // note naming the rule.
-        self.arm_end_split = None;
-        let end = self.peek_span().start;
-        while self.splits.len() > splits && self.splits.last().map(|s| s.at.start) == Some(end) {
-            let split = self.splits.pop();
-            if let Some(s) = split.filter(|s| s.kind != SplitKind::Value) {
-                self.arm_end_split = Some(s);
-            }
-        }
-        self.eat(&Token::Comma);
-        Some(MatchArm {
-            pattern,
-            guard,
-            body,
-        })
+        Some((pattern, guard))
     }
 
     fn parse_closure(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
@@ -2680,11 +2712,16 @@ impl<'a> Parser<'a> {
                     span,
                 );
                 let expr = self.parse_postfix_from(start, call, "view child")?;
+                self.end_halt();
                 let span = expr.span;
                 return Some(Spanned::new(ViewNode::Expr(expr), span));
             }
         }
-        let expr = self.parse_postfix("view child")?;
+        // A child is an expression of its own, as `parse_expr` reads one: a
+        // bare `return` or `break` in it ends with it.
+        let expr = self.parse_postfix("view child");
+        self.end_halt();
+        let expr = expr?;
         let span = expr.span;
         Some(Spanned::new(ViewNode::Expr(expr), span))
     }

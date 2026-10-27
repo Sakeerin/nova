@@ -225,6 +225,29 @@ approved by the user on 2026-10-26 (`1fc7af6`).
      `return` around it meeting it again. `77b6b2f 5.0a prototype: an arm
      drops a split it met twice` adds the test, which fails with the
      mutant applied, and the split was made again (decision 45).
+- **Amended 2026-10-27 after the review:** the review of the executed
+  branch found five things in the code, which `5.0a: the review's fixes`
+  answers, each with a test seen failing without its fix:
+  1. fmt dropped an author's `;` after a bare keyword nested in a
+     statement, `let f = || return;` or `x = break;`, then refused the
+     file: its `bare` now asks whether the statement's last code token is
+     `return` or `break`, as the base did; and after one, in a block or a
+     view, it adds no `;` before a line that starts with `{` or another
+     token it would otherwise separate, which removed the split, and so
+     refused `return` / `{ p }` and the view of item 4 (decision 9);
+  2. `let f = || return` / `(5)`, or `[`, recorded two splits at one
+     token, the closure's `Value` and the `let`'s `Call` or `Index`:
+     `record_split` keeps one split a token, the first (decision 45);
+  3. a P0001 at an arm the rule began had no note where it landed past
+     the split's token, `0 => g` / `(5)` / `_ => 1` at `_`, or followed a
+     bare keyword, `None => return` / `0,` at `,`: the first error in the
+     head of such an arm takes the note, one fitted to the keyword after a
+     `Value` split (decisions 37 and 47);
+  4. `halt` was never cleared on a view child's path, so `view {` /
+     `return` / `(1)` / `}` failed to parse: a view child clears it as
+     `parse_expr` does (decision 45);
+  5. the golden suite now quotes a failing program's standard error, and
+     gives `nova build --release` the run's 60-second limit.
 - **The mutants.** 61 breakages of what 5.0a adds, each a text
   replaced in one file, run one at a time at the split's last commit (Task
   9, Step 9): the rule's arms and contexts (11), the marks (3), fmt (7),
@@ -430,17 +453,21 @@ check in the task that owns the code:
    the parser before it would have continued must warn, and nowhere else:
    `record_split` at the postfix loop's `(` and `[`, the additive loop's
    `-`, and a bare `return` or `break` before a token an expression can
-   begin with but a `let` or an item; `halt`, which keeps the line after a
-   bare keyword from being its operand, so one split is recorded there;
-   every split at an arm body's end token dropped, and a P0001 at that arm
-   noted; none where a `;` is written; `warn_newline_splits` merging into a
-   "this value is not used" at the same place, else its own E0103;
-   `File`'s `Debug` printing the field only when it is not empty; the
-   resolver keeping the user modules' splits; fmt keeping the author's `;`
-   before `(`, `[` and `-` and after a bare `return` or `break`, and adding
+   begin with but a `let` or an item; `record_split` keeping one split a
+   token, the first; `halt`, which keeps the line after a bare keyword
+   from being its operand, cleared where the expression that holds it
+   ends, in `parse_expr` and a view child; the split at an arm body's end
+   token dropped, and the first error in the head of the arm it begins
+   noted, after a bare keyword too; none where a `;` is written;
+   `warn_newline_splits` merging into a "this value is not used" at the
+   same place, else its own E0103; `File`'s `Debug` printing the field
+   only when it is not empty; the resolver keeping the user modules'
+   splits; fmt keeping the author's `;` before `(`, `[` and `-` and after
+   a statement whose last code token is `return` or `break`, and adding
    none, and its self-check comparing the splits' kinds, not their places
-   (decisions 9, 37 and 44 to 47) → the eight split tests of
-   `newline_rule.rs`, the five of `lang_tests.rs`, whose
+   (decisions 9, 37 and 44 to 47; amended 2026-10-27 after the review) →
+   the eleven split tests of
+   `newline_rule.rs`, the six of `lang_tests.rs`, whose
    `a_split_after_a_return_value_warns` and `a_split_before_a_tail_warns`
    are the fact-check's three probes in small (Task 6), `source_rules.rs`
    (Tasks 2 and 6), the fingerprint's test in `nova-fmt`'s `check.rs`
@@ -608,15 +635,25 @@ language items implement the master spec and take dated notes (spec
    written there, so dropping it would make fmt's output warn and leave
    the author no way to silence it. `CONTINUES` is `{`, `*`, `&`, `|` and
    `||`, before which fmt prints `;` as before; before `SPLITS`, `(`, `[`
-   and `-`, and after a bare `return` or `break`, it prints `;` only where
-   the source has one (`Source::semicolon_before`), and adds none, so the
+   and `-`, and after a statement whose last code token is `return` or
+   `break` (a bare one, however deep: `let f = || return`, `x = break`),
+   it prints `;` only where the source has one
+   (`Source::semicolon_before`), and adds none, so the
    program's statements and its warnings are as they were; its
    self-check, which compares the recorded splits' kinds, in order, though
    not their places, holds it to that (decision 44; mutants 12, 13, 14, 45,
    54 and 55). An arm needs no `,` before a `(`, `[`
    or `-`: the split that begins the next arm is not recorded (decision
    37). The spec's "never starts a line with `-` in a broken chain" is
-   decision 15.
+   decision 15. *Amended 2026-10-27 after the review:* fmt asked only
+   whether the statement was itself a bare `return` or `break`, so it
+   dropped the `;` after `let f = || return;` and then refused the file;
+   it now reads the statement's last code token, as the base did. After
+   such a statement, or a view child that ends so, it prints `;` only
+   where the author wrote one, before `CONTINUES` and `VIEW_CONTINUES`
+   too: the line break ends the keyword whatever follows, and a `;` fmt
+   added before `return` / `{ p }` removed the split, and fmt refused the
+   file (`a_nested_value_less_return_or_break_keeps_the_authors_semicolon`).
 10. **The rule is off in parentheses, brackets, arguments, record literals
     and the heads of `if`, `while`, `for` and `match`; a `{` on a new line
     keeps today's meaning** (spec §12.9). `in_head_ctx` turns off record
@@ -797,7 +834,10 @@ language items implement the master spec and take dated notes (spec
     each program gets its own `TMPDIR`, `TMP` and `TEMP`, so none races
     its `run` test's fixtures; `NOVA_GC_STRESS` is removed from its
     environment (spec §3.2). `net_listener_accept` passes alone, so it is
-    in the walk (mutants 35 to 38).
+    in the walk (mutants 35 to 38). *Amended 2026-10-27 after the
+    review:* `nova build --release` has the same 60 seconds, through
+    `run_within_limit`, and a failure quotes the program's standard
+    error, its last 2000 characters.
 26. **CI's YAML.** Spec §13 left it. The matrix's `os` names
     `ubuntu-24.04` in place of `ubuntu-latest`, and an `include` gives that
     leg `require_clang: "1"` and `clang: clang-18`; the step "Install clang
@@ -950,9 +990,18 @@ prototype: the fact-check's fixes` answers all eight (Checked on).
       with, where the keyword reads as before the rule (decision 46). A
       `return` or `break` that a line break ends is no operand: nothing
       after the break calls, indexes or subtracts from it, so one split is
-      recorded there, not two (decision 45). Every split at a match arm
-      body's end token begins the next arm, which the parser before the
-      rule could not have read as part of the body, so all are dropped.
+      recorded there, not two; and `record_split` keeps one split a token,
+      the first, so `let f = || return` / `(5)` is one `Value` (decision
+      45). The split at a match arm body's end token begins the next arm,
+      and is dropped, with no warning. The parser before the rule could
+      read that line into the body: `0 => g` / `(5)` / `_ => 1` parses at
+      the base, as `g(5)`. But then the next arm cannot parse: it goes on
+      only where a pattern and `=>` follow, and no expression the base
+      read is followed by `=>`. So that file is now a P0001, at `_`, which
+      names the rule (decision 47), and an arm that does parse there is
+      one the base refused: no program changes its meaning in silence.
+      *Amended 2026-10-27 after the review,* which found that this said
+      the base could not read such a line into the body.
       `File`'s `Debug` prints the
       field only when it is not empty, so `nova parse --ast` prints a file
       the rule does not split as before, and Task 9's dump check holds.
@@ -1059,17 +1108,26 @@ twice` the gap its mutants then found (Checked on).
     other, where nothing could silence it. `bare_keyword_ends` now sets
     `halt` at that token, where `peek` reads nothing, so no operator, call
     or index takes the keyword, until the expression that holds it ends
-    (`parse_expr` clears it); and an arm drops every split at its end
-    token, which is needed apart from the bare keyword too: a `return`'s
-    or a `break`'s value, or a closure's body, meets the split before the
-    next arm, and the expression around it meets it again, so it is
-    recorded twice before `parse_file` dedups it
+    (`parse_expr` clears it, and so does a view child, which is read
+    without it); `record_split` keeps one split a token, the first
+    recorded there: a `return`'s or a `break`'s value, or a closure's
+    body, meets the split before the next line, and the expression around
+    it meets it again, as `Value` then `Call` after `let f = || return` /
+    `(5)`; and an arm drops the split at its end token
     (`a_split_after_a_bare_return_is_recorded_once`,
     `a_bare_return_ending_an_arm_records_no_split`,
-    `a_value_ending_an_arm_records_no_split_however_often_it_is_met`;
-    mutants 56 and 57). The last, `77b6b2f`'s, closed the gap mutant 57
+    `a_value_ending_an_arm_records_no_split_however_often_it_is_met`,
+    `a_closures_bare_return_before_a_parenthesis_or_bracket_is_one_split`,
+    `a_bare_return_in_a_view_child_ends_the_child`, and `lang_tests.rs`'s
+    `a_closures_bare_return_before_a_parenthesis_or_bracket_warns_once`;
+    mutants 56 and 57). The third, `77b6b2f`'s, closed the gap mutant 57
     showed on `794e915`'s split, where an arm dropping only the last split
-    passed every test.
+    passed every test. *Amended 2026-10-27 after the review:* the same
+    split was met twice with two kinds, through a closure's body, and
+    `parse_file`'s dedup kept both; and the halt outlived a view child,
+    `view {` / `return` / `(1)` / `}` failing to parse after the child.
+    Now one split stands at a token, and a view child ends the halt, so
+    that view reads as two children with the rule's E0103 at `(`.
 46. **Before a token no expression begins with, a bare keyword reads as
     before the rule.** `g(return` / `)` was accepted with a warning at `)`,
     where the base gives P0001. `can_start_expr` lists the tokens an
@@ -1081,14 +1139,25 @@ twice` the gap its mutants then found (Checked on).
     now pins `g(return` / `x)`, a P0001, where it pinned `g(return` / `)`.
 47. **A P0001 at an arm the rule began names the rule.** `0 => a` / `- 1,`
     parsed at the base, and is now P0001, "expected pattern, found `-`", as
-    spec §3.5 has it. The arm that ends at a split before `(`, `[` or `-`
-    leaves it in `arm_end_split`; when the next arm fails to parse at that
-    token, its error becomes `ParseError::Noted`, whose note says "a line
-    that starts with `(`, `[` or `-` begins the next match arm (the newline
-    rule); to continue the arm's body, end the line before with the
-    operator", which the four places that turn a parse error into P0001
-    print (`a_parse_error_at_an_arm_the_rule_began_names_the_rule`; mutant
-    59).
+    spec §3.5 has it. The arm that ends at a split leaves it in
+    `arm_end_split`; when the arm that begins at that token fails in its
+    head (its pattern, its guard or its `=>`), the first error it gave,
+    wherever it lands, becomes `ParseError::Noted`. After a split before
+    `(`, `[` or `-` the note says "a line that starts with `(`, `[` or `-`
+    begins the next match arm (the newline rule); to continue the arm's
+    body, end the line before with the operator"; after a bare keyword's
+    `Value`, "a `return` or `break` at the end of a line takes no value, so
+    the next line begins the next match arm (the newline rule); to return
+    that line's value, put it on the same line as the `return` or
+    `break`". The four places that turn a parse error into P0001 print it
+    (`a_parse_error_at_an_arm_the_rule_began_names_the_rule`,
+    `a_parse_error_anywhere_in_an_arms_head_the_rule_began_names_the_rule`;
+    mutant 59). An error in the body of an arm whose head parsed takes no
+    note: the base would have met that `=>` after an expression, an error
+    too. *Amended 2026-10-27 after the review:* the note went only to an
+    error at the split's token and never after a `Value`, so `0 => g` /
+    `(5)` / `_ => 1` (at `_`) and `None => return` / `0,` (at `,`) had
+    none.
 48. **The nits.** `SPLITS` has its own doc comment, `VIEW_CONTINUES` its
     own; until Task 6, fmt's words for `SPLITS` and `separator`, and
     `source_rules.rs`'s, do not name E0103, which Task 6 brings (the split
@@ -6859,8 +6928,10 @@ Spec §3.1, §9; decisions 2, 19 and 28.
   hyphen; the gap fix keeps it on one line (decision 36).
 - [ ] **Step 3: Run.**
   - `git diff --check HEAD`. Expected: nothing.
-  - `git diff --stat f00c99b`. Expected: nothing: the tree is the
-    prototype's last.
+  - `git diff --stat 77b6b2f -- . ':!docs/superpowers/plans'`. Expected:
+    nothing: the tree is the prototype's last, but this plan, which the
+    prototype did not hold. *Amended 2026-10-27 after the review:* the
+    step named `f00c99b`, the prototype's third commit.
 - [ ] **Step 4: The checks,** as the conventions list them.
 - [ ] **Step 5: Commit**
   `docs: ADR 0048, Phase 5's scope and backend, and the notes for 5.0a`.

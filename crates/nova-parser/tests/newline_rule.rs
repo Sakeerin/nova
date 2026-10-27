@@ -558,6 +558,21 @@ fn a_split_after_a_bare_return_is_recorded_once() {
 }
 
 #[test]
+fn a_closures_bare_return_before_a_parenthesis_or_bracket_is_one_split() {
+    // The closure's body, a bare `return`, records the line's `Value`; the
+    // `let` around the closure then declines the `(` or `[` at the same
+    // token, which records nothing more.
+    assert_eq!(
+        splits("let h = || return\n(5)"),
+        [("(".to_string(), SplitKind::Value)]
+    );
+    assert_eq!(
+        splits("let h = || return\n[1, 2].len()"),
+        [("[".to_string(), SplitKind::Value)]
+    );
+}
+
+#[test]
 fn a_bare_return_ending_an_arm_records_no_split() {
     assert!(splits("match x {\n    0 => return\n    (1) => 2\n    _ => 3\n}").is_empty());
 }
@@ -592,4 +607,65 @@ fn a_parse_error_at_an_arm_the_rule_began_names_the_rule() {
             .any(|n| n.contains("begins the next match arm")),
         "{errs:?}"
     );
+}
+
+#[test]
+fn a_parse_error_anywhere_in_an_arms_head_the_rule_began_names_the_rule() {
+    // `g` then `(5)`: the parser before the rule read `g(5)` as the body;
+    // now `(5)` is the next arm's pattern, and the P0001 lands at `_`.
+    let errs = errors("match x {\n    0 => g\n    (5)\n    _ => 1\n}");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0]
+            .notes()
+            .iter()
+            .any(|n| n.contains("begins the next match arm")),
+        "{errs:?}"
+    );
+    // A bare `return` then `0,`: the base read `return 0`; now `0` is the
+    // next arm's pattern, and the P0001 lands at `,`, with a note fitted to
+    // the keyword.
+    let errs = errors("match x {\n    None => return\n    0,\n    Some(y) => y,\n}");
+    assert_eq!(errs.len(), 1, "{errs:?}");
+    assert!(
+        errs[0]
+            .notes()
+            .iter()
+            .any(|n| n.contains("takes no value, so the next line begins the next match arm")),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn a_bare_return_in_a_view_child_ends_the_child() {
+    // As in any context, the `return` ends at the line break, the next line
+    // is the next child, and the split is recorded: no parse error after it.
+    let src = "fn f() -> Html {\n    view {\n        return\n        (1)\n    }\n}\n";
+    let mut db = FileDb::new();
+    let id = db.add("v.nova", src);
+    let (tokens, _) = lex(src, id);
+    let (file, errors) = parse(&tokens, id);
+    assert!(errors.is_empty(), "{errors:?}");
+    let file = file.expect("a file");
+    let splits: Vec<(String, SplitKind)> = file
+        .newline_splits
+        .iter()
+        .map(|s| {
+            (
+                src[s.at.start as usize..s.at.end as usize].to_string(),
+                s.kind,
+            )
+        })
+        .collect();
+    assert_eq!(splits, [("(".to_string(), SplitKind::Value)]);
+    let Item::Function(func) = &file.items[0].value else {
+        panic!("a function")
+    };
+    let Some(tail) = &func.body.value.trailing else {
+        panic!("a tail")
+    };
+    let Expr::View(children) = &tail.value else {
+        panic!("a view")
+    };
+    assert_eq!(children.len(), 2);
 }

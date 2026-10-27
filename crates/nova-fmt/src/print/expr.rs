@@ -346,29 +346,39 @@ impl<'s, 't> Printer<'s, 't> {
     /// `;` between two statements where the second would otherwise continue
     /// the first (spec §5.6). A `;` after an item would not parse, and no
     /// item can be continued. Before a statement that starts with `(`, `[`
-    /// or `-`, and after a `return` or `break` with no value, the newline
-    /// rule ends the statement at the line break (5.0 spec §3.5) and warns
-    /// (E0103) unless a `;` is written there: fmt keeps the author's `;`,
-    /// and adds none, so the program and its warnings stay as they were.
+    /// or `-`, and after a statement that ends in a `return` or `break`
+    /// with no value, the newline rule ends the statement at the line break
+    /// (5.0 spec §3.5) and warns (E0103) unless a `;` is written there: fmt
+    /// keeps the author's `;`, and adds none, so the program and its
+    /// warnings stay as they were.
     fn separator(&self, cur: Elem, next: Elem) -> Option<&'static str> {
         if let Elem::Stmt(s) = cur {
             if matches!(s.value, Stmt::Item(_)) {
                 return None;
             }
         }
+        let written = self.src.semicolon_before(next.span().start);
+        // After a bare `return` or `break`, a line break already ends the
+        // statement, whatever the next one starts with: `;` only where the
+        // author wrote it, even before a `{`.
+        if self.ends_bare(cur.span().end) {
+            return written.then_some(";");
+        }
         let first = self.src.token_from(next.span().start);
         if CONTINUES.contains(first) {
             return Some(";");
         }
-        let bare = match cur {
-            Elem::Stmt(s) => matches!(
-                &s.value,
-                Stmt::Expr(e) if matches!(e.value, Expr::Return(None) | Expr::Break(None))
-            ),
-            Elem::Tail(_) => false,
-        };
-        let written = self.src.semicolon_before(next.span().start);
-        ((SPLITS.contains(first) || bare) && written).then_some(";")
+        (SPLITS.contains(first) && written).then_some(";")
+    }
+
+    /// Whether the code before `end` ends in a `return` or `break`, which
+    /// then has no value, however deep it is: `let f = || return`,
+    /// `x = break`.
+    fn ends_bare(&self, end: u32) -> bool {
+        matches!(
+            self.src.last_code_token(end),
+            Some(Token::Return | Token::Break)
+        )
     }
 
     fn elem(&mut self, el: Elem) -> Doc {
@@ -551,10 +561,15 @@ impl<'s, 't> Printer<'s, 't> {
         let after_open = self.trailing(open + 1);
         let mut v = Vertical::new(open + 1, Blank::Keep);
         for (i, child) in children.iter().enumerate() {
-            let sep = children
-                .get(i + 1)
-                .filter(|n| VIEW_CONTINUES.contains(self.src.token_from(n.span.start)))
-                .map(|_| ";");
+            let sep = children.get(i + 1).and_then(|n| {
+                // After a bare `return` or `break`, as between statements.
+                if self.ends_bare(child.span.end) {
+                    return self.src.semicolon_before(n.span.start).then_some(";");
+                }
+                VIEW_CONTINUES
+                    .contains(self.src.token_from(n.span.start))
+                    .then_some(";")
+            });
             let end = self
                 .src
                 .token_end(child.span.end, &Token::Semicolon)
