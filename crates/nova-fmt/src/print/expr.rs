@@ -9,7 +9,7 @@ use nova_ast::{Block, Path, Stmt};
 use nova_diagnostics::{Span, Spanned};
 use nova_lexer::Token;
 
-use super::{Blank, LastComma, List, Printer, Vertical, CONTINUES};
+use super::{Blank, LastComma, List, Printer, Vertical, CONTINUES, SPLITS, VIEW_CONTINUES};
 use crate::doc::{concat, group, nest, text, Doc};
 
 /// A statement in a block, or the block's trailing expression.
@@ -345,24 +345,30 @@ impl<'s, 't> Printer<'s, 't> {
 
     /// `;` between two statements where the second would otherwise continue
     /// the first (spec §5.6). A `;` after an item would not parse, and no
-    /// item can be continued.
+    /// item can be continued. Before a statement that starts with `(`, `[`
+    /// or `-`, and after a `return` or `break` with no value, the newline
+    /// rule ends the statement at the line break (5.0 spec §3.5), and a `;`
+    /// written there says the break is meant: fmt keeps the author's `;`,
+    /// and adds none, so the program stays as it was.
     fn separator(&self, cur: Elem, next: Elem) -> Option<&'static str> {
         if let Elem::Stmt(s) = cur {
             if matches!(s.value, Stmt::Item(_)) {
                 return None;
             }
         }
-        // A `return` or `break` with no value would take the next statement
-        // as its value.
-        if matches!(
-            self.src.last_code_token(cur.span().end),
-            Some(Token::Return | Token::Break)
-        ) {
+        let first = self.src.token_from(next.span().start);
+        if CONTINUES.contains(first) {
             return Some(";");
         }
-        CONTINUES
-            .contains(self.src.token_from(next.span().start))
-            .then_some(";")
+        let bare = match cur {
+            Elem::Stmt(s) => matches!(
+                &s.value,
+                Stmt::Expr(e) if matches!(e.value, Expr::Return(None) | Expr::Break(None))
+            ),
+            Elem::Tail(_) => false,
+        };
+        let written = self.src.semicolon_before(next.span().start);
+        ((SPLITS.contains(first) || bare) && written).then_some(";")
     }
 
     fn elem(&mut self, el: Elem) -> Doc {
@@ -547,7 +553,7 @@ impl<'s, 't> Printer<'s, 't> {
         for (i, child) in children.iter().enumerate() {
             let sep = children
                 .get(i + 1)
-                .filter(|n| CONTINUES.contains(self.src.token_from(n.span.start)))
+                .filter(|n| VIEW_CONTINUES.contains(self.src.token_from(n.span.start)))
                 .map(|_| ";");
             let end = self
                 .src

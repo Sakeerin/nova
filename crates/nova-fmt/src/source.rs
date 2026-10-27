@@ -75,6 +75,16 @@ impl<'t> Source<'t> {
         (t.value == *kind).then_some(t.span.end)
     }
 
+    /// Whether the last token ending at or before `offset` is a `;`: the
+    /// author ended the statement before `offset` with one.
+    pub fn semicolon_before(&self, offset: u32) -> bool {
+        let i = self.tokens.partition_point(|t| t.span.end <= offset);
+        matches!(
+            self.tokens[..i].last().map(|t| &t.value),
+            Some(Token::Semicolon)
+        )
+    }
+
     /// The last token ending at or before `end` that is not a `;`.
     pub fn last_code_token(&self, end: u32) -> Option<&Token> {
         let i = self.tokens.partition_point(|t| t.span.end <= end);
