@@ -657,3 +657,33 @@ fn an_async_fn_containing_await_emits_a_resume_dispatch_and_an_indirect_poll() {
         "the suspend must return a status: {suspend:?}"
     );
 }
+
+/// The body of the function whose `define` line names `name`, up to its
+/// closing `}`.
+fn function_body<'a>(ir: &'a str, name: &str) -> &'a str {
+    let start = ir
+        .lines()
+        .find(|l| l.starts_with("define ") && l.contains(name))
+        .and_then(|l| ir.find(l))
+        .unwrap_or_else(|| panic!("no function `{name}`:\n{ir}"));
+    let end = ir[start..].find("\n}").expect("the function's end") + start;
+    &ir[start..end]
+}
+
+/// `String + String` (5.0 spec §3.6) is one call of the runtime's
+/// concatenation, not an integer `add` of the two pointers.
+#[test]
+fn string_plus_string_lowers_to_one_concat_call() {
+    let ir = ir_for(
+        "fn join(a: String, b: String) -> String { a + b }\n\
+         fn main() { println(join(\"x\", \"y\")) }",
+    );
+    let body = function_body(&ir, "join");
+    assert_eq!(
+        body.matches("call ptr @nova_rt_str_concat(").count(),
+        1,
+        "{body}"
+    );
+    assert!(!body.contains("add i64"), "{body}");
+    assert_well_formed(&ir);
+}

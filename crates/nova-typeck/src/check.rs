@@ -6665,6 +6665,20 @@ impl<'a> Checker<'a> {
                 ),
                 span,
             );
+            // `+` joins two `String`s only: a `Char` or an `Int` goes in
+            // through interpolation (5.0 spec §3.6).
+            let string = |t: &Ty| matches!(fcx.icx.apply(t), Ty::String);
+            if matches!(op, Add) && (string(&lhs.ty) || string(&rhs.ty)) {
+                self.diagnostics
+                    .last_mut()
+                    .expect("just pushed")
+                    .notes
+                    .push(
+                        "`+` joins two `String`s; to add any other value to a string, \
+                         interpolate it: `\"${a}${b}\"`"
+                            .to_string(),
+                    );
+            }
             return Ty::Error;
         }
         let mut operand = fcx.icx.apply(&lhs.ty);
@@ -6675,6 +6689,9 @@ impl<'a> Checker<'a> {
             operand = Ty::Int;
         }
         match op {
+            // `String + String` is a new `String`, `a` then `b` (5.0 spec
+            // §3.6); MIR lowers it to the runtime's concatenation.
+            Add if matches!(operand, Ty::String) => Ty::String,
             Add | Sub | Mul | Div | Rem => match operand {
                 Ty::Int | Ty::Float | Ty::Never | Ty::Error => operand,
                 other => {

@@ -12696,3 +12696,15 @@ fn try_operator_runs() {
 fn try_async_runs() {
     golden_three_ways("try_async", true);
 }
+
+/// `+=` and its kin on fields and elements (5.0 spec §3.4).
+#[test]
+fn compound_assign_places_runs() {
+    golden_three_ways("compound_assign_places", false);
+}
+
+/// `String + String` (5.0 spec §3.6), also under GC stress.
+#[test]
+fn string_concat_runs() {
+    golden_three_ways("string_concat", true);
+}

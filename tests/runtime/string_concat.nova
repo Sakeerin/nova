@@ -1,0 +1,58 @@
+// `String + String` (5.0 spec §3.6): empty strings, non-ASCII text, `+=` on
+// a local, in a loop, and parts with side effects, in order. A test runs it
+// under `NOVA_GC_STRESS=1` too.
+
+record Log { n: Int }
+
+fn part(log: Log, s: String) -> String {
+    let mut l = log
+    l.n += 1
+    println("part ${l.n}: ${s}")
+    s
+}
+
+fn main() {
+    let empty = ""
+    println("[" + empty + "]")
+    println("[" + empty + empty + "]")
+    let a = "สวัสดี"
+    let b = "世界"
+    let ab = a + " " + b
+    println(ab)
+    println("${ab.len()} characters")
+
+    let mut s = ""
+    s += "x"
+    s += empty
+    s += "é"
+    println(s)
+
+    let mut acc = ""
+    let mut i = 0
+    while i < 10 {
+        acc += "${i}"
+        if i < 9 { acc = acc + "," }
+        i += 1
+    }
+    println(acc)
+
+    // Left to right, each part once.
+    let log = Log { n: 0 }
+    let joined = part(log, "a") + part(log, "b") + part(log, "c")
+    println(joined)
+
+    // `+` between strings compares equal to interpolation.
+    let x = "left"
+    let y = "right"
+    let same = x + y == "${x}${y}"
+    println("same ${same}")
+
+    // A longer string built in a loop; the GC can run between appends.
+    let mut long = ""
+    let mut k = 0
+    while k < 200 {
+        long = long + "ab"
+        k += 1
+    }
+    println("${long.len()}")
+}

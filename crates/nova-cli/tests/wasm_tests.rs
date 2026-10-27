@@ -1947,9 +1947,13 @@ mod gate {
         ui_view,
         // `render_hydratable` (spec 4.6 §9.2).
         ui_hydratable,
-        // `?`: a front-end desugar, so WASM needs nothing (5.0 spec §3.3).
+        // `?`, `+=` on places and `String + String`: front-end desugars and
+        // the existing concatenation, so WASM needs nothing (5.0 spec §3.3,
+        // §3.4, §3.6).
         try_operator,
         try_async,
+        compound_assign_places,
+        string_concat,
     );
 
     /// The programs a test of their own in this module checks, by its name.
