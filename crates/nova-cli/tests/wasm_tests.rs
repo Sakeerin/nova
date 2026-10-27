@@ -1947,6 +1947,9 @@ mod gate {
         ui_view,
         // `render_hydratable` (spec 4.6 §9.2).
         ui_hydratable,
+        // `?`: a front-end desugar, so WASM needs nothing (5.0 spec §3.3).
+        try_operator,
+        try_async,
     );
 
     /// The programs a test of their own in this module checks, by its name.

@@ -1,0 +1,152 @@
+// `?` on `Option` and `Result` (5.0 spec §3.3): both sums, chains, in a
+// closure whose return type is inferred, in a loop, and in a `match`
+// scrutinee.
+
+record Node { name: String, next: Option<Node> }
+
+impl Node {
+    fn next(self) -> Option<Node> { self.next }
+
+    fn first_char(self) -> Option<String> {
+        if self.name.len() == 0 { return None }
+        Some(self.name.slice(0, 1))
+    }
+}
+
+fn first_word(s: String) -> Option<String> {
+    let i = s.index_of(" ")?
+    Some(s.slice(0, i))
+}
+
+// `a()?.b()?`: a chain through two `?`s.
+fn third_initial(n: Node) -> Option<String> { n.next()?.next()?.first_char() }
+
+fn parse_digit(s: String) -> Result<Int, String> {
+    match s {
+        "0" => Ok(0)
+        "1" => Ok(1)
+        "2" => Ok(2)
+        "3" => Ok(3)
+        _ => Err("not a digit: ${s}")
+    }
+}
+
+// Each `?` re-wraps the `Err`, whose `Ok` type differs from the function's.
+fn sum_digits(parts: Vec<String>) -> Result<Int, String> {
+    let mut total = 0
+    let mut i = 0
+    while i < parts.len() {
+        total += parse_digit(parts.get(i).unwrap())?
+        i += 1
+    }
+    Ok(total)
+}
+
+// `?` in a `match` scrutinee.
+fn describe(s: String) -> Result<String, String> {
+    let word = match parse_digit(s)? {
+        0 => "zero"
+        1 => "one"
+        _ => "many"
+    }
+    Ok(word)
+}
+
+// `map_err` converts; `?` does not.
+fn digit_or_code(s: String) -> Result<Int, Int> {
+    let d = parse_digit(s).map_err(|e: String| e.len())?
+    Ok(d * 10)
+}
+
+fn show_s(o: Option<String>) -> String {
+    match o {
+        Some(s) => "Some(${s})"
+        None => "None"
+    }
+}
+
+fn show_i(o: Option<Int>) -> String {
+    match o {
+        Some(n) => "Some(${n})"
+        None => "None"
+    }
+}
+
+fn show_r(r: Result<Int, String>) -> String {
+    match r {
+        Ok(n) => "Ok(${n})"
+        Err(e) => "Err(${e})"
+    }
+}
+
+fn show_rs(r: Result<String, String>) -> String {
+    match r {
+        Ok(s) => "Ok(${s})"
+        Err(e) => "Err(${e})"
+    }
+}
+
+fn show_ri(r: Result<Int, Int>) -> String {
+    match r {
+        Ok(n) => "Ok(${n})"
+        Err(e) => "Err(${e})"
+    }
+}
+
+fn main() {
+    println(show_s(first_word("hello world")))
+    println(show_s(first_word("hello")))
+
+    let c = Node { name: "carol", next: None }
+    let b = Node { name: "bob", next: Some(c) }
+    let a = Node { name: "alice", next: Some(b) }
+    println(show_s(third_initial(a)))
+    let short = Node { name: "x", next: Some(Node { name: "y", next: None }) }
+    println(show_s(third_initial(short)))
+    let empty = Node {
+        name: "p",
+        next: Some(Node { name: "q", next: Some(Node { name: "", next: None }) }),
+    }
+    println(show_s(third_initial(empty)))
+
+    let mut good = Vec::new()
+    good.push("1")
+    good.push("2")
+    good.push("3")
+    println(show_r(sum_digits(good)))
+    let mut bad = Vec::new()
+    bad.push("1")
+    bad.push("x")
+    bad.push("3")
+    println(show_r(sum_digits(bad)))
+
+    println(show_rs(describe("0")))
+    println(show_rs(describe("3")))
+    println(show_rs(describe("9")))
+
+    println(show_ri(digit_or_code("2")))
+    println(show_ri(digit_or_code("seven")))
+
+    // A closure whose return type `?` infers.
+    let len_of_first = |s: String| {
+        let w = first_word(s)?
+        Some(w.len())
+    }
+    println(show_i(len_of_first("abc def")))
+    println(show_i(len_of_first("abcdef")))
+
+    // `?` in a loop, in a closure that returns early.
+    let count_until_bad = |xs: Vec<String>| -> Result<Int, String> {
+        let mut n = 0
+        for x in xs.iter() { n += parse_digit(x)? }
+        Ok(n)
+    }
+    let mut ys = Vec::new()
+    ys.push("2")
+    ys.push("2")
+    println(show_r(count_until_bad(ys)))
+    let mut zs = Vec::new()
+    zs.push("2")
+    zs.push("z")
+    println(show_r(count_until_bad(zs)))
+}

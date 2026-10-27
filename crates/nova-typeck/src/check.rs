@@ -20,6 +20,8 @@ use crate::{
 };
 
 mod fixes;
+#[cfg(test)]
+mod lang_tests;
 mod view;
 
 use fixes::{Binding, Need};
@@ -357,6 +359,12 @@ struct FnCtx {
     /// Closure / wrapper functions lifted out while checking this function's
     /// body; finalized with this context's `icx` and then emitted.
     pending_closures: Vec<hir::Function>,
+    /// Whether the body being checked is `main`'s or a `@test` function's,
+    /// which return `()`: E0099's note says so. `false` inside a closure.
+    entry: bool,
+    /// Whether the body being checked is a constant's initializer, which is
+    /// no function: `?` there is E0099. `false` inside a closure.
+    in_const: bool,
 }
 
 impl FnCtx {
@@ -3072,6 +3080,8 @@ impl<'a> Checker<'a> {
             loop_depth: 0,
             in_async: f.is_async,
             pending_closures: Vec::new(),
+            entry: name == "main" || f.attrs.iter().any(|a| a.name.value == "test"),
+            in_const: false,
         };
         for (p, ty) in f.params.iter().zip(sig.params.iter()) {
             self.bind_local(
@@ -3162,6 +3172,8 @@ impl<'a> Checker<'a> {
             // has no `is_async` field), so `.await` is always illegal in one.
             in_async: false,
             pending_closures: Vec::new(),
+            entry: false,
+            in_const: true,
         };
         let value = self.check_expr(&mut fcx, value_ast);
         if !fcx.icx.unify(&value.ty, &sig.ret) {
@@ -3538,7 +3550,7 @@ impl<'a> Checker<'a> {
                 self.check_record_literal(fcx, path, fields, base.as_deref(), span)
             }
             ast::Expr::Field { target, field } => self.check_field(fcx, target, field, span),
-            ast::Expr::Try(_) => self.unsupported_expr(span, "the `?` operator"),
+            ast::Expr::Try(inner) => self.check_try(fcx, inner, span),
             ast::Expr::Await(inner) => {
                 let e = self.check_expr(fcx, inner);
                 if !fcx.in_async {
@@ -4887,6 +4899,220 @@ impl<'a> Checker<'a> {
         })
     }
 
+    /// The `DefId` of std/core's sum named `name` (`Option` or `Result`),
+    /// whatever the name means in the module being checked (5.0 spec §3.3).
+    fn core_sum(&self, name: &str) -> Option<DefId> {
+        let core = (0..self.defs.module_count() as u32)
+            .map(ModuleId)
+            .find(|&m| self.defs.module_name(m) == "$std.core")?;
+        self.defs.exported(core, name).ty
+    }
+
+    /// `e?` (5.0 spec §3.3), desugared to the `match` the `for` desugar
+    /// builds: on `Option<T>`, `Some(v)` gives `v` and `None` returns `None`;
+    /// on `Result<T, E>`, `Ok(v)` gives `v` and `Err(x)` returns `Err(x)`,
+    /// re-wrapped. Nothing is converted: the enclosing function's return
+    /// type must be the same sum, with the same `E`.
+    fn check_try(&mut self, fcx: &mut FnCtx, inner: &Spanned<ast::Expr>, span: Span) -> hir::Expr {
+        let value = self.check_expr(fcx, inner);
+        let value_ty = fcx.icx.apply(&value.ty);
+        if matches!(value_ty, Ty::Error) {
+            return error_expr(span);
+        }
+        let option = self.core_sum("Option");
+        let result = self.core_sum("Result");
+        let (sum, args) = match &value_ty {
+            Ty::Sum { def_id, args } if Some(*def_id) == option || Some(*def_id) == result => {
+                (*def_id, args.clone())
+            }
+            other => {
+                let note = match other {
+                    Ty::Var(_) => "its type is not known here; annotate it".to_string(),
+                    Ty::Sum { def_id, .. }
+                        if matches!(self.defs.def(*def_id).name.as_str(), "Option" | "Result") =>
+                    {
+                        format!(
+                            "this `{}` is the program's own type, not std's",
+                            self.show(other, fcx)
+                        )
+                    }
+                    _ => format!("its type is `{}`", self.show(other, fcx)),
+                };
+                self.diagnostics.push(
+                    Diagnostic::error("E0098", "`?` needs an `Option` or a `Result`")
+                        .with_primary_label(inner.span, "this value")
+                        .with_note(note),
+                );
+                return error_expr(span);
+            }
+        };
+        let is_option = Some(sum) == option;
+        let (good, bad) = if is_option {
+            ("Some", "None")
+        } else {
+            ("Ok", "Err")
+        };
+        let (Some(good_idx), Some(bad_idx)) =
+            (self.variant_index(sum, good), self.variant_index(sum, bad))
+        else {
+            return error_expr(span);
+        };
+        let (good_idx, bad_idx) = (good_idx as u32, bad_idx as u32);
+        let payload = args.first().cloned().unwrap_or(Ty::Error);
+
+        // A constant's initializer is no function, so there is nothing to
+        // return from: E0099, the code for a `?` with nowhere to return.
+        if fcx.in_const {
+            self.diagnostics.push(
+                Diagnostic::error("E0099", "`?` cannot return from this function")
+                    .with_primary_label(span, "this `?` is in a constant's initializer")
+                    .with_note(
+                        "a constant is not a function: `?` works only in a `fn` or a closure; \
+                         match on the value instead"
+                            .to_string(),
+                    ),
+            );
+            return error_expr(span);
+        }
+
+        // The enclosing function's return type. A closure's, still being
+        // inferred, becomes the same sum with fresh arguments.
+        let ret = fcx.icx.apply(&fcx.ret_ty);
+        if matches!(ret, Ty::Var(_)) {
+            let mut fresh_args = vec![fcx.icx.fresh()];
+            if !is_option {
+                fresh_args.push(fcx.icx.fresh());
+            }
+            fcx.icx.unify(
+                &ret,
+                &Ty::Sum {
+                    def_id: sum,
+                    args: fresh_args,
+                },
+            );
+        }
+        let ret = fcx.icx.apply(&fcx.ret_ty);
+        let ret_args = match &ret {
+            Ty::Sum { def_id, args } if *def_id == sum => args.clone(),
+            Ty::Error => return error_expr(span),
+            other => {
+                let mut d = Diagnostic::error("E0099", "`?` cannot return from this function")
+                    .with_primary_label(span, "this `?` would return early")
+                    .with_note(format!(
+                        "the function returns `{}`, not {}",
+                        self.show(other, fcx),
+                        if is_option {
+                            "an `Option`"
+                        } else {
+                            "a `Result`"
+                        }
+                    ));
+                let returns_result =
+                    matches!(other, Ty::Sum { def_id, .. } if Some(*def_id) == result);
+                if is_option && returns_result {
+                    d = d.with_note(
+                        "to return an error when the value is `None`, write `.ok_or(err)?`"
+                            .to_string(),
+                    );
+                }
+                if fcx.entry {
+                    d = d.with_note(
+                        "`main` and `@test` functions return `()`, so `?` cannot return from them"
+                            .to_string(),
+                    );
+                }
+                if let Ty::Sum { def_id, .. } = other {
+                    if matches!(self.defs.def(*def_id).name.as_str(), "Option" | "Result") {
+                        d = d.with_note(format!(
+                            "this `{}` is the program's own type, not std's",
+                            self.show(other, fcx)
+                        ));
+                    }
+                }
+                self.diagnostics.push(d);
+                return error_expr(span);
+            }
+        };
+        // A `Result`'s error types must be the same: `map_err` converts.
+        if !is_option {
+            let value_err = args.get(1).cloned().unwrap_or(Ty::Error);
+            let ret_err = ret_args.get(1).cloned().unwrap_or(Ty::Error);
+            if !fcx.icx.unify(&value_err, &ret_err) {
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "E0010",
+                        format!(
+                            "`?` cannot return an error of type `{}` from a function whose \
+                             error type is `{}`",
+                            self.show(&value_err, fcx),
+                            self.show(&ret_err, fcx),
+                        ),
+                    )
+                    .with_primary_label(span, "here")
+                    .with_note(
+                        "`?` converts nothing: convert the error first, with \
+                         `.map_err(|e| ...)?`"
+                            .to_string(),
+                    ),
+                );
+                return error_expr(span);
+            }
+        }
+
+        // `match value { good(v) => v, bad(x) => return bad(x) }`, through
+        // unscoped locals no source name can reach.
+        let v = fcx.new_local_unscoped("__ok".to_string(), payload.clone(), false, span);
+        let mut bad_binders = Vec::new();
+        let mut bad_args = Vec::new();
+        if !is_option {
+            let err_ty = args.get(1).cloned().unwrap_or(Ty::Error);
+            let x = fcx.new_local_unscoped("__err".to_string(), err_ty.clone(), false, span);
+            bad_binders.push(Some(x));
+            bad_args.push(local_expr(x, err_ty, span));
+        }
+        let early = hir::Expr {
+            kind: hir::ExprKind::MakeVariant {
+                sum,
+                variant: bad_idx,
+                args: bad_args,
+            },
+            ty: ret.clone(),
+            span,
+        };
+        let arms = vec![
+            hir::Arm {
+                pattern: hir::Pattern::Variant {
+                    sum,
+                    variant: good_idx,
+                    binders: vec![Some(v)],
+                },
+                body: local_expr(v, payload.clone(), span),
+                span,
+            },
+            hir::Arm {
+                pattern: hir::Pattern::Variant {
+                    sum,
+                    variant: bad_idx,
+                    binders: bad_binders,
+                },
+                body: hir::Expr {
+                    kind: hir::ExprKind::Return(Some(Box::new(early))),
+                    ty: Ty::Never,
+                    span,
+                },
+                span,
+            },
+        ];
+        hir::Expr {
+            kind: hir::ExprKind::Match {
+                scrutinee: Box::new(value),
+                arms,
+            },
+            ty: payload,
+            span,
+        }
+    }
+
     /// Check a closure literal `|params| body`, lifting it into its own
     /// function. Free variables referring to enclosing locals are captured
     /// by value; the closure value is a fat pointer `{ code, env }`.
@@ -4936,9 +5162,18 @@ impl<'a> Checker<'a> {
         // `async fn`'s body.
         let saved_in_async = fcx.in_async;
         fcx.in_async = false;
+        // A `return`, and a `?`, in the body return from the closure, so they
+        // check against its return type, which a `?` constrains while it is
+        // still being inferred (5.0 spec §3.3).
+        let saved_ret_ty = std::mem::replace(&mut fcx.ret_ty, ret_ty.clone());
+        let saved_entry = std::mem::replace(&mut fcx.entry, false);
+        let saved_in_const = std::mem::replace(&mut fcx.in_const, false);
         let body_hir = self.check_expr(fcx, body);
         fcx.loop_depth = saved_loop_depth;
         fcx.in_async = saved_in_async;
+        fcx.ret_ty = saved_ret_ty;
+        fcx.entry = saved_entry;
+        fcx.in_const = saved_in_const;
         if !fcx.icx.unify(&body_hir.ty, &ret_ty) {
             self.error(
                 "E0010",
@@ -7975,6 +8210,15 @@ fn lit_expr(lit: &ast::Literal, span: Span) -> hir::Expr {
         ast::Literal::Bool(v) => (hir::ExprKind::BoolLit(*v), Ty::Bool),
     };
     hir::Expr { kind, ty, span }
+}
+
+/// A read of `local`, of type `ty`.
+fn local_expr(local: LocalId, ty: Ty, span: Span) -> hir::Expr {
+    hir::Expr {
+        kind: hir::ExprKind::Local(local),
+        ty,
+        span,
+    }
 }
 
 fn error_expr(span: Span) -> hir::Expr {
@@ -13745,6 +13989,8 @@ mod tests {
             loop_depth: 0,
             in_async: false,
             pending_closures: Vec::new(),
+            entry: false,
+            in_const: false,
         };
         assert_eq!(
             checker.qualifier_self_ty(&mut fcx, "Future"),
@@ -13820,6 +14066,8 @@ mod tests {
             loop_depth: 0,
             in_async: false,
             pending_closures: Vec::new(),
+            entry: false,
+            in_const: false,
         };
         for name in nova_resolver::RESERVED_TYPE_NAMES {
             if name == "Future" {

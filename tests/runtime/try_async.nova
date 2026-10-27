@@ -1,0 +1,87 @@
+// `?` inside `async fn`s, with `.await?` (5.0 spec §3.3): the enclosing
+// function's return type is its declared one, not the future. Its values
+// live across `.await`s, so a test runs it under `NOVA_GC_STRESS=1` too.
+
+record Config { name: String, port: Int }
+
+async fn fetch(key: String) -> Option<String> {
+    yield_now().await
+    match key {
+        "name" => Some("server-${key.len()}")
+        "port" => Some("8080")
+        _ => None
+    }
+}
+
+async fn port_number(text: String) -> Result<Int, String> {
+    yield_now().await
+    match text {
+        "8080" => Ok(8080)
+        _ => Err("bad port `${text}`")
+    }
+}
+
+async fn lookup(key: String) -> Result<String, String> {
+    yield_now().await
+    match fetch(key).await {
+        Some(v) => Ok(v)
+        None => Err("missing ${key}")
+    }
+}
+
+// `Option`: `.await?` on each step.
+async fn name_and_port() -> Option<String> {
+    let name = fetch("name").await?
+    let port = fetch("port").await?
+    Some("${name}:${port}")
+}
+
+async fn missing() -> Option<String> {
+    let name = fetch("name").await?
+    let user = fetch("user").await?
+    Some("${name} ${user}")
+}
+
+// `Result`: a record built from three `.await?`s.
+async fn load() -> Result<Config, String> {
+    let name = lookup("name").await?
+    let text = lookup("port").await?
+    let port = port_number(text).await?
+    Ok(Config { name: name, port: port })
+}
+
+async fn load_user() -> Result<Config, String> {
+    let name = lookup("name").await?
+    let user = lookup("user").await?
+    Ok(Config { name: "${name}/${user}", port: 0 })
+}
+
+async fn run() -> Int {
+    match name_and_port().await {
+        Some(s) => println("some ${s}")
+        None => println("none")
+    }
+    match missing().await {
+        Some(s) => println("some ${s}")
+        None => println("none")
+    }
+    let mut ok = 0
+    let mut i = 0
+    while i < 3 {
+        match load().await {
+            Ok(c) => {
+                println("config ${c.name} ${c.port}")
+                ok += 1
+            }
+            Err(e) => println("error ${e}")
+        }
+        match load_user().await {
+            Ok(c) => println("config ${c.name}")
+            Err(e) => println("error ${e}")
+        }
+        i += 1
+    }
+    ok
+}
+
+fn main() { println("loaded ${block_on(run())}") }
