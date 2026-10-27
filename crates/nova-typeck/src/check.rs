@@ -6980,11 +6980,6 @@ impl<'a> Checker<'a> {
         rhs: &Spanned<ast::Expr>,
         span: Span,
     ) -> hir::Expr {
-        if !matches!(op, ast::AssignOp::Assign) {
-            self.unsupported(span, "compound assignment to an array element");
-            self.check_expr(fcx, rhs);
-            return error_expr(span);
-        }
         // The array's storage must be reachable through a mutable binding.
         // Walk the whole index/field chain to its root local — `grid[0][1]`,
         // `rec.data[0]`, and `make()[0]` all bypass a single-segment check.
@@ -7008,7 +7003,38 @@ impl<'a> Checker<'a> {
             self.check_expr(fcx, rhs);
             return error_expr(span);
         }
+        // `a[i] op= e` (5.0 spec §3.4): the array and the index go into
+        // unscoped locals, evaluated once, then `a[k] = a[k] op e` stores.
+        // Arrays are references, so the local aliases the place.
+        let compound = assign_binop(op).map(|bin| {
+            let arr_ty = fcx.icx.apply(&arr.ty);
+            let t = fcx.new_local_unscoped("__place".to_string(), arr_ty.clone(), false, span);
+            let k = fcx.new_local_unscoped("__index".to_string(), Ty::Int, false, span);
+            (bin, t, arr_ty, k)
+        });
+        let (arr, idx, binds) = match &compound {
+            None => (arr, idx, Vec::new()),
+            Some((_, t, arr_ty, k)) => (
+                local_expr(*t, arr_ty.clone(), target.span),
+                local_expr(*k, Ty::Int, index.span),
+                vec![let_expr(*t, arr, span), let_expr(*k, idx, span)],
+            ),
+        };
         let value = self.check_expr(fcx, rhs);
+        let value = match &compound {
+            None => value,
+            Some((bin, t, arr_ty, k)) => {
+                let old = hir::Expr {
+                    kind: hir::ExprKind::Index {
+                        target: Box::new(local_expr(*t, arr_ty.clone(), target.span)),
+                        index: Box::new(local_expr(*k, Ty::Int, index.span)),
+                    },
+                    ty: elem_ty.clone(),
+                    span: target.span.merge(index.span),
+                };
+                self.compound_value(fcx, *bin, old, value, span)
+            }
+        };
         if !fcx.icx.unify(&value.ty, &elem_ty) {
             self.error(
                 "E0010",
@@ -7020,13 +7046,36 @@ impl<'a> Checker<'a> {
                 rhs.span,
             );
         }
-        hir::Expr {
+        let set = hir::Expr {
             kind: hir::ExprKind::IndexSet {
                 target: Box::new(arr),
                 index: Box::new(idx),
                 value: Box::new(value),
             },
             ty: Ty::Unit,
+            span,
+        };
+        with_binds(binds, set, span)
+    }
+
+    /// `old op value`, the value a compound assignment stores, through the
+    /// same rules as a binary expression (E0010, E0013).
+    fn compound_value(
+        &mut self,
+        fcx: &mut FnCtx,
+        bin: hir::BinOp,
+        old: hir::Expr,
+        value: hir::Expr,
+        span: Span,
+    ) -> hir::Expr {
+        let ty = self.binary_result_ty(fcx, bin, &old, &value, span);
+        hir::Expr {
+            kind: hir::ExprKind::Binary {
+                op: bin,
+                lhs: Box::new(old),
+                rhs: Box::new(value),
+            },
+            ty,
             span,
         }
     }
@@ -7043,11 +7092,6 @@ impl<'a> Checker<'a> {
         rhs: &Spanned<ast::Expr>,
         span: Span,
     ) -> hir::Expr {
-        if !matches!(op, ast::AssignOp::Assign) {
-            self.unsupported(span, "compound assignment to a record field");
-            self.check_expr(fcx, rhs);
-            return error_expr(span);
-        }
         // The record's storage must be reachable through a mutable binding.
         // Walk the whole field/index chain to its root local — `rec.inner.f`
         // and `make().f` both bypass a single-segment check. Records have no
@@ -7080,7 +7124,35 @@ impl<'a> Checker<'a> {
             return error_expr(span);
         };
         self.note_field(fcx, &recv_ty, index, field.span);
+        // `r.f op= e` (5.0 spec §3.4): the receiver goes into an unscoped
+        // local, evaluated once, then `t.f = t.f op e` stores. Records are
+        // references, so the local aliases the place.
+        let (rec, binds, compound) = match assign_binop(op) {
+            None => (rec, Vec::new(), None),
+            Some(bin) => {
+                let t = fcx.new_local_unscoped("__place".to_string(), recv_ty.clone(), false, span);
+                (
+                    local_expr(t, recv_ty.clone(), target.span),
+                    vec![let_expr(t, rec, span)],
+                    Some((bin, t)),
+                )
+            }
+        };
         let value = self.check_expr(fcx, rhs);
+        let value = match compound {
+            None => value,
+            Some((bin, t)) => {
+                let old = hir::Expr {
+                    kind: hir::ExprKind::FieldGet {
+                        target: Box::new(local_expr(t, recv_ty.clone(), target.span)),
+                        index,
+                    },
+                    ty: field_ty.clone(),
+                    span: target.span.merge(field.span),
+                };
+                self.compound_value(fcx, bin, old, value, span)
+            }
+        };
         if !fcx.icx.unify(&value.ty, &field_ty) {
             self.error(
                 "E0010",
@@ -7093,7 +7165,7 @@ impl<'a> Checker<'a> {
                 rhs.span,
             );
         }
-        hir::Expr {
+        let set = hir::Expr {
             kind: hir::ExprKind::FieldSet {
                 target: Box::new(rec),
                 index,
@@ -7101,7 +7173,8 @@ impl<'a> Checker<'a> {
             },
             ty: Ty::Unit,
             span,
-        }
+        };
+        with_binds(binds, set, span)
     }
 
     fn check_match(
@@ -8217,6 +8290,35 @@ fn local_expr(local: LocalId, ty: Ty, span: Span) -> hir::Expr {
     hir::Expr {
         kind: hir::ExprKind::Local(local),
         ty,
+        span,
+    }
+}
+
+/// `let local = init`, unit-typed.
+fn let_expr(local: LocalId, init: hir::Expr, span: Span) -> hir::Expr {
+    hir::Expr {
+        kind: hir::ExprKind::Let {
+            local,
+            init: Box::new(init),
+        },
+        ty: Ty::Unit,
+        span,
+    }
+}
+
+/// `expr` after `binds`, in one unit-typed block; `expr` alone when there
+/// are none.
+fn with_binds(mut binds: Vec<hir::Expr>, expr: hir::Expr, span: Span) -> hir::Expr {
+    if binds.is_empty() {
+        return expr;
+    }
+    binds.push(expr);
+    hir::Expr {
+        kind: hir::ExprKind::Block {
+            stmts: binds,
+            trailing: None,
+        },
+        ty: Ty::Unit,
         span,
     }
 }
@@ -10401,28 +10503,26 @@ mod tests {
     }
 
     #[test]
-    fn compound_assignment_to_field_reports_e0900() {
-        // `+=` on a field would have to read-modify-write; not supported yet,
-        // mirroring compound assignment to an array element.
+    fn compound_assignment_to_field_checks() {
+        // `+=` on a field reads, applies and writes back (5.0 spec §3.4); it
+        // was E0900 until 5.0a.
         let r = check_src(
             "record P { v: Int }\n\
              fn main() { let mut p = P { v: 1 }\n p.v += 1\n println(\"${p.v}\") }",
         );
-        assert!(error_codes(&r).contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+        assert_eq!(field_sets_in(&r.module, "main").len(), 1);
     }
 
     #[test]
     fn compound_assignment_to_field_still_checks_the_rhs() {
-        // This branch returns before doing anything else at all — no
-        // mutability check, no receiver check — so it used to drop an
-        // independent RHS mistake along with (correctly) rejecting the
-        // compound form itself.
+        // An independent mistake in the right-hand side surfaces on its own.
         let r = check_src(
             "record P { v: Int }\n\
              fn main() { let mut p = P { v: 1 }\n p.v += undefined_fn() }",
         );
         let codes = error_codes(&r);
-        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(!codes.contains(&"E0900"), "{:?}", r.diagnostics);
         assert!(
             codes.contains(&"E0001"),
             "expected `undefined_fn`'s own error to still surface: {:?}",
@@ -10436,7 +10536,7 @@ mod tests {
         // `compound_assignment_to_field_still_checks_the_rhs`.
         let r = check_src("fn main() { let mut xs = [1, 2]\n xs[0] += undefined_fn() }");
         let codes = error_codes(&r);
-        assert!(codes.contains(&"E0900"), "{:?}", r.diagnostics);
+        assert!(!codes.contains(&"E0900"), "{:?}", r.diagnostics);
         assert!(
             codes.contains(&"E0001"),
             "expected `undefined_fn`'s own error to still surface: {:?}",
