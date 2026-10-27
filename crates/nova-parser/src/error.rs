@@ -21,6 +21,13 @@ pub enum ParseError {
 
     #[error("{message}")]
     Custom { message: String, span: Span },
+
+    /// `error`, with a note that says why it may have come about.
+    #[error("{error}")]
+    Noted {
+        error: Box<ParseError>,
+        note: String,
+    },
 }
 
 impl ParseError {
@@ -30,6 +37,19 @@ impl ParseError {
             ParseError::UnexpectedEof { span } => *span,
             ParseError::ChainedComparison { span } => *span,
             ParseError::Custom { span, .. } => *span,
+            ParseError::Noted { error, .. } => error.span(),
+        }
+    }
+
+    /// The notes that go with the error's diagnostic.
+    pub fn notes(&self) -> Vec<String> {
+        match self {
+            ParseError::Noted { error, note } => {
+                let mut notes = error.notes();
+                notes.push(note.clone());
+                notes
+            }
+            _ => Vec::new(),
         }
     }
 }

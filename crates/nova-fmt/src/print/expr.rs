@@ -347,9 +347,9 @@ impl<'s, 't> Printer<'s, 't> {
     /// the first (spec §5.6). A `;` after an item would not parse, and no
     /// item can be continued. Before a statement that starts with `(`, `[`
     /// or `-`, and after a `return` or `break` with no value, the newline
-    /// rule ends the statement at the line break (5.0 spec §3.5), and a `;`
-    /// written there says the break is meant: fmt keeps the author's `;`,
-    /// and adds none, so the program stays as it was.
+    /// rule ends the statement at the line break (5.0 spec §3.5) and warns
+    /// (E0103) unless a `;` is written there: fmt keeps the author's `;`,
+    /// and adds none, so the program and its warnings stay as they were.
     fn separator(&self, cur: Elem, next: Elem) -> Option<&'static str> {
         if let Elem::Stmt(s) = cur {
             if matches!(s.value, Stmt::Item(_)) {

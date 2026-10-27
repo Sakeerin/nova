@@ -12708,3 +12708,45 @@ fn compound_assign_places_runs() {
 fn string_concat_runs() {
     golden_three_ways("string_concat", true);
 }
+
+/// E0102 (5.0 spec §3.7) is a warning: it prints, and the program still
+/// builds and runs, its own `Number` meaning its own variant.
+#[test]
+fn a_variant_that_hides_one_of_stds_warns_and_still_builds() {
+    let dir = std::env::temp_dir().join("nova-e0102-warning");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("main.nova");
+    std::fs::write(
+        &src,
+        "type Token =\n    | Number(Int)\n    | Word(String)\n\n\
+         fn show(t: Token) -> String {\n    match t {\n        Number(n) => \"n${n}\"\n        Word(w) => w\n    }\n}\n\n\
+         fn main() {\n    println(show(Number(4)))\n    println(show(Word(\"w\")))\n}\n",
+    )
+    .expect("write the program");
+    let exe = dir.join(format!("main{}", std::env::consts::EXE_SUFFIX));
+    let built = nova()
+        .env("NO_COLOR", "1")
+        .arg("build")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&built.get_output().stderr).replace("\r\n", "\n");
+    assert!(
+        stderr.contains("warning[E0102]: variant `Number` hides std's `JsonValue::Number`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("std's is `JsonValue::Number`"), "{stderr}");
+    let out = Command::new(&exe)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8_lossy(&out).replace("\r\n", "\n"),
+        "n4\nw\n"
+    );
+    let _ = std::fs::remove_file(&exe);
+}

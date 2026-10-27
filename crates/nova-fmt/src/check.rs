@@ -51,10 +51,16 @@ fn internal(first_difference: String) -> FormatError {
 }
 
 /// The AST without its spans, after the import sorting the printer does
-/// (spec §6). Two inputs have the same fingerprint exactly when they are
-/// the same program.
+/// (spec §6), then the kinds of the newline rule's splits, in order, without
+/// their places, which move with the layout (5.0 spec §3.5). Two inputs
+/// have the same fingerprint exactly when they are the same program with the
+/// same warnings at its line breaks.
 pub(crate) fn fingerprint(file: &File) -> String {
     let mut file = file.clone();
+    let splits: Vec<_> = std::mem::take(&mut file.newline_splits)
+        .iter()
+        .map(|s| s.kind)
+        .collect();
     for run in import_runs(&file) {
         let items = &mut file.items[run];
         items.sort_by_key(|a| import_key(&a.value));
@@ -68,7 +74,7 @@ pub(crate) fn fingerprint(file: &File) -> String {
             }
         }
     }
-    strip_spans(&format!("{file:?}"))
+    format!("{}; splits {splits:?}", strip_spans(&format!("{file:?}")))
 }
 
 /// The index ranges of the runs of consecutive top-level imports.
@@ -207,6 +213,19 @@ fn around(s: &str, at: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_fingerprint_tells_splits_by_kind_not_by_place() {
+        let fp = |text: &str| {
+            let src = Source::parse(text, "<test>").expect("it parses");
+            fingerprint(&src.file)
+        };
+        let split = fp("fn f(a: Int, b: Int) -> Int {\n    a\n    - b\n}\n");
+        let moved = fp("fn f(a: Int,  b: Int) -> Int {\n    a\n        - b\n}\n");
+        let unsplit = fp("fn f(a: Int, b: Int) -> Int {\n    a;\n    - b\n}\n");
+        assert_eq!(split, moved);
+        assert_ne!(split, unsplit);
+    }
 
     #[test]
     fn strip_spans_removes_every_span_field() {

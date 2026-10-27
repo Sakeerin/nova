@@ -1,10 +1,10 @@
 //! The checker's tests of 5.0a's language (spec
 //! `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
-//! §3.3, §3.4 and §3.6): `?` and its codes E0098 and E0099, `+=` on
-//! fields and elements, and `String + String`.
+//! §3.3 to §3.6): `?` and its codes E0098 and E0099, `+=` on fields and
+//! elements, `String + String`, and E0103.
 
 use super::*;
-use nova_diagnostics::FileId;
+use nova_diagnostics::{FileId, Severity};
 use nova_lexer::lex;
 use nova_parser::parse;
 use nova_resolver::resolve;
@@ -379,4 +379,145 @@ fn string_plus_char_or_int_is_refused_with_a_note() {
 #[test]
 fn string_minus_string_is_still_e0013() {
     assert!(codes("fn main() {\n    let s = \"a\" - \"b\"\n}\n").contains(&"E0013".to_string()));
+}
+
+// --- E0103 ---
+
+fn e0103(body: &str) -> usize {
+    diags(&format!(
+        "fn g() -> Int {{ 1 }}\nfn main() {{\n    let x = 1\n    let y = 2\n{body}\n    println(\"${{x}}\")\n}}\n"
+    ))
+    .iter()
+    .filter(|d| d.code == "E0103")
+    .inspect(|d| assert_eq!(d.severity, Severity::Warning))
+    .count()
+}
+
+#[test]
+fn e0103_flags_each_form_whose_value_is_discarded() {
+    for stmt in [
+        "    -y",
+        "    !true",
+        "    x + y",
+        "    x == y",
+        "    1",
+        "    \"text\"",
+        "    y",
+        "    (x)",
+        "    (x, y)",
+        "    [x, y]",
+        "    (g())",
+    ] {
+        assert_eq!(e0103(stmt), 1, "{stmt}");
+    }
+}
+
+#[test]
+fn e0103_flags_what_the_newline_rule_leaves() {
+    // `let z = x` then `-y`: two statements, the second discarded.
+    assert_eq!(e0103("    let z = x\n    -y\n    println(\"${z}\")"), 1);
+}
+
+#[test]
+fn e0103_is_not_on_calls_assignments_conditions_or_a_tail() {
+    for stmt in [
+        "    g()",
+        "    let mut m = 1\n    m = 2\n    m += 1",
+        "    x == 1 || y == 2",
+        "    x == 1 && y == 2",
+        "    if x > 0 { g() }",
+        "    match x { _ => g() }",
+        "    while false {}",
+        "    { g() }",
+    ] {
+        assert_eq!(e0103(stmt), 0, "{stmt}");
+    }
+    // A block's tail is not a statement.
+    let all = diags("fn f(x: Int) -> Int {\n    x\n}\nfn main() {}\n");
+    assert!(all.is_empty(), "{all:?}");
+}
+
+#[test]
+fn e0103_reports_a_parenthesised_callee_after_a_line_break() {
+    // `x` then `(g)()`: `x` is an unused name, and the line break that ends
+    // it before `(g)()` is reported too, though `unused_value` cannot tell
+    // the call was written in parentheses.
+    assert_eq!(e0103("    x\n    (g)()"), 2);
+}
+
+// --- E0103 at the newline rule's splits (the user's ruling of 2026-10-27) ---
+
+/// Each E0103's message, for `src`.
+fn e0103_messages(src: &str) -> Vec<String> {
+    diags(src)
+        .into_iter()
+        .filter(|d| d.code == "E0103")
+        .map(|d| d.message)
+        .collect()
+}
+
+#[test]
+fn a_split_after_a_return_value_warns() {
+    let all = e0103_messages(
+        "fn net(a: Int, b: Int) -> Int {\n    return a\n        - b\n}\nfn main() {}\n",
+    );
+    assert_eq!(all, ["a line break ends the statement before this `-`"]);
+}
+
+#[test]
+fn a_split_before_a_tail_warns() {
+    let all = e0103_messages(
+        "record R { a: Int, b: Int }\nfn w(r: R) -> Int {\n    r.a\n    - r.b\n}\nfn main() {}\n",
+    );
+    assert_eq!(all, ["a line break ends the statement before this `-`"]);
+    let all = e0103_messages(
+        "fn k(x: Int) -> fn(Int) -> Int { |y: Int| x + y }\nfn main() {\n    let v = k(1)\n    (5)\n    println(\"${v(2)}\")\n}\n",
+    );
+    // `(5)` is also an unused value: one warning, with the line break's note.
+    assert_eq!(all, ["this value is not used"]);
+}
+
+#[test]
+fn a_split_after_a_bare_return_warns() {
+    let all = e0103_messages("fn g() {}\nfn f() {\n    return\n    g()\n}\nfn main() {}\n");
+    assert_eq!(all, ["a line break ends this `return` or `break`"]);
+}
+
+#[test]
+fn a_written_semicolon_silences_the_split() {
+    assert!(
+        e0103_messages("fn net(a: Int, b: Int) -> Int {\n    a;\n    -b\n}\nfn main() {}\n")
+            .iter()
+            .all(|m| m != "a line break ends the statement before this `-`")
+    );
+    assert!(
+        e0103_messages("fn g() {}\nfn f() {\n    return;\n    g()\n}\nfn main() {}\n").is_empty()
+    );
+}
+
+#[test]
+fn an_unused_value_at_a_split_gets_one_warning_with_the_line_breaks_note() {
+    let all: Vec<Diagnostic> = diags(
+        "fn main() {\n    let x = 1\n    let y = 2\n    let z = x\n    -y\n    println(\"${z}\")\n}\n",
+    )
+    .into_iter()
+    .filter(|d| d.code == "E0103")
+    .collect();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0].message, "this value is not used");
+    assert!(
+        all[0]
+            .notes
+            .iter()
+            .any(|n| n.contains("a line break ended the statement")),
+        "{all:?}"
+    );
+    // Without a line break, no such note.
+    let all: Vec<Diagnostic> =
+        diags("fn main() {\n    let y = 2\n    let z = 1; -y\n    println(\"${z}\")\n}\n")
+            .into_iter()
+            .filter(|d| d.code == "E0103")
+            .collect();
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(all[0].notes.is_empty(), "{all:?}");
 }
