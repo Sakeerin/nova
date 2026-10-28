@@ -710,3 +710,143 @@ fn the_marks_leave_the_tokens_as_they_were() {
 fn a_lone_carriage_return_is_a_line_break() {
     assert_eq!(marks("b\r(d)")[1], ("(".to_string(), true));
 }
+
+// ── Tuple indexes: the split after a `.` (5.0 spec §4.2) ───────────────────
+
+/// Each token with its source text, for the split's spans.
+fn texts(src: &str) -> Vec<(Token, String)> {
+    let mut db = FileDb::new();
+    let file = db.add("<split>", src);
+    let (tokens, errors) = lex(src, file);
+    assert!(errors.is_empty(), "{errors:?}");
+    tokens
+        .iter()
+        .filter(|t| t.value != Token::Eof)
+        .map(|t| {
+            let text = src[t.span.start as usize..t.span.end as usize].to_string();
+            (t.value.clone(), text)
+        })
+        .collect()
+}
+
+#[test]
+fn a_tuple_index_is_an_integer_after_a_dot() {
+    assert_eq!(
+        tokens("t.0"),
+        vec![ident("t"), Token::Dot, Token::Int(0), Token::Eof]
+    );
+}
+
+#[test]
+fn a_float_after_a_dot_splits_into_two_indexes() {
+    assert_eq!(
+        texts("t.1.0"),
+        vec![
+            (ident("t"), "t".to_string()),
+            (Token::Dot, ".".to_string()),
+            (Token::Int(1), "1".to_string()),
+            (Token::Dot, ".".to_string()),
+            (Token::Int(0), "0".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn the_split_chains() {
+    assert_eq!(
+        tokens("t.0.1.2"),
+        vec![
+            ident("t"),
+            Token::Dot,
+            Token::Int(0),
+            Token::Dot,
+            Token::Int(1),
+            Token::Dot,
+            Token::Int(2),
+            Token::Eof
+        ]
+    );
+}
+
+#[test]
+fn the_split_follows_the_source_text_not_the_value() {
+    // `1.10` is the float 1.1, but the index after the second `.` is 10.
+    let t = texts("t.1.10");
+    assert_eq!(t[4], (Token::Int(10), "10".to_string()));
+    assert_eq!(t.len(), 5);
+}
+
+#[test]
+fn a_float_elsewhere_is_not_split() {
+    assert_eq!(tokens("1.0"), vec![Token::Float(1.0), Token::Eof]);
+    assert_eq!(
+        tokens("x = 1.5"),
+        vec![ident("x"), Token::Eq, Token::Float(1.5), Token::Eof]
+    );
+    // A `..` before it is a range, not a field access.
+    assert_eq!(
+        tokens("0..1.5"),
+        vec![Token::Int(0), Token::DotDot, Token::Float(1.5), Token::Eof]
+    );
+    assert_eq!(
+        tokens("0..1"),
+        vec![Token::Int(0), Token::DotDot, Token::Int(1), Token::Eof]
+    );
+    // A float followed by a `.` stays a float: `1.0.0` is not after one.
+    assert_eq!(
+        tokens("1.0.0"),
+        vec![Token::Float(1.0), Token::Dot, Token::Int(0), Token::Eof]
+    );
+}
+
+#[test]
+fn a_float_with_an_underscore_or_an_exponent_after_a_dot_is_left_whole() {
+    assert_eq!(
+        tokens("t.1_0.2"),
+        vec![ident("t"), Token::Dot, Token::Float(10.2), Token::Eof]
+    );
+    assert_eq!(
+        tokens("t.1.0e3"),
+        vec![ident("t"), Token::Dot, Token::Float(1000.0), Token::Eof]
+    );
+    assert_eq!(
+        tokens("t.1e3"),
+        vec![ident("t"), Token::Dot, Token::Float(1000.0), Token::Eof]
+    );
+}
+
+#[test]
+fn only_plain_decimal_integers_are_marked_as_tuple_indexes() {
+    let src = "t.0 t.7 t.12 t.01 t.1_0 t.0x1 t.00 t.0b1 t.0o7 x";
+    let mut db = FileDb::new();
+    let file = db.add("<plain>", src);
+    let (tokens, errors) = lex(src, file);
+    assert!(errors.is_empty(), "{errors:?}");
+    let plain: Vec<(String, bool)> = tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t.value, Token::Int(_)))
+        .map(|(i, t)| {
+            let text = src[t.span.start as usize..t.span.end as usize].to_string();
+            (text, tokens.plain_decimal(i))
+        })
+        .collect();
+    let want: Vec<(String, bool)> = [
+        ("0", true),
+        ("7", true),
+        ("12", true),
+        ("01", false),
+        ("1_0", false),
+        ("0x1", false),
+        ("00", false),
+        ("0b1", false),
+        ("0o7", false),
+    ]
+    .iter()
+    .map(|(t, b)| (t.to_string(), *b))
+    .collect();
+    assert_eq!(plain, want);
+    // An identifier is no integer, and past the end is `false`.
+    assert!(!tokens.plain_decimal(tokens.len() - 2));
+    assert!(!tokens.plain_decimal(tokens.len() + 3));
+}
