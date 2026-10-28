@@ -71,6 +71,12 @@ pub enum Ty {
     },
     /// A heap array `[T]` with elements of a single type.
     Array(Box<Ty>),
+    /// A tuple `(T1, …, Tn)`, n of one or more (`()` is [`Ty::Unit`]): an
+    /// anonymous record, laid out as a record is, with no impls and no
+    /// [`TyHead`] (spec
+    /// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+    /// §4.1). Two tuple types are the same when their element types are.
+    Tuple(Vec<Ty>),
     /// A generic type parameter of the enclosing item (`T`).
     Param(u32),
     /// A projection onto a trait's associated type: `<on>::Name`, where
@@ -130,6 +136,7 @@ impl Ty {
                 args: a.iter().map(|t| t.subst(args)).collect(),
             },
             Ty::Array(elem) => Ty::Array(Box::new(elem.subst(args))),
+            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| t.subst(args)).collect()),
             Ty::Future(out) => Ty::Future(Box::new(out.subst(args))),
             Ty::Assoc { on, assoc } => Ty::Assoc {
                 on: Box::new(on.subst(args)),
@@ -150,6 +157,7 @@ impl Ty {
                 args.iter().any(|a| a.mentions_param(idx))
             }
             Ty::Array(elem) => elem.mentions_param(idx),
+            Ty::Tuple(elems) => elems.iter().any(|e| e.mentions_param(idx)),
             Ty::Future(out) => out.mentions_param(idx),
             Ty::Assoc { on, .. } => on.mentions_param(idx),
             _ => false,
@@ -163,6 +171,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_params) || ret.has_params(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_params),
             Ty::Array(elem) => elem.has_params(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::has_params),
             Ty::Future(out) => out.has_params(),
             Ty::Assoc { on, .. } => on.has_params(),
             _ => false,
@@ -176,6 +185,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_vars) || ret.has_vars(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_vars),
             Ty::Array(elem) => elem.has_vars(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::has_vars),
             Ty::Future(out) => out.has_vars(),
             Ty::Assoc { on, .. } => on.has_vars(),
             _ => false,
@@ -195,6 +205,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_assoc) || ret.has_assoc(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_assoc),
             Ty::Array(elem) => elem.has_assoc(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::has_assoc),
             Ty::Future(out) => out.has_assoc(),
             _ => false,
         }
@@ -222,6 +233,7 @@ impl Ty {
             Ty::Fn { params, ret } => params.iter().any(Ty::has_error) || ret.has_error(),
             Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(Ty::has_error),
             Ty::Array(elem) => elem.has_error(),
+            Ty::Tuple(elems) => elems.iter().any(Ty::has_error),
             Ty::Future(out) => out.has_error(),
             Ty::Assoc { on, .. } => on.has_error(),
             _ => false,
@@ -291,6 +303,9 @@ impl Ty {
                     && a1.iter().zip(a2).all(|(p, g)| p.match_pattern(g, out))
             }
             (Ty::Array(e1), Ty::Array(e2)) => e1.match_pattern(e2, out),
+            (Ty::Tuple(t1), Ty::Tuple(t2)) => {
+                t1.len() == t2.len() && t1.iter().zip(t2).all(|(p, g)| p.match_pattern(g, out))
+            }
             (Ty::Future(o1), Ty::Future(o2)) => o1.match_pattern(o2, out),
             (
                 Ty::Fn {
@@ -314,6 +329,14 @@ impl Ty {
         }
     }
 }
+
+/// The note an E0013 on a tuple carries: a tuple has no impls, so it is never
+/// `Eq`, `Hash`, `Display` or `Debug`, nor any other trait (spec
+/// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+/// §4.1).
+pub const TUPLE_HAS_NO_IMPLS: &str = "a tuple has no impls, so it has no `==`, `Hash`, \
+     `Display`, `Debug` or any other trait: compare or print its elements, or use a record \
+     that implements the trait";
 
 /// The nominal head of a type, used as the key for impl lookups
 /// (spec `12-TYPESYSTEM.md` §5.2, `ImplTable` indexed by trait + type head).
@@ -649,6 +672,12 @@ fn normalize_within(
         Ty::Array(elem) => Ok(Ty::Array(Box::new(normalize_within(
             elem, impls, depth, steps,
         )?))),
+        Ty::Tuple(elems) => Ok(Ty::Tuple(
+            elems
+                .iter()
+                .map(|e| normalize_within(e, impls, depth, steps))
+                .collect::<Result<_, _>>()?,
+        )),
         Ty::Future(out) => Ok(Ty::Future(Box::new(normalize_within(
             out, impls, depth, steps,
         )?))),
@@ -709,6 +738,7 @@ fn shift_params(t: &Ty, by: u32) -> Ty {
             args: args.iter().map(|a| shift_params(a, by)).collect(),
         },
         Ty::Array(elem) => Ty::Array(Box::new(shift_params(elem, by))),
+        Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| shift_params(e, by)).collect()),
         Ty::Future(out) => Ty::Future(Box::new(shift_params(out, by))),
         other => other.clone(),
     }
@@ -733,6 +763,7 @@ fn occurs(k: u32, t: &Ty, subst: &[Option<Ty>]) -> bool {
         }
         Ty::Sum { args, .. } | Ty::Record { args, .. } => args.iter().any(|a| occurs(k, a, subst)),
         Ty::Array(elem) => occurs(k, &elem, subst),
+        Ty::Tuple(elems) => elems.iter().any(|e| occurs(k, e, subst)),
         Ty::Future(out) => occurs(k, &out, subst),
         _ => false,
     }
@@ -782,6 +813,9 @@ fn unify_patterns(a: &Ty, b: &Ty, subst: &mut Vec<Option<Ty>>) -> bool {
                 && a1.iter().zip(a2).all(|(x, y)| unify_patterns(x, y, subst))
         }
         (Ty::Array(e1), Ty::Array(e2)) => unify_patterns(e1, e2, subst),
+        (Ty::Tuple(t1), Ty::Tuple(t2)) => {
+            t1.len() == t2.len() && t1.iter().zip(t2).all(|(x, y)| unify_patterns(x, y, subst))
+        }
         (Ty::Future(o1), Ty::Future(o2)) => unify_patterns(o1, o2, subst),
         (
             Ty::Fn {
@@ -1088,12 +1122,17 @@ pub enum ExprKind {
         record: DefId,
         fields: Vec<Expr>,
     },
-    /// Read field `index` of a record value.
+    /// Construct a tuple value: its elements in order, laid out as a
+    /// record's fields are. The expression's `ty` is the `Tuple`.
+    MakeTuple {
+        elems: Vec<Expr>,
+    },
+    /// Read field `index` of a record or a tuple value.
     FieldGet {
         target: Box<Expr>,
         index: u32,
     },
-    /// Store `record.field = value`. `index` is the field's position, so the
+    /// Store `record.field = value`, or `tuple.N = value`. `index` is the field's position, so the
     /// store offset is `8 * index` — the same layout `FieldGet` reads.
     /// Unit-typed.
     FieldSet {
@@ -1884,5 +1923,81 @@ mod tests {
             expected = pair(expected.clone(), expected);
         }
         assert_eq!(normalize_ty(&proj(self_ty, 100), &impls), Ok(expected));
+    }
+
+    // --- `Ty::Tuple` (5.0 spec §4.1): each walk over `Ty` reaches inside a
+    // tuple, and two tuple types are the same when their element types are.
+
+    fn tup(elems: Vec<Ty>) -> Ty {
+        Ty::Tuple(elems)
+    }
+
+    #[test]
+    fn subst_and_the_queries_reach_inside_a_tuple() {
+        let t = tup(vec![Ty::Param(0), tup(vec![Ty::Param(1), Ty::Int])]);
+        assert_eq!(
+            t.subst(&[Ty::Bool, Ty::String]),
+            tup(vec![Ty::Bool, tup(vec![Ty::String, Ty::Int])])
+        );
+        assert!(t.mentions_param(1));
+        assert!(!t.mentions_param(2));
+        assert!(t.has_params());
+        assert!(!tup(vec![Ty::Int]).has_params());
+        assert!(tup(vec![Ty::Int, Ty::Var(3)]).has_vars());
+        assert!(!tup(vec![Ty::Int]).has_vars());
+        assert!(tup(vec![Ty::Int, proj(Ty::Param(0), ITEM)]).has_assoc());
+        assert!(!tup(vec![Ty::Int]).has_assoc());
+        assert!(tup(vec![tup(vec![Ty::Error])]).has_error());
+        assert!(!tup(vec![Ty::Int]).has_error());
+    }
+
+    #[test]
+    fn a_tuple_has_no_head() {
+        // So no impl can name one, and no method resolves on one.
+        assert_eq!(tup(vec![Ty::Int, Ty::Int]).head(), None);
+        assert_eq!(tup(vec![Ty::Int]).head(), None);
+    }
+
+    #[test]
+    fn match_pattern_matches_a_tuple_element_by_element() {
+        let pat = tup(vec![Ty::Param(0), Ty::Param(0)]);
+        let mut out = Vec::new();
+        assert!(pat.match_pattern(&tup(vec![Ty::Int, Ty::Int]), &mut out));
+        assert_eq!(out, vec![Some(Ty::Int)]);
+        let mut out = Vec::new();
+        assert!(!pat.match_pattern(&tup(vec![Ty::Int, Ty::Bool]), &mut out));
+        // Another arity, or a one-tuple against its element, never matches.
+        let mut out = Vec::new();
+        assert!(!pat.match_pattern(&tup(vec![Ty::Int, Ty::Int, Ty::Int]), &mut out));
+        let mut out = Vec::new();
+        assert!(!tup(vec![Ty::Param(0)]).match_pattern(&Ty::Int, &mut out));
+    }
+
+    #[test]
+    fn normalize_reaches_a_projection_inside_a_tuple() {
+        let impls = [imp(rec(1, vec![]), 0, vec![(DefId(ITEM), Ty::Int)])];
+        assert_eq!(
+            normalize_ty(&tup(vec![Ty::Bool, proj(rec(1, vec![]), ITEM)]), &impls),
+            Ok(tup(vec![Ty::Bool, Ty::Int]))
+        );
+    }
+
+    #[test]
+    fn overlap_compares_tuples_element_by_element() {
+        // `Box<(T, Int)>` and `Box<(Bool, U)>` share `Box<(Bool, Int)>`.
+        let a = rec(1, vec![tup(vec![Ty::Param(0), Ty::Int])]);
+        let b = rec(1, vec![tup(vec![Ty::Bool, Ty::Param(0)])]);
+        assert!(self_types_overlap(&a, 1, &b, 1));
+        // `Box<(Int, Int)>` and `Box<(Int, Bool)>` share nothing, nor two
+        // arities.
+        let c = rec(1, vec![tup(vec![Ty::Int, Ty::Int])]);
+        let d = rec(1, vec![tup(vec![Ty::Int, Ty::Bool])]);
+        assert!(!self_types_overlap(&c, 0, &d, 0));
+        let e = rec(1, vec![tup(vec![Ty::Int, Ty::Int, Ty::Int])]);
+        assert!(!self_types_overlap(&c, 0, &e, 0));
+        // The occurs check reaches inside a tuple: `T` against `(T, Int)`.
+        let f = rec(1, vec![Ty::Param(0), Ty::Param(0)]);
+        let g = rec(1, vec![Ty::Param(0), tup(vec![Ty::Param(0), Ty::Int])]);
+        assert!(!self_types_overlap(&f, 1, &g, 1));
     }
 }

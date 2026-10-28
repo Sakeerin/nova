@@ -270,6 +270,41 @@ mod tests {
         assert!(hover(&answer, text.find("class:").unwrap() as u32).is_none());
     }
 
+    /// A local of a tuple type hovers with the type as it is written, and
+    /// a field of one hovers with nothing to go to (5.0 spec §4.1, §4.2).
+    #[test]
+    fn a_tuple_local_hovers_with_its_type() {
+        let text = "fn div_mod(a: Int, b: Int) -> (Int, Int) { (a / b, a % b) }\n\n\
+                    fn main() {\n    let q = div_mod(7, 2)\n    let one = (q,)\n    \
+                    println(\"${q.0} ${one.0.1}\")\n}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-hover-tuple")
+            .join("main.nova");
+        let overlay = crate::workspace::Overlay::default().with(&path, text.to_string());
+        let options = crate::analysis::options(None, true);
+        let answer = crate::analysis::answering(&path, &overlay, &options).expect("an answer");
+        let shown = |at: usize| {
+            let lsp::HoverContents::Markup(found) =
+                hover(&answer, at as u32).expect("a hover").contents
+            else {
+                panic!("not Markdown");
+            };
+            found.value
+        };
+        assert_eq!(
+            shown(text.find("q.0").unwrap()),
+            "```nova\nlet q: (Int, Int)\n```"
+        );
+        assert_eq!(
+            shown(text.find("one.0").unwrap()),
+            "```nova\nlet one: ((Int, Int),)\n```"
+        );
+        assert_eq!(
+            shown(text.find("div_mod(7").unwrap()),
+            "```nova\nfn div_mod(a: Int, b: Int) -> (Int, Int)\n```"
+        );
+    }
+
     #[test]
     fn an_item_line_keeps_pub_async_and_where_and_stops_at_its_body() {
         let text = "    pub async fn f<T>(x: T) -> T\n    where T: Show\n    { x }\n";

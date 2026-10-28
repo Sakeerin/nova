@@ -118,6 +118,7 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
             }
         }
         Ty::Array(elem) => format!("[{}]", display_ty(elem, defs)),
+        Ty::Tuple(elems) => tuple_text(elems.iter().map(|e| display_ty(e, defs)).collect()),
         Ty::Future(out) => format!("Future<{}>", display_ty(out, defs)),
         Ty::Param(i) => format!("T{i}"),
         Ty::Assoc { on, assoc } => {
@@ -126,6 +127,16 @@ pub fn display_ty(ty: &Ty, defs: &Definitions) -> String {
         Ty::Var(v) => format!("?{v}"),
         Ty::Never => "!".to_string(),
         Ty::Error => "{error}".to_string(),
+    }
+}
+
+/// A tuple type's text from its elements' texts: `(Int, String)`, and
+/// `(Int,)` for a tuple of one, as the parser reads it.
+pub fn tuple_text(elems: Vec<String>) -> String {
+    if elems.len() == 1 {
+        format!("({},)", elems[0])
+    } else {
+        format!("({})", elems.join(", "))
     }
 }
 
@@ -145,6 +156,7 @@ pub fn display_ty_named(ty: &Ty, defs: &Definitions, names: &[String]) -> String
             }
         }
         Ty::Array(elem) => format!("[{}]", show(elem)),
+        Ty::Tuple(elems) => tuple_text(elems.iter().map(show).collect()),
         Ty::Future(out) => format!("Future<{}>", show(out)),
         Ty::Param(i) => names
             .get(*i as usize)

@@ -1954,6 +1954,10 @@ mod gate {
         try_async,
         compound_assign_places,
         string_concat,
+        // Tuples: anonymous records, through MIR's records, so WASM needs
+        // nothing (5.0 spec §4.1).
+        tuples,
+        tuples_async,
     );
 
     /// The programs a test of their own in this module checks, by its name.

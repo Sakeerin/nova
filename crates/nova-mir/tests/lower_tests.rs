@@ -2215,3 +2215,134 @@ fn state_builtins_lower(kind: &str, rts: [nova_mir::RtFunc; 3]) {
         );
     }
 }
+
+// --- Tuples (5.0 spec §4.1): anonymous records ---
+
+/// A tuple lowers as a record does: one `MakeRecord` of its elements, with
+/// each element's machine class, and `t.N` is a `RecordField` at index `N`.
+/// So no backend sees a tuple.
+#[test]
+fn a_tuple_lowers_to_a_record() {
+    let mir = mir_for(
+        "fn f(a: Int, s: String) -> Bool {\n    let t = (a, s, true, 1.5)\n    t.2\n}\n\
+         fn main() { println(\"${f(1, \"s\")}\") }",
+    );
+    let stmts = stmts_of(&mir, "f");
+    let made: Vec<Vec<nova_mir::MirTy>> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            nova_mir::Stmt::MakeRecord { fields, .. } => {
+                Some(fields.iter().map(|(_, ty)| *ty).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    use nova_mir::MirTy;
+    assert_eq!(
+        made,
+        [vec![MirTy::I64, MirTy::Ptr, MirTy::I8, MirTy::F64]],
+        "{stmts:?}"
+    );
+    let reads: Vec<(u32, MirTy)> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            nova_mir::Stmt::RecordField { index, ty, .. } => Some((*index, *ty)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reads, [(2, MirTy::I8)], "{stmts:?}");
+}
+
+/// A write to an element is a `SetField` at its index.
+#[test]
+fn a_tuple_element_write_lowers_to_set_field() {
+    let mir = mir_for(
+        "fn f() -> Int {\n    let mut t = (1, \"s\")\n    t.0 = 5\n    t.1 = \"x\"\n    t.0\n}\n\
+         fn main() { println(\"${f()}\") }",
+    );
+    let stmts = stmts_of(&mir, "f");
+    let sets: Vec<(u32, nova_mir::MirTy)> = stmts
+        .iter()
+        .filter_map(|s| match s {
+            nova_mir::Stmt::SetField { index, ty, .. } => Some((*index, *ty)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        sets,
+        [(0, nova_mir::MirTy::I64), (1, nova_mir::MirTy::Ptr)],
+        "{stmts:?}"
+    );
+}
+
+/// A generic function instantiated at two tuple types, and at tuple types
+/// whose nesting differs, is three instances with three symbols: one shared
+/// mangling would send every call to the first instance's code, the shape
+/// of two earlier miscompiles (5.0 spec §10 risk 3).
+#[test]
+fn a_generic_function_at_distinct_tuple_types_is_distinct_instances() {
+    let mir = mir_for(
+        "fn first<T>(x: T) -> T { x }\n\
+         fn main() {\n    let a = first((1, (2, 3)))\n    let b = first(((1, 2), 3))\n    \
+         let c = first((true, 1))\n    println(\"${a.0} ${b.1} ${c.1}\")\n}",
+    );
+    let mut names: Vec<&str> = function_names(&mir)
+        .into_iter()
+        .filter(|n| n.starts_with("first."))
+        .collect();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 3, "{names:?}");
+}
+
+/// A tuple is not a `Map` key: it has no `Hash` and no `Eq` (decision 3),
+/// so instantiating `Map`'s methods with one is E0013, with the note that
+/// says why.
+#[test]
+fn a_tuple_map_key_is_e0013_with_a_note() {
+    let src = "fn main() {\n    let mut m: Map<(Int, Int), Int> = Map::new()\n    \
+               let p = m.insert((1, 2), 3)\n    println(\"${m.len()}\")\n}";
+    let file_id = FileId::DUMMY;
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let resolved = resolve(&ast.expect("an AST"));
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let diags = match lower_module(&checked.module) {
+        Ok(_) => panic!("a tuple key lowered"),
+        Err(d) => d,
+    };
+    assert!(!diags.is_empty());
+    for d in &diags {
+        assert_eq!(d.code, "E0013", "{d:?}");
+        assert!(d.message.contains("`(Int, Int): "), "{d:?}");
+        assert_eq!(d.notes, [nova_hir::TUPLE_HAS_NO_IMPLS], "{d:?}");
+    }
+    let traits: Vec<bool> = ["Hash", "Eq"]
+        .iter()
+        .map(|t| diags.iter().any(|d| d.message.contains(&format!(": {t}`"))))
+        .collect();
+    assert_eq!(traits, [true, true], "{diags:?}");
+}
+
+/// mono names a tuple of one with its comma in that E0013, as the checker
+/// and the parser write it, so the message names the type the program has.
+#[test]
+fn a_tuple_of_one_in_a_bound_message_keeps_its_comma() {
+    let src = "fn main() {\n    let mut m: Map<(Int,), Int> = Map::new()\n    \
+               let p = m.insert((1,), 3)\n    println(\"${m.len()}\")\n}";
+    let file_id = FileId::DUMMY;
+    let (tokens, _) = lex(src, file_id);
+    let (ast, _) = parse(&tokens, file_id);
+    let resolved = resolve(&ast.expect("an AST"));
+    let checked = check(&resolved.file, &resolved.definitions);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let diags = match lower_module(&checked.module) {
+        Ok(_) => panic!("a tuple key lowered"),
+        Err(d) => d,
+    };
+    assert!(!diags.is_empty());
+    for d in &diags {
+        assert!(d.message.contains("`(Int,): "), "{d:?}");
+    }
+}
