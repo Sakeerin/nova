@@ -48,6 +48,7 @@ impl InferCtx {
                 args: args.iter().map(|a| self.apply(a)).collect(),
             },
             Ty::Array(elem) => Ty::Array(Box::new(self.apply(&elem))),
+            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| self.apply(e)).collect()),
             Ty::Future(out) => Ty::Future(Box::new(self.apply(&out))),
             Ty::Assoc { on, assoc } => Ty::Assoc {
                 on: Box::new(self.apply(&on)),
@@ -68,6 +69,7 @@ impl InferCtx {
                 args.iter().any(|a| self.occurs(v, a))
             }
             Ty::Array(elem) => self.occurs(v, &elem),
+            Ty::Tuple(elems) => elems.iter().any(|e| self.occurs(v, e)),
             Ty::Future(out) => self.occurs(v, &out),
             Ty::Assoc { on, .. } => self.occurs(v, &on),
             _ => false,
@@ -159,6 +161,14 @@ impl InferCtx {
                         .all(|(x, y)| self.unify(x, y))
             }
             (Ty::Array(e1), Ty::Array(e2)) => self.unify(&e1.clone(), &e2.clone()),
+            (Ty::Tuple(t1), Ty::Tuple(t2)) => {
+                t1.len() == t2.len()
+                    && t1
+                        .clone()
+                        .iter()
+                        .zip(t2.clone().iter())
+                        .all(|(x, y)| self.unify(x, y))
+            }
             (Ty::Future(o1), Ty::Future(o2)) => self.unify(&o1.clone(), &o2.clone()),
             (Ty::Assoc { on: o1, assoc: a1 }, Ty::Assoc { on: o2, assoc: a2 }) => {
                 a1 == a2 && self.unify(&o1.clone(), &o2.clone())
@@ -337,5 +347,36 @@ mod tests {
             },
             "apply must resolve the solved var inside `on`, not just pass the projection through"
         );
+    }
+
+    // --- `Ty::Tuple` (5.0 spec §4.1) ---
+
+    #[test]
+    fn unify_solves_vars_inside_tuples_element_by_element() {
+        let mut cx = InferCtx::default();
+        let a = cx.fresh();
+        let b = cx.fresh();
+        let pat = Ty::Tuple(vec![a.clone(), Ty::Tuple(vec![b.clone()])]);
+        let ground = Ty::Tuple(vec![Ty::Int, Ty::Tuple(vec![Ty::String])]);
+        assert!(cx.unify(&pat, &ground));
+        assert_eq!(cx.apply(&pat), ground);
+    }
+
+    #[test]
+    fn tuples_of_different_arity_or_elements_do_not_unify() {
+        let mut cx = InferCtx::default();
+        let two = Ty::Tuple(vec![Ty::Int, Ty::Int]);
+        assert!(!cx.unify(&two, &Ty::Tuple(vec![Ty::Int, Ty::Int, Ty::Int])));
+        assert!(!cx.unify(&two, &Ty::Tuple(vec![Ty::Int, Ty::Bool])));
+        // A tuple of one is not its element.
+        assert!(!cx.unify(&Ty::Tuple(vec![Ty::Int]), &Ty::Int));
+        assert!(!cx.unify(&two, &Ty::Unit));
+    }
+
+    #[test]
+    fn occurs_check_reaches_inside_a_tuple() {
+        let mut cx = InferCtx::default();
+        let v = cx.fresh();
+        assert!(!cx.unify(&v, &Ty::Tuple(vec![Ty::Int, v.clone()])));
     }
 }

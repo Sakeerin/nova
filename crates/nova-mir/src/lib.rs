@@ -1299,6 +1299,7 @@ pub fn mir_ty(ty: &hir::Ty) -> MirTy {
         | hir::Ty::Sum { .. }
         | hir::Ty::Record { .. }
         | hir::Ty::Array(_)
+        | hir::Ty::Tuple(_)
         | hir::Ty::Future(_) => MirTy::Ptr,
         hir::Ty::Unit | hir::Ty::Never => MirTy::Unit,
         // Post-typeck these should not occur; map defensively. `Assoc` is
@@ -1374,8 +1375,18 @@ fn mangle_ty(ty: &hir::Ty) -> String {
             }
         }
         hir::Ty::Array(elem) => format!("A{}E", mangle_ty(elem)),
+        // A tuple is `T`, its elements' manglings in order, and `E`: each
+        // element's mangling is prefix-free and none begins with `E`, so
+        // distinct tuple types, `(Int, (Int, Int))` and `((Int, Int), Int)`
+        // among them, get distinct strings (spec
+        // `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+        // §4.1, §10 risk 3).
+        hir::Ty::Tuple(elems) => {
+            let es: Vec<String> = elems.iter().map(mangle_ty).collect();
+            format!("T{}E", es.join(""))
+        }
         // `U` is not otherwise used as a leading letter here (nullary:
-        // i/f/b/c/s/y/u/n; compound: F/S/R/A above), and the mangling must be
+        // i/f/b/c/s/y/u/n; compound: F/S/R/A/T above), and the mangling must be
         // output-dependent like `Array`'s `A{elem}E` rather than a shared
         // placeholder — see `mangle_ty_distinguishes_futures_by_output_type`.
         hir::Ty::Future(out) => format!("U{}E", mangle_ty(out)),

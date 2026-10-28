@@ -22,6 +22,8 @@ use crate::{
 mod fixes;
 #[cfg(test)]
 mod lang_tests;
+#[cfg(test)]
+mod tuple_tests;
 mod view;
 
 use fixes::{Binding, Need};
@@ -2680,10 +2682,14 @@ impl<'a> Checker<'a> {
                     .collect(),
                 ret: Box::new(self.convert_ty(ret, generics, bounds)),
             },
-            ast::Type::Tuple(_) => {
-                self.unsupported(ty.span, "tuple types");
-                Ty::Error
-            }
+            // `(T1, …, Tn)`, n of one or more: `(T)` is `T` already, and
+            // `(T,)` a tuple of one (spec §4.1).
+            ast::Type::Tuple(items) => Ty::Tuple(
+                items
+                    .iter()
+                    .map(|t| self.convert_ty(t, generics, bounds))
+                    .collect(),
+            ),
             ast::Type::Ref { .. } | ast::Type::Ptr { .. } => {
                 self.unsupported(ty.span, "reference and pointer types");
                 Ty::Error
@@ -3549,7 +3555,17 @@ impl<'a> Checker<'a> {
             ast::Expr::ArrayRepeat { init, len } => self.check_array_repeat(fcx, init, len, span),
             ast::Expr::Index { target, index } => self.check_index(fcx, target, index, span),
             // --- deferred constructs ---
-            ast::Expr::Tuple(_) => self.unsupported_expr(span, "tuple expressions"),
+            ast::Expr::Tuple(items) => {
+                // A tuple literal, an anonymous record (spec §4.1): its
+                // elements left to right, its type theirs.
+                let elems: Vec<hir::Expr> = items.iter().map(|e| self.check_expr(fcx, e)).collect();
+                let ty = Ty::Tuple(elems.iter().map(|e| e.ty.clone()).collect());
+                hir::Expr {
+                    kind: hir::ExprKind::MakeTuple { elems },
+                    ty,
+                    span,
+                }
+            }
             ast::Expr::Closure { params, ret, body } => {
                 self.check_closure(fcx, params, ret, body, span)
             }
@@ -3648,6 +3664,7 @@ impl<'a> Checker<'a> {
                                         // Some path; use the interp span here.
                                         span,
                                     );
+                                    self.note_tuple_has_no_impls(&other);
                                 }
                             }
                         }
@@ -5897,6 +5914,9 @@ impl<'a> Checker<'a> {
         if matches!(recv_ty, Ty::Error) {
             return error_expr(span);
         }
+        if self.tuple_index_on_unknown(fcx, &recv_ty, field) {
+            return error_expr(span);
+        }
         self.error(
             "E0014",
             self.no_field_message(fcx, &recv_ty, &field.value),
@@ -5916,6 +5936,38 @@ impl<'a> Checker<'a> {
     /// is exactly what had happened before this was pulled out (the write
     /// path said "no field `x` on type `P`" and had no separate wording for a
     /// non-record receiver at all).
+    /// `t.N` on a value whose type is not yet known: E0011, as a method
+    /// call on one is (spec §4.2). Reports it and returns `true`; `false`
+    /// for any other field or receiver.
+    fn tuple_index_on_unknown(
+        &mut self,
+        fcx: &mut FnCtx,
+        recv_ty: &Ty,
+        field: &Spanned<String>,
+    ) -> bool {
+        let is_index = field.value.bytes().all(|b| b.is_ascii_digit());
+        if !is_index || !matches!(fcx.icx.apply(recv_ty), Ty::Var(_)) {
+            return false;
+        }
+        self.error(
+            "E0011",
+            format!(
+                "the type of this value must be known before `.{}` reads an element of it",
+                field.value
+            ),
+            field.span,
+        );
+        self.diagnostics
+            .last_mut()
+            .expect("just pushed")
+            .notes
+            .push("annotate the value's type, for example `let p: (Int, Int) = …`".to_string());
+        // Bound to the error type, so the variable is not reported again as
+        // one inference could not solve.
+        fcx.icx.unify(recv_ty, &Ty::Error);
+        true
+    }
+
     fn no_field_message(&self, fcx: &FnCtx, recv_ty: &Ty, field_name: &str) -> String {
         let record_name = match recv_ty {
             Ty::Record { def_id, .. } => self
@@ -5927,6 +5979,10 @@ impl<'a> Checker<'a> {
         };
         match record_name {
             Some(record_name) => format!("no field `{field_name}` on record `{record_name}`"),
+            // `t.2` on `(Int, Int)`, or `t.x` on a tuple (spec §4.2).
+            None if matches!(fcx.icx.apply(recv_ty), Ty::Tuple(_)) => {
+                format!("no field `{field_name}` on `{}`", self.show(recv_ty, fcx))
+            }
             None => format!(
                 "cannot access field `{field_name}` on `{}`",
                 self.show(recv_ty, fcx)
@@ -5954,7 +6010,14 @@ impl<'a> Checker<'a> {
         field: &str,
         span: Span,
     ) -> Option<(u32, Ty)> {
-        let Ty::Record { def_id, args } = fcx.icx.apply(recv_ty) else {
+        let resolved = fcx.icx.apply(recv_ty);
+        if let Ty::Tuple(elems) = &resolved {
+            // `t.N` (spec §4.2): the parser lets only plain decimal digits
+            // through, so the name is the index.
+            let index: usize = field.parse().ok()?;
+            return elems.get(index).map(|ty| (index as u32, ty.clone()));
+        }
+        let Ty::Record { def_id, args } = resolved else {
             return None;
         };
         let record = self.records.iter().find(|r| r.def_id == def_id)?;
@@ -6805,6 +6868,15 @@ impl<'a> Checker<'a> {
             ),
             span,
         );
+        self.note_tuple_has_no_impls(ty);
+    }
+
+    /// On the E0013 just reported, when `ty` is a tuple, say why (spec
+    /// §4.1).
+    fn note_tuple_has_no_impls(&mut self, ty: &Ty) {
+        if let (Ty::Tuple(_), Some(d)) = (ty, self.diagnostics.last_mut()) {
+            d.notes.push(hir::TUPLE_HAS_NO_IMPLS.to_string());
+        }
     }
 
     fn check_unary(
@@ -7193,6 +7265,10 @@ impl<'a> Checker<'a> {
         let Some((index, field_ty)) =
             self.record_field_index_and_ty(fcx, &recv_ty, &field.value, span)
         else {
+            if self.tuple_index_on_unknown(fcx, &recv_ty, field) {
+                self.check_expr(fcx, rhs);
+                return error_expr(span);
+            }
             // Same wording as the read path (`no_field_message`), including
             // its separate not-a-record case.
             self.error(
@@ -8038,6 +8114,11 @@ fn collect_self_projections(ty: &Ty, self_ty: &Ty, out: &mut Vec<DefId>) {
             }
         }
         Ty::Array(elem) => collect_self_projections(elem, self_ty, out),
+        Ty::Tuple(elems) => {
+            for e in elems {
+                collect_self_projections(e, self_ty, out);
+            }
+        }
         Ty::Future(fut_out) => collect_self_projections(fut_out, self_ty, out),
         Ty::Int
         | Ty::Float
@@ -8155,6 +8236,7 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
         K::Call { args, .. } => out.extend(args.iter()),
         K::MakeVariant { args, .. }
         | K::MakeRecord { fields: args, .. }
+        | K::MakeTuple { elems: args }
         | K::MakeArray { elems: args }
         | K::StrConcat(args) => out.extend(args.iter()),
         K::FieldGet { target, .. } | K::ArrayLen { target } => out.push(target),
@@ -8239,6 +8321,7 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
         K::Call { args, .. } => out.extend(args.iter_mut()),
         K::MakeVariant { args, .. }
         | K::MakeRecord { fields: args, .. }
+        | K::MakeTuple { elems: args }
         | K::MakeArray { elems: args }
         | K::StrConcat(args) => out.extend(args.iter_mut()),
         K::FieldGet { target, .. } | K::ArrayLen { target } => out.push(target),
@@ -8808,6 +8891,7 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         }
         hir::ExprKind::MakeVariant { args, .. }
         | hir::ExprKind::MakeRecord { fields: args, .. }
+        | hir::ExprKind::MakeTuple { elems: args }
         | hir::ExprKind::MakeArray { elems: args }
         | hir::ExprKind::StrConcat(args) => {
             for a in args {

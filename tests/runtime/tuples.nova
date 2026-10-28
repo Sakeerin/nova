@@ -1,0 +1,127 @@
+// Tuple types, literals and fields (5.0 spec §4.1, §4.2): a tuple of one,
+// nested tuples read with `t.1.0` and `t.0.1.2`, writes and `+=` on an
+// element, tuples through generic functions, closures, `Option`, `Vec`,
+// arrays and a record's field, and elements of every machine class:
+// `Int`, `Float`, `Bool`, `Char`, `String`, a unit, a function and a
+// record.
+
+record Token { text: String, line: Int }
+
+record Holder { pair: (String, Int) }
+
+fn div_mod(a: Int, b: Int) -> (Int, Int) { (a / b, a % b) }
+
+fn swap<A, B>(p: (A, B)) -> (B, A) { (p.1, p.0) }
+
+fn first<A, B>(p: (A, B)) -> A { p.0 }
+
+fn pair_up<T>(a: T, b: T) -> (T, T) { (a, b) }
+
+fn apply(f: fn((Int, Int)) -> Int, p: (Int, Int)) -> Int { f(p) }
+
+fn min_max(xs: [Int]) -> Option<(Int, Int)> {
+    if xs.len() == 0 { return None }
+    let mut lo = xs[0]
+    let mut hi = xs[0]
+    let mut i = 1
+    while i < xs.len() {
+        if xs[i] < lo { lo = xs[i] }
+        if xs[i] > hi { hi = xs[i] }
+        i += 1
+    }
+    Some((lo, hi))
+}
+
+fn show_min_max(xs: [Int]) -> String {
+    match min_max(xs) {
+        Some(p) => "${p.0}..${p.1}"
+        None => "empty"
+    }
+}
+
+fn main() {
+    // Literals, a tuple of one, and a function returning a tuple.
+    let p: (String, Int) = ("x", 1)
+    let one = (5,)
+    let q = div_mod(17, 5)
+    println("${p.0} ${p.1} ${one.0} ${q.0} ${q.1}")
+
+    // Nested tuples: the lexer splits `1.0` after a `.`.
+    let n = ((1, 2), (3, (4, 5, (6, 7))))
+    println("${n.0.0} ${n.0.1} ${n.1.0} ${n.1.1.0} ${n.1.1.2.1}")
+    let deep = (((((10,),),),),)
+    println("${deep.0.0.0.0.0}")
+    let wide = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)
+    println("${wide.10} ${wide.11}")
+
+    // Writes, and `+=` on an element, through a mutable binding.
+    let mut m = (1, "a", 2.5)
+    m.0 = 7
+    m.0 += 3
+    m.1 = "b"
+    m.1 += "c"
+    m.2 *= 2.0
+    println("${m.0} ${m.1} ${m.2}")
+    let mut nested = ((0, 0), 0)
+    nested.0.1 = 9
+    nested.0.0 -= 4
+    println("${nested.0.0} ${nested.0.1} ${nested.1}")
+
+    // A tuple is a reference, as a record is: a copy of the binding
+    // shares it.
+    let shared = m
+    m.0 = 100
+    println("${shared.0}")
+
+    // Generics: inference through the element types.
+    let s = swap(p)
+    println("${s.0} ${s.1}")
+    let s2 = swap(swap(("back", true)))
+    println("${s2.0} ${s2.1}")
+    println("${first((2.5, 'z'))} ${first(('z', 2.5))}")
+    let pp = pair_up(pair_up(1, 2), pair_up(3, 4))
+    println("${pp.0.1 + pp.1.0}")
+
+    // Closures that take, return and capture tuples.
+    let mul = |t: (Int, Int)| t.0 * t.1
+    println("${mul((6, 7))} ${apply(mul, (3, 4))}")
+    let base = (100, 200)
+    let add_base = |x: Int| (base.0 + x, base.1 + x)
+    let r = add_base(5)
+    println("${r.0} ${r.1}")
+
+    // `Option`, `Vec` and arrays of tuples.
+    println(show_min_max([3, 9, -2, 7]))
+    println(show_min_max([]))
+    let mut v: Vec<(Int, Token)> = Vec::new()
+    v.push((1, Token { text: "let", line: 1 }))
+    v.push((2, Token { text: "x", line: 1 }))
+    v.push((3, Token { text: "=", line: 2 }))
+    let mut i = 0
+    while i < v.len() {
+        match v.get(i) {
+            Some(t) => println("${t.0}: ${t.1.text}@${t.1.line}")
+            None => println("none")
+        }
+        i += 1
+    }
+    let arr = [("a", 1), ("b", 2), ("c", 3)]
+    let mut total = 0
+    let mut names = ""
+    let mut j = 0
+    while j < arr.len() {
+        total += arr[j].1
+        names += arr[j].0
+        j += 1
+    }
+    println("${names} ${total}")
+
+    // A record's field, and every machine class as an element.
+    let h = Holder { pair: ("h", 9) }
+    println("${h.pair.0} ${h.pair.1}")
+    let mixed = (true, 'c', 1.5, (), "s", |x: Int| x + 1, Token { text: "t", line: 3 })
+    let inc = mixed.5
+    println("${mixed.0} ${mixed.1} ${mixed.2} ${mixed.4} ${inc(41)} ${mixed.6.text}")
+    let u = mixed.3
+    println("unit ${u == ()}")
+}

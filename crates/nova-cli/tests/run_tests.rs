@@ -12995,6 +12995,21 @@ fn string_concat_runs() {
     golden_three_ways("string_concat", true);
 }
 
+/// Tuple types, literals and fields (5.0 spec §4.1, §4.2): generics,
+/// closures, nesting, writes, and every machine class as an element, also
+/// under GC stress, since its tuples hold strings, records and closures.
+#[test]
+fn tuples_run() {
+    golden_three_ways("tuples", true);
+}
+
+/// Tuples that hold pointers, across `.await`s, under GC stress (5.0 spec
+/// §4.1, §7.3).
+#[test]
+fn tuples_async_runs() {
+    golden_three_ways("tuples_async", true);
+}
+
 /// E0102 (5.0 spec §3.7) is a warning: it prints, and the program still
 /// builds and runs, its own `Number` meaning its own variant.
 #[test]

@@ -3364,6 +3364,12 @@ fn type_full_name(ty: &nova_ast::Type) -> String {
             }
         }
         nova_ast::Type::Array(elem) => format!("Arr_{}", type_full_name(&elem.value)),
+        // A tuple, as an impl's type argument (`impl Box<(Int, Int)>`): no
+        // impl names a tuple itself (5.0 spec §4.1).
+        nova_ast::Type::Tuple(items) if !items.is_empty() => {
+            let parts: Vec<String> = items.iter().map(|a| type_full_name(&a.value)).collect();
+            format!("Tup{}_{}", items.len(), parts.join("_"))
+        }
         _ => "anon".to_string(),
     }
 }

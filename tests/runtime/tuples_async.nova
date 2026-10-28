@@ -1,0 +1,69 @@
+// Tuples that hold pointers, held across `.await`s and through many
+// allocations (5.0 spec §4.1, §7.3): a test runs it under
+// `NOVA_GC_STRESS=1` too, which collects at every allocation, so an
+// element the collector failed to trace would be read after it was freed.
+
+record Token { text: String, line: Int }
+
+// A tail tuple on the line after a statement: the `;` ends the statement
+// before it, as the newline rule's E0103 asks (5.0 spec §3.5).
+async fn split_word(word: String, line: Int) -> (String, Token) {
+    yield_now().await;
+    ("<${word}>", Token { text: word, line: line })
+}
+
+async fn count_up(n: Int) -> (Int, [String]) {
+    let mut parts = ["start"]
+    let mut i = 0
+    while i < n {
+        yield_now().await
+        parts = [parts[0], "step ${i}"]
+        i += 1
+    }
+    return (n, parts)
+}
+
+async fn run() -> Int {
+    // A tuple built before an `.await` and read after it.
+    let held = ("kept ${40 + 2}", [1, 2, 3], Token { text: "tok", line: 7 })
+    yield_now().await
+    let mut garbage = 0
+    let mut i = 0
+    while i < 50 {
+        let s = "garbage ${i}"
+        garbage += s.len()
+        i += 1
+    }
+    println("${held.0} ${held.1[2]} ${held.2.text}@${held.2.line} ${garbage}")
+
+    // Tuples returned by async functions, kept in a `Vec` across more
+    // `.await`s.
+    let mut words: Vec<(String, Token)> = Vec::new()
+    let source = ["fn", "main", "nova"]
+    let mut line = 0
+    while line < source.len() {
+        words.push(split_word(source[line], line + 1).await)
+        line += 1
+    }
+    let mut k = 0
+    while k < words.len() {
+        match words.get(k) {
+            Some(t) => println("${t.0} ${t.1.text} ${t.1.line}")
+            None => println("none")
+        }
+        k += 1
+    }
+    let counted = count_up(3).await
+    println("${counted.0} ${counted.1[0]} ${counted.1[1]}")
+
+    // A nested tuple whose inner tuple is replaced while the outer one is
+    // held across an `.await`.
+    let mut outer = (("a", 1), "b")
+    yield_now().await
+    outer.0 = ("c ${outer.0.1 + 1}", 2)
+    yield_now().await
+    println("${outer.0.0} ${outer.0.1} ${outer.1}")
+    words.len()
+}
+
+fn main() { println("done ${block_on(run())}") }

@@ -329,7 +329,9 @@ impl<'a> Lowerer<'a> {
                 });
                 t
             }
-            K::MakeRecord { fields, .. } => {
+            // A tuple is an anonymous record (spec §4.1): the same
+            // `MakeRecord`, so no backend sees a tuple.
+            K::MakeRecord { fields, .. } | K::MakeTuple { elems: fields } => {
                 let lowered: Vec<(Temp, MirTy)> = fields
                     .iter()
                     .map(|f| {

@@ -273,18 +273,20 @@ pub fn lower_module_with(
                         .trait_def(trait_id)
                         .map(|t| t.name.clone())
                         .unwrap_or_else(|| format!("trait#{}", trait_id.0));
-                    diagnostics.push(
-                        Diagnostic::error(
-                            "E0013",
-                            format!(
-                                "trait bound `{}: {}` is not satisfied when instantiating `{}`",
-                                type_name(arg, module),
-                                trait_name,
-                                func.name
-                            ),
-                        )
-                        .with_primary_label(func.span, "required by this generic parameter"),
-                    );
+                    let mut diagnostic = Diagnostic::error(
+                        "E0013",
+                        format!(
+                            "trait bound `{}: {}` is not satisfied when instantiating `{}`",
+                            type_name(arg, module),
+                            trait_name,
+                            func.name
+                        ),
+                    )
+                    .with_primary_label(func.span, "required by this generic parameter");
+                    if matches!(arg, Ty::Tuple(_)) {
+                        diagnostic = diagnostic.with_note(hir::TUPLE_HAS_NO_IMPLS);
+                    }
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -609,6 +611,14 @@ fn type_name(ty: &Ty, module: &hir::Module) -> String {
             .map(|r| r.name.clone())
             .unwrap_or_else(|| "?".to_string()),
         Ty::Array(elem) => format!("[{}]", type_name(elem, module)),
+        Ty::Tuple(elems) => {
+            let names: Vec<String> = elems.iter().map(|e| type_name(e, module)).collect();
+            if names.len() == 1 {
+                format!("({},)", names[0])
+            } else {
+                format!("({})", names.join(", "))
+            }
+        }
         Ty::Future(out) => format!("Future<{}>", type_name(out, module)),
         Ty::Assoc { on, assoc } => {
             let name = module
@@ -783,6 +793,9 @@ impl Specializer<'_> {
             } => K::MakeRecord {
                 record: *record,
                 fields: self.exprs(rec_fields),
+            },
+            K::MakeTuple { elems } => K::MakeTuple {
+                elems: self.exprs(elems),
             },
             K::FieldGet { target, index } => K::FieldGet {
                 target: self.boxed(target),
@@ -1145,6 +1158,56 @@ mod tests {
                 "Bytes's mangled string must not collide with {name}'s"
             );
         }
+    }
+
+    #[test]
+    fn mangle_ty_gives_distinct_tuple_types_distinct_strings() {
+        // A shared mangling has shipped as a miscompile twice (see above):
+        // every pair of these tuple types, which differ in arity, element
+        // type, nesting or element order, must mangle apart, and apart from
+        // the other one-argument constructors of the same element (5.0 spec
+        // §4.1, §10 risk 3).
+        use hir::Ty;
+        let t = |e: Vec<Ty>| Ty::Tuple(e);
+        let types = [
+            t(vec![Ty::Int]),
+            t(vec![Ty::Int, Ty::Int]),
+            t(vec![Ty::Int, Ty::Int, Ty::Int]),
+            t(vec![Ty::Int, Ty::Bool]),
+            t(vec![Ty::Bool, Ty::Int]),
+            t(vec![Ty::Int, t(vec![Ty::Int, Ty::Int])]),
+            t(vec![t(vec![Ty::Int, Ty::Int]), Ty::Int]),
+            t(vec![t(vec![Ty::Int]), Ty::Int]),
+            t(vec![t(vec![Ty::Int, Ty::Int])]),
+            t(vec![Ty::Array(Box::new(Ty::Int))]),
+            Ty::Array(Box::new(t(vec![Ty::Int]))),
+            Ty::Array(Box::new(Ty::Int)),
+            Ty::Future(Box::new(Ty::Int)),
+            Ty::Int,
+            Ty::Unit,
+        ];
+        let names: Vec<String> = types.iter().map(crate::mangle_ty).collect();
+        for (i, a) in names.iter().enumerate() {
+            for (j, b) in names.iter().enumerate().skip(i + 1) {
+                assert_ne!(a, b, "{:?} and {:?}", types[i], types[j]);
+            }
+        }
+        // And within `mangle`'s `_`-joined argument list.
+        let f = |args: &[Ty]| crate::mangle(DefId(3), "f", args);
+        assert_ne!(
+            f(&[t(vec![Ty::Int, Ty::Int]), Ty::Int]),
+            f(&[Ty::Int, t(vec![Ty::Int, Ty::Int])])
+        );
+    }
+
+    #[test]
+    fn mir_ty_maps_a_tuple_to_ptr() {
+        // A tuple is a heap record; `MirTy::Unit` would drop it from a
+        // signature, as the projection bug did.
+        assert_eq!(
+            crate::mir_ty(&hir::Ty::Tuple(vec![hir::Ty::Int])),
+            crate::MirTy::Ptr
+        );
     }
 
     #[test]
