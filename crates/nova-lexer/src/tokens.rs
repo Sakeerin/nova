@@ -26,6 +26,9 @@ use crate::Token;
 pub struct Tokens {
     tokens: Vec<Spanned<Token>>,
     line_break_before: Vec<bool>,
+    /// For each token, whether it is an integer spelled in plain decimal
+    /// digits with no leading zero: what a tuple index `t.N` must be.
+    plain_decimal: Vec<bool>,
 }
 
 impl Tokens {
@@ -43,10 +46,32 @@ impl Tokens {
                 gap.iter().any(|&b| b == b'\n' || b == b'\r')
             })
             .collect();
+        let plain_decimal = tokens
+            .iter()
+            .map(|t| {
+                let text = bytes
+                    .get(t.span.start as usize..t.span.end as usize)
+                    .unwrap_or(&[]);
+                matches!(t.value, Token::Int(_))
+                    && !text.is_empty()
+                    && text.iter().all(u8::is_ascii_digit)
+                    && (text.len() == 1 || text[0] != b'0')
+            })
+            .collect();
         Self {
             tokens,
             line_break_before,
+            plain_decimal,
         }
+    }
+
+    /// Whether the token at `index` is an integer written in plain decimal
+    /// digits with no leading zero (`0`, `7`, `12`; not `01`, `1_0` or
+    /// `0x1`): the only spelling a tuple index `t.N` takes (spec
+    /// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+    /// §4.2). `false` past the end.
+    pub fn plain_decimal(&self, index: usize) -> bool {
+        self.plain_decimal.get(index).copied().unwrap_or(false)
     }
 
     /// Whether a line break comes before the token at `index`. `false` past

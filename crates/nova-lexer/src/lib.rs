@@ -142,12 +142,48 @@ impl<'src> Lexer<'src> {
             ));
         }
 
+        let mut tokens = self.split_tuple_indexes(tokens);
         tokens.push(Spanned::new(
             Token::Eof,
             Span::point(self.source.len() as u32, self.file),
         ));
 
         (tokens, errors)
+    }
+
+    /// After a `.`, a float whose text is digits, `.`, digits becomes an
+    /// integer, a `.` and an integer, so `t.1.0` reads as `(t.1).0` and
+    /// `t.0.1.2` chains (spec
+    /// `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+    /// §4.2). It splits by the source text, not the value, so `t.1.10` is
+    /// `(t.1).10`. A `..` or any other token before it, an `_`, an exponent,
+    /// or a part too large for an integer leaves the float as it is.
+    fn split_tuple_indexes(&self, tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+        let mut out: Vec<Spanned<Token>> = Vec::with_capacity(tokens.len());
+        for tok in tokens {
+            let after_dot = matches!(out.last(), Some(prev) if prev.value == Token::Dot);
+            if let (true, Token::Float(_)) = (after_dot, &tok.value) {
+                let (start, end) = (tok.span.start as usize, tok.span.end as usize);
+                let text = self.source.get(start..end).unwrap_or("");
+                if let Some((int, frac)) = text.split_once('.') {
+                    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+                    if let (true, true, Ok(a), Ok(b)) = (
+                        digits(int),
+                        digits(frac),
+                        int.parse::<i64>(),
+                        frac.parse::<i64>(),
+                    ) {
+                        let dot = start + int.len();
+                        out.push(Spanned::new(Token::Int(a), self.span(start, dot)));
+                        out.push(Spanned::new(Token::Dot, self.span(dot, dot + 1)));
+                        out.push(Spanned::new(Token::Int(b), self.span(dot + 1, end)));
+                        continue;
+                    }
+                }
+            }
+            out.push(tok);
+        }
+        out
     }
 
     fn span(&self, start: usize, end: usize) -> Span {

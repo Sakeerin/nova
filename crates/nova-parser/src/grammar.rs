@@ -2109,6 +2109,29 @@ impl<'a> Parser<'a> {
                             .map(|s| s.span)
                             .unwrap_or(cur_span);
                         expr = Spanned::new(Expr::Await(Box::new(expr)), start.merge(end));
+                    } else if let Token::Int(n) = self.peek().clone() {
+                        // `t.N`, a tuple's element (spec
+                        // docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md
+                        // §4.2): plain decimal digits only, so `t.01`,
+                        // `t.1_0` and `t.0x1` are refused, as Rust does.
+                        let span = self.peek_span();
+                        if !self.tokens.plain_decimal(self.pos) {
+                            self.errors.push(ParseError::Custom {
+                                message: format!(
+                                    "a tuple index is plain decimal digits, with no leading \
+                                     zero, `_` or prefix: write `.{n}`"
+                                ),
+                                span,
+                            });
+                        }
+                        self.advance();
+                        expr = Spanned::new(
+                            Expr::Field {
+                                target: Box::new(expr),
+                                field: Spanned::new(n.to_string(), span),
+                            },
+                            start.merge(span),
+                        );
                     } else if !matches!(
                         self.peek(),
                         Token::Ident(_) | Token::SelfLower | Token::SelfUpper
