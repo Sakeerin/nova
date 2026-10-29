@@ -1,0 +1,47 @@
+keyword fn
+ident x
+small
+negative -5
+teen
+number 20
+letter
+letter
+digit
+symbol +
+numbers 5
+pair with right
+pair with left
+pair
+eof
+nothing
+depth 4 sum 15
+depth 2
+origin
+axis
+axis
+diagonal 2
+anti 3
+near
+far
+1 and one
+err 2 20
+err 30
+special
+only plain
+4 5 6
+both
+first x
+name y
+name z
+ping
+stop
+3 2
+7 seven true z
+last z
+apples 3
+2..9
+one 1
+big a tiny b small c none
+3-4
+4-3
+12

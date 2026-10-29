@@ -1267,9 +1267,9 @@ pub async fn read_request(conn: TcpStream, limits: Limits) -> Result<Request, Ht
         }
         buf = buf.concat(chunk)
         // One arm, not two: `parse_request_head` already returns
-        // `Option<Request>`, so the loop assigns it straight through. It is
-        // also the form the language permits -- `Ok(Some(r))` is
-        // `E0900: nested patterns inside variants are not supported yet`.
+        // `Option<Request>`, so the loop assigns it straight through. A
+        // nested `Ok(Some(r))` would work since 5.0b, but would need a
+        // second arm for `Ok(None)`.
         match parse_request_head(buf, limits) {
             Ok(maybe) => head = maybe
             Err(e) => return Err(e)

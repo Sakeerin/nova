@@ -1,0 +1,89 @@
+// Nested matches, guards that `.await` and fall through, and destructured
+// tuples, in `async fn`s, across `.await`s and through many allocations
+// (5.0 spec §4.3, §4.6, §7.3): a test runs it under `NOVA_GC_STRESS=1`
+// too, so a projection or a binding the collector failed to see would be
+// read after it was freed.
+
+type Expr = | Num(Int) | Name(String) | Add(Expr, Expr) | Neg(Expr)
+
+async fn lookup(name: String) -> Option<Int> {
+    yield_now().await
+    match name {
+        "x" => Some(10)
+        "y" => Some(0 - 4)
+        _ => None
+    }
+}
+
+async fn is_big(n: Int) -> Bool {
+    yield_now().await
+    n > 100
+}
+
+async fn eval(e: Expr) -> Result<Int, String> {
+    match e {
+        Num(n) if is_big(n).await => Err("too big: ${n}")
+        Num(n) => Ok(n)
+        Name(s) => match lookup(s).await {
+            Some(v) => Ok(v)
+            None => Err("unbound ${s}")
+        }
+        Add(Num(0), rest) | Add(rest, Num(0)) => eval(rest).await
+        Add(a, b) => {
+            let l = eval(a).await
+            let r = eval(b).await
+            match (l, r) {
+                (Ok(x), Ok(y)) => Ok(x + y)
+                (Err(m), _) | (_, Err(m)) => Err(m)
+            }
+        }
+        Neg(Neg(inner)) => eval(inner).await
+        Neg(inner) => match eval(inner).await {
+            Ok(v) => Ok(0 - v)
+            Err(m) => Err(m)
+        }
+    }
+}
+
+async fn churn(label: String) -> (String, Int) {
+    let mut total = 0
+    let mut i = 0
+    while i < 40 {
+        let s = "${label} ${i}"
+        total += s.len()
+        i += 1
+    }
+    yield_now().await;
+    (label, total)
+}
+
+async fn run() -> Int {
+    let exprs = [
+        Num(5),
+        Num(500),
+        Name("x"),
+        Name("zz"),
+        Add(Num(0), Name("y")),
+        Add(Name("x"), Num(0)),
+        Add(Num(2), Add(Num(3), Name("x"))),
+        Add(Num(1), Name("nope")),
+        Neg(Neg(Num(7))),
+        Neg(Add(Num(1), Num(2))),
+    ]
+    let mut ok = 0
+    for e in exprs {
+        match eval(e).await {
+            Ok(v) => {
+                ok += 1
+                println("ok ${v}")
+            }
+            Err(m) => println("error ${m}")
+        }
+    }
+    let (label, total) = churn("word").await
+    let ((a, b), c) = ((churn("left").await, churn("right").await), "end")
+    println("${label} ${total} ${a.0} ${a.1} ${b.0} ${b.1} ${c}")
+    ok
+}
+
+fn main() { println("done ${block_on(run())}") }

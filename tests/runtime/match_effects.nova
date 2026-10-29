@@ -1,0 +1,60 @@
+// The order and number of a `match`'s side effects (5.0 spec §4.3, §4.6):
+// the scrutinee is evaluated once, however many arms test it; each guard
+// runs only when its arm's pattern matched, after its bindings, in arm
+// order, at most once per match, and a false guard goes on to the next
+// arm; or-pattern alternatives run no guard twice.
+
+record Log { lines: Vec<String> }
+
+fn note(mut log: Log, s: String) { log.lines.push(s) }
+
+fn next_value(mut log: Log, v: Option<(Int, String)>) -> Option<(Int, String)> {
+    note(log, "scrutinee")
+    v
+}
+
+fn check(mut log: Log, label: String, result: Bool) -> Bool {
+    note(log, "guard ${label}")
+    result
+}
+
+fn run(log: Log, v: Option<(Int, String)>) -> String {
+    match next_value(log, v) {
+        Some((0, s)) if check(log, "zero ${s}", s == "keep") => "zero kept"
+        Some((n, "a") | (n, "b")) if check(log, "ab ${n}", n > 1) => "ab ${n}"
+        Some((n, s)) if check(log, "any ${n} ${s}", n % 2 == 0) => "even ${n}"
+        Some((n, _)) if check(log, "late ${n}", false) => "never"
+        Some(_) => "other"
+        None => "none"
+    }
+}
+
+fn flush(mut log: Log) {
+    let mut i = 0
+    while i < log.lines.len() {
+        match log.lines.get(i) {
+            Some(line) => println("  ${line}")
+            None => {}
+        }
+        i += 1
+    }
+    log.lines.clear()
+}
+
+fn main() {
+    let log = Log { lines: Vec::new() }
+    let cases = [
+        Some((0, "keep")),
+        Some((0, "drop")),
+        Some((3, "a")),
+        Some((1, "b")),
+        Some((4, "c")),
+        Some((5, "d")),
+        None,
+    ]
+    for c in cases {
+        let r = run(log, c)
+        println(r)
+        flush(log)
+    }
+}

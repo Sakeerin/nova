@@ -142,6 +142,31 @@ fn sum_match_still_switches_on_i64() {
     assert_well_formed(&ir);
 }
 
+/// 5.0b (5.0 spec §4.6): a match with a nested pattern lowers by test
+/// chains, compares and conditional branches, with no `switch`; a flat
+/// match beside it keeps its `switch`.
+#[test]
+fn a_nested_match_emits_chains_and_a_flat_one_still_switches() {
+    let nested = ir_for(
+        "type E = | A(Int) | B\n\
+         fn f(o: (E, Int)) -> Int { match o { (A(1..=3), _) => 1, (A(_), n) if n > 0 => 2, _ => 3 } }\n\
+         fn main() { println(\"${f((B, 1))}\") }",
+    );
+    let body = &nested[nested.find("define").unwrap()..];
+    assert!(!body.contains("switch "), "{nested}");
+    assert!(nested.contains("icmp eq i64"), "{nested}");
+    assert!(nested.contains("icmp sge i64"), "{nested}");
+    assert!(nested.contains("br i1"), "{nested}");
+    assert_well_formed(&nested);
+    let flat = ir_for(
+        "type E = | A(Int) | B\n\
+         fn f(e: E) -> Int { match e { A(n) => n, B => 0 } }\n\
+         fn main() { println(\"${f(B)}\") }",
+    );
+    assert!(flat.contains("switch i64"), "{flat}");
+    assert_well_formed(&flat);
+}
+
 #[test]
 fn floats_use_hex_constants_and_fp_ops() {
     let ir = ir_for(

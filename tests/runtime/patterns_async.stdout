@@ -1,0 +1,12 @@
+ok 5
+error too big: 500
+ok 10
+error unbound zz
+ok -4
+ok 10
+ok 15
+error unbound nope
+ok 7
+ok -3
+word 270 left 270 right 310 end
+done 7

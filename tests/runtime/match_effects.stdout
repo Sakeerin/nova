@@ -1,0 +1,24 @@
+zero kept
+  scrutinee
+  guard zero keep
+even 0
+  scrutinee
+  guard zero drop
+  guard any 0 drop
+ab 3
+  scrutinee
+  guard ab 3
+other
+  scrutinee
+  guard ab 1
+  guard any 1 b
+  guard late 1
+even 4
+  scrutinee
+  guard any 4 c
+other
+  scrutinee
+  guard any 5 d
+  guard late 5
+none
+  scrutinee
