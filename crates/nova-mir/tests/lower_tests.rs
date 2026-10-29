@@ -2346,3 +2346,56 @@ fn a_tuple_of_one_in_a_bound_message_keeps_its_comma() {
         assert!(d.message.contains("`(Int,): "), "{d:?}");
     }
 }
+
+/// Until test-chain lowering (5.0 spec §4.6), lowering refuses a match it
+/// would lower wrongly, one with a nested pattern or a guard: E0900.
+#[test]
+fn a_nested_or_guarded_match_is_refused_until_chains() {
+    for body in [
+        "match o {\n        Some(Some(n)) => n\n        _ => 0\n    }",
+        "match o {\n        Some(_) if true => 1\n        _ => 0\n    }",
+    ] {
+        let src = format!(
+            "fn f(o: Option<Option<Int>>) -> Int {{\n    {body}\n}}\n\
+             fn main() {{ println(\"${{f(None)}}\") }}"
+        );
+        let file_id = FileId::DUMMY;
+        let (tokens, _) = lex(&src, file_id);
+        let (ast, _) = parse(&tokens, file_id);
+        let resolved = resolve(&ast.expect("an AST"));
+        let checked = check(&resolved.file, &resolved.definitions);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let diags = match lower_module(&checked.module) {
+            Ok(_) => panic!("lowered: {body}"),
+            Err(d) => d,
+        };
+        assert!(diags.iter().any(|d| d.code == "E0900"), "{diags:?}");
+    }
+}
+
+/// A flat `Char` match, which the checker takes from Task 3 on, switches on
+/// its literals' code points, as an `Int` match switches on its literals.
+#[test]
+fn a_flat_char_match_switches_on_its_code_points() {
+    let mir = mir_for(
+        "fn f(c: Char) -> Int {\n    match c {\n        'a' => 1\n        'b' => 2\n        _ => 3\n    }\n}\n\
+         fn main() { println(\"${f('b')}\") }",
+    );
+    let instance = "f.";
+    let f = mir
+        .functions
+        .iter()
+        .find(|f| f.name == "f" || f.name.starts_with(instance))
+        .expect("f");
+    let keys: Vec<i64> = f
+        .blocks
+        .iter()
+        .find_map(|b| match &b.term {
+            nova_mir::Terminator::Switch { arms, .. } => {
+                Some(arms.iter().map(|(v, _)| *v).collect())
+            }
+            _ => None,
+        })
+        .expect("a switch");
+    assert_eq!(keys, ['a' as i64, 'b' as i64]);
+}

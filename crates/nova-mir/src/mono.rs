@@ -894,6 +894,7 @@ impl Specializer<'_> {
                     .iter()
                     .map(|a| hir::Arm {
                         pattern: a.pattern.clone(),
+                        guard: a.guard.as_ref().map(|g| self.expr(g)),
                         body: self.expr(&a.body),
                         span: a.span,
                     })

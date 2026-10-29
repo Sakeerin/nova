@@ -185,6 +185,34 @@ fn names(analysis: &Analysis, path: &Path) -> Vec<lsp::CompletionItem> {
 mod tests {
     use super::*;
 
+    /// A binding inside a nested pattern is offered in its arm, and a
+    /// member after it (5.0 spec §4.3).
+    #[test]
+    fn a_binding_in_a_nested_pattern_completes() {
+        let text = "record Tok { text: String }\n\n\
+                    fn f(o: Option<(Int, Tok)>) -> Int {\n    match o {\n        \
+                    Some((count, tok)) if count > 0 => {\n            \
+                    let a = tok.text.len()\n            \n            tok.\n            a\n        }\n        \
+                    _ => 0\n    }\n}\n\nfn main() {}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-complete-pattern")
+            .join("main.nova");
+        let overlay = Overlay::default().with(&path, text.to_string());
+        let labels = |offset: usize| -> Vec<String> {
+            complete(&path, text, offset as u32, &overlay)
+                .into_iter()
+                .map(|i| i.label)
+                .collect()
+        };
+        let blank = text.find("len()\n            ").unwrap() + "len()\n            ".len();
+        let names = labels(blank);
+        for want in ["count", "tok", "a", "o"] {
+            assert!(names.contains(&want.to_string()), "{want}: {names:?}");
+        }
+        let members = labels(text.find("tok.\n").unwrap() + 4);
+        assert!(members.contains(&"text".to_string()), "{members:?}");
+    }
+
     #[test]
     fn a_signature_stops_at_its_body_outside_parentheses() {
         assert_eq!(

@@ -18,7 +18,13 @@ pub(super) enum Binding {
     /// As a function's, a method's or a closure's parameter, `self`
     /// included.
     Param,
-    /// By a pattern or a `for` loop, where `mut` does not parse.
+    /// By a name inside a destructuring `let`'s pattern, where `mut` does
+    /// not parse but `let mut P` makes every binding mutable.
+    LetPattern,
+    /// By a name inside a `match` arm's or a `for` loop's pattern, where
+    /// `mut` does not parse.
+    Pattern,
+    /// By a `for` loop's plain name, where `mut` does not parse.
     Other,
 }
 
@@ -87,6 +93,28 @@ impl<'a> Checker<'a> {
                 vec![Edit::insert(decl.start, decl.file, "mut ")],
             )),
             _ => None,
+        }
+    }
+
+    /// The note of an E0060 at `name`, declared at `decl`, when no fix is
+    /// offered: how to make it mutable where it is bound, so as to allow
+    /// `what` ("assignment", "mutation").
+    pub(super) fn immutable_note(&self, name: &str, decl: Span, what: &str) -> String {
+        match self.bindings.get(&decl) {
+            Some(Binding::LetPattern) => format!(
+                "`{name}` is bound by a pattern, whose bindings are immutable: a destructuring \
+                 `let mut (…) = …` makes each of them mutable, or rebind it as \
+                 `let mut {name} = {name}` to allow {what}"
+            ),
+            Some(Binding::Pattern) => format!(
+                "`{name}` is bound by a pattern, whose bindings are immutable: rebind it as \
+                 `let mut {name} = {name}` to allow {what}"
+            ),
+            Some(Binding::Other) => format!(
+                "a `for` loop's variable is immutable: rebind it inside the loop's body as \
+                 `let mut {name} = {name}` to allow {what}"
+            ),
+            _ => format!("declare it as `let mut {name}` to allow {what}"),
         }
     }
 

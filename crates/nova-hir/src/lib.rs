@@ -1275,32 +1275,151 @@ pub enum ExprKind {
 #[derive(Debug, Clone)]
 pub struct Arm {
     pub pattern: Pattern,
+    /// `pattern if guard => body`: a `Bool` the arm's bindings are in scope
+    /// for, evaluated after they bind; when it is false, matching goes on
+    /// with the next arm.
+    pub guard: Option<Expr>,
     pub body: Expr,
     pub span: Span,
 }
 
-/// Patterns after checking. Phase 1 supports flat patterns: variant
-/// destructuring binds directly to locals (or discards with `None`).
-#[derive(Debug, Clone)]
+/// A checked pattern (5.0 spec §4.3). Patterns nest: a variant's fields and
+/// a tuple's elements are patterns, to any depth. A pattern carries no type;
+/// the value it tests has the type of the scrutinee at its position.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    /// `_`
+    /// `_`, and `()` against the unit type.
     Wildcard,
-    /// A catch-all binding: `n => ...`
+    /// A binding, `n` or `mut n`, that matches anything.
     Bind(LocalId),
     LitInt(i64),
     LitBool(bool),
     LitStr(String),
-    /// `Variant(a, _, c)` — one binder slot per payload field.
+    LitChar(char),
+    /// An `Int` range, or a `Char` range by code point, with both ends
+    /// included: `lo..hi` is stored as `lo..=hi - 1`. The checker refuses
+    /// an empty range (E0101), so in a program that compiles `lo <= hi`.
+    Range {
+        lo: i64,
+        hi: i64,
+    },
+    /// `Variant(p, ...)`: one pattern per payload field.
     Variant {
         sum: DefId,
         variant: u32,
-        binders: Vec<Option<LocalId>>,
+        fields: Vec<Pattern>,
     },
+    /// `(p1, ..., pn)`, n of one or more.
+    Tuple(Vec<Pattern>),
+    /// `p1 | p2 | ...`: every alternative binds the same locals.
+    Or(Vec<Pattern>),
+}
+
+impl Pattern {
+    /// The locals this pattern binds, each once, in the order they are
+    /// first met (an or-pattern's are its first alternative's).
+    pub fn bindings(&self) -> Vec<LocalId> {
+        fn walk(p: &Pattern, out: &mut Vec<LocalId>) {
+            match p {
+                Pattern::Bind(l) => {
+                    if !out.contains(l) {
+                        out.push(*l);
+                    }
+                }
+                Pattern::Variant { fields: ps, .. } | Pattern::Tuple(ps) | Pattern::Or(ps) => {
+                    for q in ps {
+                        walk(q, out);
+                    }
+                }
+                Pattern::Wildcard
+                | Pattern::LitInt(_)
+                | Pattern::LitBool(_)
+                | Pattern::LitStr(_)
+                | Pattern::LitChar(_)
+                | Pattern::Range { .. } => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(self, &mut out);
+        out
+    }
+
+    /// Whether this pattern is one today's flat `match` lowering takes: a
+    /// `_`, a binding, a literal, or a variant whose fields are each `_` or
+    /// a binding.
+    pub fn is_flat(&self) -> bool {
+        match self {
+            Pattern::Wildcard
+            | Pattern::Bind(_)
+            | Pattern::LitInt(_)
+            | Pattern::LitBool(_)
+            | Pattern::LitStr(_)
+            | Pattern::LitChar(_) => true,
+            Pattern::Variant { fields, .. } => fields
+                .iter()
+                .all(|f| matches!(f, Pattern::Wildcard | Pattern::Bind(_))),
+            Pattern::Range { .. } | Pattern::Tuple(_) | Pattern::Or(_) => false,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_patterns_bindings_are_each_local_once_in_order() {
+        use nova_resolver::DefId;
+        let (a, b) = (LocalId(3), LocalId(1));
+        // `(a, V(_, b)) | (a, V(b, _))`: an or-pattern's alternatives bind the
+        // same locals, so each is listed once, in the first one's order.
+        let alt = |first: Pattern, second: Pattern| {
+            Pattern::Tuple(vec![
+                Pattern::Bind(a),
+                Pattern::Variant {
+                    sum: DefId(0),
+                    variant: 0,
+                    fields: vec![first, second],
+                },
+            ])
+        };
+        let p = Pattern::Or(vec![
+            alt(Pattern::Wildcard, Pattern::Bind(b)),
+            alt(Pattern::Bind(b), Pattern::Wildcard),
+        ]);
+        assert_eq!(p.bindings(), vec![a, b]);
+        assert!(Pattern::Range { lo: 1, hi: 2 }.bindings().is_empty());
+    }
+
+    #[test]
+    fn only_todays_shapes_are_flat() {
+        use nova_resolver::DefId;
+        let variant = |fields| Pattern::Variant {
+            sum: DefId(0),
+            variant: 1,
+            fields,
+        };
+        for flat in [
+            Pattern::Wildcard,
+            Pattern::Bind(LocalId(0)),
+            Pattern::LitInt(1),
+            Pattern::LitBool(true),
+            Pattern::LitStr("s".to_string()),
+            Pattern::LitChar('c'),
+            variant(vec![Pattern::Bind(LocalId(0)), Pattern::Wildcard]),
+        ] {
+            assert!(flat.is_flat(), "{flat:?}");
+        }
+        for nested in [
+            variant(vec![Pattern::LitInt(0)]),
+            variant(vec![variant(vec![])]),
+            Pattern::Tuple(vec![Pattern::Wildcard]),
+            Pattern::Or(vec![Pattern::LitInt(0), Pattern::LitInt(1)]),
+            Pattern::Range { lo: 0, hi: 9 },
+        ] {
+            assert!(!nested.is_flat(), "{nested:?}");
+        }
+    }
 
     #[test]
     fn subst_recurses_into_a_projection_without_normalizing() {

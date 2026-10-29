@@ -1278,6 +1278,29 @@ impl<'a> Lowerer<'a> {
         }
         let join = self.new_block();
 
+        // A match with a guard or a pattern today's flat lowering does not
+        // take is refused until test-chain lowering lands (5.0 spec §4.6),
+        // rather than lowered wrongly.
+        if !arms
+            .iter()
+            .all(|a| a.guard.is_none() && a.pattern.is_flat())
+        {
+            self.diagnostics.push(
+                Diagnostic::error(
+                    "E0900",
+                    "matches with nested, tuple, or- or range patterns or guards are not \
+                     supported yet",
+                )
+                .with_primary_label(e.span, "not lowered yet")
+                .with_note(
+                    "the checker accepts this match; lowering it to MIR by test chains \
+                     arrives in a later commit of 5.0b"
+                        .to_string(),
+                ),
+            );
+            return result;
+        }
+
         match &scrutinee.ty {
             Ty::Sum { .. } => {
                 let disc = self.new_temp(MirTy::I64);
@@ -1290,6 +1313,7 @@ impl<'a> Lowerer<'a> {
             Ty::Int | Ty::Char => {
                 self.lower_switch_arms(s, s, arms, result, join, |pat| match pat {
                     hir::Pattern::LitInt(v) => Some(*v),
+                    hir::Pattern::LitChar(c) => Some(*c as i64),
                     _ => None,
                 });
             }
@@ -1421,9 +1445,9 @@ impl<'a> Lowerer<'a> {
                 let dst = self.local_map[local.0 as usize];
                 self.copy(dst, scrut);
             }
-            hir::Pattern::Variant { binders, .. } => {
-                for (i, binder) in binders.iter().enumerate() {
-                    if let Some(local) = binder {
+            hir::Pattern::Variant { fields, .. } => {
+                for (i, field) in fields.iter().enumerate() {
+                    if let hir::Pattern::Bind(local) = field {
                         let dst = self.local_map[local.0 as usize];
                         let ty = self.temps[dst.0 as usize];
                         if ty != MirTy::Unit {

@@ -3,7 +3,7 @@
 
 use nova_ast as ast;
 use nova_ast::item::{ExternItem, TraitItem, TypeDef};
-use nova_diagnostics::{suggest, Diagnostic, FileDb, Span, Spanned};
+use nova_diagnostics::{suggest, Diagnostic, FileDb, Severity, Span, Spanned};
 use nova_hir as hir;
 use nova_hir::{LocalId, Ty, TyHead};
 use nova_resolver::{
@@ -23,10 +23,14 @@ mod fixes;
 #[cfg(test)]
 mod lang_tests;
 #[cfg(test)]
+mod pattern_tests;
+mod patterns;
+#[cfg(test)]
 mod tuple_tests;
 mod view;
 
 use fixes::{Binding, Need};
+use patterns::PatState;
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
@@ -162,6 +166,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         sources: options.sources,
         bindings: FxHashMap::default(),
         qualified_callee: None,
+        pats: PatState::default(),
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
@@ -328,6 +333,9 @@ struct Checker<'a> {
     /// Set by `check_call` to its argument count just before it checks a
     /// two-segment callee path; taken by `check_path` (plan decision 7).
     qualified_callee: Option<usize>,
+    /// The pattern being checked: its or-patterns and `let mut` (5.0 spec
+    /// §4.3).
+    pats: PatState,
 }
 
 /// What the probe met, before its function's inference is finished.
@@ -3344,12 +3352,26 @@ impl<'a> Checker<'a> {
                         }
                         ast::Pattern::Wildcard => ("_".to_string(), false, pattern.span),
                         _ => {
-                            self.error(
-                                "E0022",
-                                "only irrefutable patterns (a name or `_`) are allowed in `let`",
-                                pattern.span,
-                            );
-                            ("_".to_string(), false, pattern.span)
+                            // Destructuring (5.0 spec §4.3): an irrefutable
+                            // pattern, bound by a one-arm `match`. `let mut`
+                            // makes each of its bindings mutable.
+                            self.pats.mutable = *is_mut;
+                            self.pats.in_let = true;
+                            let errors = self.error_count();
+                            let pat = self.check_pattern(fcx, pattern, &value.ty);
+                            self.pats.mutable = false;
+                            self.pats.in_let = false;
+                            if self.error_count() == errors {
+                                self.require_irrefutable(
+                                    fcx,
+                                    &pat,
+                                    &value.ty,
+                                    pattern.span,
+                                    "`let`",
+                                );
+                            }
+                            stmts.push(patterns::let_pattern(pat, value, stmt.span));
+                            continue;
                         }
                     };
                     let local = self.bind_local(
@@ -4537,8 +4559,7 @@ impl<'a> Checker<'a> {
         let end = fcx.new_local_unscoped("__end".to_string(), Ty::Int, false, span);
 
         fcx.scopes.push(FxHashMap::default());
-        let (var_name, var_span) = self.for_loop_var(pattern);
-        let i = self.bind_local(fcx, var_name, Ty::Int, false, var_span, Binding::Other);
+        let i = self.for_loop_binding(fcx, pattern, &Ty::Int);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.loop_depth -= 1;
@@ -4567,7 +4588,7 @@ impl<'a> Checker<'a> {
             span,
         };
         // Bind the immutable loop variable to the counter each iteration.
-        let bind_i = let_stmt(i, read(counter));
+        let bind_i = i.bind(read(counter), span);
         // increment: __i = __i + 1
         let incr = assign(
             counter,
@@ -4653,42 +4674,6 @@ impl<'a> Checker<'a> {
             },
             ty: Ty::Unit,
             span,
-        }
-    }
-
-    /// The name and span a `for` loop binds its element to. Shared by the range
-    /// and iterator desugars: they bind at different types but accept exactly
-    /// the same pattern forms, so `E0022` — and the choice to fall back to `_`
-    /// and keep checking the body rather than bail — is stated once here instead
-    /// of in two copies that can drift.
-    ///
-    /// A `for` loop variable is immutable in both desugars, so assigning it is
-    /// `E0060` — measured: `for i in 0..3 { i = i + 1 }` is
-    /// `error[E0060]: cannot assign to immutable variable 'i'`.
-    ///
-    /// The `..` in the `Ident` arm below discards `ast::Pattern::Ident`'s
-    /// `is_mut`, and that discard is **currently unreachable from source**: the
-    /// parser rejects a `mut` in this position before any pattern exists, so
-    /// there is no binding to make immutable and no `E0060` to compare against.
-    /// Measured, both spellings: `for mut i in 0..3` and `for mut x in v.iter()`
-    /// are each `error[P0001]: expected pattern (in statement), found 'mut'`.
-    /// An earlier version of this comment said `for mut i in …` "gets the same
-    /// immutable binding (and the same `E0060` on assignment) as `for i in …`",
-    /// which describes a program that cannot be written. The discard stays as
-    /// the right answer for if the parser ever accepts the form — not as a
-    /// statement about today's behaviour.
-    fn for_loop_var(&mut self, pattern: &Spanned<ast::Pattern>) -> (String, Span) {
-        match &pattern.value {
-            ast::Pattern::Ident { name, .. } => (name.value.clone(), name.span),
-            ast::Pattern::Wildcard => ("_".to_string(), pattern.span),
-            _ => {
-                self.error(
-                    "E0022",
-                    "a `for` loop variable must be a name or `_`",
-                    pattern.span,
-                );
-                ("_".to_string(), pattern.span)
-            }
         }
     }
 
@@ -4812,8 +4797,7 @@ impl<'a> Checker<'a> {
         };
 
         fcx.scopes.push(FxHashMap::default());
-        let (var_name, var_span) = self.for_loop_var(pattern);
-        let elem = self.bind_local(fcx, var_name, item_ty, false, var_span, Binding::Other);
+        let elem = self.for_loop_binding(fcx, pattern, &item_ty);
         fcx.loop_depth += 1;
         let body_hir = self.check_block(fcx, &body.value, body.span);
         fcx.loop_depth -= 1;
@@ -4824,14 +4808,15 @@ impl<'a> Checker<'a> {
             ty: Ty::Unit,
             span,
         };
-        let variant = |v, binders| hir::Pattern::Variant {
+        let variant = |v, fields| hir::Pattern::Variant {
             sum: next.option,
             variant: v,
-            binders,
+            fields,
         };
         let arms = vec![
             hir::Arm {
-                pattern: variant(next.some, vec![Some(elem)]),
+                pattern: variant(next.some, vec![elem.into_pattern()]),
+                guard: None,
                 // Wrapped in a block so the arm is `Unit` whatever the body
                 // evaluates to — the range desugar discards the body's value
                 // the same way, by making it a statement.
@@ -4843,6 +4828,7 @@ impl<'a> Checker<'a> {
             },
             hir::Arm {
                 pattern: variant(next.none, Vec::new()),
+                guard: None,
                 body: hir::Expr {
                     kind: hir::ExprKind::Break,
                     ty: Ty::Never,
@@ -5149,7 +5135,7 @@ impl<'a> Checker<'a> {
         if !is_option {
             let err_ty = args.get(1).cloned().unwrap_or(Ty::Error);
             let x = fcx.new_local_unscoped("__err".to_string(), err_ty.clone(), false, span);
-            bad_binders.push(Some(x));
+            bad_binders.push(hir::Pattern::Bind(x));
             bad_args.push(local_expr(x, err_ty, span));
         }
         let early = hir::Expr {
@@ -5166,8 +5152,9 @@ impl<'a> Checker<'a> {
                 pattern: hir::Pattern::Variant {
                     sum,
                     variant: good_idx,
-                    binders: vec![Some(v)],
+                    fields: vec![hir::Pattern::Bind(v)],
                 },
+                guard: None,
                 body: local_expr(v, payload.clone(), span),
                 span,
             },
@@ -5175,8 +5162,9 @@ impl<'a> Checker<'a> {
                 pattern: hir::Pattern::Variant {
                     sum,
                     variant: bad_idx,
-                    binders: bad_binders,
+                    fields: bad_binders,
                 },
+                guard: None,
                 body: hir::Expr {
                     kind: hir::ExprKind::Return(Some(Box::new(early))),
                     ty: Ty::Never,
@@ -6986,14 +6974,14 @@ impl<'a> Checker<'a> {
             // would.
             match self.mutable_fix(name, info.span) {
                 Some(fix) => self.push_fix(Some(fix)),
-                None => self
-                    .diagnostics
-                    .last_mut()
-                    .expect("just pushed")
-                    .notes
-                    .push(format!(
-                        "declare it as `let mut {name}` to allow assignment"
-                    )),
+                None => {
+                    let note = self.immutable_note(name, info.span, "assignment");
+                    self.diagnostics
+                        .last_mut()
+                        .expect("just pushed")
+                        .notes
+                        .push(note)
+                }
             }
         }
         let value = self.check_expr(fcx, rhs);
@@ -7099,7 +7087,7 @@ impl<'a> Checker<'a> {
                     "declare the enclosing method's receiver as `mut self` to allow mutation"
                         .to_string()
                 } else {
-                    format!("declare it as `let mut {name}` to allow mutation")
+                    self.immutable_note(&name, decl, "mutation")
                 };
                 self.diagnostics
                     .last_mut()
@@ -7346,18 +7334,31 @@ impl<'a> Checker<'a> {
         let result_ty = fcx.icx.fresh();
         let mut hir_arms = Vec::new();
         // Normalized (pattern, has-guard, its pattern's span, the whole arm's
-        // span) per arm, for the exhaustiveness and reachability analysis
-        // after all arms are checked.
-        let mut arm_pats: Vec<(usefulness::Pat, bool, Span, Span)> = Vec::new();
+        // span, its or-patterns' alternatives' spans) per arm, for the
+        // exhaustiveness and reachability analysis after all arms are
+        // checked.
+        let mut arm_pats: Vec<ArmPat> = Vec::new();
+        // An arm whose pattern was an error stands in as `_`; reading it so
+        // would report the arms after it unreachable, a second diagnostic
+        // for one mistake, so the analysis is skipped.
+        let mut bad_pattern = false;
 
         for arm in arms {
             let guarded = arm.guard.is_some();
-            if guarded {
-                self.unsupported(arm.pattern.span, "match guards");
-            }
             fcx.scopes.push(FxHashMap::default());
+            let errors = self.error_count();
             let pattern = self.check_pattern(fcx, &arm.pattern, &scrut.ty);
+            bad_pattern |= self.error_count() > errors;
             let upat = to_useful_pat(&pattern);
+            let mut or_spans = Vec::new();
+            patterns::or_alternative_spans(&arm.pattern, &pattern, &mut or_spans);
+            // A guard sees the arm's bindings and runs after they bind
+            // (5.0 spec §4.3).
+            let guard = arm.guard.as_ref().map(|g| {
+                let guard = self.check_expr(fcx, g);
+                self.expect_ty(fcx, &guard, &Ty::Bool, "a match guard");
+                guard
+            });
             let body = self.check_expr(fcx, &arm.body);
             fcx.scopes.pop();
             // A diverging arm (`Never`) imposes no constraint on the result
@@ -7376,20 +7377,24 @@ impl<'a> Checker<'a> {
                     body.span,
                 );
             }
-            arm_pats.push((
-                upat,
+            arm_pats.push(ArmPat {
+                pat: upat,
                 guarded,
-                arm.pattern.span,
-                arm.pattern.span.merge(arm.body.span),
-            ));
+                pat_span: arm.pattern.span,
+                arm_span: arm.pattern.span.merge(arm.body.span),
+                or_spans,
+            });
             hir_arms.push(hir::Arm {
                 pattern,
+                guard,
                 body,
                 span: arm.pattern.span,
             });
         }
 
-        self.check_match_usefulness(fcx, &scrut, &arm_pats, span);
+        if !bad_pattern {
+            self.check_match_usefulness(fcx, &scrut, &arm_pats, span);
+        }
 
         // If every arm diverged the result was never constrained; it is then
         // itself `Never`.
@@ -7417,7 +7422,7 @@ impl<'a> Checker<'a> {
         &mut self,
         fcx: &mut FnCtx,
         scrut: &hir::Expr,
-        arm_pats: &[(usefulness::Pat, bool, Span, Span)],
+        arm_pats: &[ArmPat],
         span: Span,
     ) {
         let scrut_ty = fcx.icx.apply(&scrut.ty);
@@ -7452,7 +7457,14 @@ impl<'a> Checker<'a> {
         // (unguarded) arm does. A guarded arm's match is conditional, so it
         // neither is reported nor counts toward coverage.
         let mut prior: Vec<Vec<usefulness::Pat>> = Vec::new();
-        for (pat, guarded, arm_span, arm) in arm_pats {
+        for ArmPat {
+            pat,
+            guarded,
+            pat_span: arm_span,
+            arm_span: arm,
+            or_spans,
+        } in arm_pats
+        {
             if *guarded {
                 continue;
             }
@@ -7470,6 +7482,8 @@ impl<'a> Checker<'a> {
                     d = d.with_fix(fix);
                 }
                 self.diagnostics.push(d);
+            } else {
+                self.check_or_alternatives(&cx, &prior, pat, or_spans, &col);
             }
             prior.push(vec![pat.clone()]);
         }
@@ -7508,10 +7522,25 @@ impl<'a> Checker<'a> {
     fn render_witness(&self, pat: &usefulness::Pat) -> String {
         match pat {
             usefulness::Pat::Wild => "_".to_string(),
+            usefulness::Pat::Or(alts) => alts
+                .iter()
+                .map(|a| self.render_witness(a))
+                .collect::<Vec<_>>()
+                .join(" | "),
             usefulness::Pat::Ctor(ctor, args) => match ctor {
                 usefulness::Ctor::Bool(b) => b.to_string(),
                 usefulness::Ctor::Int(v) => v.to_string(),
                 usefulness::Ctor::Str(s) => format!("{s:?}"),
+                usefulness::Ctor::Char(c) => format!("{c:?}"),
+                usefulness::Ctor::Range(lo, hi) => format!("{lo}..={hi}"),
+                usefulness::Ctor::Tuple(_) => {
+                    let inner: Vec<String> = args.iter().map(|a| self.render_witness(a)).collect();
+                    if inner.len() == 1 {
+                        format!("({},)", inner[0])
+                    } else {
+                        format!("({})", inner.join(", "))
+                    }
+                }
                 usefulness::Ctor::Variant(sum, vi) => {
                     let name = self
                         .sums
@@ -7553,8 +7582,12 @@ impl<'a> Checker<'a> {
                     self.unify_pattern_ty(fcx, &Ty::String, scrut_ty, pattern.span);
                     hir::Pattern::LitStr(v.clone())
                 }
-                ast::Literal::Float(_) | ast::Literal::Char(_) => {
-                    self.unsupported(pattern.span, "float and char patterns");
+                ast::Literal::Char(c) => {
+                    self.unify_pattern_ty(fcx, &Ty::Char, scrut_ty, pattern.span);
+                    hir::Pattern::LitChar(*c)
+                }
+                ast::Literal::Float(_) => {
+                    self.unsupported(pattern.span, "`Float` literal patterns");
                     hir::Pattern::Wildcard
                 }
             },
@@ -7571,23 +7604,24 @@ impl<'a> Checker<'a> {
                     // The name is a known constructor, but of a different type:
                     // reject it rather than silently binding a catch-all (which
                     // would mask uncovered cases), mirroring the `Path` and
-                    // `TupleStruct` arms.
-                    self.error(
-                        "E0001",
-                        format!("`{}` is not a variant of the matched type", name.value),
-                        pattern.span,
+                    // `TupleStruct` arms. Inside a variant this is new in
+                    // 5.0b: `Some(None)` bound a local named `None` before
+                    // nested patterns, and now matches the variant.
+                    self.diagnostics.push(
+                        Diagnostic::error(
+                            "E0001",
+                            format!("`{}` is not a variant of the matched type", name.value),
+                        )
+                        .with_primary_label(pattern.span, "here")
+                        .with_note(
+                            "a name inside a pattern that names a variant matches that variant; \
+                             to bind a value, use a lower-case name"
+                                .to_string(),
+                        ),
                     );
                     return hir::Pattern::Wildcard;
                 }
-                let local = self.bind_local(
-                    fcx,
-                    name.value.clone(),
-                    scrut_ty.clone(),
-                    *is_mut,
-                    name.span,
-                    Binding::Other,
-                );
-                hir::Pattern::Bind(local)
+                self.bind_pattern_name(fcx, name, scrut_ty, *is_mut)
             }
             ast::Pattern::Path(path) if path.segments.len() == 1 => {
                 let name = &path.segments[0].value;
@@ -7729,13 +7763,24 @@ impl<'a> Checker<'a> {
                 }
                 self.variant_pattern(fcx, sum_id, vi, fields, scrut_ty, pattern.span)
             }
-            ast::Pattern::Path(_)
-            | ast::Pattern::Binding { .. }
-            | ast::Pattern::Record { .. }
-            | ast::Pattern::Tuple(_)
-            | ast::Pattern::Array(_)
-            | ast::Pattern::Or(_)
-            | ast::Pattern::Range { .. } => {
+            ast::Pattern::Tuple(elems) => self.tuple_pattern(fcx, elems, scrut_ty, pattern.span),
+            ast::Pattern::Or(alts) => self.or_pattern(fcx, alts, scrut_ty),
+            ast::Pattern::Range { lo, hi, inclusive } => {
+                self.range_pattern(fcx, lo, hi, *inclusive, scrut_ty, pattern.span)
+            }
+            ast::Pattern::Binding { .. } => {
+                self.unsupported(pattern.span, "`@` patterns");
+                hir::Pattern::Wildcard
+            }
+            ast::Pattern::Record { .. } => {
+                self.unsupported(pattern.span, "record patterns");
+                hir::Pattern::Wildcard
+            }
+            ast::Pattern::Array(_) => {
+                self.unsupported(pattern.span, "array patterns");
+                hir::Pattern::Wildcard
+            }
+            ast::Pattern::Path(_) => {
                 self.unsupported(pattern.span, "this pattern form");
                 hir::Pattern::Wildcard
             }
@@ -7793,32 +7838,19 @@ impl<'a> Checker<'a> {
             Ty::Sum { args, .. } => args,
             _ => Vec::new(),
         };
-        let mut binders = Vec::new();
-        for (field_pat, field_ty) in fields.iter().zip(v.fields.iter()) {
-            let bound_ty = field_ty.subst(&scrut_args);
-            match &field_pat.value {
-                ast::Pattern::Wildcard => binders.push(None),
-                ast::Pattern::Ident { is_mut, name } => {
-                    let local = self.bind_local(
-                        fcx,
-                        name.value.clone(),
-                        bound_ty,
-                        *is_mut,
-                        name.span,
-                        Binding::Other,
-                    );
-                    binders.push(Some(local));
-                }
-                _ => {
-                    self.unsupported(field_pat.span, "nested patterns inside variants");
-                    binders.push(None);
-                }
-            }
-        }
+        // Each field is a pattern, to any depth (5.0 spec §4.3).
+        let fields = fields
+            .iter()
+            .zip(v.fields.iter())
+            .map(|(field_pat, field_ty)| {
+                let bound_ty = field_ty.subst(&scrut_args);
+                self.check_pattern(fcx, field_pat, &bound_ty)
+            })
+            .collect();
         hir::Pattern::Variant {
             sum: sum_id,
             variant: variant as u32,
-            binders,
+            fields,
         }
     }
 
@@ -8015,6 +8047,14 @@ impl<'a> Checker<'a> {
 
     fn show(&self, ty: &Ty, fcx: &FnCtx) -> String {
         display_ty(&fcx.icx.apply(ty), self.defs)
+    }
+
+    /// How many errors have been reported so far.
+    fn error_count(&self) -> usize {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
     }
 
     fn error(&mut self, code: &str, message: impl Into<String>, span: Span) {
@@ -8218,12 +8258,19 @@ fn remap_locals(expr: &mut hir::Expr, map: &FxHashMap<u32, u32>) {
 fn remap_pattern(pat: &mut hir::Pattern, remap: &impl Fn(&mut LocalId)) {
     match pat {
         hir::Pattern::Bind(local) => remap(local),
-        hir::Pattern::Variant { binders, .. } => {
-            for b in binders.iter_mut().flatten() {
-                remap(b);
+        hir::Pattern::Variant { fields: ps, .. }
+        | hir::Pattern::Tuple(ps)
+        | hir::Pattern::Or(ps) => {
+            for p in ps.iter_mut() {
+                remap_pattern(p, remap);
             }
         }
-        _ => {}
+        hir::Pattern::Wildcard
+        | hir::Pattern::LitInt(_)
+        | hir::Pattern::LitBool(_)
+        | hir::Pattern::LitStr(_)
+        | hir::Pattern::LitChar(_)
+        | hir::Pattern::Range { .. } => {}
     }
 }
 
@@ -8292,7 +8339,10 @@ fn child_exprs(expr: &hir::Expr) -> Vec<&hir::Expr> {
         }
         K::Match { scrutinee, arms } => {
             out.push(scrutinee);
-            out.extend(arms.iter().map(|a| &a.body));
+            for a in arms {
+                out.extend(a.guard.as_ref());
+                out.push(&a.body);
+            }
         }
         K::Return(v) => {
             if let Some(v) = v {
@@ -8376,7 +8426,10 @@ fn child_exprs_mut(kind: &mut hir::ExprKind) -> Vec<&mut hir::Expr> {
         }
         K::Match { scrutinee, arms } => {
             out.push(scrutinee);
-            out.extend(arms.iter_mut().map(|a| &mut a.body));
+            for a in arms.iter_mut() {
+                out.extend(a.guard.as_mut());
+                out.push(&mut a.body);
+            }
         }
         K::Return(v) => {
             if let Some(v) = v {
@@ -8729,9 +8782,21 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
     }
 }
 
+/// A `match` arm's pattern as the exhaustiveness and reachability analysis
+/// reads it.
+struct ArmPat {
+    pat: usefulness::Pat,
+    guarded: bool,
+    pat_span: Span,
+    arm_span: Span,
+    /// Each or-pattern's alternatives' spans, in pre-order.
+    or_spans: Vec<Vec<Span>>,
+}
+
 /// Normalize a checked HIR pattern into the usefulness-algorithm form.
-/// Bindings and wildcards are both "match anything"; variant payloads are
-/// irrefutable in Phase 1, so each contributes a wildcard sub-pattern.
+/// Bindings and wildcards are both "match anything"; the conversion recurses
+/// through variants and tuples, and keeps or-patterns, which the algorithm
+/// expands (5.0 spec §4.4).
 fn to_useful_pat(p: &hir::Pattern) -> usefulness::Pat {
     use usefulness::{Ctor, Pat};
     match p {
@@ -8739,14 +8804,21 @@ fn to_useful_pat(p: &hir::Pattern) -> usefulness::Pat {
         hir::Pattern::LitInt(v) => Pat::Ctor(Ctor::Int(*v), Vec::new()),
         hir::Pattern::LitBool(v) => Pat::Ctor(Ctor::Bool(*v), Vec::new()),
         hir::Pattern::LitStr(v) => Pat::Ctor(Ctor::Str(v.clone()), Vec::new()),
+        hir::Pattern::LitChar(c) => Pat::Ctor(Ctor::Char(*c), Vec::new()),
+        hir::Pattern::Range { lo, hi } => Pat::Ctor(Ctor::Range(*lo, *hi), Vec::new()),
         hir::Pattern::Variant {
             sum,
             variant,
-            binders,
+            fields,
         } => Pat::Ctor(
             Ctor::Variant(*sum, *variant),
-            vec![Pat::Wild; binders.len()],
+            fields.iter().map(to_useful_pat).collect(),
         ),
+        hir::Pattern::Tuple(elems) => Pat::Ctor(
+            Ctor::Tuple(elems.len() as u32),
+            elems.iter().map(to_useful_pat).collect(),
+        ),
+        hir::Pattern::Or(alts) => Pat::Or(alts.iter().map(to_useful_pat).collect()),
     }
 }
 
@@ -8982,6 +9054,9 @@ fn finalize_expr(expr: &mut hir::Expr, icx: &InferCtx, residual: &mut Vec<Span>)
         hir::ExprKind::Match { scrutinee, arms } => {
             finalize_expr(scrutinee, icx, residual);
             for arm in arms {
+                if let Some(guard) = &mut arm.guard {
+                    finalize_expr(guard, icx, residual);
+                }
                 finalize_expr(&mut arm.body, icx, residual);
             }
         }
@@ -11496,10 +11571,10 @@ mod tests {
             hir::Pattern::Variant {
                 sum,
                 variant,
-                binders,
+                fields,
             } => {
                 let s = r.module.sum(*sum).expect("the scrutinee's sum");
-                (s.variants[*variant as usize].name.clone(), binders.len())
+                (s.variants[*variant as usize].name.clone(), fields.len())
             }
             other => panic!("a variant pattern, not {other:?}"),
         };
@@ -14277,6 +14352,7 @@ mod tests {
             sources: None,
             bindings: FxHashMap::default(),
             qualified_callee: None,
+            pats: PatState::default(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -14354,6 +14430,7 @@ mod tests {
             sources: None,
             bindings: FxHashMap::default(),
             qualified_callee: None,
+            pats: PatState::default(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
