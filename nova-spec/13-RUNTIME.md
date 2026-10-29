@@ -133,6 +133,17 @@ sweep really frees, so addresses are reused. Nothing may key a persistent table 
 - Records = boxed by default (header + fields)
 - Sum types = tagged union: `{ tag: u32, payload: union { ... } }`
 
+**Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** a tuple is laid
+out as a record is, not as the line above says
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.1): MIR's `MakeRecord`, a heap object with one 8-byte slot an element,
+read by `RecordField` and written by `SetField`, on every backend, WASM
+included. It has a header like every heap object, on the stack or not, and
+the collector scans its slots conservatively, as it scans a record's: any
+slot that holds an address of a live object keeps that object. No backend
+sees a tuple. This departs from the line above as records already
+do; 5.0b's ADR 0049 records it.
+
 ### 2.3 String Encoding
 - UTF-8, immutable
 - Slicing returns `Str` (view) — no copy
