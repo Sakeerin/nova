@@ -299,8 +299,8 @@ be inferred, and `t.N` on a value whose type is not yet known; E0013 `==`,
 interpolation, or a `Hash`, `Eq`, `Display`, `Debug` or other bound on a
 tuple, with the note that a tuple has no impls; E0014 an index past the
 end ("no field `2` on `(Int, Int)`"), a name on a tuple, `.N` on a type
-that is not a tuple, or a method on a tuple. P0001 is an index that is not plain decimal digits
-(`11-PARSER.md` §2).
+that is not a tuple, or a method on a tuple. P0001 is an index that is not
+plain decimal digits (`11-PARSER.md` §2).
 
 **Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** the
 codes 5.0b's patterns add
@@ -315,14 +315,18 @@ types", with both types in the label. **E0101,** "this range matches
 nothing": `lo > hi`, or `lo >= hi` with `..`, in an `Int` or `Char` range.
 **E0010** is a pattern of the wrong type or arity, a tuple pattern of the
 wrong arity ("this pattern has 3 elements but the matched value is a tuple
-of 2"), a range over a type that is not `Int` or `Char`, and a guard that is
-not a `Bool`. **E0020** names nested witnesses (`Some(Err(_))`,
-`(None, false)`). **E0021** is an unreachable arm, as before, and an
-unreachable alternative of an or-pattern in a reachable unguarded arm,
-"unreachable alternative", on the alternative alone: every value it matches
-is matched by an earlier arm or an earlier alternative; one inside an
-alternative already reported is not reported again. **E0022** is a
-refutable pattern in a `let` or a `for`, decided by usefulness, with the
+of 2, `(Int, Int)`"), a range over a type that is not `Int` or `Char`, and
+a guard that is not a `Bool`. **E0020** names nested witnesses
+(`Some(Err(_))`, `(None, false)`), and a range in a `Char` column as
+`Char`s, `'a'..='z'`; an empty `match` names every variant, as before 5.0b.
+**E0021** is an unreachable arm, as before, and an unreachable alternative
+of an or-pattern in a reachable arm, "unreachable alternative", on the
+alternative alone: taken in the order the test chain tries them, every value
+that matches the arm with it is matched by an earlier arm or takes an
+earlier alternative; one inside an alternative already reported is not
+reported again. In a guarded arm, an alternative that only a false guard
+could lead to gets a note that the guard runs once. **E0022** is a refutable
+pattern in a `let` or a `for`, decided by usefulness, with the
 values it misses ("`None` is not matched"). Usefulness takes a tuple as a
 type with one constructor, expands or-patterns, and takes each `Int`,
 `Char` and `String` literal and each range as a constructor of its own:
@@ -338,11 +342,13 @@ pattern binding whose name starts with an upper-case letter, "`Rde` binds a
 value: no variant of that name is in scope", with a note that such a name
 reads as a variant and that a lower-case name binds, or, for a constant's
 name, that a pattern cannot match a constant and a guard can, and "did you
-mean `Empty`?" with its fix for a name near a variant. A name that starts
+mean `Empty`?" with its fix for a name near a variant of a sum the matched
+value's type unifies with; for a variant of the matched sum that is not in
+scope, a note to write `Tok::Eof` or import it. A name that starts
 with `_` is not warned about, nor a plain `let X = …` or `for X in …`,
-which binds a name and not a pattern (the user's ruling of 2026-10-28). An arm whose
-pattern was an error is not read for reachability or exhaustiveness, so no
-second diagnostic follows the first.
+which binds a name and not a pattern (the user's ruling of 2026-10-28). An
+arm whose pattern was an error is not read for reachability or
+exhaustiveness, so no second diagnostic follows the first.
 
 **Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):**
 E0103 at a newline-rule split, narrowed by the user's ruling of 2026-10-27
@@ -352,9 +358,19 @@ reading would have extended (the previous statement's value, its rightmost
 operand of a binary operator, read through a `return`, an assignment, a
 compound assignment to an element or a field, and a closure, whose body the
 old reading extended; a `let`'s value): a function before `(`, an array
-before `[`, an `Int` or a `Float` before `-`, or a type not yet known. So `g()` returning `Int`, then `(a, b)`
-on the next line, does not warn. A split after a bare `return` or `break`
-warns as before.
+before `[`, an `Int` or a `Float` before `-`, or a type not yet known. So
+`g()` returning `Int`, then `(a, b)` on the next line, does not warn. A
+split after a bare `return` or `break` warns as before.
+
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50b`), after
+the review:** a guard on an or-pattern runs once, with the bindings of the
+first alternative that matches, and when it is false, matching goes on with
+the next arm
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.6). Rust instead tries the later alternatives when the guard is false,
+so `match (1, 9) { (a, _) | (_, a) if a > 5 => "big", _ => "small" }` gives
+`small` in Nova and `big` in Rust. E0021 marks the alternative a guard
+cannot reach, `(_, a)` here, with that note.
 
 ---
 

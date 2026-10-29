@@ -3372,11 +3372,11 @@ impl<'a> Checker<'a> {
                             // pattern, bound by a one-arm `match`. `let mut`
                             // makes each of its bindings mutable.
                             self.pats.mutable = *is_mut;
-                            self.pats.in_let = true;
+                            self.pats.let_head = Some(patterns::let_head(&pattern.value));
                             let errors = self.error_count();
                             let pat = self.check_pattern(fcx, pattern, &value.ty);
                             self.pats.mutable = false;
-                            self.pats.in_let = false;
+                            self.pats.let_head = None;
                             if self.error_count() == errors {
                                 self.require_irrefutable(
                                     fcx,
@@ -7511,7 +7511,8 @@ impl<'a> Checker<'a> {
 
         // Reachability: each unguarded arm must cover a value no earlier
         // (unguarded) arm does. A guarded arm's match is conditional, so it
-        // neither is reported nor counts toward coverage.
+        // neither is reported nor counts toward coverage; only its
+        // or-pattern's alternatives are checked, when it is reachable.
         let mut prior: Vec<Vec<usefulness::Pat>> = Vec::new();
         for ArmPat {
             pat,
@@ -7522,6 +7523,12 @@ impl<'a> Checker<'a> {
         } in arm_pats
         {
             if *guarded {
+                if !cx
+                    .usefulness(&prior, std::slice::from_ref(pat), &col)
+                    .is_empty()
+                {
+                    self.check_or_alternatives(&cx, &prior, pat, or_spans, &col, true);
+                }
                 continue;
             }
             if cx
@@ -7539,7 +7546,7 @@ impl<'a> Checker<'a> {
                 }
                 self.diagnostics.push(d);
             } else {
-                self.check_or_alternatives(&cx, &prior, pat, or_spans, &col);
+                self.check_or_alternatives(&cx, &prior, pat, or_spans, &col, false);
             }
             prior.push(vec![pat.clone()]);
         }
@@ -7550,7 +7557,7 @@ impl<'a> Checker<'a> {
             let mut rendered: Vec<String> = witnesses
                 .iter()
                 .filter_map(|w| w.first())
-                .map(|p| self.render_witness(p))
+                .map(|p| self.render_witness(p, &col[0]))
                 .collect();
             rendered.dedup();
             self.error(
@@ -7574,46 +7581,61 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Render a witness pattern for a non-exhaustiveness diagnostic.
-    fn render_witness(&self, pat: &usefulness::Pat) -> String {
+    /// Render a witness pattern for a non-exhaustiveness diagnostic, at
+    /// the type `ty` of the value it matches: a range in a `Char` column
+    /// renders as `Char`s, `'a'..='z'`, and in an `Int` one as integers.
+    fn render_witness(&self, pat: &usefulness::Pat, ty: &Ty) -> String {
         match pat {
             usefulness::Pat::Wild => "_".to_string(),
             usefulness::Pat::Or(alts) => alts
                 .iter()
-                .map(|a| self.render_witness(a))
+                .map(|a| self.render_witness(a, ty))
                 .collect::<Vec<_>>()
                 .join(" | "),
-            usefulness::Pat::Ctor(ctor, args) => match ctor {
-                usefulness::Ctor::Bool(b) => b.to_string(),
-                usefulness::Ctor::Int(v) => v.to_string(),
-                usefulness::Ctor::Str(s) => format!("{s:?}"),
-                usefulness::Ctor::Char(c) => format!("{c:?}"),
-                usefulness::Ctor::Range(lo, hi) => format!("{lo}..={hi}"),
-                usefulness::Ctor::Tuple(_) => {
-                    let inner: Vec<String> = args.iter().map(|a| self.render_witness(a)).collect();
-                    if inner.len() == 1 {
-                        format!("({},)", inner[0])
-                    } else {
-                        format!("({})", inner.join(", "))
+            usefulness::Pat::Ctor(ctor, args) => {
+                let args_at = |c: &usefulness::Ctor| -> Vec<String> {
+                    let tys = usefulness::MatchCx::new(&self.sums).arg_tys(c, ty);
+                    args.iter()
+                        .enumerate()
+                        .map(|(i, a)| self.render_witness(a, tys.get(i).unwrap_or(&Ty::Error)))
+                        .collect()
+                };
+                match ctor {
+                    usefulness::Ctor::Bool(b) => b.to_string(),
+                    usefulness::Ctor::Int(v) => v.to_string(),
+                    usefulness::Ctor::Str(s) => format!("{s:?}"),
+                    usefulness::Ctor::Char(c) => format!("{c:?}"),
+                    usefulness::Ctor::Range(lo, hi) => {
+                        let as_char = |v: i64| u32::try_from(v).ok().and_then(char::from_u32);
+                        match (ty, as_char(*lo), as_char(*hi)) {
+                            (Ty::Char, Some(a), Some(b)) => format!("{a:?}..={b:?}"),
+                            _ => format!("{lo}..={hi}"),
+                        }
+                    }
+                    usefulness::Ctor::Tuple(_) => {
+                        let inner = args_at(ctor);
+                        if inner.len() == 1 {
+                            format!("({},)", inner[0])
+                        } else {
+                            format!("({})", inner.join(", "))
+                        }
+                    }
+                    usefulness::Ctor::Variant(sum, vi) => {
+                        let name = self
+                            .sums
+                            .iter()
+                            .find(|s| s.def_id == *sum)
+                            .and_then(|s| s.variants.get(*vi as usize))
+                            .map(|v| v.name.clone())
+                            .unwrap_or_else(|| "?".to_string());
+                        if args.is_empty() {
+                            name
+                        } else {
+                            format!("{name}({})", args_at(ctor).join(", "))
+                        }
                     }
                 }
-                usefulness::Ctor::Variant(sum, vi) => {
-                    let name = self
-                        .sums
-                        .iter()
-                        .find(|s| s.def_id == *sum)
-                        .and_then(|s| s.variants.get(*vi as usize))
-                        .map(|v| v.name.clone())
-                        .unwrap_or_else(|| "?".to_string());
-                    if args.is_empty() {
-                        name
-                    } else {
-                        let inner: Vec<String> =
-                            args.iter().map(|a| self.render_witness(a)).collect();
-                        format!("{name}({})", inner.join(", "))
-                    }
-                }
-            },
+            }
         }
     }
 

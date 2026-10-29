@@ -13040,6 +13040,51 @@ fn for_arrays_run() {
     golden_three_ways("for_arrays", true);
 }
 
+/// A guard on an or-pattern runs once, with the bindings of the first
+/// alternative that matches, and a false guard goes on to the next arm, not
+/// to a later alternative (5.0 spec §4.6; ADR 0049): `(1, 9)` binds `a` to
+/// 1 and gives `small`, where Rust would retry `(_, a)` and give `big`. The
+/// build says so with E0021 at the alternative that is never reached.
+#[test]
+fn a_guard_on_an_or_pattern_runs_once_with_the_first_alternatives_bindings() {
+    let dir = std::env::temp_dir().join("nova-or-guard-once");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let src = dir.join("main.nova");
+    std::fs::write(
+        &src,
+        "fn size(p: (Int, Int)) -> String {\n    match p {\n        (a, _) | (_, a) if a > 5 => \"big\"\n        \
+         _ => \"small\"\n    }\n}\n\n\
+         fn main() {\n    println(size((1, 9)))\n    println(size((9, 1)))\n}\n",
+    )
+    .expect("write the program");
+    let exe = dir.join(format!("main{}", std::env::consts::EXE_SUFFIX));
+    let built = nova()
+        .env("NO_COLOR", "1")
+        .arg("build")
+        .arg(&src)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&built.get_output().stderr).replace("\r\n", "\n");
+    assert!(
+        stderr.contains("warning[E0021]: unreachable alternative"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("the arm's guard runs once"), "{stderr}");
+    let out = Command::new(&exe)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        String::from_utf8_lossy(&out).replace("\r\n", "\n"),
+        "small\nbig\n"
+    );
+    let _ = std::fs::remove_file(&exe);
+}
+
 /// E0102 (5.0 spec §3.7) is a warning: it prints, and the program still
 /// builds and runs, its own `Number` meaning its own variant.
 #[test]

@@ -11,7 +11,7 @@ use nova_resolver::{DefId, DefKind, Exported, ModuleId, Res, ScopeEntry};
 use super::{Checker, FnCtx, MethodRes};
 
 /// How a local the user wrote was bound (spec §4.1).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Binding {
     /// By a `let`.
     Let,
@@ -19,8 +19,9 @@ pub(super) enum Binding {
     /// included.
     Param,
     /// By a name inside a destructuring `let`'s pattern, where `mut` does
-    /// not parse but `let mut P` makes every binding mutable.
-    LetPattern,
+    /// not parse but `let mut P` makes every binding mutable; it holds
+    /// `P`'s head as E0060's note quotes it, `(…)` or `W(…)`.
+    LetPattern(String),
     /// By a name inside a `match` arm's or a `for` loop's pattern, where
     /// `mut` does not parse.
     Pattern,
@@ -101,9 +102,9 @@ impl<'a> Checker<'a> {
     /// `what` ("assignment", "mutation").
     pub(super) fn immutable_note(&self, name: &str, decl: Span, what: &str) -> String {
         match self.bindings.get(&decl) {
-            Some(Binding::LetPattern) => format!(
+            Some(Binding::LetPattern(head)) => format!(
                 "`{name}` is bound by a pattern, whose bindings are immutable: a destructuring \
-                 `let mut (…) = …` makes each of them mutable, or rebind it as \
+                 `let mut {head} = …` makes each of them mutable, or rebind it as \
                  `let mut {name} = {name}` to allow {what}"
             ),
             Some(Binding::Pattern) => format!(

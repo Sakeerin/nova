@@ -236,7 +236,7 @@ impl<'a> MatchCx<'a> {
 
     /// The types of a constructor's fields, with the column type's generic
     /// arguments substituted in.
-    fn arg_tys(&self, c: &Ctor, ty0: &Ty) -> Vec<Ty> {
+    pub fn arg_tys(&self, c: &Ctor, ty0: &Ty) -> Vec<Ty> {
         match c {
             Ctor::Variant(sum_id, vi) => {
                 let args = match ty0 {
@@ -306,9 +306,11 @@ impl<'a> MatchCx<'a> {
             let named = missing_value(ty, present).filter(|_| self.name_values);
             return vec![named.map_or(Pat::Wild, |c| Pat::Ctor(c, Vec::new()))];
         }
-        if present.is_empty() {
-            // No row names a constructor here: `_` says it all, where
-            // listing each would repeat the rest of the witness per value.
+        if present.is_empty() && self.name_values {
+            // No row names a constructor here: where E0022 asks, `_` says
+            // it all, where listing each would repeat the rest of the
+            // witness per value. E0020 lists them, as before 5.0b, so an
+            // empty `match` names every variant it misses.
             return vec![Pat::Wild];
         }
         let missing: Vec<Pat> = sig

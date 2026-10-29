@@ -67,8 +67,13 @@ patterns.
      tests.
    - **Ranges are not split** (item 4), and **an unreachable alternative of
      an or-pattern is reported:** E0021, "unreachable alternative", on the
-     alternative alone, when its arm is reachable and has no guard, checked
-     against the earlier arms and the earlier alternatives of its own arm.
+     alternative alone, when its arm is reachable, in the order the test
+     chain tries the alternatives: one no value takes, every value that
+     matches the arm with it being matched by an earlier arm or taking an
+     earlier alternative of its or-pattern or of one it sits in. So in
+     `(a, 1 | 2) | (_, a)` the `2` is reached, by `(5, 2)`, though `(_, a)`
+     would match that value too. A guarded arm's alternatives are checked
+     the same way (item 7's guard).
    - **There is no flat switch before the inner chains** (item 5): MIR's
      size did not call for one.
 7. **Where the build departs from spec §4, or from 5.0a:**
@@ -95,10 +100,19 @@ patterns.
      an upper-case letter** (the same ruling): such a name is most often a
      variant misspelt or not in scope, `Some(Rde)`, and as a binding it
      matches every value. A constant's name gets its own note, to match it
-     with a guard, and a name near a variant a "did you mean". A name that
-     starts with `_` is not warned about, a leading `_` being the way to say
-     a name is meant, nor a plain `let X` or `for X`, which is not a
+     with a guard, and a name near a variant of a sum the matched value's
+     type unifies with a "did you mean"; a variant of the matched sum that
+     is not in scope gets a note to write `Tok::Eof` or import it. A name
+     that starts with `_` is not warned about, a leading `_` being the way
+     to say a name is meant, nor a plain `let X` or `for X`, which is not a
      pattern.
+   - **A guard on an or-pattern runs once, with the bindings of the first
+     alternative that matches, and a false guard goes on to the next arm,**
+     as spec §4.6 says. Rust instead tries the later alternatives when the
+     guard is false: `match (1, 9) { (a, _) | (_, a) if a > 5 => "big",
+     _ => "small" }` gives `small` in Nova and `big` in Rust. E0021 marks
+     such an alternative, `(_, a)` here, which no value reaches, with a
+     note that the guard runs once.
    - **A name bound twice in one pattern, `(x, x)`, is unchanged from
      before 5.0b:** both bind, the second shadowing the first, with no
      error.

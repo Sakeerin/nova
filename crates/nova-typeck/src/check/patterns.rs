@@ -26,8 +26,9 @@ pub(super) struct PatState {
     /// since `mut` does not parse inside a pattern.
     pub(super) mutable: bool,
     /// The pattern is a destructuring `let`'s, whose bindings `let mut P`
-    /// can make mutable (E0060's note says so).
-    pub(super) in_let: bool,
+    /// can make mutable (E0060's note says so): its head as E0060's note
+    /// quotes it, `(…)` or `W(…)`.
+    pub(super) let_head: Option<String>,
 }
 
 /// One or-pattern being checked.
@@ -105,6 +106,20 @@ pub(super) fn let_pattern(pattern: hir::Pattern, init: hir::Expr, span: Span) ->
     }
 }
 
+/// A destructuring `let`'s pattern as E0060's note quotes it after
+/// `let mut `: its head with the rest elided, `(…)` for a tuple, `W(…)` or
+/// `Wrap::W(…)` for a variant.
+pub(super) fn let_head(pattern: &ast::Pattern) -> String {
+    match pattern {
+        ast::Pattern::TupleStruct { path, .. } => {
+            let path: Vec<&str> = path.segments.iter().map(|s| s.value.as_str()).collect();
+            format!("{}(…)", path.join("::"))
+        }
+        ast::Pattern::Tuple(_) => "(…)".to_string(),
+        _ => "…".to_string(),
+    }
+}
+
 impl<'a> Checker<'a> {
     /// Bind `name` in a pattern. Inside the second or a later alternative of
     /// an or-pattern, the name is the first alternative's local, at the
@@ -161,10 +176,9 @@ impl<'a> Checker<'a> {
                     self.warn_upper_case_binding(fcx, name, ty);
                 }
                 let is_mut = is_mut || self.pats.mutable;
-                let binding = if self.pats.in_let {
-                    Binding::LetPattern
-                } else {
-                    Binding::Pattern
+                let binding = match &self.pats.let_head {
+                    Some(head) => Binding::LetPattern(head.clone()),
+                    None => Binding::Pattern,
                 };
                 let local = self.bind_local(
                     fcx,
@@ -218,24 +232,47 @@ impl<'a> Checker<'a> {
         )
         .with_primary_label(name.span, "this binding matches any value")
         .with_note(note);
-        // The variants the name could mean: the matched sum's, and those in
-        // scope.
+        // The variants the name could mean, of a sum the matched value's
+        // type unifies with: the matched sum's, and those in scope; any sum's
+        // while that type is not yet known.
+        let col = fcx.icx.apply(ty);
+        let fits = |sum: nova_resolver::DefId| match &col {
+            Ty::Sum { def_id, .. } => *def_id == sum,
+            Ty::Var(_) | Ty::Error => true,
+            _ => false,
+        };
+        let matched = super::fixes::scrutinee_sum(fcx, ty);
         let mut variants: Vec<String> = Vec::new();
-        if let Some(sum) = super::fixes::scrutinee_sum(fcx, ty) {
+        let mut unimported = None;
+        if let Some(sum) = matched {
             if let DefKind::Sum { variants: vs, .. } = &self.defs.def(sum).kind {
                 variants.extend(vs.iter().map(|v| v.name.clone()));
+                if vs.iter().any(|v| v.name == name.value) {
+                    unimported = Some(self.defs.def(sum).name.clone());
+                }
             }
         }
         for (n, entry) in self.defs.names_in_scope(self.cur_module) {
-            if matches!(entry, ScopeEntry::Value(Res::Variant(..))) {
-                variants.push(n);
+            if let ScopeEntry::Value(Res::Variant(sum, _)) = entry {
+                if fits(sum) {
+                    variants.push(n);
+                }
             }
         }
-        let near = if is_const {
+        let near = if is_const || unimported.is_some() {
             None
         } else {
             suggest::closest(&name.value, variants.iter().map(String::as_str))
         };
+        if let Some(sum) = &unimported {
+            // The matched sum has a variant of this very name, which is not
+            // in scope here.
+            d = d.with_note(format!(
+                "`{0}` is a variant of `{sum}` but is not in scope here: write \
+                 `{sum}::{0}`, or import it",
+                name.value
+            ));
+        }
         if let Some(to) = near {
             d = d.with_note(format!("did you mean `{to}`?"));
         }
@@ -425,14 +462,14 @@ impl<'a> Checker<'a> {
         let sums = self.sums.clone();
         let cx = usefulness::MatchCx::new(&sums).naming_values();
         let row = vec![to_useful_pat(pat)];
-        let witnesses = cx.usefulness(&[row], &[usefulness::Pat::Wild], &[ty]);
+        let witnesses = cx.usefulness(&[row], &[usefulness::Pat::Wild], std::slice::from_ref(&ty));
         if witnesses.is_empty() {
             return;
         }
         let mut rendered: Vec<String> = witnesses
             .iter()
             .filter_map(|w| w.first())
-            .map(|p| format!("`{}`", self.render_witness(p)))
+            .map(|p| format!("`{}`", self.render_witness(p, &ty)))
             .collect();
         rendered.dedup();
         self.diagnostics.push(
@@ -493,10 +530,18 @@ impl<'a> Checker<'a> {
         }
     }
 
-    /// Report each alternative of an or-pattern in a reachable, unguarded
-    /// arm that no value can reach: every value it matches is matched by an
-    /// earlier arm, or by an earlier alternative of the same or-pattern. An
-    /// alternative inside one already reported is not reported again.
+    /// Report each alternative of an or-pattern in a reachable arm that no
+    /// value can reach, in the order the test chain tries them (MIR's
+    /// `lower_pattern_test`): every value that matches the arm with this
+    /// alternative is matched by an earlier arm, or takes an earlier
+    /// alternative of this or-pattern or of one it sits in. An alternative
+    /// inside one already reported is not reported again.
+    ///
+    /// A guarded arm's alternatives are checked too: its guard runs once,
+    /// with the bindings of the first alternative that matches, and a false
+    /// guard goes on to the next arm (spec §4.6), so an alternative that
+    /// only a false guard could lead to, as in Rust, is never reached; its
+    /// E0021 says so.
     pub(super) fn check_or_alternatives(
         &mut self,
         cx: &usefulness::MatchCx,
@@ -504,6 +549,7 @@ impl<'a> Checker<'a> {
         pat: &usefulness::Pat,
         spans: &[Vec<Span>],
         col: &[Ty],
+        guarded: bool,
     ) {
         let tree = or_tree(pat);
         let mut dead: Vec<(usize, usize)> = Vec::new();
@@ -511,11 +557,31 @@ impl<'a> Checker<'a> {
             if ancestors(&tree, *parent).any(|a| dead.contains(&a)) {
                 continue;
             }
+            // The alternative each enclosing or-pattern takes on the way
+            // here, outermost first.
+            let mut path: Vec<(usize, usize)> = ancestors(&tree, *parent).collect();
+            path.reverse();
+            // A value reaches an enclosing or-pattern's alternative `j` only
+            // if it matches none of the alternatives before `j`, as the
+            // chain tries them in turn.
+            let mut earlier: Vec<Vec<usefulness::Pat>> = Vec::new();
+            for (i, &(a, j)) in path.iter().enumerate() {
+                if j > 0 {
+                    let mut keep = only(&path[..i]);
+                    keep.push((a, 0..j));
+                    earlier.push(vec![restrict_or(pat, &keep)]);
+                }
+            }
             for k in 0..*alts {
-                let q = restrict_or(pat, node, k..k + 1);
+                let mut keep = only(&path);
+                keep.push((node, k..k + 1));
+                let q = restrict_or(pat, &keep);
                 let mut matrix = prior.to_vec();
+                matrix.extend(earlier.iter().cloned());
                 if k > 0 {
-                    matrix.push(vec![restrict_or(pat, node, 0..k)]);
+                    let mut keep = only(&path);
+                    keep.push((node, 0..k));
+                    matrix.push(vec![restrict_or(pat, &keep)]);
                 }
                 if !cx
                     .usefulness(&matrix, std::slice::from_ref(&q), col)
@@ -527,15 +593,26 @@ impl<'a> Checker<'a> {
                 let Some(span) = spans.get(node).and_then(|s| s.get(k)) else {
                     continue;
                 };
-                self.diagnostics.push(
-                    Diagnostic::warning("E0021", "unreachable alternative")
-                        .with_primary_label(*span, "this alternative is never reached")
-                        .with_note(
-                            "an earlier arm, or an earlier alternative of this or-pattern, \
-                             already matches every value this one would"
-                                .to_string(),
-                        ),
-                );
+                let mut d = Diagnostic::warning("E0021", "unreachable alternative")
+                    .with_primary_label(*span, "this alternative is never reached")
+                    .with_note(
+                        "an earlier arm, or an earlier alternative of this or-pattern, \
+                         already matches every value this one would"
+                            .to_string(),
+                    );
+                if guarded
+                    && !cx
+                        .usefulness(prior, std::slice::from_ref(&q), col)
+                        .is_empty()
+                {
+                    d = d.with_note(
+                        "the arm's guard runs once, with the bindings of the first \
+                         alternative that matches; when it is false, matching goes on with \
+                         the next arm, not with this alternative"
+                            .to_string(),
+                    );
+                }
+                self.diagnostics.push(d);
             }
         }
     }
@@ -610,28 +687,28 @@ fn ancestors(
     std::iter::successors(start, move |(node, _)| tree[*node].0)
 }
 
-/// `pat` with its `target`-th or-pattern, counted as [`or_tree`] counts,
-/// cut to the alternatives in `keep`.
-fn restrict_or(pat: &usefulness::Pat, target: usize, keep: Range<usize>) -> usefulness::Pat {
-    fn go(
-        p: &usefulness::Pat,
-        target: usize,
-        keep: &Range<usize>,
-        n: &mut usize,
-    ) -> usefulness::Pat {
+/// Each `(node, k)` of `path` as a restriction to that one alternative.
+fn only(path: &[(usize, usize)]) -> Vec<(usize, Range<usize>)> {
+    path.iter().map(|&(n, k)| (n, k..k + 1)).collect()
+}
+
+/// `pat` with each or-pattern `keep` names, counted as [`or_tree`] counts,
+/// cut to the alternatives in its range.
+fn restrict_or(pat: &usefulness::Pat, keep: &[(usize, Range<usize>)]) -> usefulness::Pat {
+    fn go(p: &usefulness::Pat, keep: &[(usize, Range<usize>)], n: &mut usize) -> usefulness::Pat {
         match p {
             usefulness::Pat::Wild => usefulness::Pat::Wild,
-            usefulness::Pat::Ctor(c, args) => usefulness::Pat::Ctor(
-                c.clone(),
-                args.iter().map(|a| go(a, target, keep, n)).collect(),
-            ),
+            usefulness::Pat::Ctor(c, args) => {
+                usefulness::Pat::Ctor(c.clone(), args.iter().map(|a| go(a, keep, n)).collect())
+            }
             usefulness::Pat::Or(alts) => {
                 let me = *n;
                 *n += 1;
+                let range = keep.iter().find(|(t, _)| *t == me).map(|(_, r)| r);
                 let mut kept = Vec::new();
                 for (k, a) in alts.iter().enumerate() {
-                    let a = go(a, target, keep, n);
-                    if me != target || keep.contains(&k) {
+                    let a = go(a, keep, n);
+                    if range.map_or(true, |r| r.contains(&k)) {
                         kept.push(a);
                     }
                 }
@@ -639,7 +716,7 @@ fn restrict_or(pat: &usefulness::Pat, target: usize, keep: Range<usize>) -> usef
             }
         }
     }
-    go(pat, target, &keep, &mut 0)
+    go(pat, keep, &mut 0)
 }
 
 impl<'a> Checker<'a> {
