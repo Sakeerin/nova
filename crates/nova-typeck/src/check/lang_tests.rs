@@ -439,10 +439,12 @@ fn e0103_is_not_on_calls_assignments_conditions_or_a_tail() {
 
 #[test]
 fn e0103_reports_a_parenthesised_callee_after_a_line_break() {
-    // `x` then `(g)()`: `x` is an unused name, and the line break that ends
-    // it before `(g)()` is reported too, though `unused_value` cannot tell
-    // the call was written in parentheses.
-    assert_eq!(e0103("    x\n    (g)()"), 2);
+    // `x` then `(g)()`: `x` is an unused name. The line break that ends it
+    // before `(g)()` is not reported: `x` is an `Int`, so the old reading,
+    // `x((g))()`, could not have been well typed (the user's 5.0b ruling).
+    assert_eq!(e0103("    x\n    (g)()"), 1);
+    // After a function it could, so the split is reported too.
+    assert_eq!(e0103("    let h = g\n    h\n    (g)()"), 2);
 }
 
 // --- E0103 at the newline rule's splits (the user's ruling of 2026-10-27) ---
@@ -541,4 +543,136 @@ fn an_unused_value_at_a_split_gets_one_warning_with_the_line_breaks_note() {
             .collect();
     assert_eq!(all.len(), 1, "{all:?}");
     assert!(all[0].notes.is_empty(), "{all:?}");
+}
+
+// --- E0103 only where the old reading could have been well typed (the
+// user's 5.0b ruling of 2026-10-27) ---
+
+#[test]
+fn a_tuple_tail_after_a_call_that_returns_no_function_is_quiet() {
+    let all = e0103_messages(
+        "fn g() -> Int { 1 }\nfn f() -> (Int, Int) {\n    g()\n    (1, 2)\n}\nfn main() {}\n",
+    );
+    assert!(all.is_empty(), "{all:?}");
+    // A unit statement, as an `.await` or a `println` is.
+    let all =
+        e0103_messages("fn f() -> (Int, Int) {\n    println(\"x\")\n    (1, 2)\n}\nfn main() {}\n");
+    assert!(all.is_empty(), "{all:?}");
+}
+
+#[test]
+fn a_split_warns_only_after_a_value_the_old_reading_could_extend() {
+    let split = |prev: &str, line: &str| -> Vec<String> {
+        e0103_messages(&format!(
+            "fn k() -> fn(Int) -> Int {{ |y: Int| y }}\n\
+             fn f(n: Int, s: String, a: [Int], x: Float) -> Int {{\n    {prev}\n    {line}\n}}\nfn main() {{}}\n"
+        ))
+    };
+    let call = "a line break ends the statement before this `(`";
+    let index = "a line break ends the statement before this `[`";
+    let minus = "a line break ends the statement before this `-`";
+    // `(` after a function, and not after an `Int` or a `String`.
+    assert_eq!(split("let h = k()", "(n)"), [call]);
+    assert!(split("let m = n", "(n)").is_empty());
+    assert!(split("let t = s", "(n)").is_empty());
+    // `[` after an array, and not after an `Int`.
+    assert_eq!(split("let b = a", "[n][0]"), [index]);
+    assert!(split("let m = n", "[n][0]").is_empty());
+    // `-` after an `Int` or a `Float`, and not after a `String`; the
+    // operand is the rightmost one of a binary operator.
+    assert_eq!(split("let m = n", "-n"), [minus]);
+    assert_eq!(split("let y = x * 2.0", "-n"), [minus]);
+    assert_eq!(split("let b = n == 1", "-n"), [minus]);
+    assert!(split("let t = s", "-n").is_empty());
+}
+
+#[test]
+fn a_split_after_a_bare_return_warns_whatever_comes_before() {
+    let all =
+        e0103_messages("fn g() -> Int { 1 }\nfn f() {\n    return\n    (g())\n}\nfn main() {}\n");
+    assert!(
+        all.iter()
+            .any(|m| m == "this value is not used"
+                || m == "a line break ends this `return` or `break`"),
+        "{all:?}"
+    );
+}
+
+#[test]
+fn a_split_after_a_value_of_unknown_type_warns() {
+    // `m`'s type is not known when the split is judged, so the old reading,
+    // `make()(1, 2)`, could have been well typed.
+    let all = e0103_messages(
+        "fn make<T>() -> T {\n    panic(\"no\")\n}\n\
+         fn f() -> (Int, Int) {\n    let m = make()\n    (1, 2)\n}\nfn main() {}\n",
+    );
+    assert_eq!(all, ["a line break ends the statement before this `(`"]);
+}
+
+#[test]
+fn a_split_after_a_bare_return_before_a_tail_warns() {
+    // No "this value is not used" here: `(g())` is the block's tail.
+    let all = e0103_messages(
+        "fn g() {}\nfn f(c: Bool) {\n    if c {\n        return\n        (g())\n    }\n}\nfn main() {}\n",
+    );
+    assert_eq!(all, ["a line break ends this `return` or `break`"]);
+}
+
+#[test]
+fn the_split_operand_is_read_through_an_assignment() {
+    // `q = k()` then the tail `(n)`: the old reading, `q = k()(n)`, calls a
+    // function, so the split warns; after `m = n`, an `Int`, it does not.
+    let src = |prev: &str| {
+        format!(
+            "fn k() -> fn(Int) -> Int {{\n    |y: Int| y\n}}\n\
+             fn f(n: Int) -> Int {{\n    let mut q = k()\n    let mut m = 0\n    {prev}\n    (n)\n}}\nfn main() {{}}\n"
+        )
+    };
+    assert_eq!(
+        e0103_messages(&src("q = k()")),
+        ["a line break ends the statement before this `(`"]
+    );
+    assert!(e0103_messages(&src("m = n")).is_empty());
+}
+
+#[test]
+fn a_split_after_a_compound_assignment_to_an_element_or_a_field_warns() {
+    // `a[0] -= 2` then `- 1`: the old reading subtracted 1 from the 2.
+    let minus = "a line break ends the statement before this `-`";
+    let src = |stmt: &str| {
+        format!(
+            "record R {{ x: Int }}\nfn f(mut a: [Int], mut r: R, mut t: (Int, (Int, Int))) -> Int {{\n    \
+             {stmt}\n    - 1\n}}\nfn main() {{}}\n"
+        )
+    };
+    for stmt in ["a[0] -= 2", "r.x += 2", "t.1.0 += 2"] {
+        assert_eq!(e0103_messages(&src(stmt)), [minus], "{stmt}");
+    }
+}
+
+#[test]
+fn a_split_after_a_closure_reads_its_body() {
+    // The old reading extended the closure's body: `|x: Int| x - 1`,
+    // `|i: Int| arr[1]`, `|x: Int| g(3)`.
+    let src = |prev: &str, line: &str| {
+        format!(
+            "fn g(x: Int) -> Int {{ x }}\nfn f(arr: [Int]) -> Int {{\n    {prev}\n    {line}\n}}\nfn main() {{}}\n"
+        )
+    };
+    let warned = |prev: &str, line: &str, what: &str| {
+        assert_eq!(
+            e0103_messages(&src(prev, line)),
+            [format!(
+                "a line break ends the statement before this `{what}`"
+            )],
+            "{prev} / {line}"
+        );
+    };
+    warned("let f = |x: Int| x", "- 1", "-");
+    warned("let f = |i: Int| arr", "[1][0]", "[");
+    warned("let f = |x: Int| g", "(3)", "(");
+    // A body the old reading could not extend is quiet.
+    assert!(e0103_messages(&src("let f = |x: Int| \"s\"", "- 1")).is_empty());
+    // A bare function as a value is a function, not a body to read.
+    warned("let h = g", "(3)", "(");
 }

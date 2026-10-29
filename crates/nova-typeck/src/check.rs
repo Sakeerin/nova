@@ -167,6 +167,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         bindings: FxHashMap::default(),
         qualified_callee: None,
         pats: PatState::default(),
+        quiet_splits: FxHashSet::default(),
     };
     // Before any collection pass: every later pass builds a generic scope, and
     // one containing `Self` would give the name two meanings at once.
@@ -336,6 +337,10 @@ struct Checker<'a> {
     /// The pattern being checked: its or-patterns and `let mut` (5.0 spec
     /// §4.3).
     pats: PatState,
+    /// The newline rule's splits after which the old reading could not have
+    /// been well typed, so E0103 is not reported there (the user's 5.0b
+    /// ruling of 2026-10-27), by the split's span.
+    quiet_splits: FxHashSet<Span>,
 }
 
 /// What the probe met, before its function's inference is finished.
@@ -3307,7 +3312,17 @@ impl<'a> Checker<'a> {
     fn check_block(&mut self, fcx: &mut FnCtx, block: &ast::Block, span: Span) -> hir::Expr {
         fcx.scopes.push(FxHashMap::default());
         let mut stmts = Vec::new();
-        for stmt in &block.stmts {
+        // Where each statement's successor starts: a newline-rule split there
+        // follows this statement (the user's 5.0b ruling of 2026-10-27).
+        let nexts: Vec<Span> = block
+            .stmts
+            .iter()
+            .skip(1)
+            .map(|s| s.span)
+            .chain(block.trailing.as_ref().map(|t| t.span))
+            .collect();
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            let next = nexts.get(i).copied();
             // Decision 4: the probe, between the block's start and this
             // statement, sees the scope as it is before the statement.
             self.probe_locals(fcx, span.file, span.start, stmt.span.start);
@@ -3323,6 +3338,7 @@ impl<'a> Checker<'a> {
                         continue;
                     };
                     let mut value = self.check_expr(fcx, init);
+                    self.judge_split(fcx, &value, next);
                     if let Some(annot) = ty {
                         let annot_ty =
                             self.convert_ty(annot, &fcx.generics.clone(), &fcx.param_bounds);
@@ -3392,7 +3408,9 @@ impl<'a> Checker<'a> {
                     });
                 }
                 ast::Stmt::Expr(e) => {
-                    stmts.push(self.check_expr(fcx, e));
+                    let checked = self.check_expr(fcx, e);
+                    self.judge_split(fcx, &checked, next);
+                    stmts.push(checked);
                     if let Some(what) = unused_value(e) {
                         self.diagnostics.push(
                             Diagnostic::warning("E0103", "this value is not used")
@@ -4921,6 +4939,9 @@ impl<'a> Checker<'a> {
     /// takes the note instead of a second warning.
     fn warn_newline_splits(&mut self) {
         for split in &self.file.newline_splits {
+            if self.quiet_splits.contains(&split.at) {
+                continue;
+            }
             let note = match split.kind {
                 ast::SplitKind::Value => {
                     "a `return` or `break` at the end of a line takes no value: to return \
@@ -4968,6 +4989,37 @@ impl<'a> Checker<'a> {
                     .with_primary_label(split.at, label)
                     .with_note(note.to_string()),
             );
+        }
+    }
+
+    /// Whether the old reading of a newline-rule split after the statement
+    /// whose value is `value` could have been well typed (the user's 5.0b
+    /// ruling of 2026-10-27): a `(` only after a function, a `[` only after
+    /// an array, a `-` only after an `Int` or a `Float`. Where it could not,
+    /// the split is quiet: `g()` then `(a, b)` on the next line is two
+    /// statements, as the author meant, whatever `g` returns but a function.
+    /// A type not yet known could be any, so it warns; a split after a bare
+    /// `return` or `break` always warns. `next` is where the statement after
+    /// this one starts.
+    fn judge_split(&mut self, fcx: &FnCtx, value: &hir::Expr, next: Option<Span>) {
+        let Some(next) = next else { return };
+        let Some(split) = self
+            .file
+            .newline_splits
+            .iter()
+            .find(|s| s.at.file == next.file && s.at.start == next.start)
+        else {
+            return;
+        };
+        let operand = split_operand(value, split.kind, &fcx.pending_closures);
+        let could = match (split.kind, fcx.icx.apply(&operand.ty)) {
+            (ast::SplitKind::Value, _) | (_, Ty::Var(_)) => true,
+            (ast::SplitKind::Call, ty) => matches!(ty, Ty::Fn { .. }),
+            (ast::SplitKind::Index, ty) => matches!(ty, Ty::Array(_)),
+            (ast::SplitKind::Minus, ty) => matches!(ty, Ty::Int | Ty::Float),
+        };
+        if !could {
+            self.quiet_splits.insert(split.at);
         }
     }
 
@@ -8783,6 +8835,57 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
             Ty::Int,
         ),
         Builtin::ClosureCall => (vec![Ty::Int, Ty::Int], Ty::Unit),
+    }
+}
+
+/// The part of a statement's value that the old reading of a split of
+/// `kind` after it would have extended: a postfix `(` or `[` applies to the
+/// rightmost operand, inside a unary operator too; a binary `-` has the
+/// rightmost operand of a binary operator on its left, and a unary
+/// operator's whole expression. A `return`'s value and an assignment's are
+/// read through, a compound assignment to an element or a field through the
+/// block its desugar builds, and a closure through its body, which the old
+/// reading extended; a `let`'s value is passed here on its own. `closures`
+/// are the function's closures lifted so far, where a closure's body is.
+fn split_operand<'e>(
+    e: &'e hir::Expr,
+    kind: ast::SplitKind,
+    closures: &'e [hir::Function],
+) -> &'e hir::Expr {
+    use hir::ExprKind as K;
+    match &e.kind {
+        K::Binary { rhs, .. } | K::LogicalAnd { rhs, .. } | K::LogicalOr { rhs, .. } => {
+            split_operand(rhs, kind, closures)
+        }
+        K::Unary { expr, .. } if kind != ast::SplitKind::Minus => {
+            split_operand(expr, kind, closures)
+        }
+        K::Return(Some(v)) => split_operand(v, kind, closures),
+        K::Assign { value, .. } | K::FieldSet { value, .. } | K::IndexSet { value, .. } => {
+            split_operand(value, kind, closures)
+        }
+        // `a[i] op= v` and `r.f op= v`: `{ let __place = …; …; set }`.
+        K::Block {
+            stmts,
+            trailing: None,
+        } => match stmts.split_last() {
+            Some((set, lets))
+                if matches!(set.kind, K::IndexSet { .. } | K::FieldSet { .. })
+                    && lets.iter().all(|s| matches!(s.kind, K::Let { .. })) =>
+            {
+                split_operand(set, kind, closures)
+            }
+            _ => e,
+        },
+        // A closure the source wrote, not a bare function's wrapper.
+        K::MakeClosure { func, .. } => match closures
+            .iter()
+            .find(|f| f.def_id == *func && f.name.starts_with("closure$"))
+        {
+            Some(f) => split_operand(&f.body, kind, closures),
+            None => e,
+        },
+        _ => e,
     }
 }
 
@@ -14357,6 +14460,7 @@ mod tests {
             bindings: FxHashMap::default(),
             qualified_callee: None,
             pats: PatState::default(),
+            quiet_splits: FxHashSet::default(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -14435,6 +14539,7 @@ mod tests {
             bindings: FxHashMap::default(),
             qualified_callee: None,
             pats: PatState::default(),
+            quiet_splits: FxHashSet::default(),
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
