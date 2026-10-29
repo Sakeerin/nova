@@ -1958,6 +1958,12 @@ mod gate {
         // nothing (5.0 spec §4.1).
         tuples,
         tuples_async,
+        // Patterns and `for` over arrays: test chains of MIR's existing
+        // statements, so WASM needs nothing (5.0 spec §4.3 to §4.6).
+        patterns,
+        patterns_async,
+        match_effects,
+        for_arrays,
     );
 
     /// The programs a test of their own in this module checks, by its name.

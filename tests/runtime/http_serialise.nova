@@ -20,9 +20,9 @@
 fn main() {
     let raw = bytes_from_string("GET /hi HTTP/1.1\r\nHost: a.example\r\nContent-Length: 0\r\n\r\n")
     match parse_request_head(raw, Limits::default()) {
-        // Two levels of `match`, not one: `Ok(Some(req))` is
-        // `E0900: nested patterns inside variants are not supported yet`.
-        // Measured on this tree; no std module uses a nested pattern either.
+        // Two levels of `match`, written before 5.0b, when `Ok(Some(req))`
+        // was E0900; nested patterns work now, and this form still does.
+        // No std module uses a nested pattern.
         Ok(maybe) => match maybe {
             Some(req) => {
                 println("path ${req.path}")

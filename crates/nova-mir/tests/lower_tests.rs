@@ -2347,32 +2347,6 @@ fn a_tuple_of_one_in_a_bound_message_keeps_its_comma() {
     }
 }
 
-/// Until test-chain lowering (5.0 spec §4.6), lowering refuses a match it
-/// would lower wrongly, one with a nested pattern or a guard: E0900.
-#[test]
-fn a_nested_or_guarded_match_is_refused_until_chains() {
-    for body in [
-        "match o {\n        Some(Some(n)) => n\n        _ => 0\n    }",
-        "match o {\n        Some(_) if true => 1\n        _ => 0\n    }",
-    ] {
-        let src = format!(
-            "fn f(o: Option<Option<Int>>) -> Int {{\n    {body}\n}}\n\
-             fn main() {{ println(\"${{f(None)}}\") }}"
-        );
-        let file_id = FileId::DUMMY;
-        let (tokens, _) = lex(&src, file_id);
-        let (ast, _) = parse(&tokens, file_id);
-        let resolved = resolve(&ast.expect("an AST"));
-        let checked = check(&resolved.file, &resolved.definitions);
-        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-        let diags = match lower_module(&checked.module) {
-            Ok(_) => panic!("lowered: {body}"),
-            Err(d) => d,
-        };
-        assert!(diags.iter().any(|d| d.code == "E0900"), "{diags:?}");
-    }
-}
-
 /// A flat `Char` match, which the checker takes from Task 3 on, switches on
 /// its literals' code points, as an `Int` match switches on its literals.
 #[test]

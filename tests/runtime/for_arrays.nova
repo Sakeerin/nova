@@ -1,0 +1,69 @@
+// `for p in arr` over an array (5.0 spec §4.5): in order, an empty array,
+// `break` and `continue`, a tuple pattern and a nested one, a write to a
+// later element seen when the loop reaches it, the array evaluated once,
+// arrays of strings and of sums, and nested loops.
+
+record Counter { n: Int }
+
+fn numbers(mut c: Counter) -> [Int] {
+    c.n += 1;
+    [1, 2, 3]
+}
+
+fn main() {
+    let empty: [Int] = []
+    for x in empty { println("never ${x}") }
+    println("empty done")
+
+    let mut sum = 0
+    for x in [1, 2, 3, 4, 5, 6] {
+        if x == 2 { continue }
+        if x == 5 { break }
+        sum += x
+    }
+    println("sum ${sum}")
+
+    for (name, n) in [("a", 1), ("b", 2), ("c", 3)] { println("${name}=${n}") }
+
+    for (i, (word, ok)) in [(0, ("zero", true)), (1, ("one", false))] {
+        println("${i} ${word} ${ok}")
+    }
+
+    for (_, n) in [("skip", 10), ("skip", 20)] { println("n ${n}") }
+
+    let mut arr = [1, 2, 3, 4]
+    for x in arr {
+        if x == 1 { arr[2] = 30 }
+        println("x ${x}")
+    }
+
+    let c = Counter { n: 0 }
+    for x in numbers(c) { println("got ${x}") }
+    println("evaluated ${c.n} time")
+
+    for w in ["one", "two"] {
+        for opt in [Some(w), None] {
+            match opt {
+                Some(s) => println("some ${s}")
+                None => println("none")
+            }
+        }
+    }
+
+    let mut lens = 0
+    for s in ["abc", "de", "f"] { lens += s.len() }
+    println("lens ${lens}")
+
+    let mut found = 0 - 1
+    let grid = [[1, 2], [3, 4], [5, 6]]
+    for row in grid {
+        for v in row {
+            if v == 4 {
+                found = v
+                break
+            }
+        }
+        if found > 0 { break }
+    }
+    println("found ${found}")
+}

@@ -13010,6 +13010,36 @@ fn tuples_async_runs() {
     golden_three_ways("tuples_async", true);
 }
 
+/// Nested, guarded, or-, `Char` and range patterns, tuple patterns, and
+/// `let` destructuring (5.0 spec §4.3, §4.6), also under GC stress, since
+/// its patterns project strings and sums.
+#[test]
+fn patterns_run() {
+    golden_three_ways("patterns", true);
+}
+
+/// Nested matches and guards that `.await`, in `async fn`s, under GC stress
+/// (5.0 spec §4.6, §7.3).
+#[test]
+fn patterns_async_runs() {
+    golden_three_ways("patterns_async", true);
+}
+
+/// A `match`'s scrutinee is evaluated once, and its guards run in arm
+/// order, each at most once, only after its pattern matched (5.0 spec
+/// §4.3, §4.6).
+#[test]
+fn match_effects_run() {
+    golden_three_ways("match_effects", false);
+}
+
+/// `for p in arr` over an array (5.0 spec §4.5): empty, `break`,
+/// `continue`, tuple patterns, and a write the loop sees.
+#[test]
+fn for_arrays_run() {
+    golden_three_ways("for_arrays", true);
+}
+
 /// E0102 (5.0 spec §3.7) is a warning: it prints, and the program still
 /// builds and runs, its own `Number` meaning its own variant.
 #[test]

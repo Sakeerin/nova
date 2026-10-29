@@ -1279,25 +1279,14 @@ impl<'a> Lowerer<'a> {
         let join = self.new_block();
 
         // A match with a guard or a pattern today's flat lowering does not
-        // take is refused until test-chain lowering lands (5.0 spec §4.6),
-        // rather than lowered wrongly.
+        // take lowers wholly by test chains (5.0 spec §4.6); every other
+        // match lowers exactly as before 5.0b.
         if !arms
             .iter()
             .all(|a| a.guard.is_none() && a.pattern.is_flat())
         {
-            self.diagnostics.push(
-                Diagnostic::error(
-                    "E0900",
-                    "matches with nested, tuple, or- or range patterns or guards are not \
-                     supported yet",
-                )
-                .with_primary_label(e.span, "not lowered yet")
-                .with_note(
-                    "the checker accepts this match; lowering it to MIR by test chains \
-                     arrives in a later commit of 5.0b"
-                        .to_string(),
-                ),
-            );
+            self.lower_chain_arms(s, &scrutinee.ty, arms, result, join);
+            self.switch_to(join);
             return result;
         }
 
@@ -1469,6 +1458,208 @@ impl<'a> Lowerer<'a> {
         if !diverges(&arm.body) {
             self.copy(result, v);
         }
+    }
+
+    /// Lower a `match` by test chains (5.0 spec §4.6). The scrutinee is
+    /// already in `scrut`, evaluated once. Each arm, in order, tests its
+    /// pattern left to right and depth first; a failed test jumps to the next
+    /// arm's chain. After the tests the arm's guard runs, if it has one, and
+    /// a false guard jumps to the next arm too. After the last arm comes a
+    /// trap, which exhaustiveness makes unreachable.
+    fn lower_chain_arms(
+        &mut self,
+        scrut: Temp,
+        ty: &Ty,
+        arms: &[hir::Arm],
+        result: Temp,
+        join: BlockId,
+    ) {
+        for arm in arms {
+            let next = self.new_block();
+            self.lower_pattern_test(&arm.pattern, scrut, ty, next);
+            if let Some(guard) = &arm.guard {
+                let g = self.lower_expr(guard);
+                if !diverges(guard) {
+                    let body = self.new_block();
+                    self.terminate(Terminator::Branch {
+                        cond: g,
+                        then_: body,
+                        else_: next,
+                    });
+                    self.switch_to(body);
+                }
+            }
+            let v = self.lower_expr(&arm.body);
+            if !diverges(&arm.body) {
+                self.copy(result, v);
+            }
+            self.terminate(Terminator::Goto(join));
+            self.switch_to(next);
+        }
+        // Exhaustiveness was checked: no value gets here.
+        self.terminate(Terminator::Trap);
+    }
+
+    /// Test `value`, of type `ty`, against `pat` in the current block, and
+    /// jump to `fail` when it does not match; on a match, the current block
+    /// is where control goes on. Each sub-value is projected once, into a
+    /// temporary, just before its own tests. A binding is a copy, written as
+    /// the chain reaches it: one a later test fails after is dead, since
+    /// only the arm whose pattern matched reads its locals.
+    ///
+    /// An or-pattern tests its alternatives in turn on the same value; each
+    /// that matches binds the same locals and jumps to one block, where the
+    /// tests after the or-pattern go on, so nothing after it is duplicated.
+    fn lower_pattern_test(&mut self, pat: &hir::Pattern, value: Temp, ty: &Ty, fail: BlockId) {
+        match pat {
+            hir::Pattern::Wildcard => {}
+            hir::Pattern::Bind(local) => {
+                let dst = self.local_map[local.0 as usize];
+                self.copy(dst, value);
+            }
+            hir::Pattern::LitInt(n) => self.test_int_eq(value, *n, fail),
+            hir::Pattern::LitChar(c) => self.test_int_eq(value, *c as i64, fail),
+            hir::Pattern::LitBool(b) => {
+                let ok = self.new_block();
+                let (then_, else_) = if *b { (ok, fail) } else { (fail, ok) };
+                self.terminate(Terminator::Branch {
+                    cond: value,
+                    then_,
+                    else_,
+                });
+                self.switch_to(ok);
+            }
+            hir::Pattern::LitStr(lit) => {
+                let lit_t = self.new_temp(MirTy::Ptr);
+                self.push(Stmt::ConstStr(lit_t, lit.clone()));
+                let eq = self.new_temp(MirTy::I8);
+                self.push(Stmt::CallRuntime {
+                    dst: Some(eq),
+                    func: RtFunc::StrEq,
+                    args: vec![value, lit_t],
+                });
+                self.branch_or_fail(eq, fail);
+            }
+            hir::Pattern::Range { lo, hi } => {
+                self.test_int_cmp(value, hir::BinOp::Ge, *lo, fail);
+                self.test_int_cmp(value, hir::BinOp::Le, *hi, fail);
+            }
+            hir::Pattern::Variant {
+                sum,
+                variant,
+                fields,
+            } => {
+                // A sum of one variant needs no tag test, so an irrefutable
+                // `let` or `for` pattern lowers to projections alone.
+                let def = self.module.sum(*sum);
+                if def.map_or(true, |d| d.variants.len() > 1) {
+                    let tag = self.new_temp(MirTy::I64);
+                    self.push(Stmt::SumTag {
+                        dst: tag,
+                        sum: value,
+                    });
+                    self.test_int_eq(tag, *variant as i64, fail);
+                }
+                let args = match ty {
+                    Ty::Sum { args, .. } => args.clone(),
+                    _ => Vec::new(),
+                };
+                let field_tys: Vec<Ty> = def
+                    .and_then(|d| d.variants.get(*variant as usize))
+                    .map(|v| v.fields.iter().map(|f| self.concrete(f, &args)).collect())
+                    .unwrap_or_default();
+                for (i, field) in fields.iter().enumerate() {
+                    if matches!(field, hir::Pattern::Wildcard) {
+                        continue;
+                    }
+                    let fty = field_tys.get(i).cloned().unwrap_or(Ty::Error);
+                    let mty = mir_ty(&fty);
+                    let t = if mty == MirTy::Unit {
+                        self.unit_temp()
+                    } else {
+                        let t = self.new_temp(mty);
+                        self.push(Stmt::SumField {
+                            dst: t,
+                            sum: value,
+                            index: i as u32,
+                            ty: mty,
+                        });
+                        t
+                    };
+                    self.lower_pattern_test(field, t, &fty, fail);
+                }
+            }
+            hir::Pattern::Tuple(elems) => {
+                let tys = match ty {
+                    Ty::Tuple(tys) => tys.clone(),
+                    _ => Vec::new(),
+                };
+                for (i, elem) in elems.iter().enumerate() {
+                    if matches!(elem, hir::Pattern::Wildcard) {
+                        continue;
+                    }
+                    let ety = tys.get(i).cloned().unwrap_or(Ty::Error);
+                    let mty = mir_ty(&ety);
+                    let t = if mty == MirTy::Unit {
+                        self.unit_temp()
+                    } else {
+                        let t = self.new_temp(mty);
+                        self.push(Stmt::RecordField {
+                            dst: t,
+                            record: value,
+                            index: i as u32,
+                            ty: mty,
+                        });
+                        t
+                    };
+                    self.lower_pattern_test(elem, t, &ety, fail);
+                }
+            }
+            hir::Pattern::Or(alts) => {
+                let ok = self.new_block();
+                for (k, alt) in alts.iter().enumerate() {
+                    let last = k + 1 == alts.len();
+                    let alt_fail = if last { fail } else { self.new_block() };
+                    self.lower_pattern_test(alt, value, ty, alt_fail);
+                    self.terminate(Terminator::Goto(ok));
+                    if !last {
+                        self.switch_to(alt_fail);
+                    }
+                }
+                self.switch_to(ok);
+            }
+        }
+    }
+
+    /// Go on in a fresh block when `cond` holds; jump to `fail` when not.
+    fn branch_or_fail(&mut self, cond: Temp, fail: BlockId) {
+        let ok = self.new_block();
+        self.terminate(Terminator::Branch {
+            cond,
+            then_: ok,
+            else_: fail,
+        });
+        self.switch_to(ok);
+    }
+
+    /// `value == n`, an `Int`, `Char` or tag test.
+    fn test_int_eq(&mut self, value: Temp, n: i64, fail: BlockId) {
+        self.test_int_cmp(value, hir::BinOp::Eq, n, fail);
+    }
+
+    /// `value op n` on integers, failing to `fail`.
+    fn test_int_cmp(&mut self, value: Temp, op: hir::BinOp, n: i64, fail: BlockId) {
+        let c = self.new_temp(MirTy::I64);
+        self.push(Stmt::ConstInt(c, n));
+        let cond = self.bin_i64(op, value, c, MirTy::I8);
+        self.branch_or_fail(cond, fail);
+    }
+
+    /// A field's declared type at the scrutinee's type arguments, with any
+    /// projection normalized as mono normalizes the function's own types.
+    fn concrete(&self, field: &Ty, args: &[Ty]) -> Ty {
+        let ty = field.subst(args);
+        hir::normalize_ty(&ty, &self.module.impls).unwrap_or(ty)
     }
 }
 
