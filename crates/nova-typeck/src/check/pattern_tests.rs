@@ -474,6 +474,78 @@ fn e0104_near_a_variant_says_which() {
 }
 
 #[test]
+fn e0104_guesses_only_a_variant_of_the_matched_type() {
+    // `Eof` is `Tok`'s, near `Eot`, but an `Int` is never a `Tok`.
+    let src = with_sums("fn f(n: Int) -> Int {\n    match n {\n        Eot => 1\n    }\n}");
+    let d = only_warning(&src, "E0104");
+    assert_eq!(d.notes.len(), 1, "{d:?}");
+    assert!(d.fixes.is_empty(), "{d:?}");
+    // The review's case: `Nome` against an `Int` is not `None`.
+    let src = "const MAX: Int = 9\nfn f(p: (Int, Int)) -> Int {\n    match p {\n        \
+               (Nome, MAX) => 1\n    }\n}\nfn main() {}\n";
+    let all = of(src, Severity::Warning);
+    assert_eq!(all.len(), 2, "{all:#?}");
+    assert!(
+        all.iter()
+            .all(|d| d.fixes.is_empty() && !d.notes.iter().any(|n| n.contains("did you mean"))),
+        "{all:#?}"
+    );
+    // Against a `Tok`, the guess stands (`e0104_near_a_variant_says_which`),
+    // and inside an `Opt<Tok>` too.
+    let src = with_sums(
+        "fn f(o: Opt<Tok>) -> Int {\n    match o {\n        Yes(Eot) => 1\n        _ => 0\n    }\n}",
+    );
+    let d = only_warning(&src, "E0104");
+    assert!(d.notes.iter().any(|n| n == "did you mean `Eof`?"), "{d:?}");
+}
+
+/// `main_src` and a module `lex`, checked together with std.
+fn checked_two(main_src: &str, lex_src: &str) -> CheckResult {
+    let parse_one = |src: &str| {
+        let (tokens, lex_errors) = lex(src, FileId::DUMMY);
+        assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+        let (ast, parse_errors) = parse(&tokens, FileId::DUMMY);
+        assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+        ast.expect("an AST")
+    };
+    let (main, lexer) = (parse_one(main_src), parse_one(lex_src));
+    let mut sources = [
+        nova_resolver::ModuleSource::new("main", &main),
+        nova_resolver::ModuleSource::new("lex", &lexer),
+    ];
+    nova_resolver::name_imports(&mut sources);
+    let std_files: Vec<FileId> = nova_resolver::STD_MODULES
+        .iter()
+        .map(|_| FileId::DUMMY)
+        .collect();
+    let resolved = nova_resolver::resolve_program(&sources, &std_files, None);
+    assert!(
+        resolved.diagnostics.is_empty(),
+        "{:#?}",
+        resolved.diagnostics
+    );
+    check(&resolved.file, &resolved.definitions)
+}
+
+#[test]
+fn e0104_on_a_variant_not_imported_says_to_qualify_or_import_it() {
+    let r = checked_two(
+        "import lex::{Tok}\nfn f(o: Opt<Tok>) -> Int {\n    match o {\n        Yes(Eof) => 1\n        \
+         _ => 2\n    }\n}\ntype Opt<T> =\n  | Yes(T)\n  | No\nfn main() {}\n",
+        "pub type Tok =\n  | Eof\n  | Num(Int)\n",
+    );
+    let all: Vec<&Diagnostic> = r.diagnostics.iter().filter(|d| d.code == "E0104").collect();
+    assert_eq!(all.len(), 1, "{:#?}", r.diagnostics);
+    assert!(
+        all[0].notes.iter().any(|n| n
+            == "`Eof` is a variant of `Tok` but is not in scope here: write `Tok::Eof`, or import it"),
+        "{:#?}",
+        all[0]
+    );
+    assert!(all[0].fixes.is_empty(), "{:#?}", all[0]);
+}
+
+#[test]
 fn an_erroneous_pattern_does_not_make_the_arms_after_it_unreachable() {
     // `Eof` is `Tok`'s, so the first arm is E0001 and stands in as `_`; the
     // arms after it are not reported unreachable for that.
@@ -528,6 +600,34 @@ fn a_tuple_of_one_witness_keeps_its_comma() {
     let src = with_sums("fn f(p: (Bool,)) -> Int {\n    match p {\n        (true,) => 1\n    }\n}");
     let d = only(&src, "E0020");
     assert!(d.message.contains("`(false,)`"), "{d:?}");
+}
+
+#[test]
+fn an_empty_match_names_every_variant_it_misses() {
+    // As before 5.0b: E0020 lists the variants, where E0022 would say `_`.
+    let src =
+        "type Color = | Red | Green | Blue\nfn f(c: Color) -> Int {\n    match c {\n    }\n}\n\
+               fn main() {}\n";
+    let d = only(src, "E0020");
+    assert_eq!(
+        d.message,
+        "non-exhaustive match: patterns `Red`, `Green`, `Blue` not covered"
+    );
+}
+
+#[test]
+fn a_char_range_in_a_witness_renders_as_chars() {
+    let src = with_sums(
+        "fn f(xs: [(Char, Bool)]) {\n    for ('a'..='z', true) in xs {\n        let y = 1\n    }\n}",
+    );
+    let d = only(&src, "E0022");
+    assert!(label_text(&d).contains("`('a'..='z', false)`"), "{d:?}");
+    // Inside a variant, and an `Int` range beside it as integers.
+    let src = with_sums("fn f(p: (Int, Opt<Char>)) {\n    let (1..=5, Yes('a'..='c')) = p\n}");
+    let d = only(&src, "E0022");
+    let label = label_text(&d);
+    assert!(label.contains("`(1..=5, Yes('d'))`"), "{d:?}");
+    assert!(label.contains("`(1..=5, No)`"), "{d:?}");
 }
 
 #[test]
@@ -623,6 +723,82 @@ fn a_whole_unreachable_arm_reports_the_arm_not_its_alternatives() {
 }
 
 #[test]
+fn an_alternative_the_chain_tries_before_a_later_one_is_reachable() {
+    // The chain tries `(a, 1)`, `(a, 2)`, then `(_, a)`: `(5, 2)` takes the
+    // `2`, and binds `a` to 5 where `(_, a)` would bind 2.
+    clean(&with_sums(
+        "fn f(p: (Int, Int)) -> Int {\n    match p {\n        (a, 1 | 2) | (_, a) => a\n    }\n}",
+    ));
+    clean(&with_sums(
+        "fn f(o: Opt<Int>) -> Int {\n    match o {\n        Yes(1 | 2) | Yes(_) => 1\n        No => 2\n    }\n}",
+    ));
+    // `false` is reached by `(false, 1)`; `(_, 1)` alone is dead, since
+    // `true | false` covers every `Bool`.
+    let src = with_sums(
+        "fn f(p: (Bool, Int)) -> Int {\n    match p {\n        (true | false, 1) | (_, 1) => 1\n        _ => 2\n    }\n}",
+    );
+    let d = only_warning(&src, "E0021");
+    assert_eq!(labelled(&src, &d), "(_, 1)");
+}
+
+#[test]
+fn a_dead_nested_alternative_is_still_e0021() {
+    let src = with_sums(
+        "fn f(p: (Int, Int)) -> Int {\n    match p {\n        (a, 1 | 1) | (_, a) => a\n    }\n}",
+    );
+    let d = only_warning(&src, "E0021");
+    let label = d.labels.iter().find(|l| l.primary).unwrap();
+    assert_eq!(label.span.start as usize, src.find("1 | 1").unwrap() + 4);
+    // Dead because an earlier alternative of the or-pattern it sits in
+    // takes every value it would: `(a, 2)` before `(a, 2 | 3)`.
+    let src = with_sums(
+        "fn f(p: (Int, Int)) -> Int {\n    match p {\n        (a, 2) | (a, 2 | 3) => a\n        _ => 0\n    }\n}",
+    );
+    let d = only_warning(&src, "E0021");
+    let label = d.labels.iter().find(|l| l.primary).unwrap();
+    assert_eq!(label.span.start as usize, src.find("2 | 3").unwrap());
+    // At depth inside an alternative that is itself reached.
+    let src = with_sums(
+        "fn f(o: Opt<Opt<Int>>) -> Int {\n    match o {\n        Yes(Yes(1 | 2 | 1) | No) => 1\n        _ => 2\n    }\n}",
+    );
+    let d = only_warning(&src, "E0021");
+    let label = d.labels.iter().find(|l| l.primary).unwrap();
+    assert_eq!(
+        label.span.start as usize,
+        src.find("1 | 2 | 1").unwrap() + 8
+    );
+}
+
+#[test]
+fn an_alternative_of_a_guarded_arm_that_only_a_false_guard_could_reach_is_e0021() {
+    // The guard runs once, with the first alternative's bindings: a false
+    // guard goes to the next arm, so `(_, a)` is never reached.
+    let src = with_sums(
+        "fn f(p: (Int, Int)) -> String {\n    match p {\n        (a, _) | (_, a) if a > 5 => \"big\"\n        \
+         _ => \"small\"\n    }\n}",
+    );
+    let d = only_warning(&src, "E0021");
+    assert_eq!(labelled(&src, &d), "(_, a)");
+    assert!(
+        d.notes
+            .iter()
+            .any(|n| n.contains("the arm's guard runs once")),
+        "{d:?}"
+    );
+    // One an earlier arm covers is dead whatever the guard: no such note.
+    let src = with_sums(
+        "fn f(o: Opt<Int>, b: Bool) -> Int {\n    match o {\n        Yes(1) => 1\n        Yes(2 | 1) if b => 2\n        _ => 3\n    }\n}",
+    );
+    let d = only_warning(&src, "E0021");
+    assert_eq!(labelled(&src, &d), "1");
+    assert_eq!(d.notes.len(), 1, "{d:?}");
+    // A guarded arm that is reachable with every alternative is quiet.
+    clean(&with_sums(
+        "fn f(p: (Int, Int)) -> Int {\n    match p {\n        (a, 1 | 2) | (_, a) if a > 0 => a\n        _ => 0\n    }\n}",
+    ));
+}
+
+#[test]
 fn a_generic_sum_matched_at_depth_is_exhaustive() {
     clean(
         "type Tree<T> =\n  | Leaf(T)\n  | Node(Tree<T>, Tree<T>)\n\
@@ -651,6 +827,20 @@ fn a_destructured_let_binding_is_immutable_without_mut() {
         d.notes.iter().any(|n| n.contains("`let mut (…) = …`")),
         "{d:?}"
     );
+}
+
+#[test]
+fn e0060_after_a_variant_destructure_quotes_the_variant() {
+    // The note quotes the pattern's own head, which parses where the name
+    // is bound; `let mut (…)` would not match a `Wrap`.
+    let src =
+        with_sums("fn f(w: Wrap) -> Int {\n    let Wrap(a, s) = w\n    a = 3\n    a + s.len()\n}");
+    let d = only(&src, "E0060");
+    assert!(
+        d.notes.iter().any(|n| n.contains("`let mut Wrap(…) = …`")),
+        "{d:?}"
+    );
+    assert!(!d.notes.iter().any(|n| n.contains("let mut (…)")), "{d:?}");
 }
 
 #[test]

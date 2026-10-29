@@ -69,14 +69,20 @@ patterns (§4; ADR 0049).
   `Some(Token::Ident(name)) if is_keyword(name) =>`, `Some(Int(0) | Int(1))`,
   `'a'..='z'`, `0..10` and `10..=99`. A guard is a `Bool` that sees the
   arm's bindings and runs after they bind; when it is false, matching goes
-  on with the next arm. Every alternative of an or-pattern binds the same
-  names at the same types (E0100 otherwise, naming the binding), and a range
-  that matches nothing is E0101. Exhaustiveness and unreachable arms cover
-  all of them: E0020 names a nested witness, `Some(Err(_))`, and E0021 also
-  warns at an or-pattern's alternative that nothing reaches. Literals and
-  ranges need a `_` or a name to be exhaustive; ranges are not split, so an
-  arm that earlier ranges cover is not reported. Record and array patterns,
-  `x @ p` and `Float` literal patterns are still E0900.
+  on with the next arm. On an or-pattern it runs once, with the bindings of
+  the first alternative that matches, and a false guard goes on to the next
+  arm, where Rust would try a later alternative:
+  `match (1, 9) { (a, _) | (_, a) if a > 5 => "big", _ => "small" }` gives
+  `small`. Every alternative of an or-pattern binds the same names at the
+  same types (E0100 otherwise, naming the binding), and a range that matches
+  nothing is E0101. Exhaustiveness and unreachable arms cover all of them:
+  E0020 names a nested witness, `Some(Err(_))`, and E0021 also warns at an
+  or-pattern's alternative that nothing reaches, in the order the chain
+  tries them, a guarded arm's included, with a note there that the guard
+  runs once. Literals and ranges need a `_` or a name to be exhaustive;
+  ranges are not split, so an arm that earlier ranges cover is not
+  reported. Record and array patterns, `x @ p` and `Float` literal patterns
+  are still E0900.
 - **Destructuring `let` and `for`:** `let (q, r) = div_mod(a, b)`,
   `let Wrap(x, y) = w` for a sum with one variant, `let mut (a, b) = p`,
   and `for (name, n) in pairs`. A pattern that does not match every value
@@ -132,9 +138,11 @@ patterns (§4; ADR 0049).
   fields, `Some(Leaf)` for `Leaf(String)`, is E0016. No repository program
   wrote such a pattern. A new warning, E0104, marks a pattern binding whose
   name starts with an upper-case letter, most often a variant misspelt or
-  not in scope (`Some(Rde)`, with "did you mean" for a near variant), or a
-  constant, which a pattern cannot match by name (a guard can); a name that
-  starts with `_` is not warned about.
+  not in scope (`Some(Rde)`, with "did you mean" for a near variant of the
+  matched value's type, and a note to write `Tok::Eof` or import it for a
+  variant of the matched sum that is not in scope), or a constant, which a
+  pattern cannot match by name (a guard can); a name that starts with `_` is
+  not warned about.
 - **The lexer splits a float after a `.`:** `t.1.0` is `t`, `.`, `1`, `.`,
   `0`, by the source text, so `t.1.10` is `(t.1).10`. A float anywhere
   else, `0..1.5` included, is unchanged. `Tokens::plain_decimal` says

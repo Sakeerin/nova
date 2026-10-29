@@ -676,7 +676,23 @@ points it settles (spec §12.1).
     (`an_unreachable_alternative_is_e0021_on_it_alone`,
     `an_alternative_inside_one_reported_is_not_reported_again`,
     `a_whole_unreachable_arm_reports_the_arm_not_its_alternatives`; mutants
-    31 and 32).
+    31 and 32). **Amended 2026-10-29 after the review:** the check follows
+    the order the test chain tries the alternatives in: an alternative is
+    reported only when no value that matches the arm with it escapes the
+    earlier arms, the earlier alternatives of its own or-pattern and those
+    of each or-pattern it sits in, so `(a, 1 | 2) | (_, a)`'s `2`,
+    `Some(1 | 2) | Some(_)`'s `2` and `(true | false, 1) | (_, 1)`'s `false`
+    are no longer reported (`(_, 1)` still is). A guarded arm's
+    alternatives, when the arm is reachable, are checked too: its guard runs
+    once, with the first matching alternative's bindings, and a false guard
+    goes to the next arm (spec §4.6), where Rust retries the later
+    alternatives, so `(_, a)` in `(a, _) | (_, a) if a > 5` is E0021 with a
+    note that the guard runs once
+    (`an_alternative_the_chain_tries_before_a_later_one_is_reachable`,
+    `a_dead_nested_alternative_is_still_e0021`,
+    `an_alternative_of_a_guarded_arm_that_only_a_false_guard_could_reach_is_e0021`,
+    and `run_tests`'
+    `a_guard_on_an_or_pattern_runs_once_with_the_first_alternatives_bindings`).
 16. **No flat outer switch before the inner chains** (spec §13: "if MIR's
     size calls for it"). It does not: the prototype's 14-arm match three
     levels deep over a token is 190 statements in 67 blocks. A chain tests a
@@ -765,7 +781,10 @@ points it settles (spec §12.1).
     (`a_destructured_let_binding_is_immutable_without_mut`,
     `a_match_arm_or_a_loop_variable_is_rebound_to_be_mutable`,
     `a_for_loop_variable_over_an_array_is_immutable`; mutants 24, 61, 66 and
-    67).
+    67). **Amended 2026-10-29 after the review:** the destructuring `let`'s
+    note quotes the pattern's own head, `let mut Wrap(…) = …` after
+    `let Wrap(a, b) = w`, and `let mut (…) = …` after a tuple
+    (`e0060_after_a_variant_destructure_quotes_the_variant`).
 25. **An empty range keeps its pattern.** E0101, "this range matches
     nothing", labelled "`5..5` stops before its start" or "`9` is above
     `1`"; the pattern stays as written rather than `_`, so the arms after it
@@ -803,6 +822,9 @@ points it settles (spec §12.1).
     or-pattern inside a witness as its alternatives joined by ` | `
     (`a_missing_nested_variant_is_e0020_with_a_nested_witness`,
     `a_tuple_of_one_witness_keeps_its_comma`; mutants 25 and 30).
+    **Amended 2026-10-29 after the review:** a witness renders at its
+    column's type, so a range in a `Char` column is `'a'..='z'`, where it
+    printed `97..=122` (`a_char_range_in_a_witness_renders_as_chars`).
 29. **The newline rule meets tuples and patterns without a silent change of
     meaning** (step 0's probes, Task 8). A tuple tail after a statement
     warns by decision 3; a tuple pattern arm after an arm that ended at a
@@ -831,11 +853,18 @@ points it settles (spec §12.1).
     and `for_arrays` are in `wasm_tests.rs`'s `gate!` and pass under Node
     (Tasks 2 and 5).
 32. **The records** (spec §4.7): ADR 0049; the CHANGELOG's Unreleased, Added
-    (tuples, patterns, destructuring, `for` over arrays) and Changed
-    (E0103's ruling, the bare variant name, the chains, the lexer's split);
+    (E0103's ruling, extending 5.0a's newline-rule entry there; tuples,
+    patterns, destructuring, `for` over arrays) and Changed (the bare
+    variant name, the chains, the lexer's split);
     dated notes in `11-PARSER.md` §2, `12-TYPESYSTEM.md` §3 and §8 with the
     catalog's E0100 and E0101, `13-RUNTIME.md` §2.2, `14-CODEGEN.md` §4 and
-    §6.2, and `20-STDLIB.md`.
+    §6.2, and `20-STDLIB.md`. **Amended 2026-10-29 after the review:** E0103's
+    ruling is under Added, beside 5.0a's newline-rule entry, as Task 7's
+    patch put it, where this decision said Changed; the records also say
+    that a guard on an or-pattern runs once (ADR 0049 §7, the CHANGELOG,
+    `12-TYPESYSTEM.md` §8), `14-CODEGEN.md` §6.2's example switches on an
+    `i64`, as the backend does, and `12-TYPESYSTEM.md` quotes E0010's arity
+    message in full.
 
 **The split's decisions**
 
@@ -966,6 +995,14 @@ points it settles (spec §12.1).
     `an_upper_case_binding_in_a_for_pattern_is_e0104`,
     `e0104_on_a_constant_says_to_use_a_guard`,
     `e0104_near_a_variant_says_which`; mutants 57, 58, 62 and 63).
+    **Amended 2026-10-29 after the review:** the guess offers only variants
+    of a sum the matched value's type unifies with, so `(Nome, MAX)` against
+    `(Int, Int)` no longer suggests `None`; and a name that is a variant of
+    the matched sum but not in scope, `Some(Eof)` with `Tok` imported and
+    `Eof` not, gets the note "`Eof` is a variant of `Tok` but is not in
+    scope here: write `Tok::Eof`, or import it", and no guess
+    (`e0104_guesses_only_a_variant_of_the_matched_type`,
+    `e0104_on_a_variant_not_imported_says_to_qualify_or_import_it`).
 43. **A match with a pattern error skips exhaustiveness and reachability.**
     E0001's pattern becomes `_`, which made every arm after it unreachable,
     an E0021 cascade; a pattern that adds an error now keeps its `match`
@@ -985,12 +1022,22 @@ points it settles (spec §12.1).
     the values under each present constructor are named too, so
     `for (1, true) in p` reports "`(0, _)`, `(1, false)` are not matched",
     where it said "`(0, true)`, `(0, false)`" and left `(1, false)` out (the
-    second check) (mutants 60, 68 and 69).
+    second check) (mutants 60, 68 and 69). **Amended 2026-10-29 after the
+    review:** the `_` for a column that no row names is E0022's alone
+    (`naming_values`), so E0020 is unchanged: an empty `match` on a sum
+    reports "patterns `Red`, `Green`, `Blue` not covered", as at the base,
+    where the second check's `_` had made it "pattern `_`"
+    (`an_empty_match_names_every_variant_it_misses`).
 45. **Usefulness is exponential in the or-patterns of a row, a known
     limit.** Each or-row is expanded whole: a tuple pattern of sixteen
     `true | false` takes 14 s to check in a debug build, fourteen 2.7 s,
     twelve 0.6 s. No program writes one; expanding lazily is a later part's,
-    and ADR 0049 records the measurement.
+    and ADR 0049 records the measurement. **Amended 2026-10-29 after the
+    review:** decision 15's check in the chain's order makes one usefulness
+    query per alternative, as before, and is no slower: measured again on
+    one machine, the sixteen take 10.8 s after the fix and 11.4 s before,
+    fourteen 2.2 s and 2.1 s, twelve 0.5 s and 0.5 s, so ADR 0049's figures
+    stand.
 46. **The records the first fact-check corrected:** `13-RUNTIME.md`'s note
     says the collector scans a tuple's slots conservatively, as a record's;
     `12-TYPESYSTEM.md`'s E0022 row covers `for`, its patterns note carries

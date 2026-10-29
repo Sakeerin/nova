@@ -154,8 +154,8 @@ copying everything built so far. See `examples/05-json-api/BENCHMARK.md`, "AMEND
 ### 6.2 Pattern Match
 Compiled to decision tree (Maranget). Each leaf is a basic block. Compiler emits:
 ```llvm
-switch i32 %tag, label %default [ i32 0, label %case0
-                                  i32 1, label %case1 ]
+switch i64 %tag, label %default [ i64 0, label %case0
+                                  i64 1, label %case1 ]
 ```
 
 **Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** a
