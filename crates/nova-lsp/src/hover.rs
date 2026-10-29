@@ -341,6 +341,43 @@ mod tests {
         assert!(v.contains("v: Int"), "{v}");
     }
 
+    /// A `for` pattern's bindings, and a binding two variants deep in an
+    /// or-pattern, hover with their types where they are bound and where
+    /// they are used (5.0 spec §4.3, §4.5).
+    #[test]
+    fn bindings_in_a_for_pattern_and_a_nested_or_pattern_hover() {
+        let text = "fn f(o: Option<Result<Int, String>>, arr: [(Int, String)]) -> Int {\n    \
+                    let mut n = 0\n    \
+                    for (a, b) in arr {\n        n = n + a + b.len()\n    }\n    \
+                    match o {\n        Some(Ok(x)) | Some(Err(_)) if n > 0 => x\n        \
+                    Some(Ok(y)) => y\n        _ => 0\n    }\n}\n\nfn main() {}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-hover-for-pattern")
+            .join("main.nova");
+        let overlay = crate::workspace::Overlay::default().with(&path, text.to_string());
+        let options = crate::analysis::options(None, true);
+        let answer = crate::analysis::answering(&path, &overlay, &options).expect("an answer");
+        let shown = |at: usize| {
+            let lsp::HoverContents::Markup(found) =
+                hover(&answer, at as u32).expect("a hover").contents
+            else {
+                panic!("not Markdown");
+            };
+            found.value
+        };
+        for (at, want) in [
+            (text.find("(a, b)").unwrap() + 1, "let a: Int"),
+            (text.find("(a, b)").unwrap() + 4, "let b: String"),
+            (text.find("+ a +").unwrap() + 2, "let a: Int"),
+            (text.find("b.len").unwrap(), "let b: String"),
+            (text.find("Ok(x)").unwrap() + 3, "let x: Int"),
+            (text.find("=> x").unwrap() + 3, "let x: Int"),
+            (text.find("Ok(y)").unwrap() + 3, "let y: Int"),
+        ] {
+            assert_eq!(shown(at), format!("```nova\n{want}\n```"), "at {at}");
+        }
+    }
+
     #[test]
     fn an_item_line_keeps_pub_async_and_where_and_stops_at_its_body() {
         let text = "    pub async fn f<T>(x: T) -> T\n    where T: Show\n    { x }\n";

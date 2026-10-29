@@ -641,3 +641,107 @@ fn restrict_or(pat: &usefulness::Pat, target: usize, keep: Range<usize>) -> usef
     }
     go(pat, target, &keep, &mut 0)
 }
+
+impl<'a> Checker<'a> {
+    /// `for p in a`, `a` an array (5.0 spec §4.5), desugars to
+    /// `{ let __arr = a  let __n = __arr.len()  let mut __i = 0
+    ///    while __i < __n { <bind p to __arr[__i]>  __i = __i + 1  body } }`.
+    ///
+    /// `a` is evaluated once, and each element is read when the loop reaches
+    /// it, so a write to a later element is seen. The index is advanced
+    /// before the body, so `continue` is safe. The hidden locals are
+    /// unscoped, so no source name reaches or shadows them.
+    pub(super) fn check_for_array(
+        &mut self,
+        fcx: &mut FnCtx,
+        pattern: &Spanned<ast::Pattern>,
+        iterable: hir::Expr,
+        elem: Ty,
+        body: &Spanned<ast::Block>,
+        span: Span,
+    ) -> hir::Expr {
+        let arr_ty = iterable.ty.clone();
+        let arr = fcx.new_local_unscoped("__arr".to_string(), arr_ty.clone(), false, span);
+        let len = fcx.new_local_unscoped("__n".to_string(), Ty::Int, false, span);
+        let idx = fcx.new_local_unscoped("__i".to_string(), Ty::Int, true, span);
+
+        fcx.scopes.push(Default::default());
+        let bind = self.for_loop_binding(fcx, pattern, &elem);
+        fcx.loop_depth += 1;
+        let body_hir = self.check_block(fcx, &body.value, body.span);
+        fcx.loop_depth -= 1;
+        fcx.scopes.pop();
+
+        let expr = |kind, ty| hir::Expr { kind, ty, span };
+        let read = |local, ty| expr(hir::ExprKind::Local(local), ty);
+        let let_stmt = |local, init| {
+            expr(
+                hir::ExprKind::Let {
+                    local,
+                    init: Box::new(init),
+                },
+                Ty::Unit,
+            )
+        };
+        let element = expr(
+            hir::ExprKind::Index {
+                target: Box::new(read(arr, arr_ty.clone())),
+                index: Box::new(read(idx, Ty::Int)),
+            },
+            elem,
+        );
+        let advance = expr(
+            hir::ExprKind::Assign {
+                local: idx,
+                value: Box::new(expr(
+                    hir::ExprKind::Binary {
+                        op: hir::BinOp::Add,
+                        lhs: Box::new(read(idx, Ty::Int)),
+                        rhs: Box::new(expr(hir::ExprKind::IntLit(1), Ty::Int)),
+                    },
+                    Ty::Int,
+                )),
+            },
+            Ty::Unit,
+        );
+        let cond = expr(
+            hir::ExprKind::Binary {
+                op: hir::BinOp::Lt,
+                lhs: Box::new(read(idx, Ty::Int)),
+                rhs: Box::new(read(len, Ty::Int)),
+            },
+            Ty::Bool,
+        );
+        let while_body = expr(
+            hir::ExprKind::Block {
+                stmts: vec![bind.bind(element, span), advance, body_hir],
+                trailing: None,
+            },
+            Ty::Unit,
+        );
+        let len_init = expr(
+            hir::ExprKind::ArrayLen {
+                target: Box::new(read(arr, arr_ty)),
+            },
+            Ty::Int,
+        );
+        expr(
+            hir::ExprKind::Block {
+                stmts: vec![
+                    let_stmt(arr, iterable),
+                    let_stmt(len, len_init),
+                    let_stmt(idx, expr(hir::ExprKind::IntLit(0), Ty::Int)),
+                    expr(
+                        hir::ExprKind::While {
+                            cond: Box::new(cond),
+                            body: Box::new(while_body),
+                        },
+                        Ty::Unit,
+                    ),
+                ],
+                trailing: None,
+            },
+            Ty::Unit,
+        )
+    }
+}

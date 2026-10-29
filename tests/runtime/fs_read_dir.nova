@@ -27,10 +27,9 @@ async fn go() {
     let _ = write_string("${d}/Zebra.txt", "z").await
     match read_dir(d).await {
         Ok(entries) => {
-            // Arrays have no `.iter()`/`for x in arr` (only `.len()` and
-            // indexing are built in -- see the task report), so this walks by
-            // index rather than the `for e in entries.iter()` shape a `Vec`
-            // would use.
+            // Written before 5.0b, when arrays had no `for x in arr`, so
+            // this walks by index; `for e in entries` works now, and so does
+            // this.
             let n = entries.len()
             let mut i = 0
             while i < n {

@@ -213,6 +213,45 @@ mod tests {
         assert!(members.contains(&"text".to_string()), "{members:?}");
     }
 
+    /// A `for` pattern's bindings, and an or-pattern's, are offered in the
+    /// body, each once, and a member after one (5.0 spec §4.3, §4.5).
+    #[test]
+    fn bindings_in_a_for_pattern_and_an_or_pattern_complete() {
+        let text = "record Tok { text: String }\n\n\
+                    fn f(o: Result<(Int, Tok), (Int, Tok)>, arr: [(Int, Tok)]) -> Int {\n    \
+                    for (left, right) in arr {\n        \n        right.\n    }\n    \
+                    match o {\n        Ok((num, tok)) | Err((num, tok)) => {\n            \n            \
+                    tok.\n            num\n        }\n    }\n}\n\nfn main() {}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-complete-for-pattern")
+            .join("main.nova");
+        let overlay = Overlay::default().with(&path, text.to_string());
+        let labels = |offset: usize| -> Vec<String> {
+            complete(&path, text, offset as u32, &overlay)
+                .into_iter()
+                .map(|i| i.label)
+                .collect()
+        };
+        let count = |names: &[String], want: &str| names.iter().filter(|n| *n == want).count();
+        let body = text.find("arr {\n        ").unwrap() + "arr {\n        ".len();
+        let names = labels(body);
+        for want in ["left", "right", "arr", "o"] {
+            assert_eq!(count(&names, want), 1, "{want}: {names:?}");
+        }
+        let arm = text.find("=> {\n            ").unwrap() + "=> {\n            ".len();
+        let names = labels(arm);
+        for want in ["num", "tok", "arr", "o"] {
+            assert_eq!(count(&names, want), 1, "{want}: {names:?}");
+        }
+        for at in [
+            text.find("right.\n").unwrap() + 6,
+            text.find("tok.\n").unwrap() + 4,
+        ] {
+            let members = labels(at);
+            assert!(members.contains(&"text".to_string()), "{members:?}");
+        }
+    }
+
     #[test]
     fn a_signature_stops_at_its_body_outside_parentheses() {
         assert_eq!(

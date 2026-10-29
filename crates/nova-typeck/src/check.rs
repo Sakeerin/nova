@@ -4729,11 +4729,15 @@ impl<'a> Checker<'a> {
         if matches!(iter_ty, Ty::Error) {
             return error_expr(span);
         }
+        if let Ty::Array(elem) = &iter_ty {
+            let elem = (**elem).clone();
+            return self.check_for_array(fcx, pattern, iterable, elem, body, span);
+        }
         let Some(next) = self.iterator_next(fcx, &iter_ty) else {
             self.unsupported(
                 iter.span,
-                "`for` loops over anything but an integer range (`a..b`) or a value \
-                 implementing `Iterator` (try `.iter()`)",
+                "`for` loops over anything but an integer range (`a..b`), an array, or a \
+                 value implementing `Iterator` (try `.iter()`)",
             );
             return error_expr(span);
         };
