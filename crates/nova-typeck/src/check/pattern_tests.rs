@@ -1,8 +1,8 @@
 //! The checker's tests of 5.0b's patterns (spec
 //! `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
-//! §4.3, §4.4): nested, tuple, or-, `Char` and range patterns, guards,
-//! `let` and `for` destructuring, and the codes they meet: E0001, E0010,
-//! E0016, E0020, E0021, E0022, E0100, E0101 and E0104.
+//! §4.3 to §4.5): nested, tuple, or-, `Char` and range patterns, guards,
+//! `let` and `for` destructuring, `for` over an array, and the codes they
+//! meet: E0001, E0010, E0016, E0020, E0021, E0022, E0100, E0101 and E0104.
 
 use super::*;
 use nova_diagnostics::{FileId, Severity};
@@ -717,9 +717,105 @@ fn a_destructured_let_is_a_one_arm_match() {
 }
 
 #[test]
+fn for_destructures_over_an_array_and_an_iterator() {
+    clean(&with_sums(
+        "fn f(xs: [(Int, String)]) -> Int {\n    let mut n = 0\n    for (i, s) in xs {\n        n += i + s.len()\n    }\n    \
+         for x in [1, 2, 3] {\n        n += x\n    }\n    for _ in xs {\n        n += 1\n    }\n    n\n}",
+    ));
+}
+
+#[test]
+fn a_refutable_for_pattern_is_e0022() {
+    let src =
+        with_sums("fn f(xs: [Opt<Int>]) {\n    for Yes(x) in xs {\n        let y = x\n    }\n}");
+    let d = only(&src, "E0022");
+    assert_eq!(d.message, "refutable pattern in a `for` loop");
+    // Each missed value once: `(0, _)` for the literal's column, and
+    // `(1, false)` under the literal, not `(0, true)` and `(0, false)`.
+    let src = with_sums(
+        "fn f(ps: [(Int, Bool)]) {\n    for (1, true) in ps {\n        let y = 1\n    }\n}",
+    );
+    let d = only(&src, "E0022");
+    let label = label_text(&d);
+    assert!(
+        label.contains("`(0, _)`") && label.contains("`(1, false)`"),
+        "{d:?}"
+    );
+    assert!(!label.contains("`(0, true)`"), "{d:?}");
+}
+
+#[test]
+fn an_upper_case_binding_in_a_for_pattern_is_e0104() {
+    let src = with_sums(
+        "fn f(xs: [(Int, Int)]) -> Int {\n    let mut n = 0\n    for (A, c) in xs {\n        n += A + c\n    }\n    n\n}",
+    );
+    let d = only_warning(&src, "E0104");
+    assert_eq!(labelled(&src, &d), "A");
+}
+
+#[test]
+fn a_for_pattern_with_an_error_is_not_also_e0022() {
+    let src =
+        with_sums("fn f(xs: [Opt<Int>]) {\n    for Yes(Eof) in xs {\n        let y = 1\n    }\n}");
+    let errors = of(&src, Severity::Error);
+    let codes: Vec<&str> = errors.iter().map(|d| d.code.as_str()).collect();
+    assert!(!codes.contains(&"E0022"), "{errors:#?}");
+    assert!(!codes.is_empty(), "{errors:#?}");
+}
+
+#[test]
 fn a_tuple_pattern_over_a_range_is_e0010() {
     let src = with_sums("fn f() {\n    for (a, b) in 0..3 {\n        let c = a\n    }\n}");
     only(&src, "E0010");
+}
+
+#[test]
+fn a_for_loop_variable_over_an_array_is_immutable() {
+    let src = with_sums("fn f(xs: [Int]) {\n    for x in xs {\n        x = 1\n    }\n}");
+    let d = only(&src, "E0060");
+    assert!(
+        d.notes[0].contains("rebind it inside the loop's body"),
+        "{d:?}"
+    );
+    // A `for` pattern's binding is rebound too; `let mut (…)` is a `let`'s.
+    let src =
+        with_sums("fn f(xs: [(Int, Int)]) {\n    for (a, b) in xs {\n        a = b\n    }\n}");
+    let d = only(&src, "E0060");
+    assert!(d.notes[0].contains("rebind it as `let mut a = a`"), "{d:?}");
+    assert!(!d.notes[0].contains("let mut (…)"), "{d:?}");
+}
+
+#[test]
+fn for_over_an_array_desugars_to_an_index_loop() {
+    let r = checked(&with_sums(
+        "fn f(xs: [Int]) -> Int {\n    let mut n = 0\n    for x in xs {\n        n += x\n    }\n    n\n}",
+    ));
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    fn walk<'e>(e: &'e hir::Expr, out: &mut Vec<&'e hir::Expr>) {
+        out.push(e);
+        for c in child_exprs(e) {
+            walk(c, out);
+        }
+    }
+    let f = r.module.functions.iter().find(|f| f.name == "f").unwrap();
+    let mut all = Vec::new();
+    walk(&f.body, &mut all);
+    assert_eq!(
+        all.iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::ArrayLen { .. }))
+            .count(),
+        1,
+        "the length is read once"
+    );
+    assert_eq!(
+        all.iter()
+            .filter(|e| matches!(e.kind, hir::ExprKind::Index { .. }))
+            .count(),
+        1
+    );
+    assert!(all
+        .iter()
+        .any(|e| matches!(e.kind, hir::ExprKind::While { .. })));
 }
 
 // --- The newline rule and tuple patterns (5.0 spec §3.5) ---
