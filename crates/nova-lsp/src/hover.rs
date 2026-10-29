@@ -305,6 +305,42 @@ mod tests {
         );
     }
 
+    /// A binding inside a nested pattern, an or-pattern's second
+    /// alternative's and a destructuring `let`'s hover with their types
+    /// (5.0 spec §4.3).
+    #[test]
+    fn a_binding_in_a_nested_pattern_hovers_with_its_type() {
+        let text = "record Tok { text: String }\n\n\
+                    fn f(o: Option<(Int, Tok)>, r: Result<Int, Int>) -> Int {\n    \
+                    let (lo, (hi, _)) = (1, (2, 3))\n    \
+                    let k = match r {\n        Ok(v) | Err(v) => v\n    }\n    \
+                    match o {\n        Some((count, tok)) if count > lo => count + tok.text.len() + hi + k\n        \
+                    _ => 0\n    }\n}\n\nfn main() {}\n";
+        let path = std::env::temp_dir()
+            .join("nova-lsp-hover-pattern")
+            .join("main.nova");
+        let overlay = crate::workspace::Overlay::default().with(&path, text.to_string());
+        let options = crate::analysis::options(None, true);
+        let answer = crate::analysis::answering(&path, &overlay, &options).expect("an answer");
+        let shown = |at: usize| {
+            let lsp::HoverContents::Markup(found) =
+                hover(&answer, at as u32).expect("a hover").contents
+            else {
+                panic!("not Markdown");
+            };
+            found.value
+        };
+        let count = shown(text.find("count + tok").unwrap());
+        assert!(count.contains("count: Int"), "{count}");
+        let tok = shown(text.find("tok.text").unwrap());
+        assert!(tok.contains("tok: Tok"), "{tok}");
+        let hi = shown(text.find("hi + k").unwrap());
+        assert!(hi.contains("hi: Int"), "{hi}");
+        // The second alternative's `v` is the first's local.
+        let v = shown(text.find("Err(v)").unwrap() + 4);
+        assert!(v.contains("v: Int"), "{v}");
+    }
+
     #[test]
     fn an_item_line_keeps_pub_async_and_where_and_stops_at_its_body() {
         let text = "    pub async fn f<T>(x: T) -> T\n    where T: Show\n    { x }\n";
