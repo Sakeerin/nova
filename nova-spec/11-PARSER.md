@@ -273,6 +273,61 @@ after an arm's body; a `;` written at the end of the line before says the
 break is meant, so there is no split to record. A view's children keep
 their own rule: a `;` ends a child before a `(` or `[`.
 
+**Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** **tuples
+and `t.N`**
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.1, §4.2). Tuple types, literals and patterns parse as the grammar above
+writes them, and as the parser already read them: `()` is unit, `(e)` and
+`(T)` are the expression and the type, and a tuple of one is written with a
+trailing comma, `(e,)` and `(T,)`. A tuple literal is parenthesised, so the
+newline rule is off inside it. **A tuple's element is a postfix `.` and an
+index:**
+
+```ebnf
+postfix_op  = … | "." INT_LIT ;   (* t.0, plain decimal digits *)
+```
+
+The index is plain decimal digits with no leading zero: `t.01`, `t.1_0`,
+`t.0x1` and `t.00` are refused (P0001, "a tuple index is plain decimal
+digits, with no leading zero, `_` or prefix"), as Rust does, so each index
+has one spelling. `t.1e5` is a float there, and P0001 as before. The node is
+`Expr::Field` whose field is the index's digits, so `t.0` is
+`Field { field: "0" }`. **The lexer splits a float after a `.`:** a float
+token whose text is digits, `.`, digits (`1.0`) that follows a `.` becomes an
+integer, a `.` and an integer, so `t.1.0` reads as `(t.1).0` and `t.0.1.2`
+chains. It splits by the source text, not the value, so `t.1.10` is
+`(t.1).10`; after a `..`, or after any other token, `1.0` stays a float, as
+does a float with a `_` or an exponent.
+
+**Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):**
+**patterns**
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.3 to §4.5). The parser reads patterns as before; 5.0b's checker takes
+more of them. `range_pattern`, which the grammar above leaves undefined, is
+what the parser reads:
+
+```ebnf
+range_pattern = INT_LIT ( ".." | "..=" ) INT_LIT   (* 0..10, 0..=9 *)
+              | CHAR_LIT "..=" CHAR_LIT ;          (* 'a'..='z' *)
+```
+
+An end is a literal, never a path or an expression, and there is no `-` in a
+pattern, so a negative end does not parse. An alternative of an or-pattern
+is a pattern without a top-level `|`; parentheses group one, `Some(1 | 2)`
+needs none, and `(p)` is `p`. A tuple pattern of one is `(p,)`, and `()` is
+the unit pattern. `mut` does not parse inside a pattern; `let mut (a, b) =
+e` makes each binding of the pattern mutable. A guard, `pattern if expr =>`,
+ends at its `=>`, so the newline rule is off in it. **The checker takes**
+`_`, names, `Int`, `Bool`, `String` and `Char` literals, variants with field
+patterns, tuples, or-patterns at any depth, ranges and guards in `match`;
+an irrefutable pattern in `let` and `for`. Record and array patterns,
+`x @ p` and `Float` literals stay E0900. `for p in a` runs over an array
+`a` too, beside a range and an iterator: the checker desugars it to an index
+loop that evaluates `a` once and reads each element when it reaches it, the
+index advanced before the body. A match arm that starts with a
+tuple pattern, after an arm that ended at a line break, begins a new arm by
+the newline rule above.
+
 ---
 
 ## 3. AST Node Definitions (Rust)

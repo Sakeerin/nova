@@ -99,6 +99,12 @@ shim provides printing, `Float` text and case mapping.
 | Sum type | tagged: by reference | by reference |
 | Closures | (fn_ptr, env_ptr) | (table_idx, env_ptr) |
 
+**Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** a tuple is passed
+by reference, a heap pointer, as a record is, on both targets: it is never
+flattened
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.1; `13-RUNTIME.md` §2.2). 5.0b's ADR 0049 records the departure.
+
 ---
 
 ## 5. Compilation Flow Per Function
@@ -151,6 +157,24 @@ Compiled to decision tree (Maranget). Each leaf is a basic block. Compiler emits
 switch i32 %tag, label %default [ i32 0, label %case0
                                   i32 1, label %case1 ]
 ```
+
+**Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** a
+`match` is lowered to MIR by test chains, not a decision tree
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.6; ADR 0049). A match whose arms are all flat (`_`, a name, a literal,
+or a variant whose fields are names or `_`) and unguarded lowers as before:
+one `Switch` on the tag or the value (the `switch i64` above, or `i8` for a
+`Bool`), or a chain of string compares. Any other match lowers wholly by
+chains: the scrutinee is evaluated once into a temporary; each arm, in
+order, tests its pattern left to right and depth first, a tag (`SumTag`), an
+`Int`, `Char` or `Bool` value, a string (`StrEq`) or a range (two compares),
+each on a value projected once with `SumField` or `RecordField`; a failed
+test jumps to the next arm's chain. A sum of one variant takes no tag test.
+The arm binds its names as the chain reaches them, then runs its guard,
+whose false edge also goes to the next arm, then its body. An or-pattern's
+alternatives are tested in turn on one value and join where they succeed,
+so nothing after it is duplicated. A trap follows the last arm. No MIR
+statement is new, so the backends emit compares and conditional branches.
 
 ### 6.3 Generics
 Monomorphized: each unique instantiation gets its own compiled function.

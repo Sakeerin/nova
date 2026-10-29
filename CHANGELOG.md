@@ -11,7 +11,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Phase 5.0a, the small language and CI (spec
 `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
-§3; ADR 0048, Phase 5's scope and backend).
+§3; ADR 0048, Phase 5's scope and backend), and 5.0b, tuples and
+patterns (§4; ADR 0049).
 
 ### Added
 
@@ -46,7 +47,43 @@ Phase 5.0a, the small language and CI (spec
   statement the parser before it would have continued:** a line that
   starts with `(`, `[` or `-`, and a line after a `return` or `break` at
   the end of a line. A `;` written at the end of the line before says the
-  break is meant, and silences it.
+  break is meant, and silences it. Before a `(`, `[` or `-` it warns only
+  where the old reading could have been well typed: after a function, an
+  array, or an `Int` or `Float` operand, so `g()` then a tuple `(a, b)` on
+  the next line does not warn unless `g` returns a function.
+- **Tuples:** tuple types `(Int, String)` and literals `(a, b)`, with a
+  tuple of one written `(a,)`; `()` is still unit and `(a)` still `a`.
+  `t.0` reads an element, counted from 0, `t.1.0` an element of an
+  element, and `t.0 = x` and `t.0 += x` write one through a mutable
+  binding. Tuples work as type arguments, in generic functions, closures,
+  `Option`, `Vec` and arrays, and across `.await`, on every backend, WASM
+  included, laid out as records are. A tuple has no impls, so `==`,
+  interpolation and a `Hash`, `Eq` or `Display` bound refuse it (E0013,
+  with a note that says why), and a tuple is not a `Map` key; no `impl` can
+  name one. A tuple of the wrong arity or element type is E0010, an index
+  past the end E0014, and `t.0` on a value whose type is not yet known
+  E0011. A tuple index is plain decimal digits: `t.01`, `t.1_0` and
+  `t.0x1` are P0001.
+- **Patterns nest, with guards, or-patterns, `Char` literals and ranges:**
+  a variant's fields and a tuple's elements are patterns to any depth,
+  `Some(Token::Ident(name)) if is_keyword(name) =>`, `Some(Int(0) | Int(1))`,
+  `'a'..='z'`, `0..10` and `10..=99`. A guard is a `Bool` that sees the
+  arm's bindings and runs after they bind; when it is false, matching goes
+  on with the next arm. Every alternative of an or-pattern binds the same
+  names at the same types (E0100 otherwise, naming the binding), and a range
+  that matches nothing is E0101. Exhaustiveness and unreachable arms cover
+  all of them: E0020 names a nested witness, `Some(Err(_))`, and E0021 also
+  warns at an or-pattern's alternative that nothing reaches. Literals and
+  ranges need a `_` or a name to be exhaustive; ranges are not split, so an
+  arm that earlier ranges cover is not reported. Record and array patterns,
+  `x @ p` and `Float` literal patterns are still E0900.
+- **Destructuring `let` and `for`:** `let (q, r) = div_mod(a, b)`,
+  `let Wrap(x, y) = w` for a sum with one variant, `let mut (a, b) = p`,
+  and `for (name, n) in pairs`. A pattern that does not match every value
+  is E0022, with the values it misses.
+- **`for x in arr` over an array:** in order, `arr` evaluated once and each
+  element read when the loop reaches it, with `break`, `continue` and a
+  pattern, on every backend, WASM included.
 
 ### Changed
 
@@ -76,6 +113,32 @@ Phase 5.0a, the small language and CI (spec
 - **The lexer marks each token that follows a line break,** a comment
   holding one included, and a lone `\r` counting as one: `lex` returns
   `Tokens`, which reads as a slice of the tokens, and `parse` takes it.
+- **A `match` with a nested, or-, range or tuple pattern, or a guard,
+  lowers to MIR by test chains:** the scrutinee once, then each arm's tests
+  in order, each projection once, a failed test or a false guard jumping to
+  the next arm; or-patterns join where they succeed. A match whose arms are
+  all flat lowers exactly as before, to one `switch`, so no existing
+  program's code changes. No MIR statement is new, so no backend changed.
+  `hir::Pattern` is recursive (`Variant { fields }`, `Tuple`, `Or`, `Range`,
+  `LitChar`) and `hir::Arm` has a `guard`.
+- **A bare name inside a variant pattern that names a variant now matches
+  that variant, as in Rust, and so a program can run differently:** before
+  5.0b a variant's fields could only be names or `_`, so `Some(Red)` bound a
+  local named `Red` and matched every `Some`; now it matches `Some(Red)`
+  alone, so in `match c { Some(Red) => 1, _ => 2 }` a `Some(Green)` now
+  takes the second arm, and exhaustiveness says nothing, since the `_`
+  covers it. A name that is a variant of another type is E0001 there, with
+  a note: to bind a value, use a lower-case name; a bare variant that has
+  fields, `Some(Leaf)` for `Leaf(String)`, is E0016. No repository program
+  wrote such a pattern. A new warning, E0104, marks a pattern binding whose
+  name starts with an upper-case letter, most often a variant misspelt or
+  not in scope (`Some(Rde)`, with "did you mean" for a near variant), or a
+  constant, which a pattern cannot match by name (a guard can); a name that
+  starts with `_` is not warned about.
+- **The lexer splits a float after a `.`:** `t.1.0` is `t`, `.`, `1`, `.`,
+  `0`, by the source text, so `t.1.10` is `(t.1).10`. A float anywhere
+  else, `0..1.5` included, is unchanged. `Tokens::plain_decimal` says
+  whether an integer is written in plain decimal digits.
 - **CI:** the `test` job's Linux leg runs on `ubuntu-24.04`, installs
   Ubuntu's `clang-18` and asserts that it is 18.1.3. With
   `NOVA_REQUIRE_CLANG=1` and `NOVA_CLANG=clang-18`, a new test,

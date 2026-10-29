@@ -2154,6 +2154,13 @@ around exactly that. So `keys() -> [K]` is a substitute for part of `iter`,
 not a step toward the signature above; enumerating *values* or *pairs*
 still has no API at all.
 
+**Amended 2026-10-27 (branch `claude/loving-archimedes-frtf5q-50b`):** tuple types
+exist now (`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§4.1), so the second count no longer holds: `(K, V)` is a type. The first
+does, and `Map` is unchanged in 5.0, which has no `Map::entries` or `iter`
+over tuples (that spec's §11). A tuple has no impls, so no tuple is a `Map`
+key.
+
 Two properties of `keys()` are documented at the method and are
 deliberately **not** guarantees: it returns **table order, not insertion
 order**, and its `[fill; n]` seed is forced rather than stylistic, since
@@ -2353,7 +2360,11 @@ The signature moved instead: `channel` now returns `Channel<T>`, the
 record this section's original code block declares immediately above the
 function and never returns. **The blocker was not lifted; it was routed
 around.** Nothing in this paragraph should be read as saying `channel` is
-unbuilt. The two that do remain are unchanged by that
+unbuilt. (Amended 2026-10-27, branch
+`claude/loving-archimedes-frtf5q-50b`: tuple types exist now, so that
+signature compiles; `channel` stays as ADR 0017 left it, returning
+`Channel<T>`, and reverting it is optional, not owed.) The two that do
+remain are unchanged by that
 increment, and both are `std/task` items rather than `std/sync` ones.
 `spawn_blocking<T>(f: fn() -> T) ->
 JoinHandle<T>` needs a thread pool to run `f` on — `nova-runtime`'s
