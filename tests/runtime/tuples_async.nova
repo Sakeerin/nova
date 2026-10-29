@@ -5,8 +5,9 @@
 
 record Token { text: String, line: Int }
 
-// A tail tuple on the line after a statement: the `;` ends the statement
-// before it, as the newline rule's E0103 asks (5.0 spec §3.5).
+// A tail tuple on the line after a statement. The `;` ends the statement
+// before it; since 5.0b's E0103 ruling it is optional here, as a `()`
+// could not have been called, and fmt keeps it.
 async fn split_word(word: String, line: Int) -> (String, Token) {
     yield_now().await;
     ("<${word}>", Token { text: word, line: line })
