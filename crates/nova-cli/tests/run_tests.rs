@@ -13040,6 +13040,13 @@ fn for_arrays_run() {
     golden_three_ways("for_arrays", true);
 }
 
+/// `Char` and `Int` both ways, `string_from_chars`, and byte access on one-
+/// to four-byte characters (5.0 spec §5.2), also under GC stress.
+#[test]
+fn char_and_bytes_run() {
+    golden_three_ways("char_and_bytes", true);
+}
+
 /// `iter` and `slice` on arrays, and `Vec`'s `to_array`, `from_array`, `at`
 /// and `last` (5.0 spec §5.5), also under GC stress.
 #[test]
@@ -13058,6 +13065,28 @@ fn hidden_trait_methods_run() {
 /// Each panic of 5.0c's std (5.0 spec §5): the expression, and the
 /// message after `nova: panic: `. `wasm_tests.rs` has the same table.
 const STD_PANICS: &[(&str, &str)] = &[
+    ("\"ab\".byte_at(2)", "String::byte_at index out of range"),
+    ("\"ab\".byte_at(-1)", "String::byte_at index out of range"),
+    (
+        "\"ab\".byte_slice(-1, 1)",
+        "String::byte_slice start is negative",
+    ),
+    (
+        "\"ab\".byte_slice(0, 3)",
+        "String::byte_slice end is past the end of the string",
+    ),
+    (
+        "\"ab\".byte_slice(2, 1)",
+        "String::byte_slice start is after end",
+    ),
+    (
+        "\"é\".byte_slice(1, 2)",
+        "String::byte_slice start is inside a character",
+    ),
+    (
+        "\"é\".byte_slice(0, 1)",
+        "String::byte_slice end is inside a character",
+    ),
     ("[1, 2].slice(-1, 1)", "[T]::slice start is negative"),
     (
         "[1, 2].slice(0, 3)",

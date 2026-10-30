@@ -195,6 +195,22 @@ builtins! {
     /// replaced it on 2026-10-03. Std-only, so
     /// `str_to_float` is not a reserved word in user code.
     StrToFloat,
+    /// `int_to_char(n: Int) -> Char` — the `Char` whose scalar value is `n`,
+    /// the inverse of [`Builtin::CharToInt`]. A register move, as that one
+    /// is, with no runtime symbol on any target. **The caller must have
+    /// checked that `n` is a Unicode scalar value**, 0 to `0x10FFFF` without
+    /// the surrogates: `std/core`'s `char_from_int` is the only caller, and
+    /// checks it in Nova first (5.0 spec §5.2). Std-only.
+    IntToChar,
+    /// `str_as_bytes(s: String) -> Bytes` — the same object, read as `Bytes`.
+    /// `String` and `Bytes` share one layout on every target
+    /// ([`nova_hir::Ty::Bytes`]'s note), and both are immutable, so the view
+    /// copies nothing: a register move, as [`Builtin::CharToInt`] is. Backs
+    /// `std/strings`' byte access, `String.byte_len`, `byte_at` and
+    /// `byte_slice`, through the `Bytes` builtins std already has, so a
+    /// lexer reads a byte in constant time, and allocates nothing for it
+    /// (5.0 spec §5.2, §13). Std-only.
+    StrAsBytes,
     /// `test_selector() -> Int` — which `@test` to run in this process, or a
     /// negative value meaning "print the inventory instead".
     ///
@@ -1036,6 +1052,8 @@ impl Builtin {
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
             Builtin::StrToFloat => "str_to_float",
+            Builtin::IntToChar => "int_to_char",
+            Builtin::StrAsBytes => "str_as_bytes",
             Builtin::TestSelector => "test_selector",
             Builtin::TaskSpawn => "task_spawn",
             Builtin::TaskIsDone => "task_is_done",
@@ -1159,7 +1177,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 90] = [
+    pub const STD_ONLY: [Builtin; 92] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1173,6 +1191,8 @@ impl Builtin {
         Builtin::StrToLower,
         Builtin::FloatFixed,
         Builtin::StrToFloat,
+        Builtin::IntToChar,
+        Builtin::StrAsBytes,
         Builtin::TestSelector,
         Builtin::TaskSpawn,
         Builtin::TaskIsDone,

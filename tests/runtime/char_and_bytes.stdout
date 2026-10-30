@@ -1,0 +1,39 @@
+-1: None
+0: Some(0)
+1: Some(1)
+65: Some(65)
+127: Some(127)
+128: Some(128)
+2047: Some(2047)
+2048: Some(2048)
+55295: Some(55295)
+55296: None
+56319: None
+56320: None
+57343: None
+57344: Some(57344)
+65535: Some(65535)
+65536: Some(65536)
+1114111: Some(1114111)
+1114112: None
+-9223372036854775808: None
+9223372036854775807: None
+'a' 97 '\0' 0 'é' 233 '€' 8364 '𝄞' 119070
+round trip €
+built Nova 🚀 chars=6 bytes=9
+empty []
+chars back true
+a: len=1 byte_len=1 bytes=[61]
+ñ: len=1 byte_len=2 bytes=[C3 B1]
+€: len=1 byte_len=3 bytes=[E2 82 AC]
+𝄞: len=1 byte_len=4 bytes=[F0 9D 84 9E]
+añ€𝄞: len=4 byte_len=10 bytes=[61 C3 B1 E2 82 AC F0 9D 84 9E]
+: len=0 byte_len=0 bytes=[]
+slice 0..1 = a
+slice 1..3 = ñ
+slice 3..6 = €
+slice 6..10 = 𝄞
+slice 10..11 = z
+whole añ€𝄞z
+empty at end [] at start []
+a slice is equal true
