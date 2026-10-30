@@ -2474,3 +2474,19 @@ fn array_methods_monomorphise_per_element_type() {
     let slices: Vec<&&str> = names.iter().filter(|n| n.contains("slice")).collect();
     assert_eq!(slices.len(), 2, "one `slice` per element type: {names:?}");
 }
+
+/// `OrderedMap`'s methods need `K: Hash + Eq`, as `Map`'s do: a key type
+/// without them is E0013 when the method is instantiated (5.0 spec §5.6).
+#[test]
+fn ordered_map_key_without_hash_reports_e0013() {
+    let codes = diagnostics_for(
+        "record Unhashable { v: Int }\n\
+         fn main() {\n\
+             let mut m = OrderedMap::new()\n\
+             let k = Unhashable { v: 1 }\n\
+             let p = m.insert(k, 1)\n\
+             println(\"${m.len()}\")\n\
+         }",
+    );
+    assert!(codes.contains(&"E0013".to_string()), "codes: {codes:?}");
+}

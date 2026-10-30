@@ -1,0 +1,138 @@
+// `OrderedMap` (5.0 spec §5.6): the order after updates, removals,
+// reinsertion and growth, compaction, `keys`, `values`, `entries` and
+// `iter`, removal while iterating, keys of `String`, `Int` and a program's
+// own type, also under GC stress, since every entry lives in `Vec`s and a
+// `Map` that grow while the collector runs. `String` and `Int` keys hash
+// with a seed drawn once per process, so a `Map`'s order can differ between
+// runs; this program's output cannot, which its test checks by running it
+// twice.
+
+record Key { id: Int }
+
+impl Hash for Key {
+    fn hash(self) -> Int { self.id % 4 }
+}
+
+impl Eq for Key {
+    fn eq(self, other: Key) -> Bool { self.id == other.id }
+}
+
+fn show(m: OrderedMap<String, Int>) -> String {
+    let mut b = StringBuilder::new()
+    for (k, v) in m.iter() {
+        if b.byte_len() > 0 { b.push(" ") }
+        b.push("${k}=${v}")
+    }
+    "[${b}] len=${m.len()}"
+}
+
+fn main() {
+    let mut empty: OrderedMap<String, Int> = OrderedMap::new()
+    println(
+        "empty: ${show(empty)} ${empty.is_empty()} ${empty.keys().len()} ${empty.values().len()} ${empty.entries().len()}",
+    )
+    println(
+        "missing: ${empty.get("a").is_none()} ${empty.remove("a").is_none()} ${empty.contains_key("a")}",
+    )
+
+    let mut m: OrderedMap<String, Int> = OrderedMap::new()
+    for name in ["delta", "alpha", "charlie", "bravo", "echo"] { m.insert(name, name.len()) }
+    println("inserted: ${show(m)}")
+
+    // An update keeps its place, and returns the old value.
+    let old = m.insert("alpha", 100).unwrap()
+    println("updated alpha (was ${old}): ${show(m)}")
+    // So does an update of the first key, whose slot is 0.
+    let first = m.insert("delta", 50).unwrap()
+    println("updated delta (was ${first}): ${show(m)}")
+
+    // A removal leaves the others in order; a reinsertion goes last.
+    println("removed charlie: ${m.remove("charlie").unwrap()} ${show(m)}")
+    println("removed again: ${m.remove("charlie").is_none()}")
+    m.insert("charlie", 7)
+    println("reinserted charlie: ${show(m)}")
+    println(
+        "get: ${m.get("delta").unwrap()} ${m.get("charlie").unwrap()} ${m.contains_key("bravo")} ${m.contains_key("zulu")}",
+    )
+
+    // `keys`, `values` and `entries` are copies, in the same order.
+    let ks = m.keys()
+    let vs = m.values()
+    let es = m.entries()
+    let mut line = StringBuilder::new()
+    for i in 0..ks.len() {
+        if i > 0 { line.push(" ") }
+        line.push("${ks[i]}:${vs[i]}:${es[i].0}:${es[i].1}")
+    }
+    println("arrays: ${line}")
+    m.insert("foxtrot", 6)
+    println("copies keep their length: ${ks.len()} ${vs.len()} ${es.len()}, map ${m.len()}")
+
+    // Removing every other entry while iterating skips nothing else.
+    let mut seen = StringBuilder::new()
+    let mut n = 0
+    for (k, _) in m.iter() {
+        if n > 0 { seen.push(" ") }
+        seen.push("${k}")
+        if n % 2 == 0 { let _ = m.remove(k) }
+        n += 1
+    }
+    println("walked: ${seen}")
+    println("after removing while walking: ${show(m)}")
+
+    // When gaps are compacted: only as a new key is appended, and only when
+    // they are at least half the slots. `slots` reads the map's own `keys`
+    // field, which a program can reach, as `collections.nova` reads a
+    // `Map`'s `state`; it is how many slots the map holds, gaps included.
+    let mut small: OrderedMap<String, Int> = OrderedMap::new()
+    for name in ["a", "b", "c", "d"] { small.insert(name, 0) }
+    let mut slots = StringBuilder::new()
+    for name in ["a", "b", "c"] {
+        let _ = small.remove(name)
+        slots.push("${small.keys.len()}")
+        small.insert("${name}2", 1)
+        slots.push("->${small.keys.len()} ")
+    }
+    println("slots: ${slots}${show(small)}")
+
+    // Growth, with removals: the gaps are compacted as the map grows, and
+    // the order holds through each compaction.
+    let mut big: OrderedMap<Int, Int> = OrderedMap::new()
+    for i in 0..600 { big.insert(i, i * i) }
+    for i in 0..600 { if i % 3 != 0 { let _ = big.remove(i) } }
+    println(
+        "after removals: len=${big.len()} slots=${big.keys.len()} first=${big.keys()[0]} last=${big.keys()[big.len() - 1]}",
+    )
+    big.insert(600, 600)
+    println("one more: len=${big.len()} slots=${big.keys.len()}")
+    for i in 601..1000 { big.insert(i, i) }
+    let _ = big.insert(1, -1)
+    let _ = big.insert(3, -3)
+    let keys = big.keys()
+    let mut ordered = true
+    for i in 1..keys.len() { if keys[i] <= keys[i - 1] { if keys[i] != 1 { ordered = false } } }
+    let mut sum = 0
+    for (k, v) in big.iter() { sum += k + v }
+    println(
+        "grown: len=${big.len()} slots=${big.keys.len()} keys=${keys.len()} ordered=${ordered} last=${keys[keys.len() - 1]} 3=${big.get(3).unwrap()} 999=${big.get(999).unwrap()} 5=${big.get(5).is_none()} sum=${sum}",
+    )
+
+    // Every key removed, then the map used again.
+    for k in big.keys() { let _ = big.remove(k) }
+    println("emptied: ${big.len()} ${big.is_empty()} ${big.keys().len()}")
+    big.insert(42, 1)
+    big.insert(7, 2)
+    println("reused: ${big.keys()[0]} ${big.keys()[1]} ${big.len()}")
+
+    // A program's own key type, whose hashes collide.
+    let mut own: OrderedMap<Key, String> = OrderedMap::new()
+    for id in [9, 5, 1, 13, 2] { own.insert(Key { id: id }, "k${id}") }
+    let _ = own.remove(Key { id: 1 })
+    own.insert(Key { id: 1 }, "again")
+    let mut out = StringBuilder::new()
+    for (k, v) in own.iter() {
+        if !out.is_empty() { out.push(" ") }
+        out.push("${k.id}:${v}")
+    }
+    println("own keys: ${out}")
+}
