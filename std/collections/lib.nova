@@ -145,6 +145,82 @@ impl<T> Vec<T> {
     /// changes made while it runs: a value pushed onto the vector is yielded
     /// too, even one pushed after the iterator has returned `None`.
     pub fn iter(self) -> VecIter<T> { VecIter { v: self, i: 0 } }
+
+    // `at` and `last` read a value with no `Option`, as `a[i]` does, and panic
+    // where `get` and `pop` give `None`: a compiler's passes read their
+    // stacks and lists in hot loops, and `get` allocates a `Some` per read
+    // (5.0 spec §13). Both check against `len`, not the storage's length,
+    // which is longer.
+    /// Returns the value at index `i`, without an `Option`.
+    ///
+    /// Panics if `i` is negative or not less than `len()`, as indexing an
+    /// array does; `get` returns `None` there instead.
+    ///
+    /// ```
+    /// let mut v: Vec<String> = Vec::new()
+    /// v.push("a")
+    /// v.push("b")
+    /// assert_eq(v.at(1), "b")
+    /// ```
+    pub fn at(self, i: Int) -> T {
+        if i < 0 || i >= self.len { panic("Vec::at index out of range") }
+        self.data[i]
+    }
+
+    /// Returns the last value, without an `Option` or removing it.
+    ///
+    /// Panics if the vector is empty; `pop` returns `None` there instead.
+    ///
+    /// ```
+    /// let mut stack: Vec<Int> = Vec::new()
+    /// stack.push(1)
+    /// stack.push(2)
+    /// assert_eq(stack.last(), 2)
+    /// assert_eq(stack.len(), 2)
+    /// ```
+    pub fn last(self) -> T {
+        if self.len == 0 { panic("Vec::last on an empty vector") }
+        self.data[self.len - 1]
+    }
+
+    // A copy, not the storage: `data` is longer than `len`, and handing it out
+    // would let a write through the array change the vector (5.0 spec §12
+    // item 24). The first value fills the new array, every slot of which is
+    // then overwritten, as `push`'s growth does.
+    /// Returns a new array of the vector's values, in order.
+    ///
+    /// The array is a copy: a change to either afterwards is not seen in the
+    /// other.
+    ///
+    /// ```
+    /// let mut v: Vec<Int> = Vec::new()
+    /// v.push(3)
+    /// v.push(4)
+    /// let a = v.to_array()
+    /// assert_eq(a.len(), 2)
+    /// assert_eq(a[1], 4)
+    /// v.push(5)
+    /// assert_eq(a.len(), 2) // a copy
+    /// ```
+    pub fn to_array(self) -> [T] {
+        if self.len == 0 { return [] }
+        let mut out = [self.data[0]; self.len]
+        for i in 1..self.len { out[i] = self.data[i] }
+        out
+    }
+
+    /// Returns a new vector of the values of `a`, in order.
+    ///
+    /// The vector copies the array, so a change to either afterwards is not
+    /// seen in the other.
+    ///
+    /// ```
+    /// let mut v = Vec::from_array([1, 2, 3])
+    /// v.push(4)
+    /// assert_eq(v.len(), 4)
+    /// assert_eq(v.at(0), 1)
+    /// ```
+    pub fn from_array(a: [T]) -> Vec<T> { Vec { len: a.len(), data: a.slice(0, a.len()) } }
 }
 
 // A cursor over a `Vec<T>`: the vector, plus the next index to yield.
@@ -194,6 +270,76 @@ impl<T> Iterator for VecIter<T> {
         let x = self.v.get(self.i)
         self.i = self.i + 1
         x
+    }
+}
+
+// Methods on every array, `[T]` (5.0 spec §5.5). An array's `len` is built
+// into the compiler; these are looked up after it, by the array's type head,
+// as a `String`'s methods are. Both copy nothing they do not return: `iter`
+// shares the array, and `slice` copies only its range.
+/// Methods on arrays: `iter` walks one in order, and `slice` copies a range
+/// of it.
+///
+/// ```
+/// let a = [10, 20, 30, 40]
+/// let doubled = a.iter().map(|x| x * 2).collect()
+/// assert_eq(doubled.at(3), 80)
+/// assert_eq(a.slice(1, 3).len(), 2)
+/// ```
+impl<T> [T] {
+    /// Returns an iterator over the array's values, in order.
+    ///
+    /// It shares the array rather than copying it, so a value written into
+    /// the array before the iterator reaches it is the one yielded.
+    ///
+    /// ```
+    /// let mut total = 0
+    /// for x in [1, 2, 3].iter() { total = total + x }
+    /// assert_eq(total, 6)
+    /// ```
+    pub fn iter(self) -> ArrayIter<T> { ArrayIter { a: self, i: 0 } }
+
+    // Panics on a bad range, as `String::slice` does: a range that must be
+    // valid is the caller's bug.
+    /// Returns a new array of the values from index `start` up to, but not
+    /// including, `end`.
+    ///
+    /// `start == end` gives an empty array. Panics if `start` is negative, if
+    /// `end` is greater than `len()`, or if `start` is greater than `end`.
+    ///
+    /// ```
+    /// let a = ['a', 'b', 'c', 'd']
+    /// let mid = a.slice(1, 3)
+    /// assert_eq(mid.len(), 2)
+    /// assert_eq(mid[0], 'b')
+    /// assert_eq(a.slice(4, 4).len(), 0)
+    /// ```
+    pub fn slice(self, start: Int, end: Int) -> [T] {
+        if start < 0 { panic("[T]::slice start is negative") }
+        if end > self.len() { panic("[T]::slice end is past the end of the array") }
+        if start > end { panic("[T]::slice start is after end") }
+        let n = end - start
+        if n == 0 { return [] }
+        let mut out = [self[start]; n]
+        for i in 1..n { out[i] = self[start + i] }
+        out
+    }
+}
+
+// A cursor over an array: the array, shared, and the next index to yield.
+/// An iterator over an array's values, in order.
+///
+/// `[T]::iter` returns one.
+pub record ArrayIter<T> { a: [T], i: Int }
+
+impl<T> Iterator for ArrayIter<T> {
+    type Item = T
+
+    fn next(mut self) -> Option<T> {
+        if self.i >= self.a.len() { return None }
+        let x = self.a[self.i]
+        self.i = self.i + 1
+        Some(x)
     }
 }
 

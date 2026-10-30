@@ -2373,3 +2373,19 @@ fn a_flat_char_match_switches_on_its_code_points() {
         .expect("a switch");
     assert_eq!(keys, ['a' as i64, 'b' as i64]);
 }
+
+/// `impl<T> [T]`'s methods monomorphise per element type, as any generic
+/// impl's do (spec §5.5).
+#[test]
+fn array_methods_monomorphise_per_element_type() {
+    let mir = mir_for(
+        "fn main() {\n\
+             let a = [1, 2, 3].slice(0, 2)\n\
+             let b = [\"x\", \"y\"].slice(1, 2)\n\
+             println(\"${a.len()} ${b[0]}\")\n\
+         }",
+    );
+    let names = function_names(&mir);
+    let slices: Vec<&&str> = names.iter().filter(|n| n.contains("slice")).collect();
+    assert_eq!(slices.len(), 2, "one `slice` per element type: {names:?}");
+}

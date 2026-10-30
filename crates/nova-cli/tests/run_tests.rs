@@ -13040,6 +13040,81 @@ fn for_arrays_run() {
     golden_three_ways("for_arrays", true);
 }
 
+/// `iter` and `slice` on arrays, and `Vec`'s `to_array`, `from_array`, `at`
+/// and `last` (5.0 spec §5.5), also under GC stress.
+#[test]
+fn array_helpers_run() {
+    golden_three_ways("array_helpers", true);
+}
+
+/// A program's trait methods that `Vec`'s inherent methods hide: a call on
+/// the value runs std's, a function generic over the trait the trait's, a
+/// static function's too (E0105's advice, 5.0c's second fact-check).
+#[test]
+fn hidden_trait_methods_run() {
+    golden_three_ways("hidden_trait_methods", false);
+}
+
+/// Each panic of 5.0c's std (5.0 spec §5): the expression, and the
+/// message after `nova: panic: `. `wasm_tests.rs` has the same table.
+const STD_PANICS: &[(&str, &str)] = &[
+    ("[1, 2].slice(-1, 1)", "[T]::slice start is negative"),
+    (
+        "[1, 2].slice(0, 3)",
+        "[T]::slice end is past the end of the array",
+    ),
+    ("[1, 2].slice(2, 1)", "[T]::slice start is after end"),
+    (
+        "Vec::from_array([1, 2]).at(2)",
+        "Vec::at index out of range",
+    ),
+    (
+        "Vec::from_array([1, 2]).at(-1)",
+        "Vec::at index out of range",
+    ),
+    ("fresh().last()", "Vec::last on an empty vector"),
+    ("emptied().last()", "Vec::last on an empty vector"),
+    ("emptied().at(0)", "Vec::at index out of range"),
+];
+
+/// The program that prints `before`, then evaluates `expr`, which panics.
+/// `fresh()` is an empty `Vec`, and `emptied()` one cleared, whose storage
+/// still holds its values, so `at` and `last` must check `len`.
+fn std_panic_program(expr: &str) -> String {
+    format!(
+        "fn fresh() -> Vec<Int> {{ Vec::new() }}\n\n\
+         fn emptied() -> Vec<Int> {{\n    let mut v = Vec::from_array([1, 2])\n    v.clear()\n    v\n}}\n\n\
+         fn main() {{\n    println(\"before\")\n    let _ = {expr}\n    println(\"after\")\n}}\n"
+    )
+}
+
+/// Each panic of 5.0c's std, natively: the message, an abort, and nothing
+/// after it.
+#[test]
+fn each_std_panic_names_its_method() {
+    let dir = std::env::temp_dir().join("nova-std-panics");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    for (i, (expr, message)) in STD_PANICS.iter().enumerate() {
+        let src = dir.join(format!("p{i}.nova"));
+        std::fs::write(&src, std_panic_program(expr)).expect("write the program");
+        let a = nova()
+            .env("NO_COLOR", "1")
+            .arg("run")
+            .arg(&src)
+            .assert()
+            .failure();
+        let out = a.get_output();
+        let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stdout, "before\n", "{expr}: {stderr}");
+        assert!(
+            stderr.contains(&format!("nova: panic: {message}")),
+            "{expr}: {stderr}"
+        );
+    }
+}
+
 /// A guard on an or-pattern runs once, with the bindings of the first
 /// alternative that matches, and a false guard goes on to the next arm, not
 /// to a later alternative (5.0 spec §4.6; ADR 0049): `(1, 9)` binds `a` to

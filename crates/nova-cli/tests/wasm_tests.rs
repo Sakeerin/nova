@@ -1158,6 +1158,52 @@ fn an_index_out_of_bounds_panics_as_natively() {
     );
 }
 
+/// Each panic of 5.0c's std (5.0 spec §5), on WASM: the native message, an
+/// abort's status, and nothing after it. `run_tests.rs`'s `STD_PANICS` is
+/// the same table.
+#[test]
+fn each_std_panic_names_its_method_as_natively() {
+    let Some(_) = node() else { return };
+    let cases: &[(&str, &str)] = &[
+        ("[1, 2].slice(-1, 1)", "[T]::slice start is negative"),
+        (
+            "[1, 2].slice(0, 3)",
+            "[T]::slice end is past the end of the array",
+        ),
+        ("[1, 2].slice(2, 1)", "[T]::slice start is after end"),
+        (
+            "Vec::from_array([1, 2]).at(2)",
+            "Vec::at index out of range",
+        ),
+        (
+            "Vec::from_array([1, 2]).at(-1)",
+            "Vec::at index out of range",
+        ),
+        ("fresh().last()", "Vec::last on an empty vector"),
+        ("emptied().last()", "Vec::last on an empty vector"),
+        ("emptied().at(0)", "Vec::at index out of range"),
+    ];
+    for (i, (expr, message)) in cases.iter().enumerate() {
+        let Some(node) = node() else { return };
+        let dir = fresh(&format!("std-panic-{i}"));
+        write(
+            &dir,
+            &[(
+                "main.nova",
+                &format!(
+                    "fn fresh() -> Vec<Int> {{ Vec::new() }}\n\n\
+                     fn emptied() -> Vec<Int> {{\n    let mut v = Vec::from_array([1, 2])\n    v.clear()\n    v\n}}\n\n\
+                     fn main() {{\n    println(\"before\")\n    let _ = {expr}\n    println(\"after\")\n}}\n"
+                ),
+            )],
+        );
+        let dist = build_wasm(&dir, Path::new("main.nova"));
+        let a = run_wasm(node, &dist).code(134);
+        assert_eq!(stdout(&a), "before\n", "{expr}");
+        assert_eq!(stderr(&a), format!("nova: panic: {message}\n"), "{expr}");
+    }
+}
+
 /// The shim's `Float` text is `nova-runtime`'s, exact ties included (spec
 /// §6, §9.3).
 #[test]
@@ -1964,6 +2010,10 @@ mod gate {
         patterns_async,
         match_effects,
         for_arrays,
+        // 5.0c's std (5.0 spec §5.1 to §5.6): Nova over existing MIR, or
+        // over a builtin that is a shim entry on WASM.
+        array_helpers,
+        hidden_trait_methods,
     );
 
     /// The programs a test of their own in this module checks, by its name.

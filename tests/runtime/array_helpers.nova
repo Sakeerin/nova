@@ -1,0 +1,98 @@
+// `iter` and `slice` on arrays, `Vec::to_array` and `from_array`, and
+// `Vec::at` and `last` (5.0 spec §5.5): empty arrays, slices at both ends,
+// iterator adapters over `iter()`, round trips that copy, and arrays of
+// strings, records and sums, also under GC stress, since every helper
+// allocates.
+
+record Point { x: Int, y: Int }
+
+fn join_ints(a: [Int]) -> String {
+    let mut parts = ""
+    for i in 0..a.len() {
+        if i > 0 { parts = parts + "," }
+        parts = parts + "${a[i]}"
+    }
+    "[${parts}]"
+}
+
+fn main() {
+    let a = [1, 2, 3, 4, 5]
+    let empty: [Int] = []
+
+    let mut seen = 0
+    for x in empty.iter() { seen += x }
+    println("empty iter ${seen}, empty slice ${empty.slice(0, 0).len()}")
+
+    println(
+        "slices ${join_ints(a.slice(0, 2))} ${join_ints(a.slice(3, 5))} ${join_ints(a.slice(0, 5))} ${join_ints(a.slice(2, 2))} ${join_ints(a.slice(5, 5))}",
+    )
+
+    let s = a.slice(1, 4)
+    let mut copy = a.slice(0, a.len())
+    copy[0] = 100
+    println("a slice copies: a[0]=${a[0]} copy[0]=${copy[0]} s=${join_ints(s)}")
+
+    let evens = a.iter().filter(|x| x % 2 == 0).map(|x| x * 10).collect()
+    println("adapters ${evens.len()} ${evens.at(0)} ${evens.last()}")
+
+    let mut total = 0
+    loop_all(a.iter())
+    for x in a.iter() { total += x }
+    println("sum ${total}")
+
+    let words = ["alpha", "beta", "gamma"]
+    let mut joined = ""
+    for w in words.iter() { joined = joined + w.to_upper() }
+    println("words ${joined} ${words.slice(1, 3)[0]}")
+
+    let pts = [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    let ys = pts.iter().map(|p: Point| p.y).collect()
+    println("records ${ys.at(0)} ${ys.at(1)}")
+
+    let opts = [Some(1), None, Some(3)]
+    let somes = opts.iter().filter(|o: Option<Int>| o.is_some()).collect()
+    println("sums ${somes.len()} ${opts.slice(1, 2)[0].is_none()}")
+
+    let mut v: Vec<String> = Vec::new()
+    let before = v.to_array()
+    v.push("x")
+    v.push("y")
+    v.push("z")
+    let arr = v.to_array()
+    v.set(0, "changed")
+    println(
+        "to_array ${before.len()} ${arr.len()} ${arr[0]} ${arr[2]} vec ${v.at(0)} last ${v.last()}",
+    )
+
+    let mut w = Vec::from_array(a)
+    w.push(6)
+    w.set(0, 0)
+    println("from_array ${w.len()} first ${w.at(0)} last ${w.last()} a[0] ${a[0]}")
+    let mut shares = Vec::from_array(a)
+    shares.set(1, 99)
+    println("from_array copies: a[1] ${a[1]} vec ${shares.at(1)}")
+    let round = Vec::from_array(w.to_array())
+    println("round trip ${join_ints(round.to_array())}")
+    let none: Vec<Int> = Vec::from_array([])
+    println("from empty ${none.len()} ${none.is_empty()}")
+
+    let mut big: Vec<String> = Vec::new()
+    for i in 0..2000 { big.push("n${i}") }
+    let big_arr = big.to_array()
+    let tail = big_arr.slice(1990, 2000)
+    let mut count = 0
+    for x in big_arr.iter() { if x.len() == 5 { count += 1 } }
+    println("big ${big_arr.len()} ${tail[0]} ${tail.len()} five-char ${count} at ${big.at(1234)}")
+}
+
+fn loop_all(mut it: ArrayIter<Int>) {
+    let mut n = 0
+    let mut more = true
+    while more {
+        match it.next() {
+            Some(_) => n += 1
+            None => more = false
+        }
+    }
+    println("next ${n} then ${it.next().is_none()}")
+}
