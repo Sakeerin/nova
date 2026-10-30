@@ -1,0 +1,14 @@
+new: [] bytes=0 empty=true
+one part: [one] bytes=3 empty=false
+empty part: [one] bytes=3 empty=false
+only an empty part: [] bytes=0 empty=true
+non-ASCII: [héllo, 世界 🎉] bytes=19 empty=false
+twice equal: true, still 19 bytes
+after more: héllo, 世界 🎉!
+cleared: [] bytes=0 empty=true
+interpolated: <again> and 5
+shared: again shared
+ten thousand: bytes=10000 len=10000 head=012345678901 tail=890123456789
+line 0
+line 1
+line 2

@@ -485,3 +485,130 @@ impl String {
 /// assert_eq(string_from_chars([]), "")
 /// ```
 pub fn string_from_chars(cs: [Char]) -> String { str_from_chars(cs) }
+
+// A string built from parts (5.0 spec §5.1): a `Vec<String>` of the parts
+// pushed, and their total length in bytes. `push` is a `Vec` push, constant
+// time amortised; `to_string` joins every part in one copy, through
+// `str_join`, so building n bytes from any number of pushes is linear, where
+// `s = s + t` or `s = "${s}${t}"` in a loop copies the whole string each time.
+//
+// `to_string` copies the parts into an array of their exact count first,
+// `Vec::to_array`, because `str_join` takes an array and a `Vec`'s storage is
+// private to std/collections, and longer than its length. That copy is of the
+// parts' pointers, one word a part, not of their bytes; a `str_join` that took
+// a count would save it, at the price of a runtime symbol and a std/rt
+// function more, and of reaching into `Vec`'s storage from here.
+/// Builds a string from parts in time linear in its length, however many
+/// parts there are.
+///
+/// `push` appends a string and `push_char` a character; `to_string` returns
+/// everything pushed so far as one string, and leaves the builder as it was,
+/// so more can be pushed after. Appending with `+` or interpolation in a loop
+/// copies the whole string at every step, which takes time in proportion to
+/// the square of its length.
+///
+/// A builder is shared, not copied, when it is assigned, as a `Vec` is.
+///
+/// ```
+/// let mut b = StringBuilder::new()
+/// for i in 0..3 {
+///     b.push("item ")
+///     b.push("${i}")
+///     b.push_char(';')
+/// }
+/// assert_eq(b.to_string(), "item 0;item 1;item 2;")
+/// assert_eq(b.byte_len(), 21)
+/// assert_eq("[${b}]", "[item 0;item 1;item 2;]") // interpolation, through `Display`
+/// b.clear()
+/// assert(b.is_empty(), "clear removes every part")
+/// ```
+pub record StringBuilder { parts: Vec<String>, bytes: Int }
+
+impl StringBuilder {
+    /// Returns an empty builder.
+    ///
+    /// ```
+    /// let b = StringBuilder::new()
+    /// assert_eq(b.to_string(), "")
+    /// ```
+    pub fn new() -> StringBuilder { StringBuilder { parts: Vec::new(), bytes: 0 } }
+
+    // An empty `s` is pushed too: it costs a slot, and skipping it would make
+    // `push` branch for nothing a caller can see.
+    /// Appends `s`, in constant time, amortised.
+    ///
+    /// ```
+    /// let mut b = StringBuilder::new()
+    /// b.push("ab")
+    /// b.push("cd")
+    /// assert_eq(b.to_string(), "abcd")
+    /// ```
+    pub fn push(mut self, s: String) {
+        self.parts.push(s)
+        self.bytes = self.bytes + s.byte_len()
+    }
+
+    /// Appends the character `c`.
+    ///
+    /// ```
+    /// let mut b = StringBuilder::new()
+    /// b.push_char('h')
+    /// b.push_char('é')
+    /// assert_eq(b.to_string(), "hé")
+    /// assert_eq(b.byte_len(), 3)
+    /// ```
+    pub fn push_char(mut self, c: Char) { self.push(str_from_chars([c])) }
+
+    // Kept as parts are pushed, so constant time. There is no `len`: a count
+    // of characters would have to walk every part.
+    /// Returns the length in bytes of the string built so far, in constant
+    /// time.
+    ///
+    /// ```
+    /// let mut b = StringBuilder::new()
+    /// b.push("añ")
+    /// assert_eq(b.byte_len(), 3)
+    /// ```
+    pub fn byte_len(self) -> Int { self.bytes }
+
+    // By bytes, not parts: a builder holding only empty parts is empty.
+    /// Returns `true` if the string built so far is empty.
+    ///
+    /// ```
+    /// let mut b = StringBuilder::new()
+    /// b.push("")
+    /// assert(b.is_empty(), "an empty part adds nothing")
+    /// ```
+    pub fn is_empty(self) -> Bool { self.bytes == 0 }
+
+    /// Removes every part, leaving the builder empty.
+    ///
+    /// ```
+    /// let mut b = StringBuilder::new()
+    /// b.push("old")
+    /// b.clear()
+    /// b.push("new")
+    /// assert_eq(b.to_string(), "new")
+    /// ```
+    pub fn clear(mut self) {
+        self.parts.clear()
+        self.bytes = 0
+    }
+
+    /// Returns the string built so far, joined in one copy. The builder is
+    /// left as it was.
+    ///
+    /// ```
+    /// let mut b = StringBuilder::new()
+    /// b.push("a")
+    /// assert_eq(b.to_string(), "a")
+    /// b.push("b")
+    /// assert_eq(b.to_string(), "ab")
+    /// ```
+    pub fn to_string(self) -> String { str_join("", self.parts.to_array()) }
+}
+
+// Interpolation, `"${b}"`, reaches the built string through `Display`.
+impl Display for StringBuilder {
+    fn fmt(self) -> String { self.to_string() }
+}

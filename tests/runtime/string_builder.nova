@@ -1,0 +1,67 @@
+// `StringBuilder` (5.0 spec §5.1): empty, one part, non-ASCII, `push_char`,
+// `clear`, `to_string` twice, interpolation through `Display`, a builder
+// shared by assignment, and ten thousand pushes, also under GC stress, since
+// its parts live in a `Vec` that grows while the collector runs.
+
+fn report(label: String, b: StringBuilder) {
+    println("${label}: [${b.to_string()}] bytes=${b.byte_len()} empty=${b.is_empty()}")
+}
+
+fn digits(n: Int) -> StringBuilder {
+    let mut b = StringBuilder::new()
+    for i in 0..n { b.push("${i % 10}") }
+    b
+}
+
+fn main() {
+    let mut b = StringBuilder::new()
+    report("new", b)
+
+    b.push("one")
+    report("one part", b)
+
+    b.push("")
+    report("empty part", b)
+
+    b.clear()
+    b.push("")
+    report("only an empty part", b)
+
+    b.clear()
+    b.push("héllo")
+    b.push(", ")
+    b.push("世界")
+    b.push_char(' ')
+    b.push_char('🎉')
+    report("non-ASCII", b)
+
+    let first = b.to_string()
+    let second = b.to_string()
+    println("twice equal: ${first == second}, still ${b.byte_len()} bytes")
+
+    b.push_char('!')
+    println("after more: ${b}")
+
+    b.clear()
+    report("cleared", b)
+    b.push("again")
+    println("interpolated: <${b}> and ${b.byte_len()}")
+
+    let mut shared = b
+    shared.push(" shared")
+    println("shared: ${b}")
+
+    let big = digits(10000)
+    let s = big.to_string()
+    println(
+        "ten thousand: bytes=${big.byte_len()} len=${s.len()} head=${s.slice(0, 12)} tail=${s.slice(9988, 10000)}",
+    )
+
+    let mut lines = StringBuilder::new()
+    for i in 0..3 {
+        lines.push("line ")
+        lines.push("${i}")
+        lines.push_char('\n')
+    }
+    print(lines.to_string())
+}
