@@ -183,6 +183,41 @@ fn floats_use_hex_constants_and_fp_ops() {
     assert_well_formed(&ir);
 }
 
+/// The `.ll` emitter writes each float constant as the hex of its bits,
+/// which is what `Float.to_bits` gives at run time (5.0 spec §5.4): every
+/// literal `tests/runtime/float_bits.nova` shows is in its IR as the hex its
+/// golden output prints, so N can write S0's text from `to_bits`.
+#[test]
+fn float_constants_are_the_hex_that_to_bits_prints() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/runtime");
+    let src = std::fs::read_to_string(root.join("float_bits.nova")).expect("the program");
+    let golden = std::fs::read_to_string(root.join("float_bits.stdout")).expect("its output");
+    let ir = ir_for(&src);
+    // The labels of the values written as literals; the others are computed.
+    let literals = [
+        "zero",
+        "one",
+        "smallest subnormal",
+        "largest subnormal",
+        "smallest normal",
+        "largest finite",
+        "tenth",
+    ];
+    for label in literals {
+        let line = golden
+            .lines()
+            .find(|l| l.starts_with(&format!("{label}: ")))
+            .unwrap_or_else(|| panic!("no `{label}` in the golden output"));
+        let hex = line.rsplit(' ').next().expect("a hex text");
+        assert!(hex.starts_with("0x") && hex.len() == 18, "{line}");
+        assert!(
+            ir.contains(&format!("double {hex}")),
+            "`{label}`: no `double {hex}` in the IR:\n{ir}"
+        );
+    }
+    assert_well_formed(&ir);
+}
+
 #[test]
 fn arrays_emit_bounds_check_and_element_addressing() {
     let ir = ir_for(

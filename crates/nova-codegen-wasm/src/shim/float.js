@@ -86,13 +86,14 @@ function floatFixed(v, places) {
 
 // Rust's `str::parse::<f64>`, or 0.0 where it fails (nova_rt_str_to_float's
 // `unwrap_or(0.0)`): its grammar exactly, then `Number`, which rounds
-// correctly as Rust does.
+// correctly as Rust does. A `-` before `nan` sets the NaN's sign bit, as
+// Rust's does, which `Float.to_bits` shows (5.0 spec §5.4).
 const FLOAT_TEXT = /^[+-]?(?:inf|infinity|nan|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)$/i;
 function floatFrom(s) {
   if (!FLOAT_TEXT.test(s)) return 0;
   const body = s.replace(/^[+-]/, "").toLowerCase();
   if (body === "inf" || body === "infinity") return s.startsWith("-") ? -Infinity : Infinity;
-  if (body === "nan") return NaN;
+  if (body === "nan") return s.startsWith("-") ? -NaN : NaN;
   return Number(s);
 }
 

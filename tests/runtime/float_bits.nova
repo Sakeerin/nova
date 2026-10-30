@@ -1,0 +1,60 @@
+// `Float.to_bits` (5.0 spec §5.4): `0.0`, `-0.0`, `1.0`, the smallest
+// subnormal, the largest finite, both infinities and a NaN, as a signed `Int`
+// and as the hex the `.ll` emitter writes for a float constant, the same on
+// every backend, and the round trip of a value through its text and
+// `parse_float`. Its NaNs come from `parse_float`, whose bits are fixed; a
+// NaN made by arithmetic can differ by backend. `ir_tests.rs` checks the
+// emitter writes these hex texts.
+
+fn hex64(n: Int) -> String {
+    let digits = "0123456789ABCDEF".chars()
+    let mut out = [' '; 16]
+    for i in 0..16 { out[15 - i] = digits[(n >> (4 * i)) & 15] }
+    string_from_chars(out)
+}
+
+fn show(label: String, v: Float) {
+    let bits = v.to_bits()
+    println("${label}: ${bits} 0x${hex64(bits)}")
+}
+
+fn main() {
+    show("zero", 0.0)
+    show("negative zero", -0.0)
+    show("one", 1.0)
+    show("minus one", -1.0)
+    show("smallest subnormal", 5e-324)
+    show("largest subnormal", 2.2250738585072009e-308)
+    show("smallest normal", 2.2250738585072014e-308)
+    show("largest finite", 1.7976931348623157e308)
+    show("tenth", 0.1)
+    show("infinity", "inf".parse_float().unwrap())
+    show("negative infinity", "-inf".parse_float().unwrap())
+    show("NaN", "nan".parse_float().unwrap())
+    show("negative NaN", "-nan".parse_float().unwrap())
+    let x = 1.0
+    show("computed", x / 3.0)
+    show("negated", 0.0 - x)
+
+    // Each value's text, as interpolation writes it, parses back to the same
+    // bits, on every backend: `parse_float` and the text agree.
+    let values = [
+        0.0,
+        -0.0,
+        1.0,
+        0.1,
+        x / 3.0,
+        2.0 / 3.0,
+        1e300,
+        1e-300,
+        5e-324,
+        1.7976931348623157e308,
+        123456.789,
+        0.1 + 0.2,
+        "inf".parse_float().unwrap(),
+        "-inf".parse_float().unwrap(),
+    ]
+    let mut same = 0
+    for v in values { if "${v}".parse_float().unwrap().to_bits() == v.to_bits() { same += 1 } }
+    println("round trips through text: ${same} of ${values.len()}")
+}

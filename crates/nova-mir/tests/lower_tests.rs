@@ -2446,6 +2446,19 @@ fn to_bits_is_one_runtime_call() {
     );
 }
 
+/// `String.parse_float` asks `str_is_float` once (spec §5.3).
+#[test]
+fn parse_float_asks_str_is_float_once() {
+    let mir = mir_for(
+        "fn main() {\n    let f = \"2.5\".parse_float()\n    println(\"${f.is_some()}\")\n}",
+    );
+    let name = std_fn(&mir, "parse_float");
+    assert_eq!(
+        count_rt(&stmts_of(&mir, &name), nova_mir::RtFunc::StrIsFloat),
+        1
+    );
+}
+
 /// `impl<T> [T]`'s methods monomorphise per element type, as any generic
 /// impl's do (spec §5.5).
 #[test]

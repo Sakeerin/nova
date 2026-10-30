@@ -1204,6 +1204,14 @@ fn each_std_panic_names_its_method_as_natively() {
         ("fresh().last()", "Vec::last on an empty vector"),
         ("emptied().last()", "Vec::last on an empty vector"),
         ("emptied().at(0)", "Vec::at index out of range"),
+        (
+            "\"1\".parse_int_radix(1)",
+            "String::parse_int_radix radix must be from 2 to 36",
+        ),
+        (
+            "\"1\".parse_int_radix(37)",
+            "String::parse_int_radix radix must be from 2 to 36",
+        ),
     ];
     for (i, (expr, message)) in cases.iter().enumerate() {
         let Some(node) = node() else { return };
@@ -2039,6 +2047,8 @@ mod gate {
         string_builder,
         string_builder_million,
         char_and_bytes,
+        parse_numbers,
+        float_bits,
     );
 
     /// The programs a test of their own in this module checks, by its name.

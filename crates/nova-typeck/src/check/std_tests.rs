@@ -155,6 +155,7 @@ fn the_new_builtins_are_not_visible_to_a_program() {
     for (call, name) in [
         ("int_to_char(65)", "int_to_char"),
         ("str_as_bytes(\"a\")", "str_as_bytes"),
+        ("str_is_float(\"1\")", "str_is_float"),
         ("float_to_bits(1.0)", "float_to_bits"),
     ] {
         let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
@@ -228,6 +229,19 @@ fn to_bits_has_the_specs_type() {
     assert_eq!(local_ty(&r, "fb"), Ty::Int);
 }
 
+/// The parsers' types (spec §5.3).
+#[test]
+fn the_parsers_have_the_specs_types() {
+    let r = checked(
+        "fn main() {\n    let pi = \"1\".parse_int()\n    \
+         let pr = \"1\".parse_int_radix(16)\n    let pf = \"1\".parse_float()\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    assert!(option(&local_ty(&r, "pi"), Ty::Int));
+    assert!(option(&local_ty(&r, "pr"), Ty::Int));
+    assert!(option(&local_ty(&r, "pf"), Ty::Float));
+}
+
 /// `push` and `clear` take `mut self`, as `Vec`'s do.
 #[test]
 fn a_builder_mutates_only_through_a_mutable_binding() {
@@ -271,6 +285,8 @@ fn a_std_only_builtin_named_by_a_program_gets_its_public_form() {
         ("int_to_char(65)", "`char_from_int(n)`"),
         ("str_from_chars(['a'])", "`string_from_chars(cs)`"),
         ("str_as_bytes(\"a\")", "`byte_at(i)`"),
+        ("str_is_float(\"1\")", "`s.parse_float()`"),
+        ("str_to_float(\"1\")", "`s.parse_float()`"),
         ("float_to_bits(1.0)", "`x.to_bits()`"),
     ] {
         let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
@@ -498,5 +514,26 @@ fn a_trait_method_hidden_by_floats_to_bits_is_e0105() {
     assert_eq!(
         e0105s(src),
         ["std's inherent method `to_bits` on `Float` hides `Bits::to_bits`"]
+    );
+}
+
+/// The parsers, std's since Task 5, hide a program's trait methods of their
+/// names: E0105, its call shown with arguments where std's takes them.
+#[test]
+fn a_trait_method_hidden_by_the_parsers_is_e0105() {
+    let src = "trait Parse {\n    fn parse_int_radix(self, r: Int) -> Option<Int>\n}\n\
+               impl Parse for String {\n    \
+               fn parse_int_radix(self, r: Int) -> Option<Int> { Some(r) }\n}\n\
+               fn main() {}\n";
+    let w = warnings(src);
+    let d = w.iter().find(|d| d.code == "E0105").expect("an E0105");
+    assert_eq!(
+        d.message,
+        "std's inherent method `parse_int_radix` on `String` hides `Parse::parse_int_radix`"
+    );
+    assert!(
+        d.labels.iter().any(|l| l.primary
+            && l.message == "`x.parse_int_radix(…)` on a `String` runs std's method, not this one"),
+        "{d:#?}"
     );
 }

@@ -72,6 +72,7 @@ fn host(name: &str) -> Result<&'static str> {
         "float_to_str" => "  float_to_str: (v) => string(floatText(v)),\n",
         "float_fixed" => "  float_fixed: (v, places) => string(floatFixed(v, places)),\n",
         "str_to_float" => "  str_to_float: (s) => floatFrom(text(s)),\n",
+        "str_is_float" => "  str_is_float: (s) => (FLOAT_TEXT.test(text(s)) ? 1 : 0),\n",
         "float_to_bits" => "  float_to_bits: (v) => floatBits(v),\n",
         "str_to_upper" => "  str_to_upper: (s) => string(text(s).toUpperCase()),\n",
         "str_to_lower" => "  str_to_lower: (s) => string(text(s).toLowerCase()),\n",
@@ -190,6 +191,7 @@ pub fn shim<S: AsRef<str>>(imports: &[S]) -> Result<String> {
         "float_to_str",
         "float_fixed",
         "str_to_float",
+        "str_is_float",
         "float_to_bits",
     ]) {
         js.push_str(FLOAT);
@@ -253,6 +255,10 @@ mod tests {
         let bits = shim(&["float_to_bits"]).expect("a shim");
         assert!(bits.contains("function floatBits"), "{bits}");
         assert!(bits.contains("  float_to_bits: ("), "{bits}");
+        // 5.0c's `str_is_float` tests `FLOAT_TEXT`, in the float helpers.
+        let is_float = shim(&["str_is_float"]).expect("a shim");
+        assert!(is_float.contains("const FLOAT_TEXT"), "{is_float}");
+        assert!(is_float.contains("  str_is_float: ("), "{is_float}");
     }
 
     /// `floatBits`, which `float_to_bits` calls, is Rust's `f64::to_bits`
@@ -396,9 +402,11 @@ mod tests {
 
     /// `floatFrom`, which `str_to_float` calls, is Rust's
     /// `str::parse::<f64>` with `unwrap_or(0.0)` on every case of its
-    /// grammar, valid and not (spec §6, §9.3). `str_to_float` is std's
-    /// alone, so no Nova program can hand it these texts: the test runs the
-    /// shim's own code under Node and compares the bits.
+    /// grammar, valid and not (spec §6, §9.3), and `FLOAT_TEXT`, which
+    /// `str_is_float` tests, is its grammar (5.0 spec §5.3). The test runs
+    /// the shim's own code under Node and compares the bits, a NaN's sign
+    /// included, which `Float.to_bits` shows (5.0 spec §5.4), and whether
+    /// each text is taken.
     #[test]
     fn float_from_is_rusts_parse() {
         let Some(mut node) = crate::test_node() else {
@@ -490,7 +498,7 @@ mod tests {
         let script = format!(
             "{FLOAT}\nconst view = new DataView(new ArrayBuffer(8));\n\
              for (const s of [{}]) {{\n  const v = floatFrom(s);\n  view.setFloat64(0, v);\n  \
-             console.log(Number.isNaN(v) ? \"NaN\" : view.getBigUint64(0).toString(16));\n}}\n",
+             console.log(view.getBigUint64(0).toString(16), FLOAT_TEXT.test(s));\n}}\n",
             list.join(", ")
         );
         let dir = std::env::temp_dir().join("nova-codegen-wasm-float-from");
@@ -508,12 +516,9 @@ mod tests {
         let got: Vec<&str> = got.lines().collect();
         assert_eq!(got.len(), cases.len(), "{got:?}");
         for (case, got) in cases.iter().zip(got) {
-            let v = case.parse::<f64>().unwrap_or(0.0);
-            let expected = if v.is_nan() {
-                "NaN".to_string()
-            } else {
-                format!("{:x}", v.to_bits())
-            };
+            let parsed = case.parse::<f64>();
+            let v = parsed.clone().unwrap_or(0.0);
+            let expected = format!("{:x} {}", v.to_bits(), parsed.is_ok());
             assert_eq!(got, expected, "floatFrom({case:?})");
         }
     }

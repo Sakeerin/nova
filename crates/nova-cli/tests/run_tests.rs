@@ -13062,6 +13062,19 @@ fn char_and_bytes_run() {
     golden_three_ways("char_and_bytes", true);
 }
 
+/// `parse_int`, `parse_int_radix` and `parse_float`'s table (5.0 spec §5.3),
+/// also under GC stress.
+#[test]
+fn parse_numbers_runs() {
+    golden_three_ways("parse_numbers", true);
+}
+
+/// `Float.to_bits` at every edge (5.0 spec §5.4).
+#[test]
+fn float_bits_runs() {
+    golden_three_ways("float_bits", false);
+}
+
 /// `iter` and `slice` on arrays, and `Vec`'s `to_array`, `from_array`, `at`
 /// and `last` (5.0 spec §5.5), also under GC stress.
 #[test]
@@ -13119,6 +13132,14 @@ const STD_PANICS: &[(&str, &str)] = &[
     ("fresh().last()", "Vec::last on an empty vector"),
     ("emptied().last()", "Vec::last on an empty vector"),
     ("emptied().at(0)", "Vec::at index out of range"),
+    (
+        "\"1\".parse_int_radix(1)",
+        "String::parse_int_radix radix must be from 2 to 36",
+    ),
+    (
+        "\"1\".parse_int_radix(37)",
+        "String::parse_int_radix radix must be from 2 to 36",
+    ),
 ];
 
 /// The program that prints `before`, then evaluates `expr`, which panics.

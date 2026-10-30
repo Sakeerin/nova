@@ -198,6 +198,9 @@ rt_funcs! {
     FloatFixed,
     /// `(str) -> f64` — decimal text parsed as a `Float`.
     StrToFloat,
+    /// `(str) -> i8` — whether the text is one Rust's `f64::from_str`
+    /// accepts, so `StrToFloat` gives its value rather than its `0.0`.
+    StrIsFloat,
     /// `(f64) -> i64` — the IEEE 754 bits of the value, as `f64::to_bits`.
     FloatToBits,
     /// `(i8) -> str`
@@ -576,6 +579,7 @@ impl RtFunc {
             RtFunc::FloatToStr => "nova_rt_float_to_str",
             RtFunc::FloatFixed => "nova_rt_float_fixed",
             RtFunc::StrToFloat => "nova_rt_str_to_float",
+            RtFunc::StrIsFloat => "nova_rt_str_is_float",
             RtFunc::FloatToBits => "nova_rt_float_to_bits",
             RtFunc::BoolToStr => "nova_rt_bool_to_str",
             RtFunc::CharToStr => "nova_rt_char_to_str",
@@ -685,6 +689,7 @@ impl RtFunc {
             RtFunc::FloatToStr => (vec![MirTy::F64], MirTy::Ptr),
             RtFunc::FloatFixed => (vec![MirTy::F64, MirTy::I64], MirTy::Ptr),
             RtFunc::StrToFloat => (vec![MirTy::Ptr], MirTy::F64),
+            RtFunc::StrIsFloat => (vec![MirTy::Ptr], MirTy::I8),
             RtFunc::FloatToBits => (vec![MirTy::F64], MirTy::I64),
             RtFunc::BoolToStr => (vec![MirTy::I8], MirTy::Ptr),
             RtFunc::CharToStr => (vec![MirTy::I64], MirTy::Ptr),
@@ -948,6 +953,7 @@ impl RtFunc {
             RtFunc::FloatToStr => WasmRuntime::Host("float_to_str"),
             RtFunc::FloatFixed => WasmRuntime::Host("float_fixed"),
             RtFunc::StrToFloat => WasmRuntime::Host("str_to_float"),
+            RtFunc::StrIsFloat => WasmRuntime::Host("str_is_float"),
             RtFunc::FloatToBits => WasmRuntime::Host("float_to_bits"),
             RtFunc::BoolToStr => WasmRuntime::Nova("rt_bool_to_str"),
             RtFunc::CharToStr => WasmRuntime::Nova("rt_char_to_str"),

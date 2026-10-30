@@ -870,6 +870,21 @@ pub unsafe extern "C" fn nova_rt_str_to_float(s: *const NovaStr) -> f64 {
     as_str(s).parse::<f64>().unwrap_or(0.0)
 }
 
+/// Whether `s` is text `str::parse::<f64>` accepts, `1` or `0`.
+///
+/// The other half of `std/strings`' `String.parse_float`: where this says
+/// yes, [`nova_rt_str_to_float`] gives the value, and where it says no, that
+/// `0.0` is a refusal (5.0 spec §5.3). So the grammar, and the value, are
+/// Rust's on both sides of the pair, and the shim's `str_is_float` tests the
+/// same grammar on WASM.
+///
+/// # Safety
+/// `s` must point to a valid `NovaStr`.
+#[no_mangle]
+pub unsafe extern "C" fn nova_rt_str_is_float(s: *const NovaStr) -> i8 {
+    i8::from(as_str(s).parse::<f64>().is_ok())
+}
+
 /// The IEEE 754 bits of `v`, as `f64::to_bits`, read as a signed `Int`.
 ///
 /// Backs `std/core`'s `Float.to_bits` (5.0 spec §5.4). A runtime call rather
@@ -1035,6 +1050,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_float_fixed", nova_rt_float_fixed as *const u8),
         ("nova_rt_str_to_float", nova_rt_str_to_float as *const u8),
+        ("nova_rt_str_is_float", nova_rt_str_is_float as *const u8),
         ("nova_rt_float_to_bits", nova_rt_float_to_bits as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
         ("nova_rt_char_to_str", nova_rt_char_to_str as *const u8),
@@ -2021,6 +2037,28 @@ mod tests {
             // Rejected input: text that is not a number, and the empty string.
             assert_eq!(nova_rt_str_to_float(make_str("nope")), 0.0);
             assert_eq!(nova_rt_str_to_float(make_str("")), 0.0);
+        }
+    }
+
+    /// `str_is_float` says yes exactly where Rust's parser does, so
+    /// `parse_float` tells a refused text from a `0.0` (5.0 spec §5.3).
+    #[test]
+    fn str_is_float_is_rusts_grammar() {
+        let taken = [
+            "0", "-0", "+1", "1.", ".5", "1e5", "1E-5", "1e+5", "inf", "-INF", "infinity", "NaN",
+            "+nan", "1e400", "4.9e-324",
+        ];
+        let refused = [
+            "", "+", "-", ".", "e5", "1e", "1e+", "1.5.2", " 1", "1 ", "1_000", "0x1A", "infinit",
+            "nanx", "--1",
+        ];
+        unsafe {
+            for s in taken {
+                assert_eq!(nova_rt_str_is_float(make_str(s)), 1, "{s:?} is a float");
+            }
+            for s in refused {
+                assert_eq!(nova_rt_str_is_float(make_str(s)), 0, "{s:?} is not a float");
+            }
         }
     }
 
