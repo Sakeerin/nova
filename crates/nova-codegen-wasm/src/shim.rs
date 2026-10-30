@@ -522,4 +522,49 @@ mod tests {
             assert_eq!(got, expected, "floatFrom({case:?})");
         }
     }
+
+    /// `-nan` keeps its sign bit once the parse is hot (the review of
+    /// 5.0c): V8's optimising tiers replace an expression whose every value
+    /// is a NaN with the positive NaN, so the review saw `-nan` keep its
+    /// sign in only 2,107 of 200,000 parses on Node 22, where natively every
+    /// one keeps it. 200,000 parses over four spellings, two signed, reach
+    /// those tiers in well under a second.
+    #[test]
+    fn float_from_keeps_the_sign_of_minus_nan_once_hot() {
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
+        let script = format!(
+            "{FLOAT}\nconst view = new DataView(new ArrayBuffer(8));\n\
+             const cases = [\"-nan\", \"nan\", \"-NaN\", \"+NAN\"];\n\
+             let neg = 0, pos = 0, signed = 0;\n\
+             for (let i = 0; i < 200000; i++) {{\n  const s = cases[i % 4];\n  \
+             view.setFloat64(0, floatFrom(s));\n  const negative = view.getUint8(0) >= 0x80;\n  \
+             if (s.startsWith(\"-\")) {{ if (negative) neg++; else pos++; }}\n  \
+             else if (negative) signed++;\n}}\n\
+             console.log(`neg ${{neg}} pos ${{pos}} signed ${{signed}}`);\n"
+        );
+        let dir = std::env::temp_dir().join("nova-codegen-wasm-float-from-hot");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let file = dir.join("float_from_hot.js");
+        std::fs::write(&file, script).expect("the script");
+        let out = node.arg(&file).output().expect("node runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let native = ["-nan", "nan", "-NaN", "+NAN"]
+            .iter()
+            .cycle()
+            .take(200_000)
+            .filter(|s| s.parse::<f64>().expect("a NaN").is_sign_negative())
+            .count();
+        assert_eq!(native, 100_000);
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim_end(),
+            "neg 100000 pos 0 signed 0"
+        );
+    }
 }

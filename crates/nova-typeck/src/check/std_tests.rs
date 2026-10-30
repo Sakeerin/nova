@@ -125,6 +125,50 @@ fn a_programs_array_method_that_std_has_is_e0074() {
     );
 }
 
+/// A program's own `len` on arrays takes the name of arrays' built-in
+/// `len`, which a call takes first, so its impl is E0074, as `impl String`'s
+/// or `impl<T> Vec<T>`'s `len` is, labelled at the program's impl, its
+/// primary label, and at std's `impl<T> [T]` (5.0 spec §5.5; the review of
+/// 5.0c, which found `[1, 2, 3].len()` printing 3 past such an impl, with
+/// no diagnostic). With arguments or without, `len` is the builtin's name.
+#[test]
+fn a_programs_len_on_arrays_is_e0074() {
+    for (src, ty) in [
+        (
+            "impl [Int] {\n    fn len(self) -> Int { 99 }\n}\n\
+             fn main() {\n    println(\"${[1, 2, 3].len()}\")\n}\n",
+            "[Int]",
+        ),
+        (
+            "impl<T> [T] {\n    fn len(self, n: Int) -> Int { n }\n}\nfn main() {}\n",
+            "[T]",
+        ),
+    ] {
+        let e = errors(src);
+        let d = e
+            .iter()
+            .find(|d| d.code == "E0074")
+            .unwrap_or_else(|| panic!("an E0074 for {ty}: {e:#?}"));
+        assert_eq!(
+            d.message,
+            "method `len` is defined by multiple overlapping inherent impls"
+        );
+        let at = src.find(ty).expect("the impl's type") as u32;
+        assert!(
+            d.labels.iter().any(|l| l.primary
+                && l.message == "here"
+                && l.span.start == at
+                && l.span.end == at + ty.len() as u32),
+            "{d:#?}"
+        );
+        assert!(
+            d.labels.iter().any(|l| !l.primary
+                && l.message == "`len` is also defined by std, for every array"),
+            "{d:#?}"
+        );
+    }
+}
+
 /// A method no impl has is still E0014, and its fix offers `len` with the
 /// impls' methods.
 #[test]
@@ -401,6 +445,21 @@ fn a_std_only_builtin_named_by_a_program_gets_its_public_form() {
     }
 }
 
+/// The note is for a value or a function wanted: the same name where a type
+/// is wanted is E0001 "cannot find type", with no note, since no builtin is
+/// a type (the review of 5.0c).
+#[test]
+fn a_std_only_builtins_name_as_a_type_gets_no_public_form() {
+    let e = errors("fn f(x: str_as_bytes) {}\nfn main() {}\n");
+    let d = e.iter().find(|d| d.code == "E0001").expect("an E0001");
+    assert!(d.message.starts_with("cannot find type"), "{d:#?}");
+    assert!(
+        !d.notes.iter().any(|n| n.contains("is internal to std")),
+        "{:#?}",
+        d.notes
+    );
+}
+
 fn warnings(src: &str) -> Vec<Diagnostic> {
     checked(src)
         .diagnostics
@@ -422,7 +481,8 @@ fn e0105s(src: &str) -> Vec<String> {
 /// `Vec`'s `last` and `at` do since 5.0c, is E0105, a warning at the trait
 /// impl's method: a call takes the inherent method (the user's ruling on
 /// 5.0c's first fact-check). The type is shown with the impl's own
-/// parameter names, and a method that takes arguments as `x.at(…)`.
+/// parameter names, a method that takes arguments as `x.at(…)`, and the
+/// note's generic function's parameter by a name the impl does not use.
 #[test]
 fn a_programs_trait_method_hidden_by_a_std_method_is_e0105() {
     let src = "trait Top {\n    fn last(self) -> Int\n    fn at(self, i: Int) -> Int\n}\n\
@@ -453,7 +513,7 @@ fn a_programs_trait_method_hidden_by_a_std_method_is_e0105() {
         first
             .notes
             .iter()
-            .any(|n| n.contains("generic over `T: Top`, whose `x.last()` is the trait's")),
+            .any(|n| n.contains("generic over `U: Top`, whose `x.last()` is the trait's")),
         "{first:#?}"
     );
     let second = w
@@ -466,6 +526,64 @@ fn a_programs_trait_method_hidden_by_a_std_method_is_e0105() {
             .iter()
             .any(|n| n.contains("whose `x.at(…)` is the trait's")),
         "{second:#?}"
+    );
+}
+
+/// E0105's note names the trait's method with the trait's own arguments,
+/// `Top::at(x, …)` for one that takes more than `self`, as the call Nova
+/// does not have, and the generic function's `x.at(…)` by the trait's
+/// arguments too, where the label's `x.at(…)` is std's; its type parameter
+/// is `T` unless the impl uses that name, then `U` (the review of 5.0c).
+#[test]
+fn e0105s_note_names_the_traits_arguments_and_a_fresh_parameter() {
+    let note = |src: &str| -> (String, String) {
+        let w = warnings(src);
+        let d = w.iter().find(|d| d.code == "E0105").expect("an E0105");
+        let label = d
+            .labels
+            .iter()
+            .find(|l| l.primary)
+            .expect("a primary label")
+            .message
+            .clone();
+        (label, d.notes.join("\n"))
+    };
+    let (label, n) = note(
+        "trait Top {\n    fn at(self, i: Int, j: Int) -> Int\n}\n\
+         impl<T> Top for Vec<T> {\n    fn at(self, i: Int, j: Int) -> Int { i }\n}\n\
+         fn main() {}\n",
+    );
+    assert_eq!(
+        label,
+        "`x.at(…)` on a `Vec<T>` runs std's method, not this one"
+    );
+    assert!(n.contains("Nova has no `Top::at(x, …)` call"), "{n}");
+    assert!(
+        n.contains("generic over `U: Top`, whose `x.at(…)` is the trait's"),
+        "{n}"
+    );
+    let (label, n) = note(
+        "trait Top {\n    fn at(self) -> Int\n}\n\
+         impl Top for Vec<Int> {\n    fn at(self) -> Int { 0 }\n}\n\
+         fn main() {}\n",
+    );
+    assert_eq!(
+        label,
+        "`x.at(…)` on a `Vec<Int>` runs std's method, not this one"
+    );
+    assert!(n.contains("Nova has no `Top::at(x)` call"), "{n}");
+    assert!(
+        n.contains("generic over `T: Top`, whose `x.at()` is the trait's"),
+        "{n}"
+    );
+    let (_, n) = note(
+        "trait Mk {\n    fn from_array(a: [Int]) -> Self\n}\n\
+         impl<T> Mk for Vec<T> {\n    fn from_array(a: [Int]) -> Vec<T> { Vec::new() }\n}\n\
+         fn main() {}\n",
+    );
+    assert!(
+        n.contains("generic over `U: Mk`, whose `U::from_array(…)` is the trait's"),
+        "{n}"
     );
 }
 
@@ -566,6 +684,55 @@ fn an_arity_error_on_an_array_method_names_it_as_written() {
     assert!(
         e.iter().any(|d| d.code == "E0016"
             && d.message == "`Vec::at` takes 1 argument(s) but 0 were supplied"),
+        "{e:#?}"
+    );
+}
+
+/// An array of a compound element type is named as the source writes it
+/// too: `[Vec<Int>]::bump`, not the resolver's `[Vec_Int]::bump`, and so for
+/// an `Option`, a tuple and a generic `Map` element, its parameters as the
+/// impl names them (the review of 5.0c).
+#[test]
+fn an_array_of_compound_elements_names_its_method_as_written() {
+    let e = errors(
+        "impl [Vec<Int>] {\n    fn bump(mut self) { }\n}\n\
+         fn main() {\n    let v: Vec<Int> = Vec::new()\n    let a = [v]\n    a.bump()\n}\n",
+    );
+    assert!(
+        e.iter().any(|d| d.code == "E0060"
+            && d.message == "`[Vec<Int>]::bump` mutates its receiver, but `a` is immutable"),
+        "{e:#?}"
+    );
+    for (impl_ty, method, value, shown) in [
+        (
+            "[Option<String>]",
+            "two",
+            "[Some(\"a\")]",
+            "`[Option<String>]::two` takes 1 argument(s) but 0 were supplied",
+        ),
+        (
+            "[(Int, Int)]",
+            "four",
+            "[(1, 2)]",
+            "`[(Int, Int)]::four` takes 1 argument(s) but 0 were supplied",
+        ),
+    ] {
+        let e = errors(&format!(
+            "impl {impl_ty} {{\n    fn {method}(self, n: Int) -> Int {{ n }}\n}}\n\
+             fn main() {{\n    let x = {value}.{method}()\n}}\n"
+        ));
+        assert!(
+            e.iter().any(|d| d.code == "E0016" && d.message == shown),
+            "{impl_ty}: {e:#?}"
+        );
+    }
+    let e = errors(
+        "impl<K, V> [Map<K, V>] {\n    fn three(self, n: Int) -> Int { n }\n}\n\
+         fn main() {\n    let m: Map<String, Int> = Map::new()\n    let x = [m].three()\n}\n",
+    );
+    assert!(
+        e.iter().any(|d| d.code == "E0016"
+            && d.message == "`[Map<K, V>]::three` takes 1 argument(s) but 0 were supplied"),
         "{e:#?}"
     );
 }

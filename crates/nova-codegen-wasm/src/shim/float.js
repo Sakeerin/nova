@@ -87,13 +87,19 @@ function floatFixed(v, places) {
 // Rust's `str::parse::<f64>`, or 0.0 where it fails (nova_rt_str_to_float's
 // `unwrap_or(0.0)`): its grammar exactly, then `Number`, which rounds
 // correctly as Rust does. A `-` before `nan` sets the NaN's sign bit, as
-// Rust's does, which `Float.to_bits` shows (5.0 spec §5.4).
+// Rust's does, which `Float.to_bits` shows (5.0 spec §5.4). Once the code
+// is hot, V8's optimising tiers give the expression `-NaN`, or any whose
+// every value is a NaN, such as `minus ? negNaN : NaN`, the type NaN and
+// replace it with the positive NaN; so the negative NaN is read, at each
+// parse, from `NEG_NAN`, a one-element array made from its bits, whose load
+// no tier folds.
+const NEG_NAN = new Float64Array(new BigUint64Array([0xfff8000000000000n]).buffer);
 const FLOAT_TEXT = /^[+-]?(?:inf|infinity|nan|(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)$/i;
 function floatFrom(s) {
   if (!FLOAT_TEXT.test(s)) return 0;
   const body = s.replace(/^[+-]/, "").toLowerCase();
   if (body === "inf" || body === "infinity") return s.startsWith("-") ? -Infinity : Infinity;
-  if (body === "nan") return s.startsWith("-") ? -NaN : NaN;
+  if (body === "nan") return s.startsWith("-") ? NEG_NAN[0] : NaN;
   return Number(s);
 }
 

@@ -515,6 +515,45 @@ fn an_async_main_runs_under_node() {
     assert_eq!(stdout(&a), "a\n");
 }
 
+/// `"-nan".parse_float()` keeps its sign bit on WASM once the program is
+/// hot, as natively (the review of 5.0c): V8's optimising tiers replace an
+/// expression whose every value is a NaN with the positive NaN, so the
+/// shim's `-NaN` lost the sign in most of 200,000 parses. The NaN crosses
+/// from the shim into the module and back to `floatBits` for `to_bits`.
+#[test]
+fn minus_nan_keeps_its_sign_on_wasm_once_hot() {
+    let dir = fresh("minus-nan-hot");
+    write(
+        &dir,
+        &[(
+            "main.nova",
+            "fn main() {\n\
+             \x20   let words = [\"-nan\", \"nan\", \"-NaN\", \"+NAN\"]\n\
+             \x20   let mut neg = 0\n\
+             \x20   let mut pos = 0\n\
+             \x20   let mut signed = 0\n\
+             \x20   for i in 0..200000 {\n\
+             \x20       let s = words[i % 4]\n\
+             \x20       let negative = s.parse_float().unwrap().to_bits() < 0\n\
+             \x20       if s.starts_with(\"-\") {\n\
+             \x20           if negative { neg = neg + 1 } else { pos = pos + 1 }\n\
+             \x20       } else if negative {\n\
+             \x20           signed = signed + 1\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   println(\"neg ${neg} pos ${pos} signed ${signed}\")\n\
+             }\n",
+        )],
+    );
+    let expected = "neg 100000 pos 0 signed 0\n";
+    let native = nova_in(&dir, &["run", "main.nova"]).success();
+    assert_eq!(stdout(&native), expected);
+    let Some(node) = node() else { return };
+    let dist = build_wasm(&dir, Path::new("main.nova"));
+    let a = run_wasm(node, &dist).success();
+    assert_eq!(stdout(&a), expected);
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

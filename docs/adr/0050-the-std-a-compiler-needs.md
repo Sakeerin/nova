@@ -48,22 +48,36 @@ with `String::with_capacity`, `20-STDLIB.md`'s index promises `spawn` in
    `parse_float` pairs `str_to_float` with a new `str_is_float`, so a
    refused text is told from a `0.0`, by Rust's grammar on both targets.
    The shim's `str_to_float` now gives `-nan` its sign bit, as Rust's
-   parser does natively, since `to_bits` makes the sign visible.
+   parser does natively, since `to_bits` makes the sign visible. The NaN
+   is read at each parse from a one-element `Float64Array` made from its
+   bits, `0xFFF8000000000000`, not written `-NaN`: once the code is hot,
+   V8's optimising tiers replace an expression whose every value is a NaN,
+   `-NaN` or even `minus ? negNaN : NaN` with a constant `negNaN`, by the
+   positive NaN, and a load from an array is not folded (the review of
+   5.0c, `float_from_keeps_the_sign_of_minus_nan_once_hot`,
+   `minus_nan_keeps_its_sign_on_wasm_once_hot`).
 4. **Arrays have a type head,** `TyHead::Array`, so std writes
    `impl<T> [T]` (`iter`, `slice`). Before 5.0c every impl on an array was
    E0010, "impl blocks are only supported on named types"; now an inherent
    one, `impl<T> [T] { … }` or `impl [Int] { … }`, checks, as on `String`,
-   and one that defines `iter` or `slice` again is E0074. A trait impl on
-   an array stays E0010, "a trait cannot be implemented for an array" (the
-   user's ruling on the first fact-check): an array takes inherent impls
-   alone. The resolver's name for an array's method, `Arr_T.slice`, is
-   shown in diagnostics as `[T]::slice` (E0016, E0060), and a generic
-   type's, `Vec_T.at`, as `Vec::at`; an array in an interpolation is E0013
-   without the advice to implement `Display`.
-   E0074 between two inherent impls now labels both, the earlier one
-   "`iter` is also defined by this impl": the error is reported at the
-   later impl, which for a program's impl against std's is std's, so
-   before this label the program's own impl appeared nowhere in it.
+   and one that defines `iter` or `slice` again, or `len`, built into every
+   array and taken by a call first, is E0074 (the review of 5.0c found a
+   program's `len` ignored). A trait impl on an array stays E0010, "a
+   trait cannot be implemented for an array" (the user's ruling on the
+   first fact-check): an array takes inherent impls alone. The resolver's
+   name for an array's method, `Arr_T.slice`, is shown in diagnostics as
+   `[T]::slice` (E0016, E0060), from the owning impl's type as written, so
+   `Arr_Vec_Int.bump` is `[Vec<Int>]::bump` (the review of 5.0c), and a
+   generic type's, `Vec_T.at`, as `Vec::at`; an array in an interpolation
+   is E0013 without the advice to implement `Display`.
+   E0074 between two inherent impls now labels both. Where one is std's,
+   the program's impl is the primary label, "here", and std's is labelled
+   "`iter` is also defined by std's impl" ("`len` is also defined by std,
+   for every array" for `len`); between two of a program's impls the later
+   is the primary label and the earlier "`iter` is also defined by this
+   impl". Before, the error was reported at the later impl alone, which
+   for a program's impl against std's is std's, so the program's own impl
+   appeared nowhere in it.
    `Vec::to_array` and `from_array` copy. `Vec` gains `at` and `last`,
    which panic where `get` and `pop` give `None`, since `get` allocates a
    `Some` per read.
@@ -85,11 +99,12 @@ with `String::with_capacity`, `20-STDLIB.md`'s index promises `spawn` in
    tool and waits; native only, so on WASM, where the module is not
    compiled, naming one is E0092. The program is found as Rust's `Command`
    finds it, `PATH` and `.exe` included, its arguments passed with no
-   shell, the environment and working directory inherited; `run`'s
-   standard input is empty and both outputs are captured whole, read at
-   once so neither pipe stalls the child; `status` inherits all three
-   streams, after flushing standard output. A death by signal on Unix is
-   `128 + signal`. The record is `ProcessOutput`, not `Output`.
+   shell, the environment, less `NOVA_TEST_INDEX` (Consequences), and the
+   working directory inherited; `run`'s standard input is empty and both
+   outputs are captured whole, read at once so neither pipe stalls the
+   child; `status` inherits all three streams, after flushing standard
+   output. A death by signal on Unix is `128 + signal`. The record is
+   `ProcessOutput`, not `Output`.
 7. **The process builtins are on `std/fs`'s wire contract.** Six std-only
    builtins: `process_run(program, args, capture) -> Int`, a status code,
    `0` or an `IoErrorKind`'s, then `process_take_status`,
@@ -139,13 +154,17 @@ with `String::with_capacity`, `20-STDLIB.md`'s index promises `spawn` in
    call, so the trait's method is reached through a function generic over
    `T: Size`, whose `x.byte_len()` is the trait's, or by renaming it; for a
    static function, "std's inherent function `from_array` …", the generic
-   function's `T::from_array(…)`. Where only one of the two takes `self`
-   they never meet, and E0105 is quiet (the second fact-check). It counts
-   every std method a program can call, older ones such as `Vec::iter` or
-   `Map::len` and private ones such as `OrderedMap`'s `compact`, since a
-   method's privacy is not enforced at a call. A program's own inherent
-   method of one of these names, `impl String { fn byte_len … }`, compiled
-   before 5.0c and is E0074 now, labelled first at the program's impl.
+   function's `T::from_array(…)`. The note writes the trait's method with
+   the trait's own arguments, `Top::at(x, …)` for one that takes more than
+   `self`, and names the generic function's parameter `T`, or `U` where the
+   impl has a `T` of its own (the review of 5.0c). Where only one of the
+   two takes `self` they never meet, and E0105 is quiet (the second
+   fact-check). It counts every std method a program can call, older ones
+   such as `Vec::iter` or `Map::len` and private ones such as
+   `OrderedMap`'s `compact`, since a method's privacy is not enforced at a
+   call. A program's own inherent method of one of these names,
+   `impl String { fn byte_len … }`, compiled before 5.0c and is E0074 now,
+   labelled first at the program's impl.
 10. **One new diagnostic code, E0105.** E0092 covers `std/process`'s new
    names on WASM; E0010, E0013, E0014, E0060 and E0074 cover the rest. A
    program that
@@ -154,7 +173,9 @@ with `String::with_capacity`, `20-STDLIB.md`'s index promises `spawn` in
    `str_is_float`, `str_to_float` or `float_to_bits`, gets E0001 with a
    note naming the public form, `c.to_int()` and the like, in place of
    "did you mean", whose nearest name for `char_to_int` was
-   `char_from_int`, the conversion the other way.
+   `char_from_int`, the conversion the other way. The note is for a
+   value or a call alone: the name where a type is wanted is an unknown
+   type, with no note (the review of 5.0c).
 
 ## Consequences
 
@@ -177,15 +198,25 @@ with `String::with_capacity`, `20-STDLIB.md`'s index promises `spawn` in
   writes a marker in its temporary directory and stops if one is there;
   its tests give it a fresh directory, then check that a run that finds
   the marker starts nothing.
+- **A test that runs its own binary would run itself again,** since under
+  `nova test` `current_exe()` is the test binary, which picks its test
+  from `NOVA_TEST_INDEX`, and a child inherits the environment. The plan
+  saw this for doc tests alone, whose examples in `std/process` therefore
+  start no program; the review of 5.0c found it for any `@test`. So `run`
+  and `status` remove `NOVA_TEST_INDEX`, the one variable a test binary
+  reads to pick what to run, from the child's environment, and a test
+  binary without it prints its list of tests and ends
+  (`a_test_that_runs_its_own_binary_runs_once`). A program that runs a
+  test binary on purpose cannot pick its test through `run`.
 - **An `OrderedMap` that only shrinks keeps its slots,** and with them its
   dead keys and values, until it next grows; a key inserted while an
   iterator runs can move the entries under it. `OrderedSet` is not built.
 - **A program's inherent `impl<T> [T]` is new and checks, but one that
-  defines `iter` or `slice` is E0074,** std's impl defining both. As with
-  `impl String`, std's own calls of the method then resolve to the
-  program's, so a program whose `slice` takes other arguments also sees
-  errors inside std, after the E0074; the E0074 comes first and labels the
-  program's impl.
+  defines `iter`, `slice` or `len` is E0074,** std's impl defining the
+  first two, and `len` built into every array. As with `impl String`,
+  std's own calls of `iter` or `slice` then resolve to the program's, so a
+  program whose `slice` takes other arguments also sees errors inside std,
+  after the E0074; the E0074 comes first and labels the program's impl.
 - **Programs that compiled before 5.0c can change.** A program's own
   inherent method named as one of std's new ones (`impl String { fn
   byte_len … }`, `impl Char { fn to_int … }`, `impl Float { fn to_bits

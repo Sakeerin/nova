@@ -218,7 +218,10 @@ can differ by backend (`0.0 / 0.0` is `0xFFF8…` under `nova run` and
 `0x7FF8…` built `--release`, where LLVM folds it); there is no `from_bits`.
 The shim's
 `str_to_float` keeps a `-nan`'s sign bit, as Rust's parser does, so
-`"-nan".parse_float()` has the same bits on WASM.
+`"-nan".parse_float()` has the same bits on WASM: it reads the NaN from a
+one-element `Float64Array` made from the bits `0xFFF8000000000000`, since
+V8's optimising tiers turn an expression `-NaN`, or any whose every value
+is a NaN, into the positive NaN once the code is hot.
 
 ---
 
@@ -2295,8 +2298,8 @@ impl<T> Vec<T> {
 An array's type head is `TyHead::Array`, so std writes `impl<T> [T]`, and
 an array's methods are looked up after its built-in `len`; a program may
 write an inherent impl on arrays as on `String`, and one that defines
-`iter` or `slice` again is E0074, while a trait impl on an array stays
-E0010. `iter` shares the array; `slice` copies
+`iter` or `slice` again, or the built-in `len`, is E0074, while a trait
+impl on an array stays E0010. `iter` shares the array; `slice` copies
 its range, and panics when a bound is out of range or `start > end`.
 `to_array` and `from_array` copy, so neither shares storage. `at` and
 `last` read without an `Option`, panicking where `get` and `pop` give
@@ -2920,7 +2923,11 @@ pub fn current_exe() -> Result<String, IoError>
 - **`program`** is a path, or a name searched for on `PATH`, as Rust's
   `Command` does, `.exe` added on Windows. Each argument is passed as it
   is, with no shell; Rust's `Command` quotes it for Windows. The child
-  inherits the environment and the working directory.
+  inherits the environment and the working directory, less
+  `NOVA_TEST_INDEX`: under `nova test` the running executable is a test
+  binary that picks its test from it, so a test that runs `current_exe()`
+  would start the same test again, without end; without it a test binary
+  prints its list of tests and ends.
 - **The status** is the exit code; a death by signal on Unix is
   `128 + signal`, as shells report it, so a child's panic, an abort, gives
   134. Windows always has a code.

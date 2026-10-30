@@ -122,7 +122,8 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
   and `Vec::last()`, which read without an `Option` and panic where `get`
   and `pop` give `None`. A program may write an inherent impl on arrays,
   `impl<T> [T]` or `impl [Int]`, as on `String`, where any impl on an
-  array was E0010 before; a trait impl on an array stays E0010.
+  array was E0010 before; one that defines `iter`, `slice` or `len` is
+  E0074, and a trait impl on an array stays E0010.
 - **`OrderedMap`,** in std/collections: a map that keeps its keys in the
   order they were first inserted, with `new`, `len`, `is_empty`, `insert`,
   `get`, `contains_key`, `remove`, `keys`, `values`, `entries`, which gives
@@ -139,11 +140,13 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
   standard output and error; `status` runs one that reads and writes this
   program's streams and returns its status. A death by signal on Unix is
   `128 + signal`; a missing program is `NotFound`. Both block the thread,
-  every task included. `env(name)` reads an environment variable, and
-  `current_exe()` gives the running executable's path, `nova` itself
-  under `nova run`. Native only: on WASM, naming one is E0092. The four
-  names are in every module's scope, and a program's own shadows them
-  (ADR 0050).
+  every task included. The child inherits the environment, less
+  `NOVA_TEST_INDEX`, so a `@test` that runs its own binary through
+  `current_exe()` does not run itself again. `env(name)` reads an
+  environment variable, and `current_exe()` gives the running executable's
+  path, `nova` itself under `nova run`. Native only: on WASM, naming one
+  is E0092. The four names are in every module's scope, and a program's
+  own shadows them (ADR 0050).
 
 ### Changed
 
@@ -216,7 +219,10 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
   shim entries on WASM, and the six process builtins below.
 - **On WASM, the shim's `str_to_float` gives `-nan` a NaN with its sign
   bit set,** as Rust's parser does natively; before, it dropped the sign,
-  which no program could see until `to_bits`.
+  which no program could see until `to_bits`. The NaN is read from a
+  one-element `Float64Array` made from its bits, since V8's optimising
+  tiers turn an expression `-NaN`, or any whose every value is a NaN, into
+  the positive NaN once the code is hot.
 - **std's new inherent methods take a call before a program's trait
   method of the same name, and a program's own inherent method of that
   name is E0074.** `String`'s `byte_len`, `byte_at`, `byte_slice`,
@@ -237,13 +243,14 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
   such as `Vec`'s `iter` or `Map`'s `len` too, private ones included,
   since a method's privacy is not enforced at a call. A program's own
   `impl String { fn byte_len … }`, which compiled before, is E0074, as is
-  an `impl<T> [T]` that defines `iter` or `slice`. E0074 between two
-  inherent impls labels both now, the program's impl as the primary label
-  when the other is std's.
+  an `impl<T> [T]` that defines `iter`, `slice` or arrays' built-in
+  `len`. E0074 between two inherent impls labels both now, the program's
+  impl as the primary label when the other is std's.
 - **A method's name in a diagnostic** is the source's type where the
-  resolver's mangled one showed: `[T]::slice` and `[Int]::bump` for an
-  array's (E0016, E0060), not `Arr_T.slice`, and `Vec::at` for a generic
-  type's, not `Vec_T.at`. A plain type's stays `P.of`.
+  resolver's mangled one showed: `[T]::slice`, `[Int]::bump` and
+  `[Vec<Int>]::bump` for an array's (E0016, E0060), not `Arr_T.slice` or
+  `[Vec_Int]::bump`, and `Vec::at` for a generic type's, not `Vec_T.at`.
+  A plain type's stays `P.of`.
 - **An array in an interpolation** is E0013 as before, without the advice
   to implement `Display`, which a trait impl on an array cannot do.
 - **Calling `char_to_int`, `int_to_char`, `str_from_chars`,
