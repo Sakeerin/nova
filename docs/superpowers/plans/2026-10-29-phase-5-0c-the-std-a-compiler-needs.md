@@ -458,7 +458,7 @@ approved by the user on 2026-10-26.
   patch: the prototype wrote them from the program's native run, and the
   replay ran each under `nova run` (but `process_run`, which runs itself and
   so is built), `nova build`, `--release` through `clang-18`, and, for the
-  seven in the gate, WASM; four under GC stress.
+  eight in the gate, WASM; four under GC stress.
 - **Each task** but Task 8 is test first: its tests' patch, their run and
   the expected failure, then its code's patch, its run and the expected
   pass. Task 8's patch is the records. Each task then runs its checks:
