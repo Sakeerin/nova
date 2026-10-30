@@ -183,6 +183,24 @@ fn vecs_helpers_have_the_specs_types() {
     assert_eq!(local_ty(&r, "last"), Ty::Int);
 }
 
+/// The builder's types, and a `String`'s length in bytes (spec §5.1,
+/// §5.2).
+#[test]
+fn the_builder_has_the_specs_types() {
+    let r = checked(
+        "fn main() {\n    let bl = \"a\".byte_len()\n    \
+         let mut sb = StringBuilder::new()\n    sb.push(\"x\")\n    sb.push_char('y')\n    \
+         let sl = sb.byte_len()\n    let se = sb.is_empty()\n    let st = sb.to_string()\n    \
+         sb.clear()\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    for name in ["bl", "sl"] {
+        assert_eq!(local_ty(&r, name), Ty::Int, "{name}");
+    }
+    assert_eq!(local_ty(&r, "se"), Ty::Bool);
+    assert_eq!(local_ty(&r, "st"), Ty::String);
+}
+
 /// The conversions' and byte access's types (spec §5.2).
 #[test]
 fn the_conversions_and_byte_access_have_the_specs_types() {
@@ -199,6 +217,14 @@ fn the_conversions_and_byte_access_have_the_specs_types() {
     for name in ["s", "bs"] {
         assert_eq!(local_ty(&r, name), Ty::String, "{name}");
     }
+}
+
+/// `push` and `clear` take `mut self`, as `Vec`'s do.
+#[test]
+fn a_builder_mutates_only_through_a_mutable_binding() {
+    let e = errors("fn main() {\n    let b = StringBuilder::new()\n    b.push(\"x\")\n}\n");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert_eq!(e[0].code, "E0060");
 }
 
 /// A program's impl that defines a method std's impl on the same type has,

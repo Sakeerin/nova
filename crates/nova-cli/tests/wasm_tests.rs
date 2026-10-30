@@ -2036,6 +2036,8 @@ mod gate {
         // over a builtin that is a shim entry on WASM.
         array_helpers,
         hidden_trait_methods,
+        string_builder,
+        string_builder_million,
         char_and_bytes,
     );
 

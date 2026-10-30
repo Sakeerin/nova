@@ -13040,6 +13040,21 @@ fn for_arrays_run() {
     golden_three_ways("for_arrays", true);
 }
 
+/// `StringBuilder` (5.0 spec §5.1), also under GC stress, since its parts
+/// live in a `Vec` that grows while the collector runs.
+#[test]
+fn string_builder_runs() {
+    golden_three_ways("string_builder", true);
+}
+
+/// A million pushes into a `StringBuilder`, which a quadratic builder could
+/// not finish in the harness's time limit; no timing assertion (5.0 spec
+/// §5.1).
+#[test]
+fn string_builder_million_runs() {
+    golden_three_ways("string_builder_million", false);
+}
+
 /// `Char` and `Int` both ways, `string_from_chars`, and byte access on one-
 /// to four-byte characters (5.0 spec §5.2), also under GC stress.
 #[test]
