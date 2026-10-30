@@ -1,7 +1,7 @@
 # Phase 5.1, "The lexer, the parser and the AST": design
 
 - **Date:** 2026-10-30.
-- **Status:** draft, for the user's approval.
+- **Status:** approved by the user (2026-10-30).
 - **The user's decisions, 2026-10-30:**
   1. **Two pull requests, built in order: 5.1a, then 5.1b.**
      - 5.1a: the package `selfhost/`, the lexer, a token dump on both
