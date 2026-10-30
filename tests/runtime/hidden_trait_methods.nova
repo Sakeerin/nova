@@ -1,0 +1,43 @@
+// A program's trait methods that std's inherent methods of the same names
+// hide (5.0 spec §5.5; 5.0c's E0105). A call on the value runs std's; a
+// function generic over the trait reaches the trait's, as E0105's note
+// says, for a method and for a static function alike.
+
+trait Top {
+    fn last(self) -> Int
+    fn at(self, i: Int) -> Int
+}
+
+impl<T> Top for Vec<T> {
+    fn last(self) -> Int { 0 - 1 }
+    fn at(self, i: Int) -> Int { 100 + i }
+}
+
+trait Make {
+    fn from_array(a: [Int]) -> Self
+}
+
+impl Make for Vec<Int> {
+    fn from_array(a: [Int]) -> Vec<Int> {
+        let mut v: Vec<Int> = Vec::new()
+        v.push(99)
+        v
+    }
+}
+
+fn top_last<T: Top>(x: T) -> Int { x.last() }
+
+fn top_at<T: Top>(x: T, i: Int) -> Int { x.at(i) }
+
+fn made<T: Make>() -> T { T::from_array([1, 2, 3]) }
+
+fn main() {
+    let mut v: Vec<Int> = Vec::new()
+    v.push(5)
+    v.push(6)
+    println("std's: last ${v.last()}, at(0) ${v.at(0)}")
+    println("the trait's: last ${top_last(v)}, at(0) ${top_at(v, 0)}")
+    let a: Vec<Int> = Vec::from_array([1, 2, 3])
+    let b: Vec<Int> = made()
+    println("std's from_array: ${a.len()}; the trait's: ${b.len()}, ${b.at(0)}")
+}

@@ -242,7 +242,9 @@ impl Ty {
 
     /// The nominal head of this type, if it has one — used to key impl
     /// lookups. Generic arguments do not participate (Phase 1 has no
-    /// overlapping impls per head).
+    /// overlapping impls per head). An array's head is [`TyHead::Array`],
+    /// whatever its element type, so std can write `impl<T> [T]` (5.0 spec
+    /// §5.5); a tuple, a function and a future have none.
     pub fn head(&self) -> Option<TyHead> {
         match self {
             Ty::Int => Some(TyHead::Int),
@@ -251,6 +253,7 @@ impl Ty {
             Ty::Char => Some(TyHead::Char),
             Ty::String => Some(TyHead::String),
             Ty::Bytes => Some(TyHead::Bytes),
+            Ty::Array(_) => Some(TyHead::Array),
             Ty::Sum { def_id, .. } => Some(TyHead::Sum(*def_id)),
             Ty::Record { def_id, .. } => Some(TyHead::Record(*def_id)),
             _ => None,
@@ -348,6 +351,9 @@ pub enum TyHead {
     Char,
     String,
     Bytes,
+    /// `[T]`, for any `T`: an impl on arrays is `impl<T> [T]` or one on a
+    /// concrete element type, `impl [Int]`, told apart by `match_args`.
+    Array,
     Sum(DefId),
     Record(DefId),
 }

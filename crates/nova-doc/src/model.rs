@@ -1014,7 +1014,12 @@ impl<'a> Ctx<'a> {
                 continue;
             };
             let on = type_name(&block.ty.value);
-            let on_name = on.map_or_else(|| "type".to_string(), |s| s.value.clone());
+            // An impl on arrays, `impl<T> [T]`, has no name to go by: its
+            // methods are `Array::iter` and the like (5.0 spec §5.5).
+            let on_name = match &block.ty.value {
+                Type::Array(_) => "Array".to_string(),
+                _ => on.map_or_else(|| "type".to_string(), |s| s.value.clone()),
+            };
             let ty = on.and_then(|s| self.uses.get(&s.span)).copied();
             let dest = match ty {
                 Some(Target::Def(id)) => {
@@ -1529,6 +1534,33 @@ mod tests {
             .map(|m| m.anchor.as_str())
             .collect();
         assert_eq!(doubled, ["impl.Int.method.doubled"]);
+    }
+
+    /// An impl on arrays has no type name to go by: its methods are
+    /// `Array`'s, as std's `impl<T> [T]` gives `Array::iter` (5.0 spec
+    /// §5.5).
+    #[test]
+    fn an_impl_on_arrays_names_its_methods_after_array() {
+        let dir = fresh("array-impl");
+        write(
+            &dir,
+            &[
+                ("nova.toml", &manifest("arrays", "")),
+                (
+                    "src/lib.nova",
+                    "impl<T> [T] {\n    /// The second element.\n    pub fn second(self) -> T { self[1] }\n}\n",
+                ),
+            ],
+        );
+        let d = documented(&dir);
+        let lib = module(&d.site, "arrays/index.html");
+        assert_eq!(lib.other_impls.len(), 1, "the impl on arrays");
+        let methods: Vec<&str> = lib.other_impls[0]
+            .methods
+            .iter()
+            .map(|m| m.anchor.as_str())
+            .collect();
+        assert_eq!(methods, ["impl.Array.method.second"]);
     }
 
     const PAIRS: &str = "/// Two of a kind.\npub record Pair<T> {\n    pub a: T,\n    pub b: T,\n}\n\nimpl Pair<Int> {\n    /// Their sum.\n    pub fn total(self) -> Int { self.a + self.b }\n}\n\nimpl Pair<String> {\n    /// The two, joined.\n    pub fn total(self) -> String { \"${self.a}${self.b}\" }\n}\n";

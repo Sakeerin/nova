@@ -1,0 +1,367 @@
+//! The checker's tests of 5.0c's std (spec
+//! `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+//! §5):
+//! - `TyHead::Array`, `[T]`'s impls and `Vec`'s helpers, and the E0010,
+//!   E0014, E0060 and E0074 an impl on arrays meets;
+//! - E0105, a program's trait method one of std's inherent methods hides;
+//! - the new items' types;
+
+use super::*;
+use nova_diagnostics::{FileId, Severity};
+use nova_lexer::lex;
+use nova_parser::parse;
+use nova_resolver::resolve;
+
+/// `src` checked, the resolver's diagnostics first.
+fn checked(src: &str) -> CheckResult {
+    let file_id = FileId::DUMMY;
+    let (tokens, lex_errors) = lex(src, file_id);
+    assert!(lex_errors.is_empty(), "lex errors: {lex_errors:?}");
+    let (ast, parse_errors) = parse(&tokens, file_id);
+    assert!(parse_errors.is_empty(), "parse errors: {parse_errors:?}");
+    let resolved = resolve(&ast.expect("an AST"));
+    let mut result = check(&resolved.file, &resolved.definitions);
+    let mut all = resolved.diagnostics;
+    all.append(&mut result.diagnostics);
+    result.diagnostics = all;
+    result
+}
+
+fn errors(src: &str) -> Vec<Diagnostic> {
+    checked(src)
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.severity == Severity::Error)
+        .collect()
+}
+
+fn clean(src: &str) {
+    let all = checked(src).diagnostics;
+    assert!(all.is_empty(), "{all:#?}");
+}
+
+/// The type of the local `name` in `main`.
+fn local_ty(r: &CheckResult, name: &str) -> Ty {
+    r.module
+        .functions
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("a `main`")
+        .locals
+        .iter()
+        .find(|l| l.name == name)
+        .unwrap_or_else(|| panic!("a local `{name}`"))
+        .ty
+        .clone()
+}
+
+#[test]
+fn an_arrays_head_is_array_whatever_its_element() {
+    assert_eq!(Ty::Array(Box::new(Ty::Int)).head(), Some(TyHead::Array));
+    assert_eq!(
+        Ty::Array(Box::new(Ty::Array(Box::new(Ty::String)))).head(),
+        Some(TyHead::Array)
+    );
+}
+
+#[test]
+fn std_array_methods_type_check_through_the_arrays_head() {
+    let r = checked(
+        "fn main() {\n    let a = [1, 2, 3]\n    let s = a.slice(0, 2)\n    \
+         let it = a.iter()\n    let n = a.len()\n    let w = [\"x\"].slice(0, 1)\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    assert_eq!(local_ty(&r, "s"), Ty::Array(Box::new(Ty::Int)));
+    assert_eq!(local_ty(&r, "w"), Ty::Array(Box::new(Ty::String)));
+    assert_eq!(local_ty(&r, "n"), Ty::Int);
+    assert!(
+        matches!(&local_ty(&r, "it"), Ty::Record { args, .. } if args.as_slice() == [Ty::Int]),
+        "{:?}",
+        local_ty(&r, "it")
+    );
+}
+
+#[test]
+fn an_array_iterators_adapters_infer_their_item() {
+    clean(
+        "fn main() {\n    let v = [1, 2, 3].iter().map(|x| x * 2).collect()\n    \
+         println(\"${v.at(0)}\")\n}\n",
+    );
+}
+
+/// A program may write an inherent impl on arrays, as on `String` (spec
+/// §5.5), generic or on one element type; the concrete one applies only to
+/// its element type.
+#[test]
+fn a_program_may_write_an_impl_on_arrays() {
+    clean(
+        "impl<T> [T] {\n    fn second(self) -> T { self[1] }\n}\n\
+         impl [Int] {\n    fn total(self) -> Int {\n        let mut t = 0\n        \
+         for x in self { t += x }\n        t\n    }\n}\n\
+         fn main() {\n    println(\"${[\"a\", \"b\"].second()} ${[1, 2].total()}\")\n}\n",
+    );
+    let e = errors(
+        "impl [Int] {\n    fn total(self) -> Int { 0 }\n}\n\
+         fn main() {\n    println(\"${[\"a\"].total()}\")\n}\n",
+    );
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert_eq!(e[0].code, "E0014");
+    assert_eq!(e[0].message, "no method `total` on array type `[String]`");
+}
+
+/// A program's own `iter` on arrays takes the name std's has, which two
+/// overlapping inherent impls may not both define.
+#[test]
+fn a_programs_array_method_that_std_has_is_e0074() {
+    let e = errors("impl<T> [T] {\n    fn iter(self) -> Int { 0 }\n}\nfn main() {}\n");
+    assert!(
+        e.iter().any(|d| d.code == "E0074"
+            && d.message == "method `iter` is defined by multiple overlapping inherent impls"),
+        "{e:#?}"
+    );
+}
+
+/// A method no impl has is still E0014, and its fix offers `len` with the
+/// impls' methods.
+#[test]
+fn an_unknown_array_method_is_e0014_with_its_methods_offered() {
+    let e = errors("fn main() {\n    let n = [1, 2].sclice(0, 1)\n}\n");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert_eq!(e[0].code, "E0014");
+    assert_eq!(e[0].message, "no method `sclice` on array type `[Int]`");
+    assert_eq!(
+        e[0].fixes
+            .iter()
+            .map(|f| f.title.as_str())
+            .collect::<Vec<_>>(),
+        ["change `sclice` to `slice`"]
+    );
+    let e = errors("fn main() {\n    let n = [1, 2].lne()\n}\n");
+    assert_eq!(
+        e[0].fixes
+            .iter()
+            .map(|f| f.title.as_str())
+            .collect::<Vec<_>>(),
+        ["change `lne` to `len`"]
+    );
+}
+
+/// `Vec`'s helpers' types (spec §5.5).
+#[test]
+fn vecs_helpers_have_the_specs_types() {
+    let r = checked(
+        "fn main() {\n    let mut v: Vec<Int> = Vec::from_array([1])\n    \
+         let va = v.to_array()\n    let at = v.at(0)\n    let last = v.last()\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    assert_eq!(local_ty(&r, "va"), Ty::Array(Box::new(Ty::Int)));
+    assert_eq!(local_ty(&r, "at"), Ty::Int);
+    assert_eq!(local_ty(&r, "last"), Ty::Int);
+}
+
+/// A program's impl that defines a method std's impl on the same type has,
+/// `iter` on arrays, is E0074 labelled at the program's impl, its primary
+/// label, and at std's, which the program cannot change (5.0 spec §5.5;
+/// 5.0c's second fact-check).
+#[test]
+fn e0074_against_stds_array_impl_labels_the_programs_impl() {
+    let src = "impl<T> [T] {\n    fn iter(self) -> Int { 0 }\n}\nfn main() {}\n";
+    let e = errors(src);
+    let d = e.iter().find(|d| d.code == "E0074").expect("an E0074");
+    let at = src.find("[T]").expect("the impl's type") as u32;
+    assert!(
+        d.labels
+            .iter()
+            .any(|l| l.primary && l.span.start == at && l.span.end == at + 3),
+        "{d:#?}"
+    );
+    assert!(
+        d.labels
+            .iter()
+            .any(|l| !l.primary && l.message == "`iter` is also defined by std's impl"),
+        "{d:#?}"
+    );
+}
+
+fn warnings(src: &str) -> Vec<Diagnostic> {
+    checked(src)
+        .diagnostics
+        .into_iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .collect()
+}
+
+/// The messages of `src`'s E0105s.
+fn e0105s(src: &str) -> Vec<String> {
+    warnings(src)
+        .into_iter()
+        .filter(|d| d.code == "E0105")
+        .map(|d| d.message)
+        .collect()
+}
+
+/// A program's trait method that one of std's inherent methods hides, as
+/// `Vec`'s `last` and `at` do since 5.0c, is E0105, a warning at the trait
+/// impl's method: a call takes the inherent method (the user's ruling on
+/// 5.0c's first fact-check). The type is shown with the impl's own
+/// parameter names, and a method that takes arguments as `x.at(…)`.
+#[test]
+fn a_programs_trait_method_hidden_by_a_std_method_is_e0105() {
+    let src = "trait Top {\n    fn last(self) -> Int\n    fn at(self, i: Int) -> Int\n}\n\
+               impl<T> Top for Vec<T> {\n    fn last(self) -> Int { 0 - 1 }\n    \
+               fn at(self, i: Int) -> Int { i }\n}\n\
+               fn main() {}\n";
+    let w = warnings(src);
+    let messages: Vec<&str> = w
+        .iter()
+        .filter(|d| d.code == "E0105")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "std's inherent method `last` on `Vec<T>` hides `Top::last`",
+            "std's inherent method `at` on `Vec<T>` hides `Top::at`",
+        ],
+        "{w:#?}"
+    );
+    let first = w.iter().find(|d| d.code == "E0105").expect("an E0105");
+    let at = src.find("last(self) -> Int {").expect("the impl's method") as u32;
+    assert!(
+        first.labels.iter().any(|l| l.primary && l.span.start == at),
+        "{first:#?}"
+    );
+    assert!(
+        first
+            .notes
+            .iter()
+            .any(|n| n.contains("generic over `T: Top`, whose `x.last()` is the trait's")),
+        "{first:#?}"
+    );
+    let second = w
+        .iter()
+        .rfind(|d| d.code == "E0105")
+        .expect("a second E0105");
+    assert!(
+        second
+            .notes
+            .iter()
+            .any(|n| n.contains("whose `x.at(…)` is the trait's")),
+        "{second:#?}"
+    );
+}
+
+/// No E0105 for a trait method std has no inherent method of, for one
+/// named as std's but on a type std's is not on, for one the program's own
+/// inherent method hides, or where only one of the two takes `self`: a
+/// method call never picks a selfless inherent function, and a path reaches
+/// a static trait function (5.0c's second fact-check).
+#[test]
+fn a_trait_method_std_does_not_have_is_not_e0105() {
+    clean(
+        "trait Size {\n    fn width(self) -> Int\n}\n\
+         impl Size for String {\n    fn width(self) -> Int { self.len() }\n}\n\
+         trait Bytes {\n    fn byte_len(self) -> Int\n}\n\
+         impl Bytes for Int {\n    fn byte_len(self) -> Int { 8 }\n}\n\
+         trait Halve {\n    fn half(self) -> Int\n}\n\
+         impl Halve for Int {\n    fn half(self) -> Int { self / 2 }\n}\n\
+         impl Int {\n    fn half(self) -> Int { self / 2 }\n}\n\
+         trait Tr {\n    fn from_array(self) -> Int\n}\n\
+         impl Tr for Vec<Int> {\n    fn from_array(self) -> Int { 42 }\n}\n\
+         trait Fresh {\n    fn new(self) -> Int\n}\n\
+         impl Fresh for Vec<Int> {\n    fn new(self) -> Int { 7 }\n}\n\
+         fn main() {\n    let n = 3\n    let v: Vec<Int> = Vec::new()\n    \
+         println(\"${\"ab\".width()} ${n.byte_len()} ${n.half()} ${v.from_array()} ${v.new()}\")\n}\n",
+    );
+}
+
+/// A static trait function that std's inherent function of the same name
+/// hides at a path, `Vec::from_array(a)`, is E0105 too, its note naming
+/// the path and the generic function's `T::from_array(…)`.
+#[test]
+fn a_static_trait_function_hidden_by_a_std_function_is_e0105() {
+    let src = "trait Mk {\n    fn from_array(a: [Int]) -> Self\n}\n\
+               impl Mk for Vec<Int> {\n    fn from_array(a: [Int]) -> Vec<Int> { Vec::new() }\n}\n\
+               fn main() {}\n";
+    assert_eq!(
+        e0105s(src),
+        ["std's inherent function `from_array` on `Vec<Int>` hides `Mk::from_array`"]
+    );
+    let w = warnings(src);
+    let d = w.iter().find(|d| d.code == "E0105").expect("an E0105");
+    assert!(
+        d.labels
+            .iter()
+            .any(|l| l.primary
+                && l.message == "`Vec::from_array(…)` runs std's function, not this one"),
+        "{d:#?}"
+    );
+    assert!(
+        d.notes
+            .iter()
+            .any(|n| n.contains("whose `T::from_array(…)` is the trait's")),
+        "{d:#?}"
+    );
+}
+
+/// An array takes inherent impls alone: a trait impl on one stays E0010, as
+/// before 5.0c, while `impl [Int] { … }` checks (the user's ruling on 5.0c's
+/// first fact-check).
+#[test]
+fn a_trait_impl_on_an_array_is_e0010() {
+    for src in [
+        "impl Display for [Int] {\n    fn fmt(self) -> String { \"a\" }\n}\nfn main() {}\n",
+        "impl<T> Hash for [T] {\n    fn hash(self) -> Int { 0 }\n}\nfn main() {}\n",
+    ] {
+        let e = errors(src);
+        assert!(
+            e.iter()
+                .any(|d| d.code == "E0010"
+                    && d.message == "a trait cannot be implemented for an array"),
+            "{e:#?}"
+        );
+    }
+    clean("impl [Int] {\n    fn total(self) -> Int { 0 }\n}\nfn main() {}\n");
+}
+
+/// An array's method is named as the source writes the type, `[T]::slice`,
+/// not the resolver's `Arr_T.slice`, in an arity error and in E0060; a
+/// generic named type's as `Vec::at`, not `Vec_T.at` (5.0c's fact-checks).
+#[test]
+fn an_arity_error_on_an_array_method_names_it_as_written() {
+    let e = errors("fn main() {\n    let x = [1, 2].slice(1)\n}\n");
+    assert!(
+        e.iter().any(|d| d.code == "E0016"
+            && d.message == "`[T]::slice` takes 2 argument(s) but 1 were supplied"),
+        "{e:#?}"
+    );
+    let e = errors(
+        "impl [Int] {\n    fn bump(mut self) { self[0] = 1 }\n}\n\
+         fn main() {\n    let a = [1]\n    a.bump()\n}\n",
+    );
+    assert!(
+        e.iter().any(|d| d.code == "E0060"
+            && d.message == "`[Int]::bump` mutates its receiver, but `a` is immutable"),
+        "{e:#?}"
+    );
+    let e = errors("fn main() {\n    let v: Vec<Int> = Vec::new()\n    let x = v.at()\n}\n");
+    assert!(
+        e.iter().any(|d| d.code == "E0016"
+            && d.message == "`Vec::at` takes 1 argument(s) but 0 were supplied"),
+        "{e:#?}"
+    );
+}
+
+/// An array in an interpolation is E0013 without the advice to implement
+/// `Display`, which E0010 refuses on an array (5.0c's second fact-check).
+#[test]
+fn an_interpolated_array_is_e0013_without_the_display_advice() {
+    let e = errors("fn main() {\n    let a = [1]\n    println(\"${a}\")\n}\n");
+    let d = e.iter().find(|d| d.code == "E0013").expect("an E0013");
+    assert_eq!(
+        d.message,
+        "`[Int]` cannot be interpolated into a string; an array cannot implement \
+         `Display`; interpolate its elements, or wrap it in a record that does",
+        "{d:#?}"
+    );
+}

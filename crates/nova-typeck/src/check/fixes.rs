@@ -401,6 +401,11 @@ impl<'a> Checker<'a> {
                 MethodRes::Inherent(_) | MethodRes::Trait(..)
             )
         });
+        // An array's `len` is built in, not a method of an impl.
+        if matches!(recv, Ty::Array(_)) {
+            names.push("len".to_string());
+            names.sort();
+        }
         suggest::change_to(method, names.iter().map(String::as_str))
     }
 

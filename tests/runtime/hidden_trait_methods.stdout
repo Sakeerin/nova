@@ -1,0 +1,3 @@
+std's: last 6, at(0) 5
+the trait's: last -1, at(0) 100
+std's from_array: 3; the trait's: 1, 99

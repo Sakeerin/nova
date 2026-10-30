@@ -26,6 +26,8 @@ mod lang_tests;
 mod pattern_tests;
 mod patterns;
 #[cfg(test)]
+mod std_tests;
+#[cfg(test)]
 mod tuple_tests;
 mod view;
 
@@ -1132,6 +1134,14 @@ impl<'a> Checker<'a> {
         // Source span of each collected impl (aligned with `self.impls`), for
         // the post-collection coherence check.
         let mut impl_spans: Vec<Span> = Vec::new();
+        // Aligned with `impl_spans`: whether each impl is std's, and the span
+        // of each of its methods' names, in `ImplInfo::methods`' order, for
+        // `check_hidden_trait_methods`.
+        let mut impl_in_std: Vec<bool> = Vec::new();
+        let mut impl_method_spans: Vec<Vec<Span>> = Vec::new();
+        // The impl's own names for its generic parameters, `T` in
+        // `impl<T> Top for Vec<T>`, so E0105 shows `Vec<T>`, not `Vec<T0>`.
+        let mut impl_param_names: Vec<Vec<String>> = Vec::new();
 
         for (item_index, item) in self.file.items.iter().enumerate() {
             let ast::Item::Impl(block) = &item.value else {
@@ -1269,6 +1279,24 @@ impl<'a> Checker<'a> {
                 }
                 None => None,
             };
+            // An array takes inherent impls alone (5.0 spec §5.5; the user's
+            // ruling on 5.0c's first fact-check): `impl<T> [T] { … }` is
+            // std's and a program's way to add methods, while a trait impl on
+            // an array, `impl Display for [Int]`, stays E0010 as before 5.0c,
+            // when no impl could name an array.
+            if trait_id.is_some() && self_head == TyHead::Array {
+                self.diagnostics.push(
+                    Diagnostic::error("E0010", "a trait cannot be implemented for an array")
+                        .with_primary_label(block.ty.span, "an array type")
+                        .with_note(
+                            "an array takes inherent impls only, `impl<T> [T] { … }` or \
+                             `impl [Int] { … }`; wrap the array in a record to implement a \
+                             trait for it"
+                                .to_string(),
+                        ),
+                );
+                continue;
+            }
 
             // From here on, `Self` inside this impl means this impl's self type.
             // Recorded by item index too, so `check_method` can restore it when
@@ -1368,6 +1396,7 @@ impl<'a> Checker<'a> {
             }
             self.check_assoc_binding_cycles(&mut assoc_bindings, &assoc_spans, &self_ty);
             let mut methods = Vec::new();
+            let mut method_spans = Vec::new();
             for (mi, f) in block.functions.iter().enumerate() {
                 let Some(def_id) = impl_methods.get(&(item_index, mi)).copied() else {
                     continue;
@@ -1473,6 +1502,7 @@ impl<'a> Checker<'a> {
                     },
                 );
                 methods.push((f.name.value.clone(), def_id));
+                method_spans.push(f.name.span);
             }
 
             // Conformance: a trait impl must define exactly the trait's
@@ -1495,6 +1525,15 @@ impl<'a> Checker<'a> {
                 assoc_bindings,
             });
             impl_spans.push(block.ty.span);
+            impl_in_std.push(self.defs.is_std_module(self.cur_module));
+            impl_method_spans.push(method_spans);
+            impl_param_names.push(
+                block
+                    .generics
+                    .iter()
+                    .map(|g| g.name.value.clone())
+                    .collect(),
+            );
         }
         // No impl is in scope for `collect_signatures` / `collect_externs`,
         // which run next.
@@ -1504,8 +1543,164 @@ impl<'a> Checker<'a> {
         // `E0072` about a method signature still precedes `check_supertrait_impls`'s
         // own `E0072`, as it did when the signature check ran inside the loop.
         self.check_impl_method_signatures(&impl_spans);
-        self.check_impl_coherence(&impl_spans);
+        self.check_impl_coherence(&impl_spans, &impl_in_std);
+        self.check_hidden_trait_methods(
+            &impl_spans,
+            &impl_in_std,
+            &impl_method_spans,
+            &impl_param_names,
+        );
         self.check_supertrait_impls(&impl_spans);
+    }
+
+    /// E0105, a warning: a program's trait impl defines (or takes from the
+    /// trait's default) a method that one of std's inherent impls on an
+    /// overlapping type also defines, so that std's is the one a call
+    /// reaches (the user's ruling on 5.0c's first fact-check). Two methods
+    /// that both take `self` meet at a method call, which resolves an
+    /// inherent method before a trait's, as in Rust: `"é".byte_len()` runs
+    /// std's `String::byte_len`, never the program's `Size::byte_len`. Two
+    /// that both lack `self` meet at a path, `Vec::from_array(a)`, which
+    /// also takes the inherent function. A pair of which only one takes
+    /// `self` never meets: a method call skips a selfless inherent function,
+    /// and a path reaches a static trait function (5.0c's second
+    /// fact-check). A std method a program can call counts, private or not:
+    /// a method's privacy is not enforced at a call. Nova has no
+    /// `Trait::method(x)` call, so the note names the two ways to reach the
+    /// trait's method.
+    fn check_hidden_trait_methods(
+        &mut self,
+        spans: &[Span],
+        in_std: &[bool],
+        method_spans: &[Vec<Span>],
+        param_names: &[Vec<String>],
+    ) {
+        let mut found: Vec<Diagnostic> = Vec::new();
+        for (i, a) in self.impls.iter().enumerate() {
+            let Some(tid) = a.trait_id else { continue };
+            if in_std.get(i).copied().unwrap_or(true) {
+                continue;
+            }
+            let Some(tr) = self.traits.iter().find(|t| t.def_id == tid) else {
+                continue;
+            };
+            // The impl's own methods, at their names, then the trait's
+            // defaults it does not override, at the impl's type; each with
+            // whether it takes `self`.
+            let mut names: Vec<(String, Span, bool)> = a
+                .methods
+                .iter()
+                .enumerate()
+                .map(|(k, (n, d))| {
+                    let span = method_spans.get(i).and_then(|s| s.get(k)).copied();
+                    (
+                        n.clone(),
+                        span.unwrap_or(spans[i]),
+                        !self.selfless.contains(d),
+                    )
+                })
+                .collect();
+            for m in &tr.methods {
+                if m.default_def.is_some() && !a.methods.iter().any(|(n, _)| *n == m.name) {
+                    names.push((m.name.clone(), spans[i], m.has_self));
+                }
+            }
+            for (j, b) in self.impls.iter().enumerate() {
+                if b.trait_id.is_some() || !in_std.get(j).copied().unwrap_or(false) {
+                    continue;
+                }
+                if a.self_head != b.self_head
+                    || !hir::self_types_overlap(&a.self_ty, a.generics, &b.self_ty, b.generics)
+                {
+                    continue;
+                }
+                for (name, span, has_self) in &names {
+                    let Some((_, std_def)) = b.methods.iter().find(|(n, _)| n == name) else {
+                        continue;
+                    };
+                    let std_has_self = !self.selfless.contains(std_def);
+                    if std_has_self != *has_self {
+                        continue;
+                    }
+                    let no_names = Vec::new();
+                    let ty = display_ty_named(
+                        &a.self_ty,
+                        self.defs,
+                        param_names.get(i).unwrap_or(&no_names),
+                    );
+                    // `(…)` where std's method takes arguments beyond `self`.
+                    let declared = self.sigs.get(std_def).map_or(0, |s| s.params.len());
+                    let args = if declared > usize::from(std_has_self) {
+                        "(…)"
+                    } else {
+                        "()"
+                    };
+                    let trait_name = &tr.name;
+                    let d = if *has_self {
+                        Diagnostic::warning(
+                            "E0105",
+                            format!(
+                                "std's inherent method `{name}` on `{ty}` hides \
+                                 `{trait_name}::{name}`"
+                            ),
+                        )
+                        .with_primary_label(
+                            *span,
+                            format!("`x.{name}{args}` on a `{ty}` runs std's method, not this one"),
+                        )
+                        .with_note(format!(
+                            "a method call takes an inherent method before a trait's; Nova has no \
+                             `{trait_name}::{name}(x)` call, so reach this one through a function \
+                             generic over `T: {trait_name}`, whose `x.{name}{args}` is the \
+                             trait's, or rename it"
+                        ))
+                    } else {
+                        let head = ty.split('<').next().unwrap_or(&ty).to_string();
+                        Diagnostic::warning(
+                            "E0105",
+                            format!(
+                                "std's inherent function `{name}` on `{ty}` hides \
+                                 `{trait_name}::{name}`"
+                            ),
+                        )
+                        .with_primary_label(
+                            *span,
+                            format!("`{head}::{name}{args}` runs std's function, not this one"),
+                        )
+                        .with_note(format!(
+                            "a path takes an inherent function before a trait's, so \
+                             `{head}::{name}{args}` is std's; reach this one through a function \
+                             generic over `T: {trait_name}`, whose `T::{name}{args}` is the \
+                             trait's, or rename it"
+                        ))
+                    };
+                    found.push(d);
+                }
+            }
+        }
+        self.diagnostics.extend(found);
+    }
+
+    /// An inherent method's name as a diagnostic shows it: an array's as
+    /// `[T]::slice` (`shown_method_name`), a generic named type's, which the
+    /// resolver names `Vec_T.at`, as `Vec::at` (5.0c's second fact-check),
+    /// and any other as the resolver names it, `P.of`.
+    fn shown_method(&self, def_id: DefId) -> String {
+        let raw = &self.defs.def(def_id).name;
+        if raw.starts_with("Arr_") {
+            return shown_method_name(raw);
+        }
+        let owner = self
+            .impls
+            .iter()
+            .find(|i| i.generics > 0 && i.methods.iter().any(|(_, d)| *d == def_id));
+        match (owner, raw.rsplit_once('.')) {
+            (Some(imp), Some((_, method))) => {
+                let ty = display_ty(&imp.self_ty, self.defs);
+                format!("{}::{method}", ty.split('<').next().unwrap_or(&ty))
+            }
+            _ => raw.clone(),
+        }
     }
 
     /// Report `E0077` for an associated type this impl binds in terms of
@@ -1644,10 +1839,11 @@ impl<'a> Checker<'a> {
     /// conflict outright, and two inherent impls that overlap conflict on any
     /// method they both define. Without this, dispatch would depend on impl
     /// declaration order.
-    fn check_impl_coherence(&mut self, spans: &[Span]) {
-        let mut conflicts: Vec<(String, Span)> = Vec::new();
+    fn check_impl_coherence(&mut self, spans: &[Span], in_std: &[bool]) {
+        let mut conflicts: Vec<Diagnostic> = Vec::new();
         for (i, a) in self.impls.iter().enumerate() {
-            for (b, &b_span) in self.impls.iter().zip(spans).skip(i + 1) {
+            let a_span = spans.get(i).copied();
+            for (j, (b, &b_span)) in self.impls.iter().zip(spans).enumerate().skip(i + 1) {
                 if a.self_head != b.self_head || a.trait_id != b.trait_id {
                     continue;
                 }
@@ -1662,13 +1858,16 @@ impl<'a> Checker<'a> {
                             .find(|t| t.def_id == tid)
                             .map(|t| t.name.clone())
                             .unwrap_or_else(|| "?".to_string());
-                        conflicts.push((
-                            format!(
-                                "conflicting implementations of trait `{tname}` for \
-                                 overlapping types"
-                            ),
-                            b_span,
-                        ));
+                        conflicts.push(
+                            Diagnostic::error(
+                                "E0074",
+                                format!(
+                                    "conflicting implementations of trait `{tname}` for \
+                                     overlapping types"
+                                ),
+                            )
+                            .with_primary_label(b_span, "here"),
+                        );
                     }
                     None => {
                         let dup = a
@@ -1677,22 +1876,40 @@ impl<'a> Checker<'a> {
                             .map(|(n, _)| n)
                             .find(|n| b.methods.iter().any(|(m, _)| m == *n))
                             .cloned();
+                        // Both impls are labelled: when one is std's, as
+                        // a program's `impl<T> [T] { fn iter … }` meets
+                        // std's `impl<T> [T]` (5.0 spec §5.5), the other is
+                        // the program's, which the reader must see, and is
+                        // the primary label (5.0c's second fact-check).
                         if let Some(m) = dup {
-                            conflicts.push((
+                            let std_b = in_std.get(j).copied().unwrap_or(false)
+                                && !in_std.get(i).copied().unwrap_or(false);
+                            let (here, other) = match a_span {
+                                Some(a_span) if std_b => (a_span, Some(b_span)),
+                                _ => (b_span, a_span),
+                            };
+                            let mut d = Diagnostic::error(
+                                "E0074",
                                 format!(
                                     "method `{m}` is defined by multiple overlapping \
                                      inherent impls"
                                 ),
-                                b_span,
-                            ));
+                            )
+                            .with_primary_label(here, "here");
+                            if let Some(other) = other {
+                                let by = if std_b { "std's impl" } else { "this impl" };
+                                d = d.with_secondary_label(
+                                    other,
+                                    format!("`{m}` is also defined by {by}"),
+                                );
+                            }
+                            conflicts.push(d);
                         }
                     }
                 }
             }
         }
-        for (msg, span) in conflicts {
-            self.error("E0074", msg, span);
-        }
+        self.diagnostics.extend(conflicts);
     }
 
     /// Render a set of trait bounds for a diagnostic, e.g. `` `Show + Ord` ``
@@ -3693,11 +3910,18 @@ impl<'a> Checker<'a> {
                             match self.try_display(fcx, value, e, &other) {
                                 Some(fmt_call) => pieces.push(fmt_call),
                                 None => {
+                                    // An array cannot implement `Display`: a
+                                    // trait impl on one is E0010 (5.0c).
+                                    let advice = if matches!(other, Ty::Array(_)) {
+                                        "an array cannot implement `Display`; interpolate \
+                                         its elements, or wrap it in a record that does"
+                                    } else {
+                                        "implement `Display` (fmt(self) -> String) for it"
+                                    };
                                     self.error(
                                         "E0013",
                                         format!(
-                                            "`{}` cannot be interpolated into a string; \
-                                             implement `Display` (fmt(self) -> String) for it",
+                                            "`{}` cannot be interpolated into a string; {advice}",
                                             self.show(&other, fcx),
                                         ),
                                         // value was moved into try_display on the
@@ -5759,7 +5983,7 @@ impl<'a> Checker<'a> {
     /// - its inherent methods that take `self`;
     /// - the methods of the traits it implements;
     /// - for a type parameter, its bounds' methods;
-    /// - for an array, `len`.
+    /// - for an array, `len`, then the methods of its impls (5.0 spec §5.5).
     ///
     /// A field or inherent method declared without `pub` is listed only
     /// inside its own module. The first of a name wins, so an inherent method
@@ -5779,15 +6003,17 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
-            Ty::Array(_) => push(
-                &mut out,
-                Member {
-                    name: "len".to_string(),
-                    kind: MemberKind::Method,
-                    decl: None,
-                },
-            ),
             _ => {
+                if let Ty::Array(_) = recv_ty {
+                    push(
+                        &mut out,
+                        Member {
+                            name: "len".to_string(),
+                            kind: MemberKind::Method,
+                            decl: None,
+                        },
+                    );
+                }
                 if let Ty::Record { def_id, .. } = recv_ty {
                     for m in self.record_members(*def_id, from) {
                         push(&mut out, m);
@@ -6320,7 +6546,9 @@ impl<'a> Checker<'a> {
             );
             return error_expr(span);
         }
-        // Built-in array methods.
+        // An array's built-in `len`, then the methods of its impls, std's
+        // `impl<T> [T]` among them (5.0 spec §5.5), looked up by
+        // `TyHead::Array` as any other type's are.
         if matches!(recv_ty, Ty::Array(_)) {
             if method.value == "len" && args.is_empty() {
                 self.note_use(method.span, Target::BuiltinMethod("len"));
@@ -6332,17 +6560,23 @@ impl<'a> Checker<'a> {
                     span,
                 };
             }
-            self.error(
-                "E0014",
-                format!(
-                    "no method `{}` on array type `{}`",
-                    method.value,
-                    self.show(&recv_ty, fcx)
-                ),
-                method.span,
-            );
-            self.push_fix(suggest::change_to(method, ["len"]));
-            return error_expr(span);
+            if matches!(
+                self.resolve_method_on(&recv_ty, fcx, &method.value),
+                MethodRes::None
+            ) {
+                self.error(
+                    "E0014",
+                    format!(
+                        "no method `{}` on array type `{}`",
+                        method.value,
+                        self.show(&recv_ty, fcx)
+                    ),
+                    method.span,
+                );
+                let fix = self.method_fix(&recv_ty, fcx, method);
+                self.push_fix(fix);
+                return error_expr(span);
+            }
         }
         match self.resolve_method_on(&recv_ty, fcx, &method.value) {
             MethodRes::Inherent(def_id) => {
@@ -6407,7 +6641,7 @@ impl<'a> Checker<'a> {
         if !self.mut_self.contains(&def_id) {
             return;
         }
-        let mname = self.defs.def(def_id).name.clone();
+        let mname = self.shown_method(def_id);
         self.require_mutable_place(fcx, receiver_ast, span, MutTarget::Receiver(mname));
     }
 
@@ -6424,7 +6658,7 @@ impl<'a> Checker<'a> {
         // would both be off by one. `find_inherent_method` already skips these —
         // this guard keeps any future caller from reintroducing the codegen ICE.
         if self.selfless.contains(&def_id) {
-            let mname = self.defs.def(def_id).name.clone();
+            let mname = self.shown_method(def_id);
             self.error(
                 "E0014",
                 format!(
@@ -6444,7 +6678,7 @@ impl<'a> Checker<'a> {
             // One wording for every arity error in this family (see also
             // `emit_assoc_call`, `emit_trait_call`, and the free-function call in
             // `check_call`), so the same mistake always reads the same way.
-            let mname = self.defs.def(def_id).name.clone();
+            let mname = self.shown_method(def_id);
             self.error(
                 "E0016",
                 format!(
@@ -6465,7 +6699,7 @@ impl<'a> Checker<'a> {
         // sharing a head is not enough, and a silent mismatch would dispatch to
         // a wrongly specialized method.
         if !fcx.icx.unify(&receiver.ty, &self_param) {
-            let mname = self.defs.def(def_id).name.clone();
+            let mname = self.shown_method(def_id);
             self.error(
                 "E0014",
                 format!(
@@ -8657,6 +8891,24 @@ fn error_expr(span: Span) -> hir::Expr {
         kind: hir::ExprKind::Unit,
         ty: Ty::Error,
         span,
+    }
+}
+
+/// An array method's name as a diagnostic shows it. The resolver names an
+/// impl's method after its self type with `_` separators; an array's,
+/// `Arr_T.slice`, is shown as the source writes the type, `[T]::slice`
+/// (5.0c's first fact-check). `Checker::shown_method` also turns a generic
+/// named type's, `Vec_T.at`, into `Vec::at`; a plain one's, `P.of`, stays.
+pub(crate) fn shown_method_name(raw: &str) -> String {
+    fn array(ty: &str) -> String {
+        match ty.strip_prefix("Arr_") {
+            Some(elem) => format!("[{}]", array(elem)),
+            None => ty.to_string(),
+        }
+    }
+    match raw.rsplit_once('.') {
+        Some((ty, method)) if ty.starts_with("Arr_") => format!("{}::{method}", array(ty)),
+        _ => raw.to_string(),
     }
 }
 
@@ -18187,8 +18439,12 @@ mod tests {
         let (s, _) = probe_src("fn main() {\n    let n = \"a\".<|>\n}\n");
         assert!(member_names(&s).contains(&"len"), "{:?}", member_names(&s));
         let (a, _) = probe_src("fn main() {\n    let n = [1, 2].<|>\n}\n");
-        assert_eq!(member_names(&a), ["len"]);
-        assert_eq!(a.probe.members[0].decl, None);
+        // `len` is built in; `iter` and `slice` are std's `impl<T> [T]`.
+        assert_eq!(member_names(&a), ["len", "iter", "slice"]);
+        let len = a.probe.members.iter().find(|m| m.name == "len").unwrap();
+        assert_eq!(len.decl, None);
+        let iter = a.probe.members.iter().find(|m| m.name == "iter").unwrap();
+        assert!(iter.decl.is_some());
     }
 
     #[test]
