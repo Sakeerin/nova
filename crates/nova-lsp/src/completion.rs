@@ -252,6 +252,40 @@ mod tests {
         }
     }
 
+    /// The completion labels at `offset` in `text`, a file of its own
+    /// under the temporary directory's `dir`.
+    fn labels_in(dir: &str, text: &str, offset: usize) -> Vec<String> {
+        let path = std::env::temp_dir().join(dir).join("main.nova");
+        let overlay = Overlay::default().with(&path, text.to_string());
+        complete(&path, text, offset as u32, &overlay)
+            .into_iter()
+            .map(|i| i.label)
+            .collect()
+    }
+
+    /// 5.0c's std records are offered as names, in every module, and an
+    /// `OrderedMap`'s methods after a dot (5.0 spec §5.1, §5.5, §5.6).
+    #[test]
+    fn std_records_of_5_0c_complete() {
+        let text = "fn main() {\n    let mut m: OrderedMap<String, Int> = OrderedMap::new()\n    \
+                    \n    m.\n}\n";
+        let blank = text.find("new()\n    ").unwrap() + "new()\n    ".len();
+        let names = labels_in("nova-lsp-complete-std-50c", text, blank);
+        for want in ["OrderedMap", "OrderedMapIter", "StringBuilder", "ArrayIter"] {
+            assert!(names.contains(&want.to_string()), "{want}: {names:?}");
+        }
+        let members = labels_in(
+            "nova-lsp-complete-std-50c",
+            text,
+            text.find("m.\n").unwrap() + 2,
+        );
+        for want in [
+            "insert", "get", "remove", "keys", "values", "entries", "iter",
+        ] {
+            assert!(members.contains(&want.to_string()), "{want}: {members:?}");
+        }
+    }
+
     #[test]
     fn a_signature_stops_at_its_body_outside_parentheses() {
         assert_eq!(

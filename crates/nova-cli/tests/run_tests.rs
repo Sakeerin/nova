@@ -13180,6 +13180,34 @@ fn each_std_panic_names_its_method() {
     }
 }
 
+/// `OrderedMap` (5.0 spec §5.6): order after updates, removals,
+/// reinsertion and growth, `entries` and `iter`, also under GC stress, since
+/// its entries live in `Vec`s and a `Map` that grow while the collector
+/// runs.
+#[test]
+fn ordered_map_runs() {
+    golden_three_ways("ordered_map", true);
+}
+
+/// The program prints the same order on each run (5.0 spec §5.6): its keys
+/// are `String`s and `Int`s, whose hashes take a seed drawn once per
+/// process, so a `Map`'s order could differ between the two runs; an
+/// `OrderedMap`'s cannot.
+#[test]
+fn ordered_map_order_is_the_same_each_run() {
+    let source = repo_root().join("tests/runtime/ordered_map.nova");
+    let once = || {
+        let out = nova().arg("run").arg(&source).assert().success();
+        String::from_utf8(out.get_output().stdout.clone()).expect("UTF-8")
+    };
+    let (first, second) = (once(), once());
+    assert_eq!(first, second);
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("the .stdout file")
+        .replace("\r\n", "\n");
+    assert_eq!(first.replace("\r\n", "\n"), expected);
+}
+
 /// A guard on an or-pattern runs once, with the bindings of the first
 /// alternative that matches, and a false guard goes on to the next arm, not
 /// to a later alternative (5.0 spec §4.6; ADR 0049): `(1, 9)` binds `a` to

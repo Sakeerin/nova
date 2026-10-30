@@ -7,6 +7,7 @@
 //! - the std-only builtins kept from user code, and the public form a
 //!   program that names one is pointed to;
 //! - the new items' types;
+//! - `OrderedMap`'s types;
 
 use super::*;
 use nova_diagnostics::{FileId, Severity};
@@ -246,6 +247,43 @@ fn the_parsers_have_the_specs_types() {
 #[test]
 fn a_builder_mutates_only_through_a_mutable_binding() {
     let e = errors("fn main() {\n    let b = StringBuilder::new()\n    b.push(\"x\")\n}\n");
+    assert_eq!(e.len(), 1, "{e:#?}");
+    assert_eq!(e[0].code, "E0060");
+}
+
+/// `OrderedMap`'s types (spec §5.6).
+#[test]
+fn ordered_map_has_the_specs_types() {
+    let r = checked(
+        "fn main() {\n    let mut m: OrderedMap<String, Int> = OrderedMap::new()\n    \
+         let ins = m.insert(\"a\", 1)\n    let g = m.get(\"a\")\n    \
+         let rm = m.remove(\"a\")\n    let ck = m.contains_key(\"a\")\n    \
+         let n = m.len()\n    let ie = m.is_empty()\n    let ks = m.keys()\n    \
+         let vs = m.values()\n    let es = m.entries()\n    let mut it = m.iter()\n    \
+         let nx = it.next()\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    for name in ["ins", "g", "rm"] {
+        assert!(option(&local_ty(&r, name), Ty::Int), "{name}");
+    }
+    let pair = Ty::Tuple(vec![Ty::String, Ty::Int]);
+    assert!(option(&local_ty(&r, "nx"), pair.clone()));
+    assert_eq!(local_ty(&r, "n"), Ty::Int);
+    for name in ["ck", "ie"] {
+        assert_eq!(local_ty(&r, name), Ty::Bool, "{name}");
+    }
+    assert_eq!(local_ty(&r, "ks"), Ty::Array(Box::new(Ty::String)));
+    assert_eq!(local_ty(&r, "vs"), Ty::Array(Box::new(Ty::Int)));
+    assert_eq!(local_ty(&r, "es"), Ty::Array(Box::new(pair)));
+}
+
+/// `insert` and `remove` take `mut self`, as `Map`'s do.
+#[test]
+fn an_ordered_map_mutates_only_through_a_mutable_binding() {
+    let e = errors(
+        "fn main() {\n    let m: OrderedMap<Int, Int> = OrderedMap::new()\n    \
+         let _ = m.insert(1, 2)\n}\n",
+    );
     assert_eq!(e.len(), 1, "{e:#?}");
     assert_eq!(e[0].code, "E0060");
 }

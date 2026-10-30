@@ -2049,6 +2049,7 @@ mod gate {
         char_and_bytes,
         parse_numbers,
         float_bits,
+        ordered_map,
     );
 
     /// The programs a test of their own in this module checks, by its name.
