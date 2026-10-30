@@ -286,6 +286,21 @@ mod tests {
         }
     }
 
+    /// `std/process`'s new names are offered in every module (5.0 spec
+    /// §5.7).
+    #[test]
+    fn std_process_names_complete() {
+        let text = "fn main() {\n    \n}\n";
+        let names = labels_in(
+            "nova-lsp-complete-process-50c",
+            text,
+            "fn main() {\n    ".len(),
+        );
+        for want in ["ProcessOutput", "run", "status", "env", "current_exe"] {
+            assert!(names.contains(&want.to_string()), "{want}: {names:?}");
+        }
+    }
+
     #[test]
     fn a_signature_stops_at_its_body_outside_parentheses() {
         assert_eq!(

@@ -144,6 +144,35 @@ fn a_native_only_function_is_e0092_on_wasm() {
     );
 }
 
+/// `std/process`'s `run`, `status`, `env`, `current_exe` and
+/// `ProcessOutput` are native only, so each is E0092 on WASM (5.0 spec
+/// §5.7, decision 6), and the same program checks natively.
+#[test]
+fn std_process_is_e0092_on_wasm() {
+    for (name, source) in [
+        (
+            "run",
+            "fn main() {\n    let _ = run(\"nova\", [\"--version\"])\n}\n",
+        ),
+        (
+            "status",
+            "fn main() {\n    let _ = status(\"nova\", [])\n}\n",
+        ),
+        ("env", "fn main() {\n    let _ = env(\"HOME\")\n}\n"),
+        ("current_exe", "fn main() {\n    let _ = current_exe()\n}\n"),
+        (
+            "ProcessOutput",
+            "fn code(o: ProcessOutput) -> Int { 0 }\nfn main() { println(\"x\") }\n",
+        ),
+    ] {
+        missing_on_wasm(
+            &format!("process-{name}"),
+            source,
+            &format!("`{name}` is in `std/process`, which target wasm does not have"),
+        );
+    }
+}
+
 /// A type of a native-only module, in a signature.
 #[test]
 fn a_native_only_type_is_e0092_on_wasm() {
@@ -2931,7 +2960,9 @@ const LEFT_OUT: &[(&str, &str)] = &[
     ("net_timeout", "std/fs, std/io, std/net"),
     ("nova_test", "E0601 (a test file, which `nova test` runs)"),
     ("process_args", "std/process"),
+    ("process_env", "std/fs, std/process"),
     ("process_exit", "std/io, std/process"),
+    ("process_run", "std/fs, std/io, std/process"),
 ];
 
 /// Every program in `tests/runtime/` is in the gate or left out, once, and

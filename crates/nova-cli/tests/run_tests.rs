@@ -1804,6 +1804,14 @@ const RELEASE_GOLDEN_EXCLUDED: &[(&str, &str)] = &[
 /// program's is closed.
 const RELEASE_GOLDEN_STDIN: &[(&str, &str)] = &[("io_streams", "hello-stdin")];
 
+/// The environment variables `release_golden_suite` sets on a program,
+/// beside those it inherits: `process_env` reads the two its tests set (5.0
+/// spec §5.7).
+const RELEASE_GOLDEN_ENV: &[(&str, &str, &str)] = &[
+    ("process_env", "NOVA_PROCESS_TEST_VALUE", PROCESS_TEST_VALUE),
+    ("process_env", "NOVA_PROCESS_TEST_EQ", PROCESS_TEST_EQ),
+];
+
 /// The exit status `release_golden_suite` expects of a program, where it is
 /// not 0: a program that panics after printing its `.stdout` aborts.
 const RELEASE_GOLDEN_STATUS: &[(&str, i32)] = &[];
@@ -1892,6 +1900,7 @@ fn run_release_binary(
     exe: &std::path::Path,
     tmp: &std::path::Path,
     stdin: Option<&str>,
+    vars: &[(&str, &str)],
 ) -> Result<(String, String, Option<i32>), String> {
     let mut command = std::process::Command::new(exe);
     // Each program's temporary files go in a directory of its own, so none
@@ -1900,7 +1909,8 @@ fn run_release_binary(
         .env("TMPDIR", tmp)
         .env("TMP", tmp)
         .env("TEMP", tmp)
-        .env_remove("NOVA_GC_STRESS");
+        .env_remove("NOVA_GC_STRESS")
+        .envs(vars.iter().copied());
     run_within_limit(command, stdin)
 }
 
@@ -1960,6 +1970,12 @@ fn release_golden_suite() {
             "the exclusion table names `{name}`, which has no golden program"
         );
     }
+    for (name, _, _) in RELEASE_GOLDEN_ENV {
+        assert!(
+            programs.iter().any(|p| p == name),
+            "the environment table names `{name}`, which has no golden program"
+        );
+    }
     let walk: Vec<String> = programs
         .iter()
         .filter(|p| !RELEASE_GOLDEN_EXCLUDED.iter().any(|(n, _)| n == p))
@@ -1990,6 +2006,9 @@ fn release_golden_suite() {
                 let source = runtime.join(format!("{name}.nova"));
                 let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
                 let tmp = dir.join(format!("{name}.tmp"));
+                // Fresh each run: `process_run` leaves a marker there if a
+                // run stops part way.
+                let _ = std::fs::remove_dir_all(&tmp);
                 std::fs::create_dir_all(&tmp).expect("a temporary directory");
                 let mut build = std::process::Command::new(&nova_exe);
                 build
@@ -2028,7 +2047,12 @@ fn release_golden_suite() {
                 let expected = std::fs::read_to_string(source.with_extension("stdout"))
                     .expect("the .stdout file")
                     .replace('\r', "");
-                let ran = run_release_binary(&exe, &tmp, stdin);
+                let vars: Vec<(&str, &str)> = RELEASE_GOLDEN_ENV
+                    .iter()
+                    .filter(|(n, _, _)| n == name)
+                    .map(|(_, k, v)| (*k, *v))
+                    .collect();
+                let ran = run_release_binary(&exe, &tmp, stdin, &vars);
                 let _ = std::fs::remove_file(&exe);
                 match ran {
                     Err(why) => failures.lock().unwrap().push(format!("{name}: {why}")),
@@ -13206,6 +13230,190 @@ fn ordered_map_order_is_the_same_each_run() {
         .expect("the .stdout file")
         .replace("\r\n", "\n");
     assert_eq!(first.replace("\r\n", "\n"), expected);
+}
+
+/// `tests/runtime/process_run.nova` built with `nova build` into `dir`, as
+/// `name`: under `nova run`, `current_exe()` is `nova`, so a program that
+/// runs itself is built first (5.0 spec §10 risk 9).
+fn build_process_program(dir: &std::path::Path, name: &str, source: &str) -> PathBuf {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).expect("a directory for the build");
+    let exe = dir.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    nova()
+        .arg("build")
+        .arg(source)
+        .arg("-o")
+        .arg(&exe)
+        .assert()
+        .success();
+    exe
+}
+
+/// `run` and `status` (5.0 spec §5.7): the program, built, runs itself
+/// through `current_exe()` as a child that prints its arguments to standard
+/// output, a line to standard error, and exits with a chosen status. The
+/// captured output, the status, arguments with spaces, quotes, a trailing
+/// backslash and non-ASCII, more output than a pipe holds, `status`'s
+/// inherited streams in order, and a missing program as `NotFound`, on all
+/// three systems. The child's standard error under `status` is this
+/// program's own. A child that lost its arguments would start the parent
+/// again, without end; the program's marker in its temporary directory
+/// stops that, so this test gives it a fresh one, and then checks that a
+/// run that finds the marker starts nothing. The build is removed only
+/// after every child has ended, since Windows locks a running executable.
+#[test]
+fn process_run_runs() {
+    let dir = std::env::temp_dir().join("nova-process-run");
+    let exe = build_process_program(
+        &dir,
+        "process_run",
+        &repo_root()
+            .join("tests/runtime/process_run.nova")
+            .to_string_lossy(),
+    );
+    // A temporary directory of its own, fresh, for the program's marker
+    // against a child that lost its arguments.
+    let tmp = dir.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("a temporary directory");
+    let out = Command::new(&exe)
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .success();
+    let out = out.get_output();
+    let expected = std::fs::read_to_string(repo_root().join("tests/runtime/process_run.stdout"))
+        .expect("the .stdout file")
+        .replace("\r\n", "\n");
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    assert_eq!(stdout, expected);
+    let stderr = String::from_utf8_lossy(&out.stderr).replace("\r\n", "\n");
+    assert_eq!(stderr, "child stderr, status 5\n");
+    // The guard: with its marker already there, as a child that lost its
+    // arguments would find it, the program starts no child and stops.
+    std::fs::write(tmp.join("nova-process-run-parent"), "").expect("the marker");
+    let out = Command::new(&exe)
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert()
+        .code(1);
+    let out = out.get_output();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("exists: a child lost its arguments, or an earlier run stopped"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A child that panics aborts, and a death by signal is `128 + signal`, as
+/// shells report it (5.0 spec §5.7, §12 item 22): `SIGABRT`, 6, gives 134.
+/// Unix only: Windows has no signals, and its abort's status is its own.
+#[cfg(unix)]
+#[test]
+fn a_child_killed_by_a_signal_is_128_plus_the_signal() {
+    let dir = std::env::temp_dir().join("nova-process-signal");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory");
+    let source = dir.join("main.nova");
+    std::fs::write(
+        &source,
+        "fn main() {\n    if args().len() < 2 { panic(\"as asked\") }\n    \
+         let out = run(current_exe().unwrap(), []).unwrap()\n    \
+         println(\"status ${out.status}\")\n    \
+         println(\"${out.stderr.to_string().unwrap().contains(\"as asked\")}\")\n}\n",
+    )
+    .expect("the program");
+    let exe = build_process_program(&dir.join("bin"), "signal", &source.to_string_lossy());
+    // The parent is the run given an argument, and the child the one given
+    // none, so a child that lost its arguments still panics, and cannot
+    // start a parent again.
+    let out = Command::new(&exe).arg("parent").assert().success();
+    assert_eq!(
+        String::from_utf8_lossy(&out.get_output().stdout),
+        "status 134\ntrue\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The value `process_env`'s tests, and the `--release` walk, give
+/// `NOVA_PROCESS_TEST_VALUE`: `=` and non-ASCII included.
+const PROCESS_TEST_VALUE: &str = "a = b, héllo ✓";
+
+/// The value they give `NOVA_PROCESS_TEST_EQ`: with it set, glibc's
+/// `getenv("NOVA_PROCESS_TEST_EQ=x")` finds `y`, and macOS's the whole
+/// value, so the program's `None` for that name is `env`'s own refusal of a
+/// name holding `=`, seen on every system (5.0 spec §5.7).
+const PROCESS_TEST_EQ: &str = "x=y";
+
+/// `env` and `current_exe` (5.0 spec §5.7): a variable the test sets on the
+/// program, one it removes, and names no variable can have, under `nova
+/// run`, where the program sees `nova`'s environment, and built, where it
+/// sees its own.
+#[test]
+fn process_env_runs() {
+    let source = repo_root().join("tests/runtime/process_env.nova");
+    let expected = std::fs::read_to_string(source.with_extension("stdout"))
+        .expect("the .stdout file")
+        .replace("\r\n", "\n");
+    nova()
+        .env("NOVA_PROCESS_TEST_VALUE", PROCESS_TEST_VALUE)
+        .env("NOVA_PROCESS_TEST_EQ", PROCESS_TEST_EQ)
+        .env_remove("NOVA_PROCESS_TEST_UNSET")
+        .arg("run")
+        .arg(&source)
+        .assert()
+        .success()
+        .stdout(expected.clone());
+    let dir = std::env::temp_dir().join("nova-process-env");
+    let exe = build_process_program(&dir, "process_env", &source.to_string_lossy());
+    let out = Command::new(&exe)
+        .env("NOVA_PROCESS_TEST_VALUE", PROCESS_TEST_VALUE)
+        .env("NOVA_PROCESS_TEST_EQ", PROCESS_TEST_EQ)
+        .env_remove("NOVA_PROCESS_TEST_UNSET")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace("\r\n", "\n");
+    assert_eq!(stdout, expected);
+    // Without the variable, `env` gives `None`: the line is the program's
+    // reading, not a constant.
+    let out = Command::new(&exe)
+        .env_remove("NOVA_PROCESS_TEST_VALUE")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).replace("\r\n", "\n");
+    assert!(stdout.starts_with("set: None\n"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `current_exe()` names `nova` under `nova run`, where the program runs
+/// inside it, and the program's own executable when it is built (5.0 spec
+/// §5.7, §10 risk 9), as its docs say.
+#[test]
+fn current_exe_is_nova_under_run_and_the_program_when_built() {
+    let dir = std::env::temp_dir().join("nova-process-current-exe");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a directory");
+    let source = dir.join("main.nova");
+    std::fs::write(&source, "fn main() { println(current_exe().unwrap()) }\n")
+        .expect("the program");
+    let same = |printed: &[u8], want: &std::path::Path| {
+        let printed = String::from_utf8_lossy(printed);
+        let got = std::fs::canonicalize(printed.trim_end()).expect("the printed path exists");
+        let want = std::fs::canonicalize(want).expect("the expected path exists");
+        assert_eq!(got, want);
+    };
+    let out = nova().arg("run").arg(&source).assert().success();
+    same(
+        &out.get_output().stdout,
+        &assert_cmd::cargo::cargo_bin("nova"),
+    );
+    let exe = build_process_program(&dir.join("bin"), "current", &source.to_string_lossy());
+    let out = Command::new(&exe).assert().success();
+    same(&out.get_output().stdout, &exe);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A guard on an or-pattern runs once, with the bindings of the first

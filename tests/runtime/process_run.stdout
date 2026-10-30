@@ -1,0 +1,23 @@
+run: status 3
+arg 0: [plain]
+arg 1: [two words]
+arg 2: []
+arg 3: [say "hi"]
+arg 4: [back\slash\]
+arg 5: [tab	here]
+arg 6: [héllo wörld ✓]
+arg 7: [日本語]
+arg 8: [--flag=1]
+arg 9: [*]
+run: stderr child stderr, status 3
+
+no arguments: status 0, 0 bytes out
+status 255: 255
+big: status 4, 138890 bytes, 5000 lines, last line 4999 of the big output
+big: stderr big stderr
+
+before status, unflushed, then arg 0: [inherited]
+arg 1: [ü]
+status: 5
+missing run: NotFound
+missing status: NotFound, message given: true

@@ -1,0 +1,7 @@
+set: Some([a = b, héllo ✓])
+unset: None
+empty name: None
+name with =: None
+hidden name: None
+name with NUL: None
+current_exe exists: true

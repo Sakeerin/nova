@@ -2475,6 +2475,62 @@ fn array_methods_monomorphise_per_element_type() {
     assert_eq!(slices.len(), 2, "one `slice` per element type: {names:?}");
 }
 
+/// `std/process`'s wrappers call their builtins as the wire contract has
+/// them (5.0 spec §5.7): `run` one `process_run` and one of each take, and
+/// `status` one `process_run` and the status alone; `env` and
+/// `current_exe` hand their text over through `fs_take_string`.
+#[test]
+fn std_process_wrappers_call_their_runtime_builtins() {
+    let mir = mir_for(
+        "fn main() {\n\
+             let o = run(\"p\", [\"a\"])\n\
+             let s = status(\"p\", [])\n\
+             let e = env(\"HOME\")\n\
+             let x = current_exe()\n\
+             println(\"${o.is_ok()} ${s.is_ok()} ${e.is_some()} ${x.is_ok()}\")\n\
+         }",
+    );
+    let names = function_names(&mir);
+    let find = |part: &str| -> String {
+        names
+            .iter()
+            .find(|n| n.starts_with(part))
+            .unwrap_or_else(|| panic!("no function `{part}`: {names:?}"))
+            .to_string()
+    };
+    use nova_mir::RtFunc as R;
+    for (func, wants) in [
+        (
+            "run",
+            &[
+                (R::ProcessRun, 1),
+                (R::ProcessTakeStatus, 1),
+                (R::ProcessTakeStdout, 1),
+                (R::ProcessTakeStderr, 1),
+            ][..],
+        ),
+        (
+            "status",
+            &[
+                (R::ProcessRun, 1),
+                (R::ProcessTakeStatus, 1),
+                (R::ProcessTakeStdout, 0),
+                (R::ProcessTakeStderr, 0),
+            ][..],
+        ),
+        ("env", &[(R::ProcessEnv, 1), (R::FsTakeString, 1)][..]),
+        (
+            "current_exe",
+            &[(R::ProcessCurrentExe, 1), (R::FsTakeString, 1)][..],
+        ),
+    ] {
+        let stmts = stmts_of(&mir, &find(func));
+        for (rt, count) in wants {
+            assert_eq!(count_rt(&stmts, *rt), *count, "`{func}`, {rt:?}: {stmts:?}");
+        }
+    }
+}
+
 /// `OrderedMap`'s methods need `K: Hash + Eq`, as `Map`'s do: a key type
 /// without them is E0013 when the method is instantiated (5.0 spec §5.6).
 #[test]

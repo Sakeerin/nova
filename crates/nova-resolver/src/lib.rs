@@ -962,6 +962,45 @@ builtins! {
     /// after flushing stdout, and never returns. Runtime symbol
     /// `nova_rt_process_exit`. Std-only.
     ProcessExit,
+    /// `process_run(program: String, args: [String], capture: Bool) -> Int`
+    /// — start `program`, a path or a name searched for on `PATH`, with
+    /// `args` passed as they are, no shell, and wait for it. With `capture`
+    /// its standard input is empty and its standard output and error are
+    /// piped; without, it inherits all three streams. Returns `std/fs`'s
+    /// status code: `0`, and then the exit status, and the output when
+    /// captured, wait for [`Builtin::ProcessTakeStatus`],
+    /// [`Builtin::ProcessTakeStdout`] and [`Builtin::ProcessTakeStderr`];
+    /// otherwise an `IoErrorKind`'s code, with the message waiting for
+    /// `fs_last_error_message`. Backs `std/process`'s `run` and `status`
+    /// (5.0 spec §5.7). Runtime symbol `nova_rt_process_run`
+    /// (`crates/nova-runtime/src/process.rs`). Std-only.
+    ProcessRun,
+    /// `process_take_status() -> Int` — the exit status of the last
+    /// [`Builtin::ProcessRun`] that started its program: the exit code, or
+    /// `128 + signal` for a death by signal on Unix. Runtime symbol
+    /// `nova_rt_process_take_status`. Std-only.
+    ProcessTakeStatus,
+    /// `process_take_stdout() -> Bytes` — the standard output of the last
+    /// captured [`Builtin::ProcessRun`], held by the runtime until taken,
+    /// and then empty. Runtime symbol `nova_rt_process_take_stdout`.
+    /// Std-only.
+    ProcessTakeStdout,
+    /// `process_take_stderr() -> Bytes` — the standard error of the last
+    /// captured [`Builtin::ProcessRun`], as
+    /// [`Builtin::ProcessTakeStdout`]. Runtime symbol
+    /// `nova_rt_process_take_stderr`. Std-only.
+    ProcessTakeStderr,
+    /// `process_env(name: String) -> Bool` — whether the environment
+    /// variable `name` is set to UTF-8 text; its value then waits for
+    /// `fs_take_string`. `false` for an empty `name`, or one that holds `=`
+    /// or NUL, without asking the system. Backs `std/process`'s `env`.
+    /// Runtime symbol `nova_rt_process_env`. Std-only.
+    ProcessEnv,
+    /// `process_current_exe() -> Int` — `std/fs`'s status code; on `0` the
+    /// running executable's path waits for `fs_take_string`. Backs
+    /// `std/process`'s `current_exe`. Runtime symbol
+    /// `nova_rt_process_current_exe`. Std-only.
+    ProcessCurrentExe,
     /// `ui_state_present() -> Bool` — whether `std/ui` has stored its state
     /// for this thread, or this page (spec
     /// `docs/superpowers/specs/2026-10-17-phase-4-3-std-ui-reactivity-and-views-design.md`
@@ -1150,6 +1189,12 @@ impl Builtin {
             Builtin::ProcessArgCount => "process_arg_count",
             Builtin::ProcessArg => "process_arg",
             Builtin::ProcessExit => "process_exit",
+            Builtin::ProcessRun => "process_run",
+            Builtin::ProcessTakeStatus => "process_take_status",
+            Builtin::ProcessTakeStdout => "process_take_stdout",
+            Builtin::ProcessTakeStderr => "process_take_stderr",
+            Builtin::ProcessEnv => "process_env",
+            Builtin::ProcessCurrentExe => "process_current_exe",
             Builtin::UiStatePresent => "ui_state_present",
             Builtin::UiStateLoad => "ui_state_load",
             Builtin::UiStateStore => "ui_state_store",
@@ -1196,7 +1241,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 94] = [
+    pub const STD_ONLY: [Builtin; 100] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1285,6 +1330,12 @@ impl Builtin {
         Builtin::ProcessArgCount,
         Builtin::ProcessArg,
         Builtin::ProcessExit,
+        Builtin::ProcessRun,
+        Builtin::ProcessTakeStatus,
+        Builtin::ProcessTakeStdout,
+        Builtin::ProcessTakeStderr,
+        Builtin::ProcessEnv,
+        Builtin::ProcessCurrentExe,
         Builtin::UiStatePresent,
         Builtin::UiStateLoad,
         Builtin::UiStateStore,

@@ -1,0 +1,31 @@
+// `std/process`'s `env` and `current_exe` (5.0 spec §5.7). Its tests, and
+// the `--release` walk, set `NOVA_PROCESS_TEST_VALUE` on the program to the
+// value below, `=` and non-ASCII included, and `NOVA_PROCESS_TEST_EQ` to
+// `x=y`, and leave `NOVA_PROCESS_TEST_UNSET` unset; a name that is empty or
+// holds `=` or NUL is `None` without asking the system. Under `nova run`,
+// the program runs inside `nova`, so it sees `nova`'s environment, which the
+// test sets, and `current_exe()` is `nova`'s path; built, both are the
+// program's own.
+
+fn show(v: Option<String>) -> String {
+    match v {
+        Some(s) => "Some([${s}])"
+        None => "None"
+    }
+}
+
+async fn main() {
+    println("set: ${show(env("NOVA_PROCESS_TEST_VALUE"))}")
+    println("unset: ${show(env("NOVA_PROCESS_TEST_UNSET"))}")
+    println("empty name: ${show(env(""))}")
+    // The system would answer this one: glibc's `getenv` finds `y` for
+    // `NOVA_PROCESS_TEST_EQ=x` in `NOVA_PROCESS_TEST_EQ=x=y`, and macOS's the
+    // whole value, so `None` here is `env`'s own refusal. On Windows `=C:`
+    // names a variable the system keeps hidden.
+    println("name with =: ${show(env("NOVA_PROCESS_TEST_EQ=x"))}")
+    println("hidden name: ${show(env("=C:"))}")
+    println("name with NUL: ${show(env("NOVA_PROCESS_TEST_VALUE\0"))}")
+
+    let exe = current_exe().unwrap()
+    println("current_exe exists: ${exists(exe).await}")
+}
