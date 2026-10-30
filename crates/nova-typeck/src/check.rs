@@ -4579,6 +4579,12 @@ impl<'a> Checker<'a> {
             | Builtin::ProcessArgCount
             | Builtin::ProcessArg
             | Builtin::ProcessExit
+            | Builtin::ProcessRun
+            | Builtin::ProcessTakeStatus
+            | Builtin::ProcessTakeStdout
+            | Builtin::ProcessTakeStderr
+            | Builtin::ProcessEnv
+            | Builtin::ProcessCurrentExe
             | Builtin::UiStatePresent
             | Builtin::UiStateLoad
             | Builtin::UiStateStore
@@ -9096,6 +9102,13 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::ProcessArgCount => (vec![], Ty::Int),
         Builtin::ProcessArg => (vec![Ty::Int], Ty::String),
         Builtin::ProcessExit => (vec![Ty::Int], Ty::Unit),
+        Builtin::ProcessRun => (
+            vec![Ty::String, Ty::Array(Box::new(Ty::String)), Ty::Bool],
+            Ty::Int,
+        ),
+        Builtin::ProcessTakeStatus | Builtin::ProcessCurrentExe => (vec![], Ty::Int),
+        Builtin::ProcessTakeStdout | Builtin::ProcessTakeStderr => (vec![], Ty::Bytes),
+        Builtin::ProcessEnv => (vec![Ty::String], Ty::Bool),
         Builtin::UiStatePresent => (vec![], Ty::Bool),
         Builtin::UiStateLoad => (vec![], Ty::Param(0)),
         Builtin::UiStateStore => (vec![Ty::Param(0)], Ty::Unit),
@@ -17439,6 +17452,33 @@ mod tests {
                     (vec![Ty::Int], Ty::Unit),
                     "`process_exit(code)` in `std/process`'s `exit`",
                 ),
+                Builtin::ProcessRun => (
+                    (
+                        vec![Ty::String, Ty::Array(Box::new(Ty::String)), Ty::Bool],
+                        Ty::Int,
+                    ),
+                    "`process_run(program, args, true)` in `std/process`'s `run`",
+                ),
+                Builtin::ProcessTakeStatus => (
+                    (vec![], Ty::Int),
+                    "`process_take_status()` in `std/process`'s `run` and `status`",
+                ),
+                Builtin::ProcessTakeStdout => (
+                    (vec![], Ty::Bytes),
+                    "`process_take_stdout()` in `std/process`'s `run`",
+                ),
+                Builtin::ProcessTakeStderr => (
+                    (vec![], Ty::Bytes),
+                    "`process_take_stderr()` in `std/process`'s `run`",
+                ),
+                Builtin::ProcessEnv => (
+                    (vec![Ty::String], Ty::Bool),
+                    "`process_env(name)` in `std/process`'s `env`",
+                ),
+                Builtin::ProcessCurrentExe => (
+                    (vec![], Ty::Int),
+                    "`process_current_exe()` in `std/process`'s `current_exe`",
+                ),
                 Builtin::UiStatePresent => (
                     (vec![], Ty::Bool),
                     "`ui_state_present()` in `std/ui`'s `ui`",
@@ -17575,14 +17615,26 @@ mod tests {
         assert_eq!(builtin_signature(b), (vec![], Ty::Bool));
     }
 
-    /// The three `std/process` builtins are `STD_ONLY` and typed as
-    /// `std/process/lib.nova` calls them (docs/adr/0023).
+    /// The nine `std/process` builtins are `STD_ONLY` and typed as
+    /// `std/process/lib.nova` calls them (docs/adr/0023; 5.0 spec §5.7).
     #[test]
     fn the_process_builtins_are_std_only_with_their_signatures() {
         for (name, sig) in [
             ("process_arg_count", (vec![], Ty::Int)),
             ("process_arg", (vec![Ty::Int], Ty::String)),
             ("process_exit", (vec![Ty::Int], Ty::Unit)),
+            (
+                "process_run",
+                (
+                    vec![Ty::String, Ty::Array(Box::new(Ty::String)), Ty::Bool],
+                    Ty::Int,
+                ),
+            ),
+            ("process_take_status", (vec![], Ty::Int)),
+            ("process_take_stdout", (vec![], Ty::Bytes)),
+            ("process_take_stderr", (vec![], Ty::Bytes)),
+            ("process_env", (vec![Ty::String], Ty::Bool)),
+            ("process_current_exe", (vec![], Ty::Int)),
         ] {
             let b = nova_resolver::Builtin::STD_ONLY
                 .iter()

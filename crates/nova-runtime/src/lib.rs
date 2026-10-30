@@ -1282,6 +1282,30 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
             process::nova_rt_process_exit as *const u8,
         ),
         (
+            "nova_rt_process_run",
+            process::nova_rt_process_run as *const u8,
+        ),
+        (
+            "nova_rt_process_take_status",
+            process::nova_rt_process_take_status as *const u8,
+        ),
+        (
+            "nova_rt_process_take_stdout",
+            process::nova_rt_process_take_stdout as *const u8,
+        ),
+        (
+            "nova_rt_process_take_stderr",
+            process::nova_rt_process_take_stderr as *const u8,
+        ),
+        (
+            "nova_rt_process_env",
+            process::nova_rt_process_env as *const u8,
+        ),
+        (
+            "nova_rt_process_current_exe",
+            process::nova_rt_process_current_exe as *const u8,
+        ),
+        (
             "nova_rt_ui_state_present",
             ui::nova_rt_ui_state_present as *const u8,
         ),

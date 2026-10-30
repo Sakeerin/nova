@@ -8,6 +8,7 @@
 //!   program that names one is pointed to;
 //! - the new items' types;
 //! - `OrderedMap`'s types;
+//! - `std/process`'s types, and its builtins kept from user code.
 
 use super::*;
 use nova_diagnostics::{FileId, Severity};
@@ -251,6 +252,27 @@ fn a_builder_mutates_only_through_a_mutable_binding() {
     assert_eq!(e[0].code, "E0060");
 }
 
+/// The six process builtins are std's own (spec §5.7): a program that
+/// names one finds nothing.
+#[test]
+fn the_process_builtins_are_not_visible_to_a_program() {
+    for (call, name) in [
+        ("process_run(\"p\", [], true)", "process_run"),
+        ("process_take_status()", "process_take_status"),
+        ("process_take_stdout()", "process_take_stdout"),
+        ("process_take_stderr()", "process_take_stderr"),
+        ("process_env(\"HOME\")", "process_env"),
+        ("process_current_exe()", "process_current_exe"),
+    ] {
+        let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
+        assert!(
+            e.iter()
+                .any(|d| d.code == "E0001" && d.message.contains(&format!("`{name}`"))),
+            "{name}: {e:#?}"
+        );
+    }
+}
+
 /// `OrderedMap`'s types (spec §5.6).
 #[test]
 fn ordered_map_has_the_specs_types() {
@@ -277,6 +299,25 @@ fn ordered_map_has_the_specs_types() {
     assert_eq!(local_ty(&r, "es"), Ty::Array(Box::new(pair)));
 }
 
+/// `std/process`'s types (spec §5.7).
+#[test]
+fn std_process_has_the_specs_types() {
+    let r = checked(
+        "fn main() {\n    let o = run(\"p\", [\"a\"]).unwrap()\n    let os = o.status\n    \
+         let oo = o.stdout\n    let oe = o.stderr\n    \
+         let st = status(\"p\", []).unwrap()\n    let ev = env(\"HOME\")\n    \
+         let ce = current_exe().unwrap()\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    assert!(option(&local_ty(&r, "ev"), Ty::String));
+    for name in ["os", "st"] {
+        assert_eq!(local_ty(&r, name), Ty::Int, "{name}");
+    }
+    assert_eq!(local_ty(&r, "oo"), Ty::Bytes);
+    assert_eq!(local_ty(&r, "oe"), Ty::Bytes);
+    assert_eq!(local_ty(&r, "ce"), Ty::String);
+}
+
 /// `insert` and `remove` take `mut self`, as `Map`'s do.
 #[test]
 fn an_ordered_map_mutates_only_through_a_mutable_binding() {
@@ -286,6 +327,26 @@ fn an_ordered_map_mutates_only_through_a_mutable_binding() {
     );
     assert_eq!(e.len(), 1, "{e:#?}");
     assert_eq!(e[0].code, "E0060");
+}
+
+/// `run`, `status` and `env` are in every module's scope, and a program's
+/// own definition of one shadows it, silently, as one of `args` does (spec
+/// §5.7, §10 risk 7).
+#[test]
+fn a_programs_own_run_status_and_env_shadow_stds() {
+    clean(
+        "fn run(n: Int) -> Int { n }\nfn status() -> String { \"ok\" }\n\
+         fn main() {\n    let env = 3\n    let a = run(env)\n    let b = status()\n    \
+         println(\"${a} ${b}\")\n}\n",
+    );
+}
+
+/// `run` takes its arguments as an array of `String`s, not one string a
+/// shell would split (spec §5.7).
+#[test]
+fn run_takes_an_array_of_strings() {
+    let e = errors("fn main() {\n    let _ = run(\"ls\", \"-l\")\n}\n");
+    assert!(e.iter().any(|d| d.code == "E0010"), "{e:#?}");
 }
 
 /// A program's impl that defines a method std's impl on the same type has,

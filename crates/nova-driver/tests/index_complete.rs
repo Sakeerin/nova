@@ -252,8 +252,8 @@ fn every_name_in_the_corpora_is_indexed() {
     // after 5.0c added `array_helpers`; 167 after `hidden_trait_methods`;
     // 168 after `char_and_bytes`; 170 after `string_builder` and
     // `string_builder_million`; 172 after `parse_numbers` and `float_bits`;
-    // 173 after `ordered_map`.
-    assert_eq!(programs.len(), 183, "{programs:#?}");
+    // 173 after `ordered_map`; 175 after `process_run` and `process_env`.
+    assert_eq!(programs.len(), 185, "{programs:#?}");
     let mut files = 0;
     let mut failures: Vec<String> = Vec::new();
     for (k, path) in programs.iter().enumerate() {
@@ -280,11 +280,11 @@ fn every_name_in_the_corpora_is_indexed() {
             every_name_is_covered(&a, file, &mut failures);
         }
     }
-    // 9 + 173 + 3 files of user code, 05-geometry's library's 2, the 8
+    // 9 + 175 + 3 files of user code, 05-geometry's library's 2, the 8
     // modules 07-fullstack-blog's client reaches from its `main.nova` (not
     // the server's 4, which only `server.nova` and `lib.nova` reach), and
     // native std's 22, `std/ui/ssr` among them.
-    assert_eq!(files, 217);
+    assert_eq!(files, 219);
     failures.sort();
     failures.dedup();
     assert!(

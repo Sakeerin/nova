@@ -1,10 +1,16 @@
-//! The running program: its command-line arguments, and ending it with an
-//! exit status.
+//! The running program and others: its command-line arguments, ending it
+//! with an exit status, running another program, and reading the
+//! environment.
 //!
 //! `args()` returns the arguments the program was started with, and
-//! `exit(code)` ends it at once with the status `code`. Every module sees
-//! these names without an import, and a module's own `args` or `exit`
-//! shadows the one here.
+//! `exit(code)` ends it at once with the status `code`. `run` runs another
+//! program and captures what it prints, and `status` runs one that prints
+//! where this program does; both wait for it to end. `env(name)` reads an
+//! environment variable, and `current_exe()` names the running executable.
+//! Every module sees these names without an import, and a module's own
+//! definition of one of them, such as a `run` or an `env`, shadows the one
+//! here. The module is native only: on WASM, naming one of these is an
+//! error.
 //!
 //! Reading the program's arguments. `exit` ends the program at once, so the
 //! example does not call it:
@@ -20,6 +26,11 @@
 //! let mut mine = args()
 //! mine.push("--verbose")
 //! assert_eq(args().len(), argv.len())
+//!
+//! // The environment, and the running executable, which `run` can start.
+//! let verbose = env("NOVA_EXAMPLE_VERBOSE").is_some()
+//! assert(!verbose || argv.len() >= 1, "env is None for an unset variable")
+//! assert(current_exe().is_ok(), "the system names the executable")
 //! ```
 
 // Nova standard library -- the running process: its arguments, and a way to
@@ -29,9 +40,24 @@
 // `args()` and `exit(1)` need no `import` (docs/adr/0004-stdlib-compile-model.md).
 // A program's own `args` or `exit` shadows these.
 //
-// Of `nova-spec/20-STDLIB.md`'s module-index entry, "spawn, env, args", only
-// `args` ships, with `exit`; `spawn` and `env` do not exist. See that file's
-// section 17, and docs/adr/0023-program-arguments.md.
+// Of `nova-spec/20-STDLIB.md`'s module-index entry, "spawn, env, args",
+// `args` ships, with `exit`, and since 5.0c `env`, with `run` and `status` in
+// place of `spawn` and `current_exe` beside them (docs/adr/0050). See that
+// file's section 17, and docs/adr/0023-program-arguments.md.
+//
+// # Running programs
+//
+// `run` and `status` are plain `fn`s that block the thread, executor
+// included, until the child ends (5.0 spec §5.7, decision 6): a compiler's
+// driver runs `clang` and waits for it, and `args()` is a plain `fn` too.
+// Each is on `std/fs`'s wire contract: `process_run` returns a status code,
+// `0` or an `IoErrorKind`'s (`io_error_kind_of`), and the child's exit status
+// and output wait in the runtime for the `process_take_*` builtins
+// (`crates/nova-runtime/src/process.rs`). As in `std/fs`, each wrapper takes
+// its payload straight after the call, with no `.await` between; a plain
+// `fn` has none to put there. `env` and `current_exe` hand their text over
+// through `fs_take_string`, and every failure's message through
+// `fs_last_error_message`, as `std/fs`'s do.
 
 // The program's arguments. Index 0 is the program itself: under
 // `nova run [FILE] -- ARGS` it is FILE as written (`src/main.nova` when
@@ -72,3 +98,122 @@ pub fn args() -> Vec<String> {
 /// 255, and Windows 32 bits. Under `nova run` it ends the `nova` process
 /// itself. Code after a call to `exit` never runs.
 pub fn exit(code: Int) { process_exit(code) }
+
+// What `run` returns: the child's exit status and everything it printed.
+// Named `ProcessOutput`, not `Output`, which trait code uses for an
+// associated type (5.0 spec §12 item 22).
+/// What a program that `run` ran left behind: its exit status, and what it
+/// wrote to its standard output and standard error.
+///
+/// ```
+/// let out = ProcessOutput { status: 0, stdout: bytes_from_string("hi\n"), stderr: bytes_from_string("") }
+/// assert_eq(out.stdout.to_string().unwrap(), "hi\n")
+/// assert_eq(out.stderr.len(), 0)
+/// ```
+pub record ProcessOutput {
+    /// The exit status: the program's exit code, or `128 + n` on Unix when
+    /// signal `n` ended it.
+    pub status: Int,
+    /// Everything the program wrote to its standard output.
+    pub stdout: Bytes,
+    /// Everything the program wrote to its standard error.
+    pub stderr: Bytes,
+}
+
+// The `IoError` for a failed `process_run` or `process_current_exe`, whose
+// status code is `code`.
+fn process_error(code: Int) -> IoError {
+    IoError { kind: io_error_kind_of(code), message: fs_last_error_message() }
+}
+
+/// Runs `program` with the arguments `args`, waits for it to end, and
+/// returns its exit status and what it printed.
+///
+/// `program` is a path, or a name looked for on `PATH`, as a shell would,
+/// with `.exe` added on Windows. Each argument reaches the program as it is,
+/// spaces and quotes included: no shell reads them. The program's standard
+/// input is empty, its standard output and standard error are captured,
+/// and it inherits this program's environment and working directory. Its
+/// exit status is its exit code, or `128 + n` on Unix when signal `n` ended
+/// it.
+///
+/// Returns an `IoError` of kind `NotFound` if there is no such program, and
+/// `PermissionDenied` if it cannot be run. A program that runs and fails
+/// is not an error: its status says so.
+///
+/// It blocks the thread until the program ends, every task included.
+///
+/// ```
+/// let missing = run("nova-no-such-program", ["--version"])
+/// let kind = match missing {
+///     Ok(_) => "ran"
+///     Err(e) => match e.kind {
+///         NotFound => "not found"
+///         _ => "another error"
+///     }
+/// }
+/// assert_eq(kind, "not found")
+/// ```
+pub fn run(program: String, args: [String]) -> Result<ProcessOutput, IoError> {
+    let code = process_run(program, args, true)
+    if code != 0 { return Err(process_error(code)) }
+    let exit_status = process_take_status()
+    let out = process_take_stdout()
+    let err = process_take_stderr()
+    Ok(ProcessOutput { status: exit_status, stdout: out, stderr: err })
+}
+
+/// Runs `program` with the arguments `args`, waits for it to end, and
+/// returns its exit status.
+///
+/// As `run`, but the program reads and writes this program's own standard
+/// input, output and error, so what it prints appears with what this
+/// program prints, in order.
+///
+/// Returns an `IoError` of kind `NotFound` if there is no such program, and
+/// `PermissionDenied` if it cannot be run. It blocks the thread until the
+/// program ends, every task included.
+///
+/// ```
+/// match status("nova-no-such-program", []) {
+///     Ok(code) => println("it ended with ${code}")
+///     Err(e) => assert(e.message.len() > 0, "the system says why")
+/// }
+/// ```
+pub fn status(program: String, args: [String]) -> Result<Int, IoError> {
+    let code = process_run(program, args, false)
+    if code != 0 { return Err(process_error(code)) }
+    Ok(process_take_status())
+}
+
+/// Returns the value of the environment variable `name`, or `None`.
+///
+/// `None` when the variable is not set, when its value is not valid UTF-8,
+/// and when `name` is empty or holds `=` or the NUL character, which no
+/// variable's name can. On Windows, names are not case-sensitive.
+///
+/// ```
+/// assert(env("NOVA_SURELY_UNSET_VARIABLE").is_none(), "nothing sets it")
+/// assert(env("").is_none(), "no variable has an empty name")
+/// assert(env("A=B").is_none(), "no variable's name holds `=`")
+/// ```
+pub fn env(name: String) -> Option<String> {
+    if process_env(name) { Some(fs_take_string()) } else { None }
+}
+
+/// Returns the path of the running executable.
+///
+/// Under `nova run`, the program runs inside `nova`, so this is the path of
+/// `nova` itself; a program built with `nova build` gets its own. Returns an
+/// `IoError` when the system cannot say, and one of kind `InvalidData` when
+/// the path is not valid Unicode.
+///
+/// ```
+/// let exe = current_exe().unwrap()
+/// assert(exe.len() > 0, "a path")
+/// ```
+pub fn current_exe() -> Result<String, IoError> {
+    let code = process_current_exe()
+    if code != 0 { return Err(process_error(code)) }
+    Ok(fs_take_string())
+}

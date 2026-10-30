@@ -548,6 +548,26 @@ rt_funcs! {
     ProcessArg,
     /// `(i64 code) -> unit` — `std::process::exit`; never returns.
     ProcessExit,
+    /// `(ptr program, ptr args, i8 capture) -> i64` — start `program` with
+    /// the `[String]` `args`, no shell, and wait for it; `capture` pipes its
+    /// standard output and error, and otherwise it inherits all three
+    /// streams. `std/fs`'s status code: on `0` the exit status, and the
+    /// output if captured, wait for the three takes below
+    /// (`crates/nova-runtime/src/process.rs`; 5.0 spec §5.7).
+    ProcessRun,
+    /// `() -> i64` — the last run's exit status, `128 + signal` for a death
+    /// by signal on Unix.
+    ProcessTakeStatus,
+    /// `() -> ptr` — the last captured run's standard output, as `Bytes`.
+    ProcessTakeStdout,
+    /// `() -> ptr` — the last captured run's standard error, as `Bytes`.
+    ProcessTakeStderr,
+    /// `(ptr name) -> i8` — whether the environment variable `name` is set
+    /// to UTF-8; its value then waits for `FsTakeString`.
+    ProcessEnv,
+    /// `() -> i64` — `std/fs`'s status code; on `0` the running
+    /// executable's path waits for `FsTakeString`.
+    ProcessCurrentExe,
     /// `() -> i8` — whether `std/ui` has stored its state for this thread
     /// (`crates/nova-runtime/src/ui.rs`; spec 4.3 §4).
     UiStatePresent,
@@ -668,6 +688,12 @@ impl RtFunc {
             RtFunc::ProcessArgCount => "nova_rt_process_arg_count",
             RtFunc::ProcessArg => "nova_rt_process_arg",
             RtFunc::ProcessExit => "nova_rt_process_exit",
+            RtFunc::ProcessRun => "nova_rt_process_run",
+            RtFunc::ProcessTakeStatus => "nova_rt_process_take_status",
+            RtFunc::ProcessTakeStdout => "nova_rt_process_take_stdout",
+            RtFunc::ProcessTakeStderr => "nova_rt_process_take_stderr",
+            RtFunc::ProcessEnv => "nova_rt_process_env",
+            RtFunc::ProcessCurrentExe => "nova_rt_process_current_exe",
             RtFunc::UiStatePresent => "nova_rt_ui_state_present",
             RtFunc::UiStateLoad => "nova_rt_ui_state_load",
             RtFunc::UiStateStore => "nova_rt_ui_state_store",
@@ -874,6 +900,10 @@ impl RtFunc {
             RtFunc::ProcessArgCount => (vec![], MirTy::I64),
             RtFunc::ProcessArg => (vec![MirTy::I64], MirTy::Ptr),
             RtFunc::ProcessExit => (vec![MirTy::I64], MirTy::Unit),
+            RtFunc::ProcessRun => (vec![MirTy::Ptr, MirTy::Ptr, MirTy::I8], MirTy::I64),
+            RtFunc::ProcessTakeStatus | RtFunc::ProcessCurrentExe => (vec![], MirTy::I64),
+            RtFunc::ProcessTakeStdout | RtFunc::ProcessTakeStderr => (vec![], MirTy::Ptr),
+            RtFunc::ProcessEnv => (vec![MirTy::Ptr], MirTy::I8),
             RtFunc::UiStatePresent => (vec![], MirTy::I8),
             RtFunc::UiStateLoad => (vec![], MirTy::Ptr),
             RtFunc::UiStateStore => (vec![MirTy::Ptr], MirTy::Unit),
@@ -1047,7 +1077,13 @@ impl RtFunc {
             | RtFunc::ShutdownRequested
             | RtFunc::ProcessArgCount
             | RtFunc::ProcessArg
-            | RtFunc::ProcessExit => WasmRuntime::Unavailable,
+            | RtFunc::ProcessExit
+            | RtFunc::ProcessRun
+            | RtFunc::ProcessTakeStatus
+            | RtFunc::ProcessTakeStdout
+            | RtFunc::ProcessTakeStderr
+            | RtFunc::ProcessEnv
+            | RtFunc::ProcessCurrentExe => WasmRuntime::Unavailable,
         }
     }
 }

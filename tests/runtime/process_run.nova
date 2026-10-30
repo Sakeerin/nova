@@ -1,0 +1,111 @@
+// `std/process`'s `run` and `status` (5.0 spec §5.7): the program runs
+// itself, found through `current_exe()`, as a child its first argument
+// names. The child prints each argument it was given, between brackets, to
+// its standard output, a line to its standard error, and exits with the
+// status its second argument names. Arguments with spaces, quotes, a
+// trailing backslash, an empty one and non-ASCII ones reach it as they are,
+// with no shell, on Windows too; more output than a pipe holds is captured
+// whole; `status` lets the child print where this program prints, in order,
+// after what this program wrote but had not flushed; a missing program is
+// `NotFound`. Built, not run with `nova run`, under
+// which `current_exe()` is `nova` itself.
+
+fn child(argv: Vec<String>) {
+    let code = argv.at(2).parse_int().unwrap_or(99)
+    if argv.at(1) == "big" {
+        for i in 0..5000 { println("line ${i} of the big output") }
+        eprintln("big stderr")
+        exit(code)
+    }
+    for i in 3..argv.len() { println("arg ${i - 3}: [${argv.at(i)}]") }
+    eprintln("child stderr, status ${code}")
+    exit(code)
+}
+
+// `[mode, code]` and then `rest`.
+fn child_args(mode: String, code: String, rest: [String]) -> [String] {
+    let mut v = Vec::from_array([mode, code])
+    for s in rest { v.push(s) }
+    v.to_array()
+}
+
+fn text(b: Bytes) -> String { b.to_string().unwrap_or("<not UTF-8>") }
+
+fn kind(e: IoError) -> String {
+    match e.kind {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        _ => "another kind"
+    }
+}
+
+async fn main() {
+    let argv = args()
+    if argv.len() > 2 {
+        child(argv)
+        return
+    }
+    // A child that lost its arguments would run this part again, and start
+    // a child of its own, without end. The marker, in the temporary
+    // directory its tests give it, stops the second parent: it exists while
+    // the first one's children run, and a child that has its arguments never
+    // looks. A run that stops part way leaves it, so the tests clear the
+    // directory first.
+    let marker = "${temp_dir()}/nova-process-run-parent"
+    if exists(marker).await {
+        eprintln(
+            "process_run: ${marker} exists: a child lost its arguments, or an earlier run stopped",
+        )
+        exit(1)
+    }
+    write_string(marker, "").await.unwrap()
+    let exe = current_exe().unwrap()
+
+    let odd = [
+        "plain",
+        "two words",
+        "",
+        "say \"hi\"",
+        "back\\slash\\",
+        "tab\there",
+        "héllo wörld ✓",
+        "日本語",
+        "--flag=1",
+        "*",
+    ]
+    match run(exe, child_args("child", "3", odd)) {
+        Ok(out) => {
+            println("run: status ${out.status}")
+            print(text(out.stdout))
+            println("run: stderr ${text(out.stderr)}")
+        }
+        Err(e) => println("run failed: ${e.message}")
+    }
+
+    let quiet = run(exe, ["child", "0"]).unwrap()
+    println("no arguments: status ${quiet.status}, ${quiet.stdout.len()} bytes out")
+    println("status 255: ${run(exe, ["child", "255"]).unwrap().status}")
+
+    let big = run(exe, ["big", "4"]).unwrap()
+    let lines = text(big.stdout).split("\n")
+    println(
+        "big: status ${big.status}, ${big.stdout.len()} bytes, ${lines.len() - 1} lines, last ${lines[lines.len() - 2]}",
+    )
+    println("big: stderr ${text(big.stderr)}")
+
+    // Written through `Write`, which leaves a line without its break in
+    // the buffer: `status` flushes it before the child prints.
+    let _ = stdout().write(bytes_from_string("before status, unflushed, then ")).await
+    let code = status(exe, ["child", "5", "inherited", "ü"]).unwrap()
+    println("status: ${code}")
+
+    match run("nova-no-such-program-5-0c", ["x"]) {
+        Ok(_) => println("missing: ran")
+        Err(e) => println("missing run: ${kind(e)}")
+    }
+    match status("nova-no-such-program-5-0c", []) {
+        Ok(_) => println("missing: ran")
+        Err(e) => println("missing status: ${kind(e)}, message given: ${e.message.len() > 0}")
+    }
+    remove_file(marker).await.unwrap()
+}
