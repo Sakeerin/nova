@@ -23,10 +23,12 @@
 //! assert!(errors.is_empty());
 //! ```
 
+mod dump;
 mod error;
 mod token;
 mod tokens;
 
+pub use dump::dump_tokens;
 pub use error::LexError;
 pub use token::Token;
 pub use tokens::Tokens;

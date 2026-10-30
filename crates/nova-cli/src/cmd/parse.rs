@@ -1,6 +1,13 @@
 //! `nova parse <file>` — parse a Nova source file and print the AST.
+//!
+//! The hidden `--dump-tokens FILE…` prints each file's token dump instead,
+//! what the self-hosted lexer's `selfhost tokens` prints (spec
+//! `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+//! §3.3, ADR 0051).
 
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -20,9 +27,50 @@ pub struct ParseCmd {
     /// Print only errors (exit 1 if any).
     #[arg(long)]
     check: bool,
+
+    /// Print the token dump of FILE and of every further file given, for
+    /// the self-hosted lexer's differential test. Hidden: it carries no
+    /// stability promise.
+    #[arg(long, hide = true, conflicts_with_all = ["ast", "check"])]
+    dump_tokens: bool,
+
+    /// The files after FILE, which only `--dump-tokens` takes.
+    #[arg(hide = true)]
+    more: Vec<PathBuf>,
 }
 
 pub fn run(cmd: ParseCmd) -> Result<()> {
+    if cmd.dump_tokens {
+        let files: Vec<&Path> = std::iter::once(cmd.file.as_path())
+            .chain(cmd.more.iter().map(PathBuf::as_path))
+            .collect();
+        let code = dump_tokens(&files)?;
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return Ok(());
+    }
+    if let Some(extra) = cmd.more.first() {
+        // What clap said before `more` existed, without naming the hidden
+        // flag: its "unexpected argument" error, built as clap builds it,
+        // so a terminal shows it in the same colours, with its usage line
+        // naming the command as clap does (`parse_bin_name`).
+        use clap::error::{ContextKind, ContextValue, ErrorKind};
+        let cli = <crate::Cli as clap::CommandFactory>::command();
+        let mut parse = cli
+            .find_subcommand("parse")
+            .expect("parse is a subcommand")
+            .clone()
+            .bin_name(parse_bin_name(std::env::args_os().next()));
+        let usage = parse.render_usage();
+        let mut error = clap::Error::new(ErrorKind::UnknownArgument).with_cmd(&parse);
+        error.insert(
+            ContextKind::InvalidArg,
+            ContextValue::String(extra.display().to_string()),
+        );
+        error.insert(ContextKind::Usage, ContextValue::StyledStr(usage));
+        error.exit();
+    }
     let source = std::fs::read_to_string(&cmd.file)
         .with_context(|| format!("failed to read {}", cmd.file.display()))?;
 
@@ -85,5 +133,59 @@ pub fn run(cmd: ParseCmd) -> Result<()> {
             total_errors,
             if total_errors == 1 { "" } else { "s" }
         )
+    }
+}
+
+/// The name clap's usage line gives `nova parse`, from the binary's first
+/// argument `arg0`, as clap names it: that argument's file name, then
+/// `parse`, so a renamed `nova` prints its own; or `parse` alone when the
+/// argument has no file name in UTF-8 (`""`, `/`, `..`, bytes that are not
+/// UTF-8) or there is none.
+fn parse_bin_name(arg0: Option<OsString>) -> String {
+    let name = arg0
+        .as_deref()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .and_then(OsStr::to_str);
+    match name {
+        Some(name) => format!("{name} parse"),
+        None => "parse".to_string(),
+    }
+}
+
+/// `--dump-tokens`: for each file, `== FILE` (the path as given), then its
+/// token dump; for a file that cannot be read, `== FILE` then `IOERR` and
+/// its kind, after which the rest are dumped and the exit code is 2.
+fn dump_tokens(files: &[&Path]) -> Result<i32> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut code = 0;
+    for file in files {
+        writeln!(out, "== {}", file.display())?;
+        match std::fs::read_to_string(file) {
+            Ok(source) => out.write_all(nova_lexer::dump_tokens(&source).as_bytes())?,
+            Err(e) => {
+                writeln!(out, "IOERR {}", io_kind_name(e.kind()))?;
+                code = 2;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(code)
+}
+
+/// The kind as std/io's `IoErrorKind` names it, so N's dump, whose reads
+/// fail with those kinds, prints the same word: the seven kinds it has, and
+/// `Other` for every other.
+fn io_kind_name(kind: std::io::ErrorKind) -> &'static str {
+    use std::io::ErrorKind;
+    match kind {
+        ErrorKind::NotFound => "NotFound",
+        ErrorKind::PermissionDenied => "PermissionDenied",
+        ErrorKind::AlreadyExists => "AlreadyExists",
+        ErrorKind::InvalidData => "InvalidData",
+        ErrorKind::Interrupted => "Interrupted",
+        ErrorKind::TimedOut => "TimedOut",
+        ErrorKind::ConnectionRefused => "ConnectionRefused",
+        _ => "Other",
     }
 }
