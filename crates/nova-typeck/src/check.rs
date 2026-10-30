@@ -4504,6 +4504,7 @@ impl<'a> Checker<'a> {
             | Builtin::StrToLower
             | Builtin::FloatFixed
             | Builtin::StrToFloat
+            | Builtin::StrIsFloat
             | Builtin::FloatToBits
             | Builtin::IntToChar
             | Builtin::StrAsBytes
@@ -8967,6 +8968,7 @@ pub(crate) fn builtin_signature(builtin: Builtin) -> (Vec<Ty>, Ty) {
         Builtin::StrToUpper | Builtin::StrToLower => (vec![Ty::String], Ty::String),
         Builtin::FloatFixed => (vec![Ty::Float, Ty::Int], Ty::String),
         Builtin::StrToFloat => (vec![Ty::String], Ty::Float),
+        Builtin::StrIsFloat => (vec![Ty::String], Ty::Bool),
         Builtin::FloatToBits => (vec![Ty::Float], Ty::Int),
         Builtin::IntToChar => (vec![Ty::Int], Ty::Char),
         Builtin::StrAsBytes => (vec![Ty::String], Ty::Bytes),
@@ -17097,6 +17099,10 @@ mod tests {
                 Builtin::StrToFloat => (
                     (vec![Ty::String], Ty::Float),
                     "`str_to_float(span)` in `std/json`'s `scan_number`",
+                ),
+                Builtin::StrIsFloat => (
+                    (vec![Ty::String], Ty::Bool),
+                    "`str_is_float(self)` in `String::parse_float`",
                 ),
                 Builtin::FloatToBits => (
                     (vec![Ty::Float], Ty::Int),

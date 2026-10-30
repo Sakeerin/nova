@@ -195,6 +195,15 @@ builtins! {
     /// replaced it on 2026-10-03. Std-only, so
     /// `str_to_float` is not a reserved word in user code.
     StrToFloat,
+    /// `str_is_float(s: String) -> Bool` — whether `s` is text Rust's
+    /// `f64::from_str` accepts: an optional sign, then digits with an
+    /// optional `.` and exponent, or `inf`, `infinity` or `nan` in any case.
+    /// Backs `std/strings`' `String.parse_float`, which pairs it with
+    /// [`Builtin::StrToFloat`]: that one returns `0.0` on text it refuses, so
+    /// the pair says whether a `0.0` is the value or the refusal. On WASM a
+    /// shim entry, by the same grammar the shim's `str_to_float` already
+    /// tests (5.0 spec §5.3). Std-only.
+    StrIsFloat,
     /// `float_to_bits(v: Float) -> Int` — the IEEE 754 bits of `v`, as Rust's
     /// `f64::to_bits`, read as a signed `Int`. Backs `std/core`'s
     /// `Float.to_bits`, which N's `.ll` emitter needs to write each float
@@ -1060,6 +1069,7 @@ impl Builtin {
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
             Builtin::StrToFloat => "str_to_float",
+            Builtin::StrIsFloat => "str_is_float",
             Builtin::FloatToBits => "float_to_bits",
             Builtin::IntToChar => "int_to_char",
             Builtin::StrAsBytes => "str_as_bytes",
@@ -1186,7 +1196,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 93] = [
+    pub const STD_ONLY: [Builtin; 94] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1200,6 +1210,7 @@ impl Builtin {
         Builtin::StrToLower,
         Builtin::FloatFixed,
         Builtin::StrToFloat,
+        Builtin::StrIsFloat,
         Builtin::FloatToBits,
         Builtin::IntToChar,
         Builtin::StrAsBytes,
