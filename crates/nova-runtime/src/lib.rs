@@ -870,6 +870,18 @@ pub unsafe extern "C" fn nova_rt_str_to_float(s: *const NovaStr) -> f64 {
     as_str(s).parse::<f64>().unwrap_or(0.0)
 }
 
+/// The IEEE 754 bits of `v`, as `f64::to_bits`, read as a signed `Int`.
+///
+/// Backs `std/core`'s `Float.to_bits` (5.0 spec §5.4). A runtime call rather
+/// than a bit cast in MIR, because one `RtFunc` is then a call natively and a
+/// shim entry on WASM, the user's choice there, with no statement new to any
+/// backend; a float constant's bits are asked for once per constant, so the
+/// call costs nothing that matters.
+#[no_mangle]
+pub extern "C" fn nova_rt_float_to_bits(v: f64) -> i64 {
+    v.to_bits() as i64
+}
+
 /// Format an `Int` as a string.
 ///
 /// The digits are written on the stack and copied once into GC memory,
@@ -1023,6 +1035,7 @@ pub fn symbols() -> Vec<(&'static str, *const u8)> {
         ("nova_rt_float_to_str", nova_rt_float_to_str as *const u8),
         ("nova_rt_float_fixed", nova_rt_float_fixed as *const u8),
         ("nova_rt_str_to_float", nova_rt_str_to_float as *const u8),
+        ("nova_rt_float_to_bits", nova_rt_float_to_bits as *const u8),
         ("nova_rt_bool_to_str", nova_rt_bool_to_str as *const u8),
         ("nova_rt_char_to_str", nova_rt_char_to_str as *const u8),
         ("nova_rt_alloc", nova_rt_alloc as *const u8),
@@ -2009,6 +2022,22 @@ mod tests {
             assert_eq!(nova_rt_str_to_float(make_str("nope")), 0.0);
             assert_eq!(nova_rt_str_to_float(make_str("")), 0.0);
         }
+    }
+
+    /// `float_to_bits` is `f64::to_bits`, read as an `i64` (5.0 spec §5.4).
+    #[test]
+    fn float_to_bits_is_rusts_to_bits() {
+        assert_eq!(nova_rt_float_to_bits(0.0), 0);
+        assert_eq!(nova_rt_float_to_bits(-0.0), i64::MIN);
+        assert_eq!(nova_rt_float_to_bits(1.0), 0x3FF0_0000_0000_0000);
+        assert_eq!(nova_rt_float_to_bits(f64::from_bits(1)), 1);
+        assert_eq!(nova_rt_float_to_bits(f64::MAX), 0x7FEF_FFFF_FFFF_FFFF);
+        assert_eq!(nova_rt_float_to_bits(f64::INFINITY), 0x7FF0_0000_0000_0000);
+        assert_eq!(
+            nova_rt_float_to_bits(f64::NEG_INFINITY),
+            0xFFF0_0000_0000_0000_u64 as i64
+        );
+        assert_eq!(nova_rt_float_to_bits(f64::NAN), 0x7FF8_0000_0000_0000);
     }
 
     /// A negative `places` has no meaning and must never reach `format!`'s

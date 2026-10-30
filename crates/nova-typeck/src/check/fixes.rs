@@ -95,6 +95,7 @@ const STD_ONLY_PUBLIC_FORMS: &[(&str, &str)] = &[
         "a `String`'s `byte_len()`, `byte_at(i)` and `byte_slice(a, b)`, or \
          `bytes_from_string(s)` for a copy",
     ),
+    ("float_to_bits", "the method `to_bits`, as in `x.to_bits()`"),
 ];
 
 impl<'a> Checker<'a> {

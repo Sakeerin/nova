@@ -2434,6 +2434,18 @@ fn char_from_int_checks_the_range_and_moves() {
     );
 }
 
+/// `Float.to_bits` is one call of the runtime's `float_to_bits` (spec
+/// §5.4).
+#[test]
+fn to_bits_is_one_runtime_call() {
+    let mir = mir_for("fn main() {\n    let b = (1.5).to_bits()\n    println(\"${b}\")\n}");
+    let name = std_fn(&mir, "to_bits");
+    assert_eq!(
+        count_rt(&stmts_of(&mir, &name), nova_mir::RtFunc::FloatToBits),
+        1
+    );
+}
+
 /// `impl<T> [T]`'s methods monomorphise per element type, as any generic
 /// impl's do (spec §5.5).
 #[test]

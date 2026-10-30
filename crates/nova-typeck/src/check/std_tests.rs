@@ -155,6 +155,7 @@ fn the_new_builtins_are_not_visible_to_a_program() {
     for (call, name) in [
         ("int_to_char(65)", "int_to_char"),
         ("str_as_bytes(\"a\")", "str_as_bytes"),
+        ("float_to_bits(1.0)", "float_to_bits"),
     ] {
         let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
         assert!(
@@ -219,6 +220,14 @@ fn the_conversions_and_byte_access_have_the_specs_types() {
     }
 }
 
+/// `Float.to_bits`'s type (spec §5.4).
+#[test]
+fn to_bits_has_the_specs_type() {
+    let r = checked("fn main() {\n    let fb = (1.0).to_bits()\n}\n");
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    assert_eq!(local_ty(&r, "fb"), Ty::Int);
+}
+
 /// `push` and `clear` take `mut self`, as `Vec`'s do.
 #[test]
 fn a_builder_mutates_only_through_a_mutable_binding() {
@@ -262,6 +271,7 @@ fn a_std_only_builtin_named_by_a_program_gets_its_public_form() {
         ("int_to_char(65)", "`char_from_int(n)`"),
         ("str_from_chars(['a'])", "`string_from_chars(cs)`"),
         ("str_as_bytes(\"a\")", "`byte_at(i)`"),
+        ("float_to_bits(1.0)", "`x.to_bits()`"),
     ] {
         let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
         let d = e.iter().find(|d| d.code == "E0001").expect("an E0001");
@@ -475,5 +485,18 @@ fn a_trait_method_hidden_by_strings_and_chars_methods_is_e0105() {
             "std's inherent method `byte_len` on `String` hides `Size::byte_len`",
             "std's inherent method `to_int` on `Char` hides `Codes::to_int`",
         ]
+    );
+}
+
+/// `Float`'s `to_bits`, std's since Task 4, hides a program's trait method
+/// of that name: E0105.
+#[test]
+fn a_trait_method_hidden_by_floats_to_bits_is_e0105() {
+    let src = "trait Bits {\n    fn to_bits(self) -> Int\n}\n\
+               impl Bits for Float {\n    fn to_bits(self) -> Int { 42 }\n}\n\
+               fn main() {}\n";
+    assert_eq!(
+        e0105s(src),
+        ["std's inherent method `to_bits` on `Float` hides `Bits::to_bits`"]
     );
 }

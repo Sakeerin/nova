@@ -72,6 +72,7 @@ fn host(name: &str) -> Result<&'static str> {
         "float_to_str" => "  float_to_str: (v) => string(floatText(v)),\n",
         "float_fixed" => "  float_fixed: (v, places) => string(floatFixed(v, places)),\n",
         "str_to_float" => "  str_to_float: (s) => floatFrom(text(s)),\n",
+        "float_to_bits" => "  float_to_bits: (v) => floatBits(v),\n",
         "str_to_upper" => "  str_to_upper: (s) => string(text(s).toUpperCase()),\n",
         "str_to_lower" => "  str_to_lower: (s) => string(text(s).toLowerCase()),\n",
         "int_hash_seed" => "  int_hash_seed: () => hashSeed(),\n",
@@ -185,7 +186,12 @@ pub fn shim<S: AsRef<str>>(imports: &[S]) -> Result<String> {
     let imports: Vec<&str> = imports.iter().map(AsRef::as_ref).collect();
     let mut js = String::from(CORE);
     let uses = |names: &[&str]| imports.iter().any(|i| names.contains(i));
-    if uses(&["float_to_str", "float_fixed", "str_to_float"]) {
+    if uses(&[
+        "float_to_str",
+        "float_fixed",
+        "str_to_float",
+        "float_to_bits",
+    ]) {
         js.push_str(FLOAT);
     }
     if uses(&["int_hash_seed"]) {
@@ -243,6 +249,58 @@ mod tests {
         assert!(floats.contains("function hashSeed"), "{floats}");
         let clocks = shim(&["time_now_epoch_nanos"]).expect("a shim");
         assert!(clocks.contains("function epochNanos"), "{clocks}");
+        // 5.0c's `float_to_bits` calls `floatBits`, in the float helpers.
+        let bits = shim(&["float_to_bits"]).expect("a shim");
+        assert!(bits.contains("function floatBits"), "{bits}");
+        assert!(bits.contains("  float_to_bits: ("), "{bits}");
+    }
+
+    /// `floatBits`, which `float_to_bits` calls, is Rust's `f64::to_bits`
+    /// read as an `i64`, a NaN's sign included (5.0 spec §5.4): each value is
+    /// made in JavaScript from its bits, and must give them back.
+    #[test]
+    fn float_bits_is_rusts_to_bits() {
+        let Some(mut node) = crate::test_node() else {
+            return;
+        };
+        let values = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            0.1,
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -f64::NAN,
+        ];
+        let bits: Vec<String> = values.iter().map(|v| format!("{}n", v.to_bits())).collect();
+        let script = format!(
+            "{FLOAT}\nconst view = new DataView(new ArrayBuffer(8));\n\
+             for (const b of [{}]) {{\n  view.setBigUint64(0, b);\n  \
+             console.log(String(floatBits(view.getFloat64(0))));\n}}\n",
+            bits.join(", ")
+        );
+        let dir = std::env::temp_dir().join("nova-codegen-wasm-float-bits");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let file = dir.join("float_bits.js");
+        std::fs::write(&file, script).expect("the script");
+        let out = node.arg(&file).output().expect("node runs");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = String::from_utf8(out.stdout).expect("UTF-8");
+        let expected: Vec<String> = values
+            .iter()
+            .map(|v| (v.to_bits() as i64).to_string())
+            .collect();
+        assert_eq!(got.lines().collect::<Vec<_>>(), expected);
     }
 
     /// The monotonic clock starts at 0 and never decreases over a busy
