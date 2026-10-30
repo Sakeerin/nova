@@ -11,8 +11,8 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Phase 5.0a, the small language and CI (spec
 `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
-§3; ADR 0048, Phase 5's scope and backend), and 5.0b, tuples and
-patterns (§4; ADR 0049).
+§3; ADR 0048, Phase 5's scope and backend), 5.0b, tuples and
+patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
 
 ### Added
 
@@ -90,6 +90,60 @@ patterns (§4; ADR 0049).
 - **`for x in arr` over an array:** in order, `arr` evaluated once and each
   element read when the loop reaches it, with `break`, `continue` and a
   pattern, on every backend, WASM included.
+- **`StringBuilder`,** in std/strings: `new`, `push`, `push_char`,
+  `byte_len`, `is_empty`, `clear` and `to_string`, and `Display`, so
+  `"${b}"` interpolates it. `push` is constant time amortised and
+  `to_string` joins every part in one copy, so building a string from any
+  number of pushes is linear, where `+` or interpolation in a loop is
+  quadratic. `to_string` leaves the builder as it was. A record over a
+  `Vec<String>`, on every backend, WASM included.
+- **`Char` and `Int`, and a `String`'s bytes:** `'a'.to_int()`;
+  `char_from_int(n)`, `None` below 0, above `0x10FFFF` and for the
+  surrogates; `string_from_chars(cs)`; and `byte_len`, `byte_at(i)` and
+  `byte_slice(a, b)` on `String`, in constant time, counting bytes.
+  `byte_at` panics past the end, and `byte_slice` when a bound is out of
+  range, `a > b`, or a bound falls inside a character, so neither
+  allocates an `Option`.
+- **`parse_int`, `parse_int_radix` and `parse_float`** on `String`, each
+  an `Option`: an optional sign and digits, nothing else, and `None` out
+  of `Int`'s range, its least value included; radix 2 to 36, letters of
+  either case, no prefix, and a panic on any other radix; and the text
+  Rust's `f64::from_str` takes, with its value, `inf` and `nan` included,
+  the same on WASM.
+- **`Float.to_bits`,** the IEEE 754 bits as a signed `Int`, as Rust's
+  `f64::to_bits`: a runtime call natively and a shim entry on WASM, each
+  giving the bits of the value it is handed. A NaN made by arithmetic can
+  have other bits on another backend: `0.0 / 0.0` is `0xFFF8…` under
+  `nova run` and `0x7FF8…` built `--release`, where LLVM folds it. There
+  is no `from_bits`.
+- **Methods on arrays and between arrays and `Vec`:** `iter()`, which
+  yields each element in order, and `slice(a, b)`, a copy, on every
+  `[T]`; `Vec::to_array` and `Vec::from_array`, which copy; and `Vec::at(i)`
+  and `Vec::last()`, which read without an `Option` and panic where `get`
+  and `pop` give `None`. A program may write an inherent impl on arrays,
+  `impl<T> [T]` or `impl [Int]`, as on `String`, where any impl on an
+  array was E0010 before; a trait impl on an array stays E0010.
+- **`OrderedMap`,** in std/collections: a map that keeps its keys in the
+  order they were first inserted, with `new`, `len`, `is_empty`, `insert`,
+  `get`, `contains_key`, `remove`, `keys`, `values`, `entries`, which gives
+  `(key, value)` tuples, and `iter`, which yields them. Updating a key
+  keeps its place; removing it and inserting it again puts it last. The
+  order is the same on every run, where a `Map`'s is unspecified, and
+  `Map` does not change. Lookups go through a `Map`, so its keys need
+  `Hash` and `Eq`; the gaps removals leave are compacted as the map grows.
+  On every backend, WASM included (ADR 0050).
+- **`run`, `status`, `env` and `current_exe`,** in std/process, with the
+  record `ProcessOutput`: `run(program, args)` runs another program, a
+  path or a name looked for on `PATH`, with its arguments as they are and
+  no shell, waits for it, and returns its exit status and its captured
+  standard output and error; `status` runs one that reads and writes this
+  program's streams and returns its status. A death by signal on Unix is
+  `128 + signal`; a missing program is `NotFound`. Both block the thread,
+  every task included. `env(name)` reads an environment variable, and
+  `current_exe()` gives the running executable's path, `nova` itself
+  under `nova run`. Native only: on WASM, naming one is E0092. The four
+  names are in every module's scope, and a program's own shadows them
+  (ADR 0050).
 
 ### Changed
 
@@ -153,6 +207,58 @@ patterns (§4; ADR 0049).
   `release_golden_suite`, builds every golden program of `tests/runtime/`
   but the nine its exclusion table names with `--release`, through
   `clang`, runs it and compares its output; elsewhere it skips (ADR 0048).
+- **An array has a type head,** `hir::TyHead::Array`, so impls on `[T]` are
+  looked up as other types' are, after an array's built-in `len`; an
+  unknown method on an array is E0014 as before, its fix now offering the
+  impls' methods with `len`. Ten std-only builtins are new, `STD_ONLY`
+  growing from 90 to 100: `str_as_bytes` and `int_to_char`, register
+  moves, `str_is_float` and `float_to_bits`, runtime calls natively and
+  shim entries on WASM, and the six process builtins below.
+- **On WASM, the shim's `str_to_float` gives `-nan` a NaN with its sign
+  bit set,** as Rust's parser does natively; before, it dropped the sign,
+  which no program could see until `to_bits`.
+- **std's new inherent methods take a call before a program's trait
+  method of the same name, and a program's own inherent method of that
+  name is E0074.** `String`'s `byte_len`, `byte_at`, `byte_slice`,
+  `parse_int`, `parse_int_radix` and `parse_float`, `Char`'s `to_int`,
+  `Float`'s `to_bits`, `Vec`'s `at`, `last` and `to_array`, and an array's
+  `iter` and `slice` are std's inherent methods now, and `Vec::from_array`
+  its inherent function. A program whose `impl Size for String { fn
+  byte_len … }` made `"é".byte_len()` run its trait's method runs std's
+  now, as in Rust, and the new warning E0105 marks the hidden method, with
+  how to reach it: through a function generic over the trait, whose
+  `x.byte_len()` is the trait's, or by renaming it. A static trait
+  function `from_array` on `Vec<Int>` is warned of too: the path
+  `Vec::from_array(…)`, E0011 before, since `Vec` alone could not pick the
+  impl, is std's now, and the trait's is reached through a function
+  generic over the trait, as before; a trait method and a std function
+  of which only one takes `self` never meet, and draw nothing. E0105 marks
+  a hide by any of std's inherent methods a program can call, older ones
+  such as `Vec`'s `iter` or `Map`'s `len` too, private ones included,
+  since a method's privacy is not enforced at a call. A program's own
+  `impl String { fn byte_len … }`, which compiled before, is E0074, as is
+  an `impl<T> [T]` that defines `iter` or `slice`. E0074 between two
+  inherent impls labels both now, the program's impl as the primary label
+  when the other is std's.
+- **A method's name in a diagnostic** is the source's type where the
+  resolver's mangled one showed: `[T]::slice` and `[Int]::bump` for an
+  array's (E0016, E0060), not `Arr_T.slice`, and `Vec::at` for a generic
+  type's, not `Vec_T.at`. A plain type's stays `P.of`.
+- **An array in an interpolation** is E0013 as before, without the advice
+  to implement `Display`, which a trait impl on an array cannot do.
+- **Calling `char_to_int`, `int_to_char`, `str_from_chars`,
+  `str_as_bytes`, `str_is_float`, `str_to_float` or `float_to_bits` by
+  name** is E0001 as before, std's alone having them, now with a note
+  naming the public form, such as `c.to_int()`, where "did you mean"
+  offered `char_from_int` for `char_to_int`.
+- **Six std-only builtins run programs and read the environment,** on
+  `std/fs`'s wire contract: `process_run`, a status code, then
+  `process_take_status`, `process_take_stdout` and `process_take_stderr`,
+  and `process_env` and `process_current_exe`, whose text and errors go
+  through `fs_take_string` and `fs_last_error_message`.
+- **`release_golden_suite` sets environment variables on a program** its
+  `RELEASE_GOLDEN_ENV` table names, as it gives standard input:
+  `process_env` reads one.
 
 ### Fixed
 

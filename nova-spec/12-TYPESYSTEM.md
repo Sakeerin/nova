@@ -149,6 +149,16 @@ Stored as `TraitDef { id, methods: Vec<MethodSig>, supers: Vec<TraitRef> }`.
   4. If multiple match → ambiguity error
   5. If none match → "no impl of `Display` for `Ty(x)`" error
 
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):** an
+array's head is `TyHead::Array`, whatever its element type, so an inherent
+impl may name `[T]` (`impl<T> [T]`, or `impl [Int]`), where every impl on
+an array was E0010 before, and `match_args` tells the two apart by the
+element type; a trait impl on an array stays E0010, "a trait cannot be
+implemented for an array" (the user's ruling on 5.0c's first fact-check)
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5.5). An array's built-in `len` is looked up first, then its impls'
+methods; a tuple, a function type and a future still have no head.
+
 ### 5.3 Coherence (Orphan Rules)
 - An `impl Trait for Type` is allowed only if either `Trait` or `Type` is defined in current package
 - Prevents conflicting impls across packages
@@ -269,6 +279,7 @@ types differ.
 | E0102 | A variant hides one of std's; a warning (added 2026-10-26, Phase 5.0a) |
 | E0103 | This value is not used, or a line break ended a statement; a warning (added 2026-10-26, Phase 5.0a) |
 | E0104 | A pattern binds a name that starts with an upper-case letter, not a plain `let X` or `for X`; a warning (added 2026-10-28, Phase 5.0b) |
+| E0105 | One of std's inherent methods hides a program's trait method of the same name; a warning (added 2026-10-29, Phase 5.0c) |
 
 Each gets a fully detailed error in `nova-diagnostics::messages` with example, suggestion, and link.
 
@@ -371,6 +382,37 @@ the next arm
 so `match (1, 9) { (a, _) | (_, a) if a > 5 => "big", _ => "small" }` gives
 `small` in Nova and `big` in Rust. E0021 marks the alternative a guard
 cannot reach, `(_, a)` here, with that note.
+
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):** 5.0c,
+std
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5, §6; `docs/adr/0050-the-std-a-compiler-needs.md`), takes one new code.
+**E0105,** a warning, is a program's trait method, defined in its impl or
+taken from the trait's default, that one of std's inherent methods on an
+overlapping type also defines: a method call takes the inherent method,
+as in Rust, so the trait's is never reached by `x.m()`, and a path takes
+an inherent function, so a static trait function is never reached by
+`Vec::from_array(…)`; the note says to call it through a function generic
+over the trait, or to rename it. A pair of which only one takes `self`
+never meets, and is not reported; any std method a program can call
+counts, older or private.
+**E0092** is `std/process`'s `run`, `status`, `env`, `current_exe` and
+`ProcessOutput` on WASM, where the module is not compiled, as for `args`.
+**E0074** is a program's inherent impl that defines one of std's new
+inherent methods again: `iter` or `slice` on arrays, on which no impl at
+all was accepted before 5.0c, and `byte_len`, `to_int`, `to_bits`, `last`
+and the rest on `String`, `Char`, `Float` and `Vec`, which compiled
+before. Between two inherent impls it now labels both, the program's
+impl first where the other is std's. **E0010** is a trait impl on an
+array, and **E0013** an interpolated array, without the advice to
+implement `Display`. **E0001** at a call of a std-only
+builtin that std now wraps, `char_to_int` and the like, notes the public
+form, `c.to_int()`, in place of "did you mean". **E0014** is an unknown
+method on an array, its fix offering std's array methods with `len`.
+**E0013** is an `OrderedMap` method instantiated with a key type that is
+not `Hash` and `Eq`, as for `Map`, and **E0060** an `insert` or `remove`
+on an `OrderedMap`, or a `push` on a `StringBuilder`, through a binding
+that is not `mut`.
 
 ---
 
