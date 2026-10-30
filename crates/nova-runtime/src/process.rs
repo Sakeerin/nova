@@ -125,6 +125,11 @@ fn exit_code(status: std::process::ExitStatus) -> i64 {
     -1
 }
 
+/// The environment variable a test binary, a program's or its docs', reads
+/// to pick the test it runs (`nova_rt_test_selector`); the only one it
+/// reads to decide what to run.
+pub(crate) const TEST_SELECTION: &str = "NOVA_TEST_INDEX";
+
 /// Runs `program` with `args` and waits for it. With `capture`, its
 /// standard input is empty and its standard output and error are read
 /// whole, both at once, so a child that fills one pipe while the other is
@@ -132,6 +137,12 @@ fn exit_code(status: std::process::ExitStatus) -> i64 {
 /// streams, after this process's standard output is flushed, so what was
 /// printed before comes first. Returns the exit status and the two outputs,
 /// empty when not captured.
+///
+/// The child gets this process's environment less [`TEST_SELECTION`]: under
+/// `nova test` the running executable is a test binary that picks its test
+/// from that variable, so a test that runs `current_exe()` would otherwise
+/// start the same test again, and that one a third, without end. Without
+/// it, a test binary prints its list of tests and ends.
 fn run_command(
     program: &str,
     args: &[&str],
@@ -141,7 +152,7 @@ fn run_command(
     use std::process::{Command, Stdio};
     let _ = std::io::stdout().flush();
     let mut command = Command::new(program);
-    command.args(args);
+    command.args(args).env_remove(TEST_SELECTION);
     if capture {
         let out = command.stdin(Stdio::null()).output()?;
         Ok((exit_code(out.status), out.stdout, out.stderr))

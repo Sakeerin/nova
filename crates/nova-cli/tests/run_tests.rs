@@ -13388,6 +13388,74 @@ fn process_env_runs() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A `@test` that runs its own test binary, through `current_exe()`, starts
+/// it as a plain program, not as the same test again (decision 26 and the
+/// review of 5.0c): under `nova test` the binary picks its test from
+/// `NOVA_TEST_INDEX`, which `run` and `status` remove from the child's
+/// environment, so the child prints the binary's list of tests and ends.
+/// Each test counts its runs in a file of the temporary directory this test
+/// gives it; without the removal each child would run the test again, and
+/// the count stops that at three, so the test fails with a count of 3, never
+/// runs away. Run under the process limit all the same.
+#[test]
+fn a_test_that_runs_its_own_binary_runs_once() {
+    let dir = std::env::temp_dir().join("nova-process-test-reentry");
+    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = dir.join("tmp");
+    std::fs::create_dir_all(&tmp).expect("a temporary directory");
+    let dir = write_test_project(
+        "nova-process-test-reentry",
+        "fn count(name: String) -> Int {\n\
+         \x20   let path = \"${temp_dir()}/${name}\"\n\
+         \x20   let before = match block_on(read_to_string(path)) {\n\
+         \x20       Ok(s) => s.parse_int().unwrap_or(0)\n\
+         \x20       Err(_) => 0\n\
+         \x20   }\n\
+         \x20   block_on(write_string(path, \"${before + 1}\")).unwrap()\n\
+         \x20   before + 1\n\
+         }\n\
+         \n\
+         @test\n\
+         fn run_starts_its_binary_once() {\n\
+         \x20   if count(\"run-count\") < 3 {\n\
+         \x20       let out = run(current_exe().unwrap(), [\"child\"]).unwrap()\n\
+         \x20       assert_eq(out.status, 0)\n\
+         \x20       let listed = out.stdout.to_string().unwrap_or(\"\")\n\
+         \x20       assert(listed.contains(\"status_starts_its_binary_once\"), listed)\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         @test\n\
+         fn status_starts_its_binary_once() {\n\
+         \x20   if count(\"status-count\") < 3 {\n\
+         \x20       assert_eq(status(current_exe().unwrap(), [\"child\"]).unwrap(), 0)\n\
+         \x20   }\n\
+         }\n",
+    );
+    let out = nova()
+        .current_dir(&dir)
+        .arg("test")
+        .env("TMPDIR", &tmp)
+        .env("TMP", &tmp)
+        .env("TEMP", &tmp)
+        .assert();
+    let output = out.get_output();
+    let shown = format!(
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let runs = |name: &str| std::fs::read_to_string(tmp.join(name)).unwrap_or_default();
+    assert_eq!(runs("run-count"), "1", "`run`'s test ran again: {shown}");
+    assert_eq!(
+        runs("status-count"),
+        "1",
+        "`status`'s test ran again: {shown}"
+    );
+    out.success();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `current_exe()` names `nova` under `nova run`, where the program runs
 /// inside it, and the program's own executable when it is built (5.0 spec
 /// §5.7, §10 risk 9), as its docs say.

@@ -152,6 +152,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
         supertraits: FxHashMap::default(),
         traits: Vec::new(),
         impls: Vec::new(),
+        impl_param_names: Vec::new(),
         impl_self: None,
         impl_selves: FxHashMap::default(),
         extra_functions: Vec::new(),
@@ -284,6 +285,10 @@ struct Checker<'a> {
     supertraits: FxHashMap<DefId, Vec<DefId>>,
     traits: Vec<hir::TraitDef>,
     impls: Vec<hir::ImplInfo>,
+    /// Each impl's own names for its generic parameters, by the index of
+    /// `impls`: `T` in `impl<T> [T]`, so a diagnostic shows the impl's type
+    /// as written (`Checker::shown_method`, E0105).
+    impl_param_names: Vec<Vec<String>>,
     /// The `Self` of the `impl` block whose signatures or body are being
     /// converted right now, or `None` outside one. Read by [`Checker::convert_ty`]
     /// to resolve `Self::Item` inside an impl.
@@ -1551,6 +1556,7 @@ impl<'a> Checker<'a> {
             &impl_param_names,
         );
         self.check_supertrait_impls(&impl_spans);
+        self.impl_param_names = impl_param_names;
     }
 
     /// E0105, a warning: a program's trait impl defines (or takes from the
@@ -1636,6 +1642,28 @@ impl<'a> Checker<'a> {
                         "()"
                     };
                     let trait_name = &tr.name;
+                    // The trait's own method takes its own arguments, which
+                    // the note's `Top::at(x, …)` and generic `x.at(…)` show.
+                    let trait_extra = tr
+                        .methods
+                        .iter()
+                        .find(|m| m.name == *name)
+                        .map_or(0, |m| m.params.len());
+                    let (trait_args, path_args) = match (trait_extra, *has_self) {
+                        (0, true) => ("()", "(x)"),
+                        (_, true) => ("(…)", "(x, …)"),
+                        (0, false) => ("()", "()"),
+                        (_, false) => ("(…)", "(…)"),
+                    };
+                    // The generic function's type parameter, by a name the
+                    // impl does not use for one of its own.
+                    let own = param_names.get(i).unwrap_or(&no_names);
+                    let param = ["T", "U", "V", "W"]
+                        .iter()
+                        .map(|p| p.to_string())
+                        .chain((1..).map(|k| format!("T{k}")))
+                        .find(|p| !own.contains(p))
+                        .unwrap_or_default();
                     let d = if *has_self {
                         Diagnostic::warning(
                             "E0105",
@@ -1650,9 +1678,9 @@ impl<'a> Checker<'a> {
                         )
                         .with_note(format!(
                             "a method call takes an inherent method before a trait's; Nova has no \
-                             `{trait_name}::{name}(x)` call, so reach this one through a function \
-                             generic over `T: {trait_name}`, whose `x.{name}{args}` is the \
-                             trait's, or rename it"
+                             `{trait_name}::{name}{path_args}` call, so reach this one through a \
+                             function generic over `{param}: {trait_name}`, whose \
+                             `x.{name}{trait_args}` is the trait's, or rename it"
                         ))
                     } else {
                         let head = ty.split('<').next().unwrap_or(&ty).to_string();
@@ -1670,8 +1698,8 @@ impl<'a> Checker<'a> {
                         .with_note(format!(
                             "a path takes an inherent function before a trait's, so \
                              `{head}::{name}{args}` is std's; reach this one through a function \
-                             generic over `T: {trait_name}`, whose `T::{name}{args}` is the \
-                             trait's, or rename it"
+                             generic over `{param}: {trait_name}`, whose \
+                             `{param}::{name}{path_args}` is the trait's, or rename it"
                         ))
                     };
                     found.push(d);
@@ -1681,21 +1709,29 @@ impl<'a> Checker<'a> {
         self.diagnostics.extend(found);
     }
 
-    /// An inherent method's name as a diagnostic shows it: an array's as
-    /// `[T]::slice` (`shown_method_name`), a generic named type's, which the
-    /// resolver names `Vec_T.at`, as `Vec::at` (5.0c's second fact-check),
-    /// and any other as the resolver names it, `P.of`.
+    /// An inherent method's name as a diagnostic shows it. The resolver
+    /// names an impl's method after its self type with `_` separators,
+    /// `Arr_T.slice` or `Arr_Vec_Int.bump`; an array's is shown with the
+    /// owning impl's self type as the source writes it, its parameters by
+    /// the impl's names, `[T]::slice`, `[Vec<Int>]::bump`, `[[T]]::m` (5.0c's
+    /// first fact-check and its review), a generic named type's, `Vec_T.at`,
+    /// as `Vec::at` (the second fact-check), and any other as the resolver
+    /// names it, `P.of`.
     fn shown_method(&self, def_id: DefId) -> String {
         let raw = &self.defs.def(def_id).name;
-        if raw.starts_with("Arr_") {
-            return shown_method_name(raw);
-        }
         let owner = self
             .impls
             .iter()
-            .find(|i| i.generics > 0 && i.methods.iter().any(|(_, d)| *d == def_id));
+            .enumerate()
+            .find(|(_, i)| i.methods.iter().any(|(_, d)| *d == def_id));
+        let no_names = Vec::new();
         match (owner, raw.rsplit_once('.')) {
-            (Some(imp), Some((_, method))) => {
+            (Some((k, imp)), Some((_, method))) if imp.self_head == TyHead::Array => {
+                let names = self.impl_param_names.get(k).unwrap_or(&no_names);
+                let ty = display_ty_named(&imp.self_ty, self.defs, names);
+                format!("{ty}::{method}")
+            }
+            (Some((_, imp)), Some((_, method))) if imp.generics > 0 => {
                 let ty = display_ty(&imp.self_ty, self.defs);
                 format!("{}::{method}", ty.split('<').next().unwrap_or(&ty))
             }
@@ -1908,6 +1944,46 @@ impl<'a> Checker<'a> {
                     }
                 }
             }
+        }
+        // Arrays' `len` is built in, in no impl, and a call takes it first,
+        // so a program's inherent impl on arrays that defines one would be
+        // ignored: E0074, as `impl String`'s `len` is against std's impl,
+        // labelled at the program's impl and at std's `impl<T> [T]` (5.0
+        // spec §5.5; the review of 5.0c).
+        let std_arrays = self
+            .impls
+            .iter()
+            .zip(spans)
+            .zip(in_std)
+            .find(|((imp, _), &std)| {
+                std && imp.trait_id.is_none() && imp.self_head == TyHead::Array
+            })
+            .map(|((_, &span), _)| span);
+        for ((imp, &span), _) in self
+            .impls
+            .iter()
+            .zip(spans)
+            .zip(in_std)
+            .filter(|(_, &std)| !std)
+        {
+            if imp.trait_id.is_some()
+                || imp.self_head != TyHead::Array
+                || !imp.methods.iter().any(|(n, _)| n == "len")
+            {
+                continue;
+            }
+            let mut d = Diagnostic::error(
+                "E0074",
+                "method `len` is defined by multiple overlapping inherent impls",
+            )
+            .with_primary_label(span, "here");
+            if let Some(std_span) = std_arrays {
+                d = d.with_secondary_label(
+                    std_span,
+                    "`len` is also defined by std, for every array",
+                );
+            }
+            conflicts.push(d);
         }
         self.diagnostics.extend(conflicts);
     }
@@ -8904,24 +8980,6 @@ fn error_expr(span: Span) -> hir::Expr {
     }
 }
 
-/// An array method's name as a diagnostic shows it. The resolver names an
-/// impl's method after its self type with `_` separators; an array's,
-/// `Arr_T.slice`, is shown as the source writes the type, `[T]::slice`
-/// (5.0c's first fact-check). `Checker::shown_method` also turns a generic
-/// named type's, `Vec_T.at`, into `Vec::at`; a plain one's, `P.of`, stays.
-pub(crate) fn shown_method_name(raw: &str) -> String {
-    fn array(ty: &str) -> String {
-        match ty.strip_prefix("Arr_") {
-            Some(elem) => format!("[{}]", array(elem)),
-            None => ty.to_string(),
-        }
-    }
-    match raw.rsplit_once('.') {
-        Some((ty, method)) if ty.starts_with("Arr_") => format!("{}::{method}", array(ty)),
-        _ => raw.to_string(),
-    }
-}
-
 /// Every builtin's parameter types and result type — the whole of what
 /// `check_builtin_call` needs to know about one, so that arity and argument
 /// checking is a single shared code path rather than an arm per builtin.
@@ -14738,6 +14796,7 @@ mod tests {
             supertraits: FxHashMap::default(),
             traits: Vec::new(),
             impls: Vec::new(),
+            impl_param_names: Vec::new(),
             impl_self: None,
             impl_selves: FxHashMap::default(),
             extra_functions: Vec::new(),
@@ -14817,6 +14876,7 @@ mod tests {
             supertraits: FxHashMap::default(),
             traits: Vec::new(),
             impls: Vec::new(),
+            impl_param_names: Vec::new(),
             impl_self: None,
             impl_selves: FxHashMap::default(),
             extra_functions: Vec::new(),

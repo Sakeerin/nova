@@ -166,7 +166,13 @@ impl<'a> Checker<'a> {
         // A std-only builtin that 5.0c's std wraps gets its public form as a
         // note instead of a guess: the nearest name can mean something else,
         // `char_from_int` for `char_to_int`, the conversion the other way.
-        if let Some((_, form)) = STD_ONLY_PUBLIC_FORMS.iter().find(|(b, _)| *b == name.value) {
+        // Only where a value or a function is wanted, as a builtin is one;
+        // where a type is wanted, the name is an unknown type like any other.
+        let builtin = matches!(need, Need::Value | Need::Call(_));
+        let form = STD_ONLY_PUBLIC_FORMS
+            .iter()
+            .find(|(b, _)| builtin && *b == name.value);
+        if let Some((_, form)) = form {
             if let Some(d) = self.diagnostics.last_mut() {
                 d.notes
                     .push(format!("`{}` is internal to std; use {form}", name.value));

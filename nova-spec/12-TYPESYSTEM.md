@@ -399,10 +399,10 @@ counts, older or private.
 **E0092** is `std/process`'s `run`, `status`, `env`, `current_exe` and
 `ProcessOutput` on WASM, where the module is not compiled, as for `args`.
 **E0074** is a program's inherent impl that defines one of std's new
-inherent methods again: `iter` or `slice` on arrays, on which no impl at
-all was accepted before 5.0c, and `byte_len`, `to_int`, `to_bits`, `last`
-and the rest on `String`, `Char`, `Float` and `Vec`, which compiled
-before. Between two inherent impls it now labels both, the program's
+inherent methods again: `iter` or `slice` on arrays, or their built-in
+`len`, on which no impl at all was accepted before 5.0c, and `byte_len`,
+`to_int`, `to_bits`, `last` and the rest on `String`, `Char`, `Float`
+and `Vec`, which compiled before. Between two inherent impls it now labels both, the program's
 impl first where the other is std's. **E0010** is a trait impl on an
 array, and **E0013** an interpolated array, without the advice to
 implement `Display`. **E0001** at a call of a std-only

@@ -1006,7 +1006,7 @@ pub unsafe extern "C" fn nova_rt_panic_str(s: *const NovaStr) -> ! {
 /// `test_selector() -> i64`. See `Builtin::TestSelector`.
 #[no_mangle]
 pub extern "C" fn nova_rt_test_selector() -> i64 {
-    std::env::var("NOVA_TEST_INDEX")
+    std::env::var(process::TEST_SELECTION)
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(-1)

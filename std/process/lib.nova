@@ -28,8 +28,8 @@
 //! assert_eq(args().len(), argv.len())
 //!
 //! // The environment, and the running executable, which `run` can start.
-//! let verbose = env("NOVA_EXAMPLE_VERBOSE").is_some()
-//! assert(!verbose || argv.len() >= 1, "env is None for an unset variable")
+//! if env("NOVA_EXAMPLE_VERBOSE").is_some() { println("verbose") }
+//! assert(env("NOVA_SURELY_UNSET_VARIABLE").is_none(), "env is None for an unset variable")
 //! assert(current_exe().is_ok(), "the system names the executable")
 //! ```
 
@@ -133,9 +133,10 @@ fn process_error(code: Int) -> IoError {
 /// with `.exe` added on Windows. Each argument reaches the program as it is,
 /// spaces and quotes included: no shell reads them. The program's standard
 /// input is empty, its standard output and standard error are captured,
-/// and it inherits this program's environment and working directory. Its
-/// exit status is its exit code, or `128 + n` on Unix when signal `n` ended
-/// it.
+/// and it inherits this program's environment and working directory, less
+/// `NOVA_TEST_INDEX`, the variable that picks a test under `nova test`, so
+/// a test that runs its own binary does not run itself again. Its exit
+/// status is its exit code, or `128 + n` on Unix when signal `n` ended it.
 ///
 /// Returns an `IoError` of kind `NotFound` if there is no such program, and
 /// `PermissionDenied` if it cannot be run. A program that runs and fails
