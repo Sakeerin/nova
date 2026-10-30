@@ -752,6 +752,17 @@ ADR. Tagging `v0.4.0` completes Phase 4 within that boundary.
 
 **Gate:** CI builds stage2 == stage1 byte-for-byte (or close — may differ in non-deterministic codegen, document tolerances).
 
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):** the
+language and std the port needs land first, as Phase 5.0, in three parts
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`;
+ADR 0048): 5.0a, `?`, `+=` on places, the newline rule, `String + String`
+and the golden suite through LLVM in CI; 5.0b, tuples and patterns (ADR
+0049); 5.0c, std (ADR 0050): `StringBuilder`, conversions between `Char`,
+`Int` and a `String`'s bytes, number parsing, `Float.to_bits`, methods on
+arrays, `OrderedMap`, whose order makes a stage's output the same on every
+run, and `std/process`'s `run`, `status`, `env` and `current_exe`, for the
+driver that runs `clang`.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)

@@ -58,6 +58,14 @@ Its functions are listed in
 `docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md`
 §6 (ADR 0041).
 
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):** of
+`std/process`'s "spawn, env, args", `env` ships, and `run` and `status`
+stand in for `spawn`, beside `current_exe` (`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md` §5.7, §5.8;
+`docs/adr/0050-the-std-a-compiler-needs.md`). They are native only, as
+the rest of the module is: on WASM, naming one is E0092. `std/collections`
+gains `OrderedMap` (§5.6) beside `Map`, on both targets; `Queue` is still
+not built. §17 and §12 have the details.
+
 **AMENDED 2026-10-17 (branch `claude/loving-archimedes-frtf5q-43`): `std/ui`
 and `std/ui/html`**, on both targets, are imported too: `import ui` for
 reactivity and views, `import ui::html` for the element builders, std's
@@ -187,6 +195,30 @@ pub record FilterIter<I: Iterator> { it: I, keep: fn(I::Item) -> Bool }
 // === Primitives have inherent impls === //
 // Int, Float, Bool, Char, String all impl: Display, Debug, Eq, Clone, Hash
 ```
+
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):**
+`std/core` converts between `Char` and `Int`, and gives a `Float`'s bits
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5.2, §5.4):
+
+```nova
+impl Char { pub fn to_int(self) -> Int }
+pub fn char_from_int(n: Int) -> Option<Char>
+impl Float { pub fn to_bits(self) -> Int }
+```
+
+`to_int` is the scalar value, a register move. `char_from_int` is `None`
+below 0, above `0x10FFFF` and for the surrogates `0xD800` to `0xDFFF`; it
+checks the range in Nova, then the std-only builtin `int_to_char` makes the
+`Char`, a register move with no runtime symbol. `to_bits` is Rust's
+`f64::to_bits` read as a signed `Int`, through the std-only builtin
+`float_to_bits`: a runtime call natively and a shim entry on WASM, each
+giving the bits of the value it is handed, though a NaN made by arithmetic
+can differ by backend (`0.0 / 0.0` is `0xFFF8…` under `nova run` and
+`0x7FF8…` built `--release`, where LLVM folds it); there is no `from_bits`.
+The shim's
+`str_to_float` keeps a `-nan`'s sign bit, as Rust's parser does, so
+`"-nan".parse_float()` has the same bits on WASM.
 
 ---
 
@@ -2240,6 +2272,78 @@ no implementation at all — grepped, not assumed, and corroborated
 independently by `std/sync/lib.nova`'s ring buffer, whose comment explains
 that it built its own because this module "has no `Queue` to borrow".
 
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):** arrays
+have methods, and `Vec` converts to and from them
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5.5):
+
+```nova
+impl<T> [T] {
+    pub fn iter(self) -> ArrayIter<T>
+    pub fn slice(self, start: Int, end: Int) -> [T]
+}
+pub record ArrayIter<T> { /* private */ }   // impl<T> Iterator for ArrayIter<T>
+
+impl<T> Vec<T> {
+    pub fn to_array(self) -> [T]
+    pub fn from_array(a: [T]) -> Vec<T>
+    pub fn at(self, i: Int) -> T
+    pub fn last(self) -> T
+}
+```
+
+An array's type head is `TyHead::Array`, so std writes `impl<T> [T]`, and
+an array's methods are looked up after its built-in `len`; a program may
+write an inherent impl on arrays as on `String`, and one that defines
+`iter` or `slice` again is E0074, while a trait impl on an array stays
+E0010. `iter` shares the array; `slice` copies
+its range, and panics when a bound is out of range or `start > end`.
+`to_array` and `from_array` copy, so neither shares storage. `at` and
+`last` read without an `Option`, panicking where `get` and `pop` give
+`None`, since `get` allocates a `Some` per read.
+
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):**
+`OrderedMap`, a map that keeps its keys in the order they were first
+inserted, beside `Map`, which does not change (`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md` §5.6;
+`docs/adr/0050-the-std-a-compiler-needs.md`):
+
+```nova
+pub record OrderedMap<K, V> { /* private */ }
+
+impl<K: Hash + Eq, V> OrderedMap<K, V> {
+    pub fn new() -> OrderedMap<K, V>
+    pub fn len(self) -> Int
+    pub fn is_empty(self) -> Bool
+    pub fn insert(mut self, k: K, v: V) -> Option<V>
+    pub fn get(self, k: K) -> Option<V>
+    pub fn contains_key(self, k: K) -> Bool
+    pub fn remove(mut self, k: K) -> Option<V>
+    pub fn keys(self) -> [K]
+    pub fn values(self) -> [V]
+    pub fn entries(self) -> [(K, V)]
+    pub fn iter(self) -> OrderedMapIter<K, V>   // yields (K, V)
+}
+pub record OrderedMapIter<K, V> { /* private */ }
+```
+
+- **Order:** updating a key keeps its place; removing it and inserting it
+  again puts it last. `keys`, `values` and `entries` are copies in that
+  order, and `iter` walks it, the same on every run, where `Map`'s order
+  is unspecified and seeded per process. `Map`'s docs point here.
+- **Inside:** three `Vec`s, keys, values and a live flag, one slot per key
+  in insertion order, and a `Map<K, Int>` from key to slot, used for
+  lookups only. `remove` marks its slot dead, leaving a gap.
+- **Compaction:** only `insert`, before it appends a new key's slot, and
+  only when the gaps are at least half the slots, rebuilds the three
+  `Vec`s from the live slots and moves each position in the `Map`. So the
+  slots stay within twice the entries plus one after any insertion, `Vec`'s
+  own slack, `insert` and `remove` are amortized constant time, and a
+  removal never moves an entry, so removing while an iterator runs skips
+  nothing else. A map that only shrinks keeps its slots until it grows.
+- **WASM:** Nova over `Vec` and `Map`, so std/collections has it on both
+  targets. A key type without `Hash` and `Eq` is E0013 when a method is
+  instantiated, as for `Map`.
+
 ---
 
 ## 13. `std/sync` & `std/task`
@@ -2788,6 +2892,59 @@ pub fn exit(code: Int)
   `process_exit`, so `STD_ONLY` grows from 78 to 81.
 - See `docs/adr/0023-program-arguments.md`.
 
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):**
+`std/process` runs other programs and reads the environment (`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5.7; `docs/adr/0050-the-std-a-compiler-needs.md`). In place of the index's
+`spawn`, `run` and `status` are plain functions that block:
+
+```nova
+pub record ProcessOutput {
+    pub status: Int,
+    pub stdout: Bytes,
+    pub stderr: Bytes,
+}
+
+pub fn run(program: String, args: [String]) -> Result<ProcessOutput, IoError>
+pub fn status(program: String, args: [String]) -> Result<Int, IoError>
+pub fn env(name: String) -> Option<String>
+pub fn current_exe() -> Result<String, IoError>
+```
+
+- **`run`** starts `program` with `args`, its standard input empty, waits
+  for it, and captures its standard output and error whole, reading both
+  at once so neither pipe can stall the child. **`status`** does the same
+  with the three streams inherited, after flushing the program's standard
+  output, so what it printed before comes first. Both block the thread,
+  executor included, though `std/fs` is `async`: a compiler's driver runs
+  `clang` and waits.
+- **`program`** is a path, or a name searched for on `PATH`, as Rust's
+  `Command` does, `.exe` added on Windows. Each argument is passed as it
+  is, with no shell; Rust's `Command` quotes it for Windows. The child
+  inherits the environment and the working directory.
+- **The status** is the exit code; a death by signal on Unix is
+  `128 + signal`, as shells report it, so a child's panic, an abort, gives
+  134. Windows always has a code.
+- **Errors** follow `std/fs`'s mapping: a missing program is `NotFound`,
+  one that cannot be run `PermissionDenied`. A program that runs and fails
+  is not an error.
+- **`env(name)`** is `None` when the variable is unset, its value is not
+  UTF-8, or `name` is empty or holds `=` or NUL, which is not asked of the
+  system. **`current_exe()`** is the running executable's path, `nova`
+  itself under `nova run`; a path that is not Unicode is `InvalidData`.
+- **The wire contract** is `std/fs`'s: six `STD_ONLY` builtins,
+  `process_run(program, args, capture) -> Int`, a status code, then
+  `process_take_status`, `process_take_stdout` and `process_take_stderr`,
+  whose payload the runtime holds, as Rust bytes, until taken;
+  `process_env(name) -> Bool` and `process_current_exe() -> Int`, whose
+  text waits for `fs_take_string`; a failure's message waits for
+  `fs_last_error_message`. `STD_ONLY` grows from 94 to 100.
+- **The names are glob-imported** into every module, as `args` is, and a
+  program's own `run`, `status`, `env` or `current_exe` shadows them,
+  silently. The record is `ProcessOutput`, not `Output`.
+- **Not built:** a `Command` builder with a working directory, an
+  environment or standard input; asynchronous processes; processes on
+  WASM (§11 of the spec).
+
 ---
 
 ## 18. `std/strings`
@@ -2909,6 +3066,60 @@ impl String {
   `string_slice_negative_start_panics`, `string_slice_end_past_len_panics`,
   `string_slice_start_after_end_panics` and
   `string_repeat_negative_count_panics`.
+
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):**
+`std/strings` gains a builder, byte access, number parsing and
+`string_from_chars`
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5.1 to §5.3), each in the module's one `impl String` block but the free
+function and the record:
+
+```nova
+impl String {
+    pub fn byte_len(self) -> Int
+    pub fn byte_at(self, i: Int) -> Int
+    pub fn byte_slice(self, start: Int, end: Int) -> String
+    pub fn parse_int(self) -> Option<Int>
+    pub fn parse_int_radix(self, radix: Int) -> Option<Int>
+    pub fn parse_float(self) -> Option<Float>
+}
+pub fn string_from_chars(cs: [Char]) -> String
+
+pub record StringBuilder { /* private: parts: Vec<String>, bytes: Int */ }
+impl StringBuilder {
+    pub fn new() -> StringBuilder
+    pub fn push(mut self, s: String)
+    pub fn push_char(mut self, c: Char)
+    pub fn byte_len(self) -> Int
+    pub fn is_empty(self) -> Bool
+    pub fn clear(mut self)
+    pub fn to_string(self) -> String
+}
+impl Display for StringBuilder
+```
+
+- **Bytes, in constant time.** These three count bytes, unlike every other
+  index here. The std-only builtin `str_as_bytes` reads a `String` as a
+  `Bytes`, a register move, since the two share one layout and neither
+  changes, so they are `Bytes`' builtins on the string's own bytes.
+  `byte_at` panics past the end, and `byte_slice` when a bound is out of
+  range, `start > end`, or a bound falls inside a character; neither
+  allocates an `Option`.
+- **Numbers.** `parse_int` takes an optional sign and one or more ASCII
+  digits, nothing else, and is `None` outside `Int`'s range, its least
+  value included as text. `parse_int_radix` is the same in radix 2 to 36,
+  letters of either case, no prefix, and panics on any other radix.
+  `parse_float` takes the text Rust's `f64::from_str` takes, `inf`,
+  `infinity` and `nan` in any case included, and gives its value: the
+  std-only builtin `str_is_float` says whether, and `str_to_float` what.
+- **`StringBuilder`.** `push` is a `Vec` push, constant time amortised;
+  `to_string` copies the parts into an array of their count, then joins
+  them in one copy through `str_join`, so building n bytes is linear,
+  where `+` or interpolation in a loop is quadratic. It leaves the builder
+  as it was. `byte_len` is kept as parts are pushed; there is no `len`,
+  which would count characters by walking every part.
+- **Builtins.** `str_as_bytes`, `str_is_float`, `int_to_char` and
+  `float_to_bits` join the module's `STD_ONLY` builtins.
 
 ---
 

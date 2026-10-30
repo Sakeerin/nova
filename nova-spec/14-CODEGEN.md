@@ -151,6 +151,15 @@ two or more parts was a chain of pairwise `nova_rt_str_concat` calls, each
 copying everything built so far. See `examples/05-json-api/BENCHMARK.md`, "AMENDMENT
 2026-10-01 (nary-interpolation)".
 
+**Amended 2026-10-29 (branch `claude/loving-archimedes-frtf5q-50c`):** the
+builder a program writes by hand is not `String::with_capacity` and
+`push_str` either: it is std/strings' `StringBuilder`, a record over a
+`Vec<String>` of the parts and their length in bytes
+(`docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
+§5.1). `push` is a `Vec` push; `to_string` copies the parts' pointers into
+an array of their count, then joins them with one `nova_rt_str_join`, one
+copy of the bytes. No backend and no runtime symbol changed for it.
+
 ### 6.2 Pattern Match
 Compiled to decision tree (Maranget). Each leaf is a basic block. Compiler emits:
 ```llvm
