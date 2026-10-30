@@ -1,5 +1,5 @@
 use nova_diagnostics::FileDb;
-use nova_lexer::{lex, lex_with_comments, CommentKind, Token};
+use nova_lexer::{dump_tokens, lex, lex_with_comments, CommentKind, Token};
 use std::path::{Path, PathBuf};
 
 fn tokens(source: &str) -> Vec<Token> {
@@ -849,4 +849,56 @@ fn only_plain_decimal_integers_are_marked_as_tuple_indexes() {
     // An identifier is no integer, and past the end is `false`.
     assert!(!tokens.plain_decimal(tokens.len() - 2));
     assert!(!tokens.plain_decimal(tokens.len() + 3));
+}
+
+// --- The token dump (5.1 spec §3.3, ADR 0051) ---
+
+/// Every field of the dump: the spans; the kinds' names; `Int` in decimal,
+/// `Float` as its bits in lowercase hex, `Char` as its code point, text in
+/// quotes with its control bytes, DEL, `"` and `\` escaped and non-ASCII
+/// kept; the `NL` and `PD` marks; `Eof` last; then the errors in order, a
+/// control byte in a message escaped and a `\` kept; then the comments.
+#[test]
+fn the_token_dump_writes_every_field() {
+    let source = "let s = \"a\x01\x7f\\\"\\\\é\" r#\"q\\\"# // c\n\
+                  /* b */ 07 1_0 0x1 12 2.5 'é' t.1.2 \x02 \"\\q\"\n/// doc \nfn 0.1";
+    let want = [
+        "0 3 Let",
+        r#"4 5 Ident "s""#,
+        "6 7 Eq",
+        "8 9 StrStart",
+        r#"9 18 StrPart "a\x01\x7f\x22\x5cé""#,
+        "18 19 StrEnd",
+        r#"20 27 RawStr "q\x5c""#,
+        "41 43 Int 7 NL",
+        "44 47 Int 10",
+        "48 51 Int 1",
+        "52 54 Int 12 PD",
+        "55 58 Float 4004000000000000",
+        "59 63 Char 233",
+        r#"64 65 Ident "t""#,
+        "65 66 Dot",
+        "66 67 Int 1 PD",
+        "67 68 Dot",
+        "68 69 Int 2 PD",
+        "72 73 StrStart",
+        r#"74 75 StrPart "q""#,
+        "75 76 StrEnd",
+        r#"77 85 DocComment " doc" NL"#,
+        "86 88 Fn NL",
+        "89 92 Float 3fb999999999999a",
+        "92 92 Eof",
+        r"ERR 70 71 unexpected character `\x02`",
+        r"ERR 73 74 invalid escape sequence `\q`",
+        "COMMENT 28 32 Line",
+        "COMMENT 33 40 Block",
+    ];
+    assert_eq!(dump_tokens(source), want.join("\n") + "\n");
+}
+
+/// An empty source is `Eof` alone, and every line ends with `\n`.
+#[test]
+fn the_token_dump_of_nothing_is_eof() {
+    assert_eq!(dump_tokens(""), "0 0 Eof\n");
+    assert_eq!(dump_tokens("\r\n1"), "2 3 Int 1 NL PD\n3 3 Eof\n");
 }
