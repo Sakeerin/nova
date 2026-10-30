@@ -2374,6 +2374,66 @@ fn a_flat_char_match_switches_on_its_code_points() {
     assert_eq!(keys, ['a' as i64, 'b' as i64]);
 }
 
+/// The instance of a std function whose name holds `part`, in `mir`.
+fn std_fn(mir: &nova_mir::Module, part: &str) -> String {
+    let names = function_names(mir);
+    names
+        .iter()
+        .find(|n| n.contains(part))
+        .unwrap_or_else(|| panic!("no function with `{part}`: {names:?}"))
+        .to_string()
+}
+
+/// How many `CallRuntime`s and `Copy`s the function `name` makes.
+fn calls_and_copies(mir: &nova_mir::Module, name: &str) -> (usize, usize) {
+    let stmts = stmts_of(mir, name);
+    let calls = stmts
+        .iter()
+        .filter(|s| matches!(s, nova_mir::Stmt::CallRuntime { .. }))
+        .count();
+    let copies = stmts
+        .iter()
+        .filter(|s| matches!(s, nova_mir::Stmt::Copy { .. }))
+        .count();
+    (calls, copies)
+}
+
+/// 5.0c's byte view (spec §5.2): `str_as_bytes`, in `String.byte_len`, is a
+/// register move, a `Copy`, so `byte_len`'s one runtime call is `Bytes`'
+/// own length, read on the view.
+#[test]
+fn byte_len_lowers_to_a_move_and_the_bytes_length() {
+    let mir = mir_for("fn main() {\n    let n = \"abc\".byte_len()\n    println(\"${n}\")\n}");
+    let name = std_fn(&mir, "byte_len");
+    let (calls, copies) = calls_and_copies(&mir, &name);
+    assert_eq!(calls, 1, "`{name}`: {:?}", stmts_of(&mir, &name));
+    assert!(
+        copies > 0,
+        "`{name}` has no move: {:?}",
+        stmts_of(&mir, &name)
+    );
+    assert_eq!(
+        count_rt(&stmts_of(&mir, &name), nova_mir::RtFunc::BytesLen),
+        1
+    );
+}
+
+/// `int_to_char`, in `char_from_int`, is a register move too (spec §5.2):
+/// `char_from_int` checks the range and moves, and calls nothing.
+#[test]
+fn char_from_int_checks_the_range_and_moves() {
+    let mir =
+        mir_for("fn main() {\n    let c = char_from_int(65)\n    println(\"${c.is_some()}\")\n}");
+    let name = std_fn(&mir, "char_from_int");
+    let (calls, copies) = calls_and_copies(&mir, &name);
+    assert_eq!(calls, 0, "`{name}`: {:?}", stmts_of(&mir, &name));
+    assert!(
+        copies > 0,
+        "`{name}` has no move: {:?}",
+        stmts_of(&mir, &name)
+    );
+}
+
 /// `impl<T> [T]`'s methods monomorphise per element type, as any generic
 /// impl's do (spec §5.5).
 #[test]

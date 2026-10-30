@@ -1165,6 +1165,28 @@ fn an_index_out_of_bounds_panics_as_natively() {
 fn each_std_panic_names_its_method_as_natively() {
     let Some(_) = node() else { return };
     let cases: &[(&str, &str)] = &[
+        ("\"ab\".byte_at(2)", "String::byte_at index out of range"),
+        ("\"ab\".byte_at(-1)", "String::byte_at index out of range"),
+        (
+            "\"ab\".byte_slice(-1, 1)",
+            "String::byte_slice start is negative",
+        ),
+        (
+            "\"ab\".byte_slice(0, 3)",
+            "String::byte_slice end is past the end of the string",
+        ),
+        (
+            "\"ab\".byte_slice(2, 1)",
+            "String::byte_slice start is after end",
+        ),
+        (
+            "\"é\".byte_slice(1, 2)",
+            "String::byte_slice start is inside a character",
+        ),
+        (
+            "\"é\".byte_slice(0, 1)",
+            "String::byte_slice end is inside a character",
+        ),
         ("[1, 2].slice(-1, 1)", "[T]::slice start is negative"),
         (
             "[1, 2].slice(0, 3)",
@@ -2014,6 +2036,7 @@ mod gate {
         // over a builtin that is a shim entry on WASM.
         array_helpers,
         hidden_trait_methods,
+        char_and_bytes,
     );
 
     /// The programs a test of their own in this module checks, by its name.

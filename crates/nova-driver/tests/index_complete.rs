@@ -249,8 +249,9 @@ fn every_name_in_the_corpora_is_indexed() {
     // `try_async`, `compound_assign_places` and `string_concat`; 161 on
     // 2026-10-27, after 5.0b added `tuples` and `tuples_async`; 165 after
     // `patterns`, `patterns_async`, `match_effects` and `for_arrays`; 166
-    // after 5.0c added `array_helpers`; 167 after `hidden_trait_methods`.
-    assert_eq!(programs.len(), 177, "{programs:#?}");
+    // after 5.0c added `array_helpers`; 167 after `hidden_trait_methods`;
+    // 168 after `char_and_bytes`.
+    assert_eq!(programs.len(), 178, "{programs:#?}");
     let mut files = 0;
     let mut failures: Vec<String> = Vec::new();
     for (k, path) in programs.iter().enumerate() {
@@ -277,11 +278,11 @@ fn every_name_in_the_corpora_is_indexed() {
             every_name_is_covered(&a, file, &mut failures);
         }
     }
-    // 9 + 167 + 3 files of user code, 05-geometry's library's 2, the 8
+    // 9 + 168 + 3 files of user code, 05-geometry's library's 2, the 8
     // modules 07-fullstack-blog's client reaches from its `main.nova` (not
     // the server's 4, which only `server.nova` and `lib.nova` reach), and
     // native std's 22, `std/ui/ssr` among them.
-    assert_eq!(files, 211);
+    assert_eq!(files, 212);
     failures.sort();
     failures.dedup();
     assert!(

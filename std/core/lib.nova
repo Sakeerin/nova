@@ -962,3 +962,42 @@ impl Hash for Char {
 impl Hash for String {
     fn hash(self) -> Int { str_hash(self) }
 }
+
+// Conversions between `Char` and `Int` (5.0 spec §5.2). A method where there
+// is a receiver; `char_from_int` is a free function, named after
+// `bytes_from_string`, because `Char::from_int(n)` would need an associated
+// function on a primitive that returns an `Option` of it, and the free name
+// is what the rest of std's constructors look like.
+impl Char {
+    // A register move: `char_to_int` has no runtime symbol on any target.
+    /// Returns the character's Unicode scalar value, from 0 to `0x10FFFF`.
+    ///
+    /// ```
+    /// assert_eq('A'.to_int(), 65)
+    /// assert_eq('é'.to_int(), 233)
+    /// assert_eq(char_from_int('z'.to_int()).unwrap(), 'z')
+    /// ```
+    pub fn to_int(self) -> Int { char_to_int(self) }
+}
+
+// The range is checked here, in Nova, so `int_to_char` can be a register move
+// with no check of its own, as `char_to_int` is: a `Char` outside the scalar
+// values would break every `str_from_chars` and `Display` downstream, so this
+// function is the only place a `Char` is made from an `Int`.
+/// Returns the character whose Unicode scalar value is `n`, or `None` if `n`
+/// is not one: below 0, above `0x10FFFF`, or a surrogate, `0xD800` to
+/// `0xDFFF`.
+///
+/// ```
+/// assert_eq(char_from_int(97).unwrap(), 'a')
+/// assert_eq(char_from_int(0x10FFFF).unwrap().to_int(), 0x10FFFF)
+/// assert(char_from_int(0xD800).is_none(), "a surrogate is not a character")
+/// assert(char_from_int(0x110000).is_none(), "past the last scalar value")
+/// assert(char_from_int(-1).is_none(), "negative")
+/// ```
+pub fn char_from_int(n: Int) -> Option<Char> {
+    if n < 0 { return None }
+    if n > 0x10FFFF { return None }
+    if n >= 0xD800 && n <= 0xDFFF { return None }
+    Some(int_to_char(n))
+}

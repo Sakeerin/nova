@@ -20,7 +20,9 @@ use crate::{
 enum Lowering {
     /// One `CallRuntime` to this runtime function.
     Runtime(RtFunc),
-    /// The result *is* the argument, in a different `Ty` of the same `MirTy`.
+    /// The result *is* the argument, in a different `Ty` of the same `MirTy`:
+    /// `char_to_int` and `int_to_char` (`Char` and `Int` are both `I64`), and
+    /// `str_as_bytes` (`String` and `Bytes` are both `Ptr`, one layout).
     Reinterpret,
     /// Two typed field loads reaching a finished future's output slot.
     FutureOutput,
@@ -711,6 +713,8 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrToLower => Lowering::Runtime(RtFunc::StrToLower),
                     Builtin::FloatFixed => Lowering::Runtime(RtFunc::FloatFixed),
                     Builtin::StrToFloat => Lowering::Runtime(RtFunc::StrToFloat),
+                    Builtin::IntToChar => Lowering::Reinterpret,
+                    Builtin::StrAsBytes => Lowering::Reinterpret,
                     Builtin::TestSelector => Lowering::Runtime(RtFunc::TestSelector),
                     Builtin::TaskSpawn => Lowering::Runtime(RtFunc::TaskSpawn),
                     Builtin::TaskIsDone => Lowering::Runtime(RtFunc::TaskIsDone),
@@ -825,7 +829,11 @@ impl<'a> Lowerer<'a> {
                     // Unicode scalar value at runtime), so the conversion is a
                     // register move. Giving it a runtime symbol would mean
                     // adding an ABI function whose body is the identity —
-                    // permanent surface area for nothing.
+                    // permanent surface area for nothing. `int_to_char` is
+                    // the same move the other way, its range checked in Nova
+                    // by `char_from_int` first; `str_as_bytes` is one between
+                    // two `MirTy::Ptr`s, `String` and `Bytes` sharing a layout
+                    // (5.0 spec §5.2).
                     //
                     // The `Copy` is not optional and must not be skipped:
                     // `dst` was allocated above and is returned below, so

@@ -4,6 +4,8 @@
 //! - `TyHead::Array`, `[T]`'s impls and `Vec`'s helpers, and the E0010,
 //!   E0014, E0060 and E0074 an impl on arrays meets;
 //! - E0105, a program's trait method one of std's inherent methods hides;
+//! - the std-only builtins kept from user code, and the public form a
+//!   program that names one is pointed to;
 //! - the new items' types;
 
 use super::*;
@@ -146,6 +148,28 @@ fn an_unknown_array_method_is_e0014_with_its_methods_offered() {
     );
 }
 
+/// The std-only builtins std/core and std/strings gain are std's own: a
+/// program that names one finds nothing (spec §5.2 to §5.4).
+#[test]
+fn the_new_builtins_are_not_visible_to_a_program() {
+    for (call, name) in [
+        ("int_to_char(65)", "int_to_char"),
+        ("str_as_bytes(\"a\")", "str_as_bytes"),
+    ] {
+        let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
+        assert!(
+            e.iter()
+                .any(|d| d.code == "E0001" && d.message.contains(&format!("`{name}`"))),
+            "{name}: {e:#?}"
+        );
+    }
+}
+
+/// `option(t, inner)`: whether `t` is an `Option` of `inner`.
+fn option(t: &Ty, inner: Ty) -> bool {
+    matches!(t, Ty::Sum { args, .. } if args.as_slice() == [inner])
+}
+
 /// `Vec`'s helpers' types (spec §5.5).
 #[test]
 fn vecs_helpers_have_the_specs_types() {
@@ -157,6 +181,24 @@ fn vecs_helpers_have_the_specs_types() {
     assert_eq!(local_ty(&r, "va"), Ty::Array(Box::new(Ty::Int)));
     assert_eq!(local_ty(&r, "at"), Ty::Int);
     assert_eq!(local_ty(&r, "last"), Ty::Int);
+}
+
+/// The conversions' and byte access's types (spec §5.2).
+#[test]
+fn the_conversions_and_byte_access_have_the_specs_types() {
+    let r = checked(
+        "fn main() {\n    let c = char_from_int(65)\n    let i = 'a'.to_int()\n    \
+         let s = string_from_chars(['a'])\n    let ba = \"a\".byte_at(0)\n    \
+         let bs = \"ab\".byte_slice(0, 1)\n}\n",
+    );
+    assert!(r.diagnostics.is_empty(), "{:#?}", r.diagnostics);
+    assert!(option(&local_ty(&r, "c"), Ty::Char));
+    for name in ["i", "ba"] {
+        assert_eq!(local_ty(&r, name), Ty::Int, "{name}");
+    }
+    for name in ["s", "bs"] {
+        assert_eq!(local_ty(&r, name), Ty::String, "{name}");
+    }
 }
 
 /// A program's impl that defines a method std's impl on the same type has,
@@ -181,6 +223,31 @@ fn e0074_against_stds_array_impl_labels_the_programs_impl() {
             .any(|l| !l.primary && l.message == "`iter` is also defined by std's impl"),
         "{d:#?}"
     );
+}
+
+/// A std-only builtin that std's public surface wraps, named by a program,
+/// is E0001 with a note naming that surface, and no "did you mean": its
+/// nearest name can be another operation, `char_from_int` for
+/// `char_to_int` (5.0 spec §5.2 to §5.4).
+#[test]
+fn a_std_only_builtin_named_by_a_program_gets_its_public_form() {
+    for (call, form) in [
+        ("char_to_int('a')", "`c.to_int()`"),
+        ("int_to_char(65)", "`char_from_int(n)`"),
+        ("str_from_chars(['a'])", "`string_from_chars(cs)`"),
+        ("str_as_bytes(\"a\")", "`byte_at(i)`"),
+    ] {
+        let e = errors(&format!("fn main() {{\n    let x = {call}\n}}\n"));
+        let d = e.iter().find(|d| d.code == "E0001").expect("an E0001");
+        assert!(d.fixes.is_empty(), "{call}: {:#?}", d.fixes);
+        assert!(
+            d.notes
+                .iter()
+                .any(|n| n.contains("is internal to std; use") && n.contains(form)),
+            "{call}: {:#?}",
+            d.notes
+        );
+    }
 }
 
 fn warnings(src: &str) -> Vec<Diagnostic> {
@@ -363,5 +430,24 @@ fn an_interpolated_array_is_e0013_without_the_display_advice() {
         "`[Int]` cannot be interpolated into a string; an array cannot implement \
          `Display`; interpolate its elements, or wrap it in a record that does",
         "{d:#?}"
+    );
+}
+
+/// `String`'s `byte_len` and `Char`'s `to_int`, std's since Task 2, hide a
+/// program's trait methods of those names, a trait default included: E0105
+/// at the method, or at the impl for a default it takes.
+#[test]
+fn a_trait_method_hidden_by_strings_and_chars_methods_is_e0105() {
+    let src = "trait Size {\n    fn byte_len(self) -> Int\n}\n\
+               impl Size for String {\n    fn byte_len(self) -> Int { self.len() }\n}\n\
+               trait Codes {\n    fn to_int(self) -> Int { 1000 }\n}\n\
+               impl Codes for Char {}\n\
+               fn main() {}\n";
+    assert_eq!(
+        e0105s(src),
+        [
+            "std's inherent method `byte_len` on `String` hides `Size::byte_len`",
+            "std's inherent method `to_int` on `Char` hides `Codes::to_int`",
+        ]
     );
 }

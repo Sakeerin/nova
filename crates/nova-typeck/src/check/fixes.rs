@@ -79,6 +79,24 @@ pub(super) fn scrutinee_sum(fcx: &FnCtx, ty: &Ty) -> Option<DefId> {
     }
 }
 
+/// The std-only builtins whose work std's public surface does since 5.0c
+/// (5.0 spec §5.2 to §5.4), with the form a program writes instead. A
+/// program that calls one by name gets E0001, and this note in place of
+/// "did you mean", whose nearest name is not always the same operation.
+const STD_ONLY_PUBLIC_FORMS: &[(&str, &str)] = &[
+    ("char_to_int", "the method `to_int`, as in `c.to_int()`"),
+    (
+        "int_to_char",
+        "`char_from_int(n)`, which is `None` when `n` is not a character",
+    ),
+    ("str_from_chars", "`string_from_chars(cs)`"),
+    (
+        "str_as_bytes",
+        "a `String`'s `byte_len()`, `byte_at(i)` and `byte_slice(a, b)`, or \
+         `bytes_from_string(s)` for a copy",
+    ),
+];
+
 impl<'a> Checker<'a> {
     /// "make `x` mutable" (spec §4.1): `mut ` before the name of a local
     /// bound by a `let` or as a parameter. `decl` is that name's span.
@@ -136,6 +154,16 @@ impl<'a> Checker<'a> {
     /// names the site could mean: the visible locals, or the type
     /// parameters in scope.
     pub(super) fn name_fixes(&mut self, name: Spanned<String>, need: Need, nearby: Vec<String>) {
+        // A std-only builtin that 5.0c's std wraps gets its public form as a
+        // note instead of a guess: the nearest name can mean something else,
+        // `char_from_int` for `char_to_int`, the conversion the other way.
+        if let Some((_, form)) = STD_ONLY_PUBLIC_FORMS.iter().find(|(b, _)| *b == name.value) {
+            if let Some(d) = self.diagnostics.last_mut() {
+                d.notes
+                    .push(format!("`{}` is internal to std; use {form}", name.value));
+            }
+            return;
+        }
         let import = self.import_fix(&name, &need);
         let change = self.did_you_mean(&name, &need, &nearby);
         self.push_fix(import);

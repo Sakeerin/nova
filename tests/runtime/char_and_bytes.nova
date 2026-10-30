@@ -1,0 +1,80 @@
+// `Char` and `Int` both ways at every edge of the scalar values,
+// `string_from_chars`, and a `String`'s bytes in constant time on one-, two-,
+// three- and four-byte characters (5.0 spec §5.2).
+
+fn show(n: Int) {
+    match char_from_int(n) {
+        Some(c) => println("${n}: Some(${c.to_int()})")
+        None => println("${n}: None")
+    }
+}
+
+fn hex(b: Int) -> String {
+    let digits = "0123456789ABCDEF".chars()
+    "${digits[b / 16]}${digits[b % 16]}"
+}
+
+fn bytes_of(s: String) -> String {
+    let mut out = ""
+    let mut i = 0
+    while i < s.byte_len() {
+        if i > 0 { out = out + " " }
+        out = out + hex(s.byte_at(i))
+        i += 1
+    }
+    out
+}
+
+fn main() {
+    for n in [
+        0 - 1,
+        0,
+        1,
+        65,
+        127,
+        128,
+        0x7FF,
+        0x800,
+        0xD7FF,
+        0xD800,
+        0xDBFF,
+        0xDC00,
+        0xDFFF,
+        0xE000,
+        0xFFFF,
+        0x10000,
+        0x10FFFF,
+        0x110000,
+        -9223372036854775807 - 1,
+        9223372036854775807,
+    ] {
+        show(n)
+    }
+    println(
+        "'a' ${'a'.to_int()} '\\0' ${'\0'.to_int()} 'é' ${'é'.to_int()} '€' ${'€'.to_int()} '𝄞' ${'𝄞'.to_int()}",
+    )
+    let back = char_from_int('€'.to_int()).unwrap()
+    println("round trip ${back}")
+
+    let built = string_from_chars(['N', 'o', 'v', 'a', ' ', char_from_int(0x1F680).unwrap()])
+    println("built ${built} chars=${built.len()} bytes=${built.byte_len()}")
+    println("empty [${string_from_chars([])}]")
+    println("chars back ${string_from_chars("añ€𝄞".chars()) == "añ€𝄞"}")
+
+    for s in ["a", "ñ", "€", "𝄞", "añ€𝄞", ""] {
+        println("${s}: len=${s.len()} byte_len=${s.byte_len()} bytes=[${bytes_of(s)}]")
+    }
+
+    let text = "añ€𝄞z"
+    let starts = [0, 1, 3, 6, 10, 11]
+    let mut k = 0
+    while k + 1 < starts.len() {
+        println(
+            "slice ${starts[k]}..${starts[k + 1]} = ${text.byte_slice(starts[k], starts[k + 1])}",
+        )
+        k += 1
+    }
+    println("whole ${text.byte_slice(0, text.byte_len())}")
+    println("empty at end [${text.byte_slice(11, 11)}] at start [${text.byte_slice(0, 0)}]")
+    println("a slice is equal ${text.byte_slice(1, 6) == "ñ€"}")
+}
