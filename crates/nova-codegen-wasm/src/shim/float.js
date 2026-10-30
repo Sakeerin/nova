@@ -95,3 +95,11 @@ function floatFrom(s) {
   if (body === "nan") return NaN;
   return Number(s);
 }
+
+// Rust's `f64::to_bits`, read as an `i64` as nova_rt_float_to_bits does:
+// the double's bits, as the BigInt an `Int` result is (5.0 spec §5.4).
+function floatBits(v) {
+  const view = new DataView(new ArrayBuffer(8));
+  view.setFloat64(0, v);
+  return view.getBigInt64(0);
+}

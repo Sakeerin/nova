@@ -195,6 +195,14 @@ builtins! {
     /// replaced it on 2026-10-03. Std-only, so
     /// `str_to_float` is not a reserved word in user code.
     StrToFloat,
+    /// `float_to_bits(v: Float) -> Int` — the IEEE 754 bits of `v`, as Rust's
+    /// `f64::to_bits`, read as a signed `Int`. Backs `std/core`'s
+    /// `Float.to_bits`, which N's `.ll` emitter needs to write each float
+    /// constant as S0 does, the hex of its bits. A runtime call natively
+    /// (`nova_rt_float_to_bits`), and a shim entry on WASM, through a
+    /// `DataView` (5.0 spec §5.4, decision 8): one `RtFunc` serves both, so
+    /// no backend has a new statement. Std-only.
+    FloatToBits,
     /// `int_to_char(n: Int) -> Char` — the `Char` whose scalar value is `n`,
     /// the inverse of [`Builtin::CharToInt`]. A register move, as that one
     /// is, with no runtime symbol on any target. **The caller must have
@@ -1052,6 +1060,7 @@ impl Builtin {
             Builtin::StrToLower => "str_to_lower",
             Builtin::FloatFixed => "float_fixed",
             Builtin::StrToFloat => "str_to_float",
+            Builtin::FloatToBits => "float_to_bits",
             Builtin::IntToChar => "int_to_char",
             Builtin::StrAsBytes => "str_as_bytes",
             Builtin::TestSelector => "test_selector",
@@ -1177,7 +1186,7 @@ impl Builtin {
     /// consecutive review rounds (see the Phase 2.2b whole-branch review),
     /// because the roster is duplicated information that only this array
     /// needs to stay exact.
-    pub const STD_ONLY: [Builtin; 92] = [
+    pub const STD_ONLY: [Builtin; 93] = [
         Builtin::StrCmp,
         Builtin::StrHash,
         Builtin::CharToInt,
@@ -1191,6 +1200,7 @@ impl Builtin {
         Builtin::StrToLower,
         Builtin::FloatFixed,
         Builtin::StrToFloat,
+        Builtin::FloatToBits,
         Builtin::IntToChar,
         Builtin::StrAsBytes,
         Builtin::TestSelector,

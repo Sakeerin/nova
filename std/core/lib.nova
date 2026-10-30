@@ -1001,3 +1001,23 @@ pub fn char_from_int(n: Int) -> Option<Char> {
     if n >= 0xD800 && n <= 0xDFFF { return None }
     Some(int_to_char(n))
 }
+
+// A `Float`'s bits (5.0 spec §5.4).
+impl Float {
+    // A runtime call natively, a shim entry on WASM, each giving the bits of
+    // the value it is handed. A NaN made by arithmetic can itself differ by
+    // backend: `0.0 / 0.0` is `0xFFF8…` under `nova run` and `0x7FF8…` built
+    // `--release`, where LLVM folds it. There is no `from_bits` (5.0 spec §12
+    // item 23).
+    /// Returns the IEEE 754 bits of the number, as Rust's `f64::to_bits`
+    /// gives them, read as a signed `Int`: a negative number's sign bit makes
+    /// its bits negative.
+    ///
+    /// ```
+    /// assert_eq((1.0).to_bits(), 0x3FF0000000000000)
+    /// assert_eq((0.0).to_bits(), 0)
+    /// assert_eq((-0.0).to_bits(), -9223372036854775807 - 1) // the sign bit alone
+    /// assert_eq((5e-324).to_bits(), 1) // the smallest subnormal
+    /// ```
+    pub fn to_bits(self) -> Int { float_to_bits(self) }
+}

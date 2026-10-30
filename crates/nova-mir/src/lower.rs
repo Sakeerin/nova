@@ -713,6 +713,7 @@ impl<'a> Lowerer<'a> {
                     Builtin::StrToLower => Lowering::Runtime(RtFunc::StrToLower),
                     Builtin::FloatFixed => Lowering::Runtime(RtFunc::FloatFixed),
                     Builtin::StrToFloat => Lowering::Runtime(RtFunc::StrToFloat),
+                    Builtin::FloatToBits => Lowering::Runtime(RtFunc::FloatToBits),
                     Builtin::IntToChar => Lowering::Reinterpret,
                     Builtin::StrAsBytes => Lowering::Reinterpret,
                     Builtin::TestSelector => Lowering::Runtime(RtFunc::TestSelector),
