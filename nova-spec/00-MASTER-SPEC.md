@@ -763,6 +763,16 @@ arrays, `OrderedMap`, whose order makes a stage's output the same on every
 run, and `std/process`'s `run`, `status`, `env` and `current_exe`, for the
 driver that runs `clang`.
 
+**Amended 2026-10-30 (branch `claude/loving-archimedes-frtf5q-51a`):** step
+1, the lexer, is ported, as 5.1a
+(`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+§3; ADR 0051): the package `selfhost/`, whose `selfhost tokens FILE…` prints
+the token dump S0's hidden `nova parse --dump-tokens` prints, and a
+differential test that compares the two on every `.nova` file of the
+repository and on fuzzed inputs, on all three systems. From here a change to
+the tokens changes both compilers in one pull request. Step 2, the parser
+and the AST, is 5.1b.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)
