@@ -1,0 +1,4 @@
+// A `${` in a raw string is text; hashes close a raw string only when as
+// many follow its `"`.
+let a = r"${x}" r#"${"# r##"a"#b"## r#"one"## r"" r#""#
+let b = r#x r## r

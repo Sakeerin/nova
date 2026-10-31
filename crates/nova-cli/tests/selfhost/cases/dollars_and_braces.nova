@@ -1,0 +1,4 @@
+// `$` without `{` is text; braces inside a hole are counted, and a `}`
+// outside every hole is a brace.
+let a = "$" "$x" "$$" "a$" "${}" "${ { } }" "${ {a: 1} }" "x${"${"y"}"}z"
+}
