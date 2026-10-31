@@ -1,0 +1,6 @@
+// A keyword is a whole match; every keyword, then words that only start
+// as one, and identifiers that start as a raw string would.
+let mut const fn return if else while for in break continue match type record trait impl
+import module pub async await extern unsafe true false as is where with self Self
+lets mutable constant fnord returns iffy elsewhere fork inner breaks selfish Selfie asy
+async_ awaits _ __ _1 A_1 r ra rx br bar

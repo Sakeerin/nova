@@ -1,0 +1,10 @@
+// Integers at Int's edges: one past the largest overflows, in each radix,
+// so its first digit is an unexpected character and lexing moves on one
+// character; `_` after a prefix, and a prefix with no digit, are no integer.
+let a = 9223372036854775807
+let b = 9223372036854775808
+let c = -9223372036854775808
+let d = 0x7FFF_FFFF_FFFF_FFFF 0x8000000000000000 0xFFFFFFFFFFFFFFFFF
+let e = 0b111111111111111111111111111111111111111111111111111111111111111 0b1000000000000000000000000000000000000000000000000000000000000000
+let f = 0o777777777777777777777 0o1000000000000000000000
+let g = 0x_1 0b_1 0o_7 0x 0b 0o 0b2 0o8 0xg 0x1_ 1_ 1__2 0_0

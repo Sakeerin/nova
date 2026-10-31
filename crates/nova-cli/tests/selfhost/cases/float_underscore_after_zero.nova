@@ -1,0 +1,5 @@
+// The 5.0 spike's one difference: its float workaround trimmed the leading
+// zeros before it removed the `_`, and misread `0_81.5`.
+let a = 0_81.5
+let b = 00_1.25e1_0
+let c = 0_0.5

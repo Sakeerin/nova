@@ -1,0 +1,5 @@
+// Char literals: each escape, a quote, three quotes, an empty pair, two
+// characters, a bad escape and a non-ASCII escape.
+let a = 'a' '\n' '\t' '\r' '\\' '\'' '\0' '"' 'é' '😀'
+let b = ''' '' 'ab' '\q' '\é' '\
+'

@@ -1,0 +1,3 @@
+// A block comment that never closes runs to the end, a `"` inside it
+// included.
+let a = 1 /* " never closed

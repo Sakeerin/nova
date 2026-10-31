@@ -23,6 +23,10 @@ const EXPECTED_SKIP: [&str; 2] = [
     "tools/vscode-nova/test/fixture/src/complete.nova",
 ];
 
+/// The self-hosted lexer's fixed cases, inputs kept because they once made
+/// the two lexers disagree, many of them on purpose not Nova (ADR 0051).
+const CASES: &str = "crates/nova-cli/tests/selfhost/cases/";
+
 /// The gate's floor, set in 3.1: the 168 tracked files then, less the one
 /// that did not parse.
 const AT_LEAST: usize = 167;
@@ -166,6 +170,9 @@ fn every_corpus_file_formats_to_the_same_program_and_comments() {
             .unwrap()
             .to_string_lossy()
             .replace('\\', "/");
+        if rel.starts_with(CASES) {
+            continue;
+        }
         let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
         let Some(before) = summary(&text) else {
             skipped.push(rel);
