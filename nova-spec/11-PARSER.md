@@ -461,6 +461,21 @@ pub fn parse(tokens: &[Spanned<Token>], file: FileId)
 - Returns `Some(File)` even with errors when recovery succeeds
 - Returns `None` only on catastrophic failure (rare with chumsky)
 
+**Amended 2026-10-30 (branch `claude/loving-archimedes-frtf5q-51a`):** **the
+token dump**
+(`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+§3.3; ADR 0051, which writes the format out). `nova_lexer::dump_tokens(source)`
+renders one source's tokens, lex errors and comments as text, one per line:
+`start end Kind[ payload][ NL][ PD]` for each token, `Eof` last, with the
+`Token` variant's name, decimal `Int`s, a `Float`'s 16 hex digits of bits, a
+`Char`'s code point, and text in double quotes with control bytes, `"` and
+`\` written `\xHH`; then `ERR start end message` for each lex error; then
+`COMMENT start end Line|Block`. The hidden `nova parse --dump-tokens FILE…`
+prints it after a `== FILE` header per file, and the self-hosted lexer's
+`selfhost tokens FILE…` prints the same bytes. It carries no stability
+promise: it changes with the tokens, in both compilers at once. 5.1b adds an
+AST dump beside it.
+
 ---
 
 ## 5. Error Recovery

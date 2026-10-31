@@ -361,6 +361,25 @@ decision 1; ADR 0048), in place of the 5.0a and 5.0b below:
   - whether the shadowing of std's variant names gets a warning.
 
 ### 5.1 — The lexer, the parser and the AST
+
+**Amended 2026-10-30 (branch `claude/loving-archimedes-frtf5q-51a`):** 5.1
+is built as **two parts, in order,** by the user's decision of 2026-10-30
+(`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+decision 1):
+- **5.1a, the lexer and the harness** (ADR 0051): the package
+  `selfhost/` and its lexer; a token dump on both sides, S0's behind the
+  hidden `nova parse --dump-tokens`; the differential test, with a Rust
+  fuzzer of soup and mutated corpus files on fixed seeds, on all three
+  systems;
+- **5.1b, the parser and the AST:** the AST and the parser in Nova; an AST
+  dump on both sides; parse errors compared completely, notes and newline
+  splits included; the depth limit, 128 levels, P0002, in both parsers;
+  the fuzzer's deep inputs; and the speed measured against S0.
+
+The three questions below are answered by that spec: the AST dump is an
+indented S-expression with spans (§4.3); the fuzzer mutates corpus files
+token by token (§3.5); and the depth is capped at 128 in both parsers, with
+S0's pipeline on a 64 MB stack (§4.4).
 - **N's first modules:** the tokens, a hand-written scanner, the AST,
   recursive descent with error recovery, and the P-codes.
 - **The dumps:** a token dump on both sides (the spike's format), and a

@@ -12,7 +12,10 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 Phase 5.0a, the small language and CI (spec
 `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
 §3; ADR 0048, Phase 5's scope and backend), 5.0b, tuples and
-patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
+patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050). Phase 5.1a, the
+self-hosted lexer and the differential (spec
+`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+§3; ADR 0051).
 
 ### Added
 
@@ -147,6 +150,24 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
   path, `nova` itself under `nova run`. Native only: on WASM, naming one
   is E0092. The four names are in every module's scope, and a program's
   own shadows them (ADR 0050).
+- **The self-hosted lexer, `selfhost/`:** N's first module, a Nova
+  package whose `selfhost tokens FILE…` lexes each file exactly as
+  `nova-lexer` does, quirks included, and prints its token dump. A
+  differential test, `crates/nova-cli/tests/selfhost.rs`, builds it with
+  `nova build` and compares its dumps with S0's, byte for byte, on every
+  `.nova` file of the repository, on fixed cases, and on a fuzzer's soup
+  and mutated corpus files from fixed seeds, on every system, the corpus
+  also with a Windows checkout's `\r\n` line endings;
+  `NOVA_SELFHOST_FUZZ=SEED:COUNT` searches longer. A change to the tokens
+  now changes both lexers in one pull request (ADR 0051).
+- **`nova parse --dump-tokens FILE…`, hidden:** each file's tokens with
+  their spans, line-break and plain-decimal marks, then its lex errors and
+  comments, one per line, after a header `== FILE`; a file that cannot be
+  read is `IOERR` and its kind, and the exit code 2. The text comes from
+  `nova_lexer::dump_tokens`. It is absent from `--help` and carries no
+  stability promise. `nova parse` without it still takes one file, and
+  refuses a second in clap's words as before; the further files are a
+  hidden argument only the flag reads (ADR 0051).
 
 ### Changed
 
@@ -204,6 +225,8 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050).
   `0`, by the source text, so `t.1.10` is `(t.1).10`. A float anywhere
   else, `0..1.5` included, is unchanged. `Tokens::plain_decimal` says
   whether an integer is written in plain decimal digits.
+- **CI:** `nova fmt --check` covers `selfhost/` with `std/` and
+  `examples/` (ADR 0051).
 - **CI:** the `test` job's Linux leg runs on `ubuntu-24.04`, installs
   Ubuntu's `clang-18` and asserts that it is 18.1.3. With
   `NOVA_REQUIRE_CLANG=1` and `NOVA_CLANG=clang-18`, a new test,
