@@ -192,6 +192,29 @@ fn the_token_dump_flag_is_hidden() {
     let stderr = String::from_utf8_lossy(&extra.stderr);
     let usage = format!("\nUsage: nova-renamed{EXE_SUFFIX} parse [OPTIONS] <FILE>\n");
     assert!(stderr.contains(&usage), "{stderr}");
+    // An empty further file is refused in clap's words as well, naming the
+    // first file after FILE, never the hidden list.
+    for (args, named) in [
+        (&["parse", "a.nova", ""][..], ""),
+        (&["parse", "a.nova", "b.nova", ""], "b.nova"),
+        (&["parse", "--ast", "a.nova", ""], ""),
+    ] {
+        let extra = Command::new(nova())
+            .args(args)
+            .output()
+            .expect("run nova parse");
+        let stderr = String::from_utf8_lossy(&extra.stderr);
+        assert_eq!(extra.status.code(), Some(2), "{args:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: unexpected argument '{named}' found\n\n\
+                 Usage: nova{EXE_SUFFIX} parse [OPTIONS] <FILE>\n\n\
+                 For more information, try '--help'.\n"
+            ),
+            "{args:?}"
+        );
+    }
     // A first argument with no file name in UTF-8 gives clap no name, and
     // its usage line says `parse` alone. Only Unix's `Command` sets it.
     #[cfg(unix)]
@@ -680,6 +703,11 @@ fn unreadable_files_are_reported_alike() {
         out.ends_with("== latin1.nova\nIOERR InvalidData\n"),
         "{out}"
     );
+    // An empty path after the first is a file that is not there, on both
+    // sides; an empty first one is S0's clap error (ADR 0051).
+    let files = ["ok.nova", ""].map(String::from);
+    let out = agree(&dir, &files, BATCH, 2);
+    assert!(out.ends_with("== \nIOERR NotFound\n"), "{out}");
 }
 
 /// No file at all: both sides refuse it, print nothing and exit 2.

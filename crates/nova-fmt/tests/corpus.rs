@@ -23,8 +23,9 @@ const EXPECTED_SKIP: [&str; 2] = [
     "tools/vscode-nova/test/fixture/src/complete.nova",
 ];
 
-/// The self-hosted lexer's fixed cases, inputs kept because they once made
-/// the two lexers disagree, many of them on purpose not Nova (ADR 0051).
+/// The self-hosted lexer's fixed cases: the spike's one difference,
+/// `0_81.5`, and eleven probes that agreed, kept so the edges stay pinned,
+/// many of them on purpose not Nova (ADR 0051).
 const CASES: &str = "crates/nova-cli/tests/selfhost/cases/";
 
 /// The gate's floor, set in 3.1: the 168 tracked files then, less the one

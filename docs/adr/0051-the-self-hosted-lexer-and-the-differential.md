@@ -68,14 +68,14 @@ found the one bug the corpus could not.
    `nova_lexer::dump_tokens(source)` writes one file's dump, next to the
    lexer it describes; the command adds the headers and `IOERR`. Without
    the flag, `nova parse` takes one file as before: the further files are
-   a hidden list, `more`, that only the flag reads, and a second file
-   without it is refused with clap's own "unexpected argument" error, in
-   the words clap gave before the list existed and built as clap builds
-   it, so a terminal shows the same colours. Its usage line names the
-   command as clap does: the file name of the first argument, then
-   `parse`, so a renamed `nova` names itself; or `parse` alone when that
-   argument has no file name in UTF-8 (`""`, `/`, `..`, bytes that are
-   not UTF-8). `--help` is unchanged.
+   a hidden list, `more`, that only the flag reads, taken unchecked, and a
+   second file without it, an empty one too, is refused with clap's own
+   "unexpected argument" error, in the words clap gave before the list
+   existed and built as clap builds it, so a terminal shows the same
+   colours. Its usage line names the command as clap does: the file name
+   of the first argument, then `parse`, so a renamed `nova` names itself;
+   or `parse` alone when that argument has no file name in UTF-8 (`""`,
+   `/`, `..`, bytes that are not UTF-8). `--help` is unchanged.
    The flag conflicts with `--ast` and `--check`. Per file, every line
    ending in `\n`:
    - **a line per token, `Eof` last:** `start end Kind[ payload][ NL][ PD]`.
@@ -153,8 +153,8 @@ found the one bug the corpus could not.
      that crashed or printed nothing says so rather than showing a
      confusing difference.
    - **The fixed cases** in `tests/selfhost/cases/` run the same way:
-     every input that ever found a difference, starting with the spike's
-     `0_81.5`, then the probes of numbers, tuple indexes, nested holes,
+     the spike's one difference, `0_81.5`, and eleven probes that agreed,
+     kept so the edges stay pinned: numbers, tuple indexes, nested holes,
      raw strings, chars, punctuation, keywords, `$` and braces, slashes and
      an open block comment. They are `.nova` files, and `nova-fmt`'s corpus
      gate skips their directory, since many are not Nova on purpose.
@@ -171,21 +171,22 @@ found the one bug the corpus could not.
      would rewrite such a file's line endings, and the repository's text
      holds no line ending in `\r`, no NUL and no backslash-u escape.
    - Other tests: the flag is absent from `nova parse --help` and from the
-     error for a second file, and conflicts with `--ast` and `--check`;
-     S0's dump has a header per file and `IOERR` for a missing one, the
-     rest dumped, exit code 2; unreadable files, a missing one and one
-     that is not UTF-8, are reported alike; the report names the file and
-     line, run on a deliberately wrong dump, and a side that fails is
-     reported with its exit code and stderr; both sides refuse no file; a
-     process past its limit is killed and its batch named, and a pipe
-     still open at the limit is reported; a failed build is made once, and
-     N is one however often asked; a missing final line break is marked;
-     a seed's mutations are the same from a Windows checkout; a renamed
-     `nova` names itself in the second file's error, and on Unix a first
-     argument with no file name gives `parse` alone;
-     `nova-lexer`'s tests hold one dump with every field, a float's bits
-     among them in lowercase hex; and `nova test` in `selfhost/` passes as
-     many tests as N's sources hold, so a run of none fails.
+     error for a second file, an empty one included, and conflicts with
+     `--ast` and `--check`; S0's dump has a header per file and `IOERR` for
+     a missing one, the rest dumped, exit code 2; unreadable files, a
+     missing one, one that is not UTF-8 and an empty path after the first,
+     are reported alike; the report names the file and line, run on a
+     deliberately wrong dump, and a side that fails is reported with its
+     exit code and stderr; both sides refuse no file; a process past its
+     limit is killed and its batch named, and a pipe still open at the
+     limit is reported; a failed build is made once, and N is one however
+     often asked; a missing final line break is marked; a seed's mutations
+     are the same from a Windows checkout; a renamed `nova` names itself in
+     the second file's error, and on Unix a first argument with no file
+     name gives `parse` alone; `nova-lexer`'s tests hold one dump with
+     every field, a float's bits among them in lowercase hex; and
+     `nova test` in `selfhost/` passes as many tests as N's sources hold,
+     so a run of none fails.
 5. **The fuzzer is Rust, in the test, with a splitmix64 PRNG** and no new
    crate:
    - **soup:** the spike's atoms, with `\r` and `\r\n` alone and inside
@@ -259,8 +260,9 @@ found the one bug the corpus could not.
   indexes, escapes, holes, chars and comments; the interesting ones became
   the fixed cases and the edge inputs. A later check's own search, about
   50,000 inputs, found none either.
-- An empty path is refused by S0's clap and read as `IOERR NotFound` by N;
-  the harness never passes one.
+- An empty first path is refused by S0's clap and read as `IOERR NotFound`
+  by N; the harness never passes one. An empty path after the first is
+  `IOERR NotFound` on both, as `unreadable_files_are_reported_alike` checks.
 - A file name that is not UTF-8 differs too: S0 reads the file and dumps
   it, under a header that shows the name lossily, while N, whose `args()`
   are strings, gets the lossy name and prints `IOERR NotFound`. The

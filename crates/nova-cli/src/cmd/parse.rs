@@ -10,6 +10,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::Args;
 use nova_diagnostics::{render, FileDb};
 use nova_lexer::lex;
@@ -34,8 +35,11 @@ pub struct ParseCmd {
     #[arg(long, hide = true, conflicts_with_all = ["ast", "check"])]
     dump_tokens: bool,
 
-    /// The files after FILE, which only `--dump-tokens` takes.
-    #[arg(hide = true)]
+    /// The files after FILE, which only `--dump-tokens` takes. Taken as
+    /// they are, an empty one included, so that without the flag `run`
+    /// refuses them in clap's words, and with it an empty one is a file
+    /// that is not there, as N reads it.
+    #[arg(hide = true, value_parser = OsStringValueParser::new().map(PathBuf::from))]
     more: Vec<PathBuf>,
 }
 

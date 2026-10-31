@@ -1,5 +1,6 @@
 // The float split after a `.`: plain digits on both sides split; a leading
-// zero, an `_`, an exponent, `..` before it or a part past Int do not.
+// zero splits but is not plain decimal (no `PD`); an `_`, an exponent, `..`
+// before it or a part past Int do not.
 let a = t.0.1.2 x.1.2.3.4 a.0.0 t.1.10
 let b = t.1e5 t.01.2 t.1.02 t.1_0.2 t..1.2 t.1.5e3
 let c = t.99999999999999999999.1 t.1.99999999999999999999 t.9223372036854775807.9223372036854775808
