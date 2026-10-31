@@ -13,6 +13,7 @@
 /examples/07-fullstack-blog/data/users.json
 /examples/07-fullstack-blog/data/users.json.tmp
 /examples/07-fullstack-blog/data/secret
+/selfhost/target
 /tools/vscode-nova/node_modules
 /tools/vscode-nova/out
 /tools/vscode-nova/.vscode-test

@@ -4,14 +4,103 @@
 //!
 //! - S0's hidden `nova parse --dump-tokens FILE…`: absent from `--help`, a
 //!   header per file, and `IOERR` with the exit code 2 for a file it cannot
-//!   read.
+//!   read;
+//! - N's own `@test`s, which `nova test` runs in `selfhost/`: as many must
+//!   pass as its sources hold.
 //!
 //! Each test writes its inputs to fixed directories under the system temp
 //! directory.
 
 use std::env::consts::EXE_SUFFIX;
-use std::path::PathBuf;
-use std::process::Command;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// The repository, two levels above this crate.
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+/// How long one process a test starts may run: `nova test`, `nova build`,
+/// or one side on one batch. Each takes a second or two here, and CI's
+/// Windows runners are several times slower; a lexer that loops forever
+/// fails its test at this limit rather than holding CI for hours.
+const CHILD_LIMIT: Duration = Duration::from_secs(120);
+
+/// `cmd`'s output, as `Command::output` gives it, if it exits and its
+/// stdout and stderr close within `limit`; otherwise an error that names it
+/// by `what`. Its stdout and stderr are read on threads of their own, so a
+/// child that fills a pipe cannot stall the wait; its stdin is what `cmd`
+/// sets.
+/// - Past the limit, or if it cannot be waited for, it is killed. `kill`
+///   reaches the child alone, not a process it started: an N `@test` that
+///   looped would leave its test process running, orphaned, when
+///   `nova test` is killed, but that process holds none of these pipes,
+///   since `nova test` reads its output itself.
+/// - After it exits, its pipes are read to their end within what is left
+///   of the limit ([`read_by`]): a process it started may still hold them
+///   open, and that is reported rather than waited for. After a kill the
+///   readers are not waited for at all.
+fn output_within(cmd: &mut Command, limit: Duration, what: &str) -> Result<Output, String> {
+    fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            bytes
+        })
+    }
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{what} could not start: {e}"))?;
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{what} did not finish within {limit:?}: killed"));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{what} could not be waited for: {e}: killed"));
+            }
+        }
+    };
+    let [stdout, stderr] = read_by([stdout, stderr], deadline).ok_or_else(|| {
+        format!(
+            "{what} exited ({status}), but its stdout or stderr was still open at \
+             {limit:?}: a process it started holds it"
+        )
+    })?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// What each of `readers` read, once both have finished, if they finish by
+/// `deadline`; `None` if either is still reading then.
+fn read_by(readers: [JoinHandle<Vec<u8>>; 2], deadline: Instant) -> Option<[Vec<u8>; 2]> {
+    while readers.iter().any(|reader| !reader.is_finished()) {
+        if Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Some(readers.map(|reader| reader.join().expect("read a pipe")))
+}
 
 fn nova() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_nova"))
@@ -112,4 +201,49 @@ fn the_token_dump_has_a_header_per_file_and_ioerr_for_a_missing_one() {
          == b.nova\n0 1 Ident \"b\"\n1 1 Eof\n"
     );
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// How many `@test` functions N's sources hold: the lines that are `@test`
+/// in the `.nova` files of `selfhost/src/` and `selfhost/tests/`.
+fn selfhost_test_count() -> usize {
+    let mut count = 0;
+    for sub in ["src", "tests"] {
+        let Ok(entries) = std::fs::read_dir(root().join("selfhost").join(sub)) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("read a directory entry").path();
+            if path.extension().is_some_and(|e| e == "nova") {
+                let text = std::fs::read_to_string(&path).expect("read an N source");
+                count += text.lines().filter(|l| l.trim() == "@test").count();
+            }
+        }
+    }
+    assert!(count > 0, "no @test in selfhost/");
+    count
+}
+
+/// N's own `@test`s. `nova test` writes nothing into the package, so it
+/// runs in place. Each one must pass, so as many must pass as the sources
+/// hold: a run of no test at all fails.
+#[test]
+fn the_selfhost_tests_pass() {
+    let home = fresh_dir("test-home");
+    let out = output_within(
+        Command::new(nova())
+            .current_dir(root().join("selfhost"))
+            .env("NOVA_HOME", &home)
+            .arg("test")
+            .stdin(Stdio::null()),
+        CHILD_LIMIT,
+        "nova test in selfhost/",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let all = format!(" {} passed; 0 failed;", selfhost_test_count());
+    assert!(
+        out.status.success() && stdout.contains(&all),
+        "`{all}` is not in:\n{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
