@@ -1,0 +1,54 @@
+// N, the self-hosted Nova compiler, so far its lexer (spec
+// docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
+// §3.2, ADR 0051).
+//
+//   selfhost tokens FILE...   prints each file's token dump, after a header
+//                             line `== FILE`, as `nova parse --dump-tokens`
+//                             does
+//
+// A file with lex errors is dumped with them, and the exit code stays 0. A
+// file that cannot be read prints `IOERR` and its kind after its header;
+// the rest are dumped, then the exit code is 2.
+
+import dump
+import lexer
+import lexer_tests
+import token
+
+async fn main() {
+    let argv = args()
+    // No file is refused, as S0's clap refuses it.
+    if argv.len() < 3 || argv.at(1) != "tokens" {
+        eprintln("usage: selfhost tokens FILE...")
+        exit(2)
+        return
+    }
+    let mut failed = false
+    let mut i = 2
+    while i < argv.len() {
+        let path = argv.at(i)
+        match read_to_string(path).await {
+            Ok(source) => print("== ${path}\n${dump_tokens(source)}")
+            Err(e) => {
+                print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
+                failed = true
+            }
+        }
+        i += 1
+    }
+    if failed { exit(2) }
+}
+
+// The kind's name, as S0's dump prints it.
+fn io_kind_name(kind: IoErrorKind) -> String {
+    match kind {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}

@@ -1,0 +1,202 @@
+// The token dump: one source's tokens, lex errors and comments as text, one
+// item per line, exactly as S0's `nova parse --dump-tokens` prints them
+// (crates/nova-lexer/src/dump.rs; spec §3.3 and ADR 0051 give the format).
+//
+// Per source:
+// - one line per token, `Eof` last: `start end Kind[ payload][ NL][ PD]`;
+// - one line per lex error: `ERR start end message`;
+// - one line per comment: `COMMENT start end Line|Block`.
+
+import lexer
+import token
+
+/// The token dump of `source` (dump.rs's `dump_tokens`).
+pub fn dump_tokens(source: String) -> String {
+    let (tokens, comments, errors) = lex_with_comments(source)
+    let mut out = StringBuilder::new()
+    let mut i = 0
+    while i < tokens.len() {
+        let t = tokens.at(i)
+        out.push("${t.span.start} ${t.span.end} ")
+        push_kind_and_payload(out, t.value)
+        if tokens.line_break_before(i) { out.push(" NL") }
+        if tokens.plain_decimal(i) { out.push(" PD") }
+        out.push("\n")
+        i += 1
+    }
+    for e in errors.iter() {
+        let span = e.span()
+        out.push("ERR ${span.start} ${span.end} ")
+        push_escaped(out, "${e}", false)
+        out.push("\n")
+    }
+    for c in comments.iter() {
+        let kind = match c.kind {
+            Line => "Line"
+            Block => "Block"
+        }
+        out.push("COMMENT ${c.span.start} ${c.span.end} ${kind}\n")
+    }
+    out.to_string()
+}
+
+// The token's kind, the Rust variant's name, and its payload: `Int` in
+// decimal, `Float` as the 16 hex digits of its bits, `Char` as its code
+// point, and text in double quotes, escaped.
+fn push_kind_and_payload(mut out: StringBuilder, t: Token) {
+    match t {
+        Int(n) => out.push("Int ${n}")
+        Float(f) => {
+            out.push("Float ")
+            out.push(hex16(f.to_bits()))
+        }
+        Char(c) => out.push("Char ${c.to_int()}")
+        StrPart(s) => push_quoted(out, "StrPart", s)
+        RawStr(s) => push_quoted(out, "RawStr", s)
+        Ident(s) => push_quoted(out, "Ident", s)
+        DocComment(s) => push_quoted(out, "DocComment", s)
+        _ => out.push(kind_name(t))
+    }
+}
+
+fn push_quoted(mut out: StringBuilder, kind: String, text: String) {
+    out.push(kind)
+    out.push(" \"")
+    push_escaped(out, text, true)
+    out.push("\"")
+}
+
+// `text`, with each byte below 0x20 and 0x7F written `\xHH`, two lowercase
+// hex digits, and, when `quoted`, `"` and `\` too. Every other byte is kept,
+// so a non-ASCII character prints as it is. The bytes escaped are all ASCII,
+// so the runs between them are whole characters.
+fn push_escaped(mut out: StringBuilder, text: String, quoted: Bool) {
+    let n = text.byte_len()
+    let mut run = 0
+    let mut i = 0
+    while i < n {
+        let b = text.byte_at(i)
+        if b < 0x20 || b == 0x7F || (quoted && (b == 34 || b == 92)) {
+            if i > run { out.push(text.byte_slice(run, i)) }
+            out.push("\\x")
+            out.push(hex_digit(b >> 4))
+            out.push(hex_digit(b & 15))
+            run = i + 1
+        }
+        i += 1
+    }
+    if n > run { out.push(text.byte_slice(run, n)) }
+}
+
+// The 64 bits of `bits` as 16 lowercase hex digits, the sign bit first.
+fn hex16(bits: Int) -> String {
+    let mut out = StringBuilder::new()
+    let mut shift = 60
+    while shift >= 0 {
+        out.push(hex_digit((bits >> shift) & 15))
+        shift -= 4
+    }
+    out.to_string()
+}
+
+fn hex_digit(d: Int) -> String {
+    if d < 10 { "${d}" } else { string_from_chars([char_from_int(87 + d).unwrap()]) }
+}
+
+// The name of a token kind with no payload: its Rust variant's name.
+fn kind_name(t: Token) -> String {
+    match t {
+        Let => "Let"
+        Mut => "Mut"
+        Const => "Const"
+        Fn => "Fn"
+        Return => "Return"
+        If => "If"
+        Else => "Else"
+        While => "While"
+        For => "For"
+        In => "In"
+        Break => "Break"
+        Continue => "Continue"
+        Match => "Match"
+        Type => "Type"
+        Record => "Record"
+        Trait => "Trait"
+        Impl => "Impl"
+        Import => "Import"
+        Module => "Module"
+        Pub => "Pub"
+        Async => "Async"
+        Await => "Await"
+        Extern => "Extern"
+        Unsafe => "Unsafe"
+        True => "True"
+        False => "False"
+        As => "As"
+        Is => "Is"
+        Where => "Where"
+        With => "With"
+        SelfLower => "SelfLower"
+        SelfUpper => "SelfUpper"
+        LParen => "LParen"
+        RParen => "RParen"
+        LBracket => "LBracket"
+        RBracket => "RBracket"
+        LBrace => "LBrace"
+        RBrace => "RBrace"
+        Comma => "Comma"
+        Semicolon => "Semicolon"
+        Colon => "Colon"
+        ColonColon => "ColonColon"
+        Arrow => "Arrow"
+        FatArrow => "FatArrow"
+        Dot => "Dot"
+        DotDot => "DotDot"
+        DotDotEq => "DotDotEq"
+        At => "At"
+        Question => "Question"
+        Eq => "Eq"
+        EqEq => "EqEq"
+        BangEq => "BangEq"
+        Lt => "Lt"
+        LtEq => "LtEq"
+        Gt => "Gt"
+        GtEq => "GtEq"
+        AmpAmp => "AmpAmp"
+        PipePipe => "PipePipe"
+        Bang => "Bang"
+        Plus => "Plus"
+        Minus => "Minus"
+        Star => "Star"
+        Slash => "Slash"
+        Percent => "Percent"
+        PlusEq => "PlusEq"
+        MinusEq => "MinusEq"
+        StarEq => "StarEq"
+        SlashEq => "SlashEq"
+        PercentEq => "PercentEq"
+        Amp => "Amp"
+        Pipe => "Pipe"
+        Caret => "Caret"
+        Tilde => "Tilde"
+        LtLt => "LtLt"
+        GtGt => "GtGt"
+        AmpEq => "AmpEq"
+        PipeEq => "PipeEq"
+        CaretEq => "CaretEq"
+        LtLtEq => "LtLtEq"
+        GtGtEq => "GtGtEq"
+        StrStart => "StrStart"
+        StrEnd => "StrEnd"
+        InterpOpen => "InterpOpen"
+        InterpClose => "InterpClose"
+        Eof => "Eof"
+        Int(_) => "Int"
+        Float(_) => "Float"
+        Char(_) => "Char"
+        StrPart(_) => "StrPart"
+        RawStr(_) => "RawStr"
+        Ident(_) => "Ident"
+        DocComment(_) => "DocComment"
+    }
+}

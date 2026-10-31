@@ -1,0 +1,1048 @@
+// The Nova lexer: a port of crates/nova-lexer/src/lib.rs, tokens.rs and
+// error.rs, function by function, so that it gives the same tokens, spans,
+// line-break marks, errors and comments as the Rust lexer on every input
+// (spec
+// docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
+// §3, ADR 0051). Each function names the Rust it ports. A change to the
+// language's tokens changes both lexers in one pull request; the
+// differential test in crates/nova-cli/tests/selfhost.rs holds them equal.
+//
+// The Rust lexer hands most tokens to `logos` 0.14. Here `lex_logos` and
+// the functions after it are that recognizer written by hand, with logos's
+// rules: the longest match wins, a keyword beats an identifier of the same
+// text, and a match that no regex makes, or whose callback refuses it (an
+// integer that overflows), is `UnexpectedCharacter` of its first character,
+// after which lexing moves on one character.
+//
+// The source is read a byte at a time with `String.byte_at`, and every span
+// is a byte offset, as in Rust.
+
+import token
+
+// The bytes the lexer tests for, by name.
+const TAB: Int = 9
+
+const NEWLINE: Int = 10
+
+const CR: Int = 13
+
+const SPACE: Int = 32
+
+const QUOTE: Int = 34
+
+const HASH: Int = 35
+
+const DOLLAR: Int = 36
+
+const APOSTROPHE: Int = 39
+
+const STAR: Int = 42
+
+const PLUS: Int = 43
+
+const MINUS: Int = 45
+
+const DOT: Int = 46
+
+const SLASH: Int = 47
+
+const ZERO: Int = 48
+
+const NINE: Int = 57
+
+const UPPER_E: Int = 69
+
+const BACKSLASH: Int = 92
+
+const UNDERSCORE: Int = 95
+
+const LOWER_E: Int = 101
+
+const LOWER_R: Int = 114
+
+const LBRACE: Int = 123
+
+const RBRACE: Int = 125
+
+// ---------------------------------------------------------------------------
+// error.rs
+// ---------------------------------------------------------------------------
+
+/// A non-fatal error the lexer reports (error.rs's `LexError`). Lexing goes
+/// on after each one.
+pub type LexError =
+    | UnterminatedString(Span)
+    | UnterminatedInterpolation(Span)
+    | UnterminatedBlockComment(Span)
+    | InvalidEscapeSequence(Char, Span)
+    | InvalidUnicodeEscape(Span)
+    | InvalidNumberLiteral(Span)
+    | UnexpectedCharacter(Char, Span)
+
+impl LexError {
+    /// Where the error is (error.rs's `LexError::span`).
+    pub fn span(self) -> Span {
+        match self {
+            UnterminatedString(s) => s
+            UnterminatedInterpolation(s) => s
+            UnterminatedBlockComment(s) => s
+            InvalidEscapeSequence(_, s) => s
+            InvalidUnicodeEscape(s) => s
+            InvalidNumberLiteral(s) => s
+            UnexpectedCharacter(_, s) => s
+        }
+    }
+}
+
+// The `#[error(…)]` texts, word for word.
+impl Display for LexError {
+    fn fmt(self) -> String {
+        match self {
+            UnterminatedString(_) => "unterminated string literal"
+            UnterminatedInterpolation(_) => {
+                "unterminated string interpolation: this `$" + "{` has no matching `}`"
+            }
+            UnterminatedBlockComment(_) => "unterminated block comment"
+            InvalidEscapeSequence(c, _) => "invalid escape sequence `\\${c}`"
+            InvalidUnicodeEscape(_) => "invalid unicode escape sequence"
+            InvalidNumberLiteral(_) => "invalid numeric literal"
+            UnexpectedCharacter(c, _) => "unexpected character `${c}`"
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lib.rs: comments, and the lexer's entry points
+// ---------------------------------------------------------------------------
+
+/// Which kind of comment (lib.rs's `CommentKind`).
+pub type CommentKind =
+    /// `// …`, including `//// …`.
+    | Line
+    /// `/* … */`, which does not nest.
+    | Block
+
+/// A comment the lexer skipped (lib.rs's `Comment`): from `//` to the end
+/// of its line, without the line break or a `\r` before it; or from `/*`
+/// through `*/`.
+pub record Comment { pub kind: CommentKind, pub span: Span }
+
+/// The tokens of `source` and the errors found (lib.rs's `lex`).
+pub fn lex(source: String) -> (Tokens, Vec<LexError>) {
+    let mut lexer = new_lexer(source)
+    let (tokens, errors) = lexer.tokenize()
+    (marked(tokens, source), errors)
+}
+
+/// `lex`, plus every comment skipped, in source order (lib.rs's
+/// `lex_with_comments`). The tokens and errors are exactly `lex`'s.
+pub fn lex_with_comments(source: String) -> (Tokens, Vec<Comment>, Vec<LexError>) {
+    let mut lexer = new_lexer(source)
+    let (tokens, errors) = lexer.tokenize()
+    (marked(tokens, source), lexer.comments, errors)
+}
+
+// ---------------------------------------------------------------------------
+// tokens.rs
+// ---------------------------------------------------------------------------
+
+/// The tokens of one source, ending with `Eof`, each marked with whether a
+/// line break comes before it, and whether it is an integer in plain decimal
+/// digits (tokens.rs's `Tokens`).
+pub record Tokens { pub tokens: Vec<Spanned>, breaks: Vec<Bool>, plain: Vec<Bool> }
+
+/// `tokens`, lexed from `source`, each marked by the source text between it
+/// and the token before it, or the start of the source (tokens.rs's
+/// `Tokens::marked`). A line break is a `\n` or a `\r`, and one inside a
+/// comment counts.
+pub fn marked(tokens: Vec<Spanned>, source: String) -> Tokens {
+    let n = source.byte_len()
+    let mut prev_end = 0
+    let mut breaks: Vec<Bool> = Vec::new()
+    let mut plain: Vec<Bool> = Vec::new()
+    for t in tokens.iter() {
+        let start = min(t.span.start, n)
+        let mut i = min(prev_end, start)
+        let mut line_break = false
+        while i < start {
+            let c = source.byte_at(i)
+            if c == NEWLINE || c == CR {
+                line_break = true
+                break
+            }
+            i += 1
+        }
+        prev_end = max(prev_end, t.span.end)
+        breaks.push(line_break)
+        plain.push(is_plain_decimal(t, source))
+    }
+    Tokens { tokens: tokens, breaks: breaks, plain: plain }
+}
+
+// An `Int` whose text is ASCII digits with no leading zero, unless it is
+// exactly `0`.
+fn is_plain_decimal(t: Spanned, source: String) -> Bool {
+    let is_int = match t.value {
+        Int(_) => true
+        _ => false
+    }
+    if !is_int { return false }
+    let start = t.span.start
+    let end = t.span.end
+    if end <= start { return false }
+    let mut i = start
+    while i < end {
+        if !is_digit(source.byte_at(i)) { return false }
+        i += 1
+    }
+    end - start == 1 || source.byte_at(start) != ZERO
+}
+
+impl Tokens {
+    /// How many tokens, `Eof` included.
+    pub fn len(self) -> Int { self.tokens.len() }
+
+    /// The token at `index`, which must be less than `len()`.
+    pub fn at(self, index: Int) -> Spanned { self.tokens.at(index) }
+
+    /// Whether a line break comes before the token at `index`; `false` past
+    /// the end (tokens.rs's `line_break_before`).
+    pub fn line_break_before(self, index: Int) -> Bool {
+        if index < 0 || index >= self.breaks.len() { return false }
+        self.breaks.at(index)
+    }
+
+    /// Whether the token at `index` is an integer in plain decimal digits
+    /// with no leading zero; `false` past the end (tokens.rs's
+    /// `plain_decimal`).
+    pub fn plain_decimal(self, index: Int) -> Bool {
+        if index < 0 || index >= self.plain.len() { return false }
+        self.plain.at(index)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// lib.rs: the lexer
+// ---------------------------------------------------------------------------
+
+// One open `${…}` hole (lib.rs's `InterpFrame`): the offset of its `$`, for
+// the unterminated-hole error, and how many `{` opened inside it are still
+// unmatched. A `}` ends the hole only when that count is zero.
+record InterpFrame { open: Int, braces: Int }
+
+/// The lexer's state (lib.rs's `Lexer`).
+pub record Lexer {
+    source: String,
+    // The source's length in bytes.
+    len: Int,
+    // The current byte offset.
+    pos: Int,
+    // The open `${…}` holes, innermost last.
+    interp: Vec<InterpFrame>,
+    // Whether the lexer is between a string's delimiters.
+    in_string: Bool,
+    // Every comment skipped so far, in source order.
+    comments: Vec<Comment>,
+}
+
+/// A lexer at the start of `source` (lib.rs's `Lexer::new`).
+pub fn new_lexer(source: String) -> Lexer {
+    Lexer {
+        source: source,
+        len: source.byte_len(),
+        pos: 0,
+        interp: Vec::new(),
+        in_string: false,
+        comments: Vec::new(),
+    }
+}
+
+impl Lexer {
+    /// Every token, `Eof` last, and every error (lib.rs's `tokenize`).
+    pub fn tokenize(mut self) -> (Vec<Spanned>, Vec<LexError>) {
+        let mut tokens: Vec<Spanned> = Vec::new()
+        let mut errors: Vec<LexError> = Vec::new()
+        while self.pos < self.len {
+            match self.next_token() {
+                Ok(Some(tok)) => tokens.push(tok)
+                Ok(None) => ()
+                Err(e) => errors.push(e)
+            }
+        }
+        // A hole still open at the end never found its `}`: report the
+        // innermost one.
+        if !self.interp.is_empty() {
+            let frame = self.interp.last()
+            let end = min(frame.open + 2, self.len)
+            errors.push(UnterminatedInterpolation(Span { start: frame.open, end: end }))
+        }
+        let mut out = self.split_tuple_indexes(tokens)
+        out.push(spanned(Eof, self.len, self.len))
+        (out, errors)
+    }
+
+    // After a `.`, a float whose text is digits, `.`, digits, both parts
+    // fitting an `Int`, becomes an integer, a `.` and an integer, so `t.1.0`
+    // reads as `(t.1).0` (lib.rs's `split_tuple_indexes`). It splits by the
+    // text, not the value.
+    fn split_tuple_indexes(self, tokens: Vec<Spanned>) -> Vec<Spanned> {
+        let mut out: Vec<Spanned> = Vec::new()
+        for tok in tokens.iter() {
+            let after_dot = !out.is_empty() && is_dot(out.last().value)
+            if after_dot && is_float(tok.value) {
+                let start = tok.span.start
+                let end = tok.span.end
+                let dot = self.find_dot(start, end)
+                if dot >= 0 && self.all_digits(start, dot) && self.all_digits(dot + 1, end) {
+                    let int_part = self.source.byte_slice(start, dot).parse_int()
+                    let frac_part = self.source.byte_slice(dot + 1, end).parse_int()
+                    match (int_part, frac_part) {
+                        (Some(a), Some(b)) => {
+                            out.push(spanned(Int(a), start, dot))
+                            out.push(spanned(Dot, dot, dot + 1))
+                            out.push(spanned(Int(b), dot + 1, end))
+                            continue
+                        }
+                        _ => ()
+                    }
+                }
+            }
+            out.push(tok)
+        }
+        out
+    }
+
+    // The offset of the first `.` in `start..end`, or -1 (`split_once('.')`).
+    fn find_dot(self, start: Int, end: Int) -> Int {
+        let mut i = start
+        while i < end {
+            if self.source.byte_at(i) == DOT { return i }
+            i += 1
+        }
+        0 - 1
+    }
+
+    // Whether `start..end` is one or more ASCII digits.
+    fn all_digits(self, start: Int, end: Int) -> Bool {
+        if end <= start { return false }
+        let mut i = start
+        while i < end {
+            if !is_digit(self.source.byte_at(i)) { return false }
+            i += 1
+        }
+        true
+    }
+
+    // The byte at `i`, or -1 past the end (`b.get(i)`).
+    fn byte_or_none(self, i: Int) -> Int {
+        if i < self.len { self.source.byte_at(i) } else { 0 - 1 }
+    }
+
+    // Advance past whitespace, `//` line comments and `/* */` block
+    // comments, recording each comment (lib.rs's `skip_trivia`). A `///` doc
+    // comment, exactly three slashes, is left for the tokenizer; four or
+    // more make a plain comment. A `/*` with no `*/` is an error.
+    fn skip_trivia(mut self) -> Result<(), LexError> {
+        let b = self.source
+        let n = self.len
+        while true {
+            while self.pos < n {
+                let c = b.byte_at(self.pos)
+                if c == SPACE || c == TAB || c == NEWLINE || c == CR {
+                    self.pos += 1
+                } else {
+                    break
+                }
+            }
+            if self.pos + 1 < n
+                && b.byte_at(self.pos) == SLASH
+                && b.byte_at(self.pos + 1) == SLASH {
+                let doc = self.byte_or_none(self.pos + 2) == SLASH
+                    && self.byte_or_none(self.pos + 3) != SLASH
+                if doc { break }
+                let start = self.pos
+                while self.pos < n && b.byte_at(self.pos) != NEWLINE { self.pos += 1 }
+                let end = if self.pos > start && b.byte_at(self.pos - 1) == CR {
+                    self.pos - 1
+                } else {
+                    self.pos
+                }
+                self.comments.push(Comment { kind: Line, span: Span { start: start, end: end } })
+                continue
+            }
+            if self.pos + 1 < n && b.byte_at(self.pos) == SLASH && b.byte_at(self.pos + 1) == STAR {
+                let start = self.pos
+                self.pos += 2
+                while self.pos + 1 < n
+                    && !(b.byte_at(self.pos) == STAR && b.byte_at(self.pos + 1) == SLASH) {
+                    self.pos += 1
+                }
+                if self.pos + 1 >= n {
+                    self.pos = n
+                    return Err(UnterminatedBlockComment(Span { start: start, end: n }))
+                }
+                self.pos += 2
+                self.comments.push(
+                    Comment { kind: Block, span: Span { start: start, end: self.pos } },
+                )
+                continue
+            }
+            break
+        }
+        Ok(())
+    }
+
+    // The next token, nothing, or an error (lib.rs's `next_token`).
+    fn next_token(mut self) -> Result<Option<Spanned>, LexError> {
+        // Inside a string, whitespace is text: lex the content before any
+        // skipping.
+        if self.in_string {
+            if self.pos >= self.len { return Ok(None) }
+            return self.lex_string_content()
+        }
+        self.skip_trivia()?
+        if self.pos >= self.len { return Ok(None) }
+        let b = self.source
+        if b.byte_at(self.pos) == QUOTE { return self.lex_string_start() }
+        if self.pos + 1 < self.len && b.byte_at(self.pos) == LOWER_R {
+            let next = b.byte_at(self.pos + 1)
+            if next == QUOTE || next == HASH { return self.lex_raw_string() }
+        }
+        self.lex_logos()
+    }
+
+    // lib.rs's `lex_string_start`.
+    fn lex_string_start(mut self) -> Result<Option<Spanned>, LexError> {
+        let start = self.pos
+        self.pos += 1
+        self.in_string = true
+        Ok(Some(spanned(StrStart, start, self.pos)))
+    }
+
+    // The string's end, an interpolation's `${`, or a segment of text with
+    // its escapes decoded (lib.rs's `lex_string_content`). Runs of plain text
+    // are copied a run at a time rather than a character at a time, which
+    // gives the same text.
+    fn lex_string_content(mut self) -> Result<Option<Spanned>, LexError> {
+        let src = self.source
+        let n = self.len
+        let start = self.pos
+        if src.byte_at(self.pos) == QUOTE {
+            self.pos += 1
+            self.in_string = false
+            return Ok(Some(spanned(StrEnd, start, self.pos)))
+        }
+        if self.pos + 1 < n
+            && src.byte_at(self.pos) == DOLLAR
+            && src.byte_at(self.pos + 1) == LBRACE {
+            self.pos += 2
+            self.in_string = false
+            self.interp.push(InterpFrame { open: start, braces: 0 })
+            return Ok(Some(spanned(InterpOpen, start, self.pos)))
+        }
+        let mut buf = StringBuilder::new()
+        let mut run = self.pos
+        while self.pos < n && src.byte_at(self.pos) != QUOTE {
+            if self.pos + 1 < n
+                && src.byte_at(self.pos) == DOLLAR
+                && src.byte_at(self.pos + 1) == LBRACE {
+                break
+            }
+            if src.byte_at(self.pos) == BACKSLASH {
+                if self.pos > run { buf.push(src.byte_slice(run, self.pos)) }
+                self.pos += 1
+                if self.pos >= n {
+                    return Err(UnterminatedString(Span { start: start, end: self.pos }))
+                }
+                let c = src.byte_at(self.pos)
+                if c == 110 {
+                    // `\n`
+                    buf.push_char('\n')
+                    self.pos += 1
+                } else if c == 116 {
+                    // `\t`
+                    buf.push_char('\t')
+                    self.pos += 1
+                } else if c == 114 {
+                    // `\r`
+                    buf.push_char('\r')
+                    self.pos += 1
+                } else if c == QUOTE {
+                    buf.push_char('"')
+                    self.pos += 1
+                } else if c == BACKSLASH {
+                    buf.push_char('\\')
+                    self.pos += 1
+                } else if c == ZERO {
+                    buf.push_char('\0')
+                    self.pos += 1
+                } else if c == 117 {
+                    // A Unicode escape: the hex runs to the next `}`, wherever it is.
+                    self.pos += 1
+                    if self.pos < n && src.byte_at(self.pos) == LBRACE {
+                        self.pos += 1
+                        let hex_start = self.pos
+                        while self.pos < n && src.byte_at(self.pos) != RBRACE { self.pos += 1 }
+                        let hex_end = self.pos
+                        if self.pos < n { self.pos += 1 }
+                        match char_from_int(self.hex_u32(hex_start, hex_end)) {
+                            Some(ch) => buf.push_char(ch)
+                            None => return Err(
+                                InvalidUnicodeEscape(Span { start: start, end: self.pos }),
+                            )
+                        }
+                    } else {
+                        return Err(InvalidEscapeSequence('u', Span { start: start, end: self.pos }))
+                    }
+                } else {
+                    // Rust's `c as char` of the byte, even one that starts
+                    // a longer character.
+                    return Err(
+                        InvalidEscapeSequence(
+                            char_from_int(c).unwrap(),
+                            Span { start: start, end: self.pos },
+                        ),
+                    )
+                }
+                run = self.pos
+            } else {
+                self.pos += utf8_char_width(src.byte_at(self.pos))
+            }
+        }
+        if self.pos > run { buf.push(src.byte_slice(run, self.pos)) }
+        if self.pos >= n && !buf.is_empty() {
+            return Err(UnterminatedString(Span { start: start, end: self.pos }))
+        }
+        Ok(Some(spanned(StrPart(buf.to_string()), start, self.pos)))
+    }
+
+    // `u32::from_str_radix(hex, 16)`: the value of the text `start..end`,
+    // an optional `+` then one or more hex digits; or -1 if it is anything
+    // else or past `u32::MAX`. `char_from_int` then refuses what
+    // `char::from_u32` refuses.
+    fn hex_u32(self, start: Int, end: Int) -> Int {
+        let mut i = start
+        if i < end && self.source.byte_at(i) == PLUS { i += 1 }
+        if i >= end { return 0 - 1 }
+        let mut v = 0
+        while i < end {
+            let d = digit_value(self.source.byte_at(i))
+            if d >= 16 { return 0 - 1 }
+            v = v * 16 + d
+            if v > 0xFFFFFFFF { return 0 - 1 }
+            i += 1
+        }
+        v
+    }
+
+    // `r"…"` and `r#"…"#`, with any number of `#`s (lib.rs's
+    // `lex_raw_string`). An `r#` with no `"` after its `#`s is the one
+    // source of `InvalidNumberLiteral`.
+    fn lex_raw_string(mut self) -> Result<Option<Spanned>, LexError> {
+        let src = self.source
+        let n = self.len
+        let start = self.pos
+        self.pos += 1
+        let mut hash_count = 0
+        while self.pos < n && src.byte_at(self.pos) == HASH {
+            hash_count += 1
+            self.pos += 1
+        }
+        if self.pos >= n || src.byte_at(self.pos) != QUOTE {
+            return Err(InvalidNumberLiteral(Span { start: start, end: self.pos }))
+        }
+        self.pos += 1
+        let content_start = self.pos
+        while true {
+            if self.pos >= n {
+                return Err(UnterminatedString(Span { start: start, end: self.pos }))
+            }
+            if src.byte_at(self.pos) == QUOTE {
+                // A `"` followed by as many `#`s as opened the string.
+                let mut end_hashes = 0
+                let mut look = self.pos + 1
+                while look < n && src.byte_at(look) == HASH && end_hashes < hash_count {
+                    end_hashes += 1
+                    look += 1
+                }
+                if end_hashes == hash_count {
+                    let content = src.byte_slice(content_start, self.pos)
+                    self.pos = look
+                    return Ok(Some(spanned(RawStr(content), start, self.pos)))
+                }
+            }
+            self.pos += utf8_char_width(src.byte_at(self.pos))
+        }
+        Ok(None)
+    }
+
+    // A `}` closes the innermost hole only when that hole has no unmatched
+    // `{` of its own; otherwise it is an ordinary `RBrace` (lib.rs's
+    // `maybe_close_interp`).
+    fn maybe_close_interp(mut self, start: Int) -> Spanned {
+        if self.interp.is_empty() { return spanned(RBrace, start, self.pos) }
+        let mut frame = self.interp.last()
+        if frame.braces > 0 {
+            frame.braces -= 1
+            return spanned(RBrace, start, self.pos)
+        }
+        let _ = self.interp.pop()
+        self.in_string = true
+        spanned(InterpClose, start, self.pos)
+    }
+
+    // What logos recognizes, at `pos` (lib.rs's `lex_logos`). Braces are
+    // the one pair that interacts with interpolation: a `{` opened inside a
+    // hole must be matched before the hole's own `}`.
+    fn lex_logos(mut self) -> Result<Option<Spanned>, LexError> {
+        let start = self.pos
+        match self.raw_token(start) {
+            Some((tok, end)) => {
+                self.pos = end
+                match tok {
+                    LBrace => {
+                        if !self.interp.is_empty() {
+                            let mut frame = self.interp.last()
+                            frame.braces += 1
+                        }
+                    }
+                    RBrace => return Ok(Some(self.maybe_close_interp(start)))
+                    _ => ()
+                }
+                Ok(Some(spanned(tok, start, end)))
+            }
+            None => {
+                // logos's error: the span is the one character at `start`.
+                let w = utf8_char_width(self.source.byte_at(start))
+                let ch = self.char_at(start, w)
+                self.pos = start + w
+                Err(UnexpectedCharacter(ch, Span { start: start, end: self.pos }))
+            }
+        }
+    }
+
+    // logos's longest match at `start`, after its callback: the token and
+    // its end, or `None` where logos reports an error (lib.rs's `RawToken`,
+    // and `raw_to_token`).
+    fn raw_token(self, start: Int) -> Option<(Token, Int)> {
+        let b = self.source
+        let c = b.byte_at(start)
+        if is_ident_start(c) {
+            // `[a-zA-Z_][a-zA-Z0-9_]*`, unless the whole match is a keyword.
+            let mut i = start + 1
+            while i < self.len && is_ident_continue(b.byte_at(i)) { i += 1 }
+            return Some((keyword_or_ident(b.byte_slice(start, i), c, i - start), i))
+        }
+        if is_digit(c) { return self.lex_number(start) }
+        if c == APOSTROPHE { return self.lex_char(start) }
+        if c == SLASH
+            && self.byte_or_none(start + 1) == SLASH
+            && self.byte_or_none(start + 2) == SLASH {
+            // `///[^\n]*`. Leading whitespace kept, so indentation inside a
+            // doc's Markdown survives; trailing whitespace, `\r` included,
+            // dropped (`trim_end`).
+            let mut i = start + 3
+            while i < self.len && b.byte_at(i) != NEWLINE { i += 1 }
+            let text_end = self.trim_end(start + 3, i)
+            return Some((DocComment(b.byte_slice(start + 3, text_end)), i))
+        }
+        self.punct(start)
+    }
+
+    // The character of width `w` at `i`.
+    fn char_at(self, i: Int, w: Int) -> Char {
+        let b = self.source
+        let cp = if w == 1 {
+            b.byte_at(i)
+        } else if w == 2 {
+            ((b.byte_at(i) & 31) << 6) | (b.byte_at(i + 1) & 63)
+        } else if w == 3 {
+            ((b.byte_at(i) & 15) << 12) | ((b.byte_at(i + 1) & 63) << 6) | (b.byte_at(i + 2) & 63)
+        } else {
+            ((b.byte_at(i) & 7) << 18)
+                | ((b.byte_at(i + 1) & 63) << 12)
+                | ((b.byte_at(i + 2) & 63) << 6)
+                | (b.byte_at(i + 3) & 63)
+        }
+        char_from_int(cp).unwrap()
+    }
+
+    // The end of `start..end` once trailing whitespace is dropped: Rust's
+    // `str::trim_end`, which drops every character with Unicode's
+    // White_Space property.
+    fn trim_end(self, start: Int, end: Int) -> Int {
+        let mut e = end
+        while e > start {
+            // Step back over one UTF-8 character.
+            let mut s = e - 1
+            while s > start && (self.source.byte_at(s) & 0xC0) == 0x80 { s -= 1 }
+            if !is_white_space(self.char_at(s, e - s).to_int()) { return e }
+            e = s
+        }
+        e
+    }
+
+    // Punctuation, by longest match (the `#[token(…)]` variants).
+    fn punct(self, start: Int) -> Option<(Token, Int)> {
+        let c = self.source.byte_at(start)
+        let c1 = self.byte_or_none(start + 1)
+        let c2 = self.byte_or_none(start + 2)
+        // `(` `)` `[` `]` `{` `}` `,` `;` `@` `?` `~`
+        if c == 40 { return Some((LParen, start + 1)) }
+        if c == 41 { return Some((RParen, start + 1)) }
+        if c == 91 { return Some((LBracket, start + 1)) }
+        if c == 93 { return Some((RBracket, start + 1)) }
+        if c == LBRACE { return Some((LBrace, start + 1)) }
+        if c == RBRACE { return Some((RBrace, start + 1)) }
+        if c == 44 { return Some((Comma, start + 1)) }
+        if c == 59 { return Some((Semicolon, start + 1)) }
+        if c == 64 { return Some((At, start + 1)) }
+        if c == 63 { return Some((Question, start + 1)) }
+        if c == 126 { return Some((Tilde, start + 1)) }
+        if c == 58 {
+            // `:` `::`
+            if c1 == 58 { return Some((ColonColon, start + 2)) }
+            return Some((Colon, start + 1))
+        }
+        if c == MINUS {
+            // `-` `->` `-=`
+            if c1 == 62 { return Some((Arrow, start + 2)) }
+            if c1 == 61 { return Some((MinusEq, start + 2)) }
+            return Some((Minus, start + 1))
+        }
+        if c == 61 {
+            // `=` `=>` `==`
+            if c1 == 62 { return Some((FatArrow, start + 2)) }
+            if c1 == 61 { return Some((EqEq, start + 2)) }
+            return Some((Eq, start + 1))
+        }
+        if c == DOT {
+            // `.` `..` `..=`
+            if c1 == DOT {
+                if c2 == 61 { return Some((DotDotEq, start + 3)) }
+                return Some((DotDot, start + 2))
+            }
+            return Some((Dot, start + 1))
+        }
+        if c == 33 {
+            // `!` `!=`
+            if c1 == 61 { return Some((BangEq, start + 2)) }
+            return Some((Bang, start + 1))
+        }
+        if c == 60 {
+            // `<` `<=` `<<` `<<=`
+            if c1 == 61 { return Some((LtEq, start + 2)) }
+            if c1 == 60 {
+                if c2 == 61 { return Some((LtLtEq, start + 3)) }
+                return Some((LtLt, start + 2))
+            }
+            return Some((Lt, start + 1))
+        }
+        if c == 62 {
+            // `>` `>=` `>>` `>>=`
+            if c1 == 61 { return Some((GtEq, start + 2)) }
+            if c1 == 62 {
+                if c2 == 61 { return Some((GtGtEq, start + 3)) }
+                return Some((GtGt, start + 2))
+            }
+            return Some((Gt, start + 1))
+        }
+        if c == 38 {
+            // `&` `&&` `&=`
+            if c1 == 38 { return Some((AmpAmp, start + 2)) }
+            if c1 == 61 { return Some((AmpEq, start + 2)) }
+            return Some((Amp, start + 1))
+        }
+        if c == 124 {
+            // `|` `||` `|=`
+            if c1 == 124 { return Some((PipePipe, start + 2)) }
+            if c1 == 61 { return Some((PipeEq, start + 2)) }
+            return Some((Pipe, start + 1))
+        }
+        // `+` `*` `/` `%` `^`, each alone or before `=`
+        if c == PLUS {
+            if c1 == 61 { return Some((PlusEq, start + 2)) }
+            return Some((Plus, start + 1))
+        }
+        if c == STAR {
+            if c1 == 61 { return Some((StarEq, start + 2)) }
+            return Some((Star, start + 1))
+        }
+        if c == SLASH {
+            if c1 == 61 { return Some((SlashEq, start + 2)) }
+            return Some((Slash, start + 1))
+        }
+        if c == 37 {
+            if c1 == 61 { return Some((PercentEq, start + 2)) }
+            return Some((Percent, start + 1))
+        }
+        if c == 94 {
+            if c1 == 61 { return Some((CaretEq, start + 2)) }
+            return Some((Caret, start + 1))
+        }
+        None
+    }
+
+    // The end of an exponent `[eE][+-]?[0-9]+` at `j`, or `j` if there is
+    // none there.
+    fn exponent_end(self, j: Int) -> Int {
+        let b = self.source
+        if j < self.len && (b.byte_at(j) == LOWER_E || b.byte_at(j) == UPPER_E) {
+            let mut k = j + 1
+            if k < self.len && (b.byte_at(k) == PLUS || b.byte_at(k) == MINUS) { k += 1 }
+            if k < self.len && is_digit(b.byte_at(k)) {
+                while k < self.len && is_digit(b.byte_at(k)) { k += 1 }
+                return k
+            }
+        }
+        j
+    }
+
+    // The number literals' regexes, by longest match, then their callbacks:
+    //   `0x[0-9a-fA-F][0-9a-fA-F_]*`, `0b[01][01_]*`, `0o[0-7][0-7_]*`;
+    //   `[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?` and
+    //   `[0-9][0-9_]*[eE][+-]?[0-9]+`, floats;
+    //   `[0-9][0-9_]*`, a decimal integer.
+    // A prefixed integer, when its regex matches, is always the longest.
+    fn lex_number(self, start: Int) -> Option<(Token, Int)> {
+        let b = self.source
+        let n = self.len
+        if b.byte_at(start) == ZERO && start + 2 < n {
+            let p = b.byte_at(start + 1)
+            // `x`, `b`, `o`
+            let radix = if p == 120 { 16 } else if p == 98 { 2 } else if p == 111 { 8 } else { 0 }
+            if radix > 0 && digit_value(b.byte_at(start + 2)) < radix {
+                let mut i = start + 3
+                while i < n && (digit_value(b.byte_at(i)) < radix || b.byte_at(i) == UNDERSCORE) {
+                    i += 1
+                }
+                // lex_hex_int, lex_bin_int, lex_oct_int
+                return match self.int_value(start + 2, i, radix) {
+                    Some(v) => Some((Int(v), i))
+                    None => None
+                }
+            }
+        }
+        let mut i = start + 1
+        while i < n && (is_digit(b.byte_at(i)) || b.byte_at(i) == UNDERSCORE) { i += 1 }
+        if i + 1 < n && b.byte_at(i) == DOT && is_digit(b.byte_at(i + 1)) {
+            let mut j = i + 2
+            while j < n && (is_digit(b.byte_at(j)) || b.byte_at(j) == UNDERSCORE) { j += 1 }
+            return self.lex_float(start, self.exponent_end(j))
+        }
+        let e = self.exponent_end(i)
+        if e > i { return self.lex_float(start, e) }
+        // lex_dec_int
+        match self.int_value(start, i, 10) {
+            Some(v) => Some((Int(v), i))
+            None => None
+        }
+    }
+
+    // The digits `start..end` in `radix`, underscores skipped, or `None`
+    // past `Int`'s range (`i64::from_str_radix`, `str::parse::<i64>`).
+    fn int_value(self, start: Int, end: Int, radix: Int) -> Option<Int> {
+        let mut v = 0
+        let mut i = start
+        while i < end {
+            let c = self.source.byte_at(i)
+            if c != UNDERSCORE {
+                let d = digit_value(c)
+                if v > (9223372036854775807 - d) / radix { return None }
+                v = v * radix + d
+            }
+            i += 1
+        }
+        Some(v)
+    }
+
+    // lib.rs's `lex_float`: the text without its underscores, read as Rust
+    // reads an `f64`.
+    fn lex_float(self, start: Int, end: Int) -> Option<(Token, Int)> {
+        let mut text = StringBuilder::new()
+        let mut run = start
+        let mut i = start
+        while i < end {
+            if self.source.byte_at(i) == UNDERSCORE {
+                text.push(self.source.byte_slice(run, i))
+                run = i + 1
+            }
+            i += 1
+        }
+        text.push(self.source.byte_slice(run, end))
+        match text.to_string().parse_float() {
+            Some(f) => Some((Float(f), end))
+            None => None
+        }
+    }
+
+    // `'([^'\\]|\\.)'`, where `[^'\\]` is any character but those two, and
+    // `.` any character but `\n`; then lib.rs's `lex_char`, whose escapes
+    // are `\n \t \r \\ \' \0`.
+    fn lex_char(self, start: Int) -> Option<(Token, Int)> {
+        let b = self.source
+        let n = self.len
+        let i = start + 1
+        if i >= n { return None }
+        let c = b.byte_at(i)
+        if c == BACKSLASH {
+            if i + 1 >= n || b.byte_at(i + 1) == NEWLINE { return None }
+            let q = i + 1 + utf8_char_width(b.byte_at(i + 1))
+            if q >= n || b.byte_at(q) != APOSTROPHE { return None }
+            let e = b.byte_at(i + 1)
+            let cp = if e == 110 {
+                10
+            } else if e == 116 {
+                9
+            } else if e == 114 {
+                13
+            } else if e == BACKSLASH {
+                92
+            } else if e == APOSTROPHE {
+                39
+            } else if e == ZERO {
+                0
+            } else {
+                0 - 1
+            }
+            if cp < 0 { return None }
+            return Some((Char(char_from_int(cp).unwrap()), q + 1))
+        }
+        if c == APOSTROPHE { return None }
+        let w = utf8_char_width(c)
+        let q = i + w
+        if q >= n || b.byte_at(q) != APOSTROPHE { return None }
+        Some((Char(self.char_at(i, w)), q + 1))
+    }
+}
+
+// lib.rs's `utf8_char_width`: a character's length from its first byte.
+fn utf8_char_width(b: Int) -> Int {
+    if b <= 0x7F { return 1 }
+    if b >= 0xC0 && b <= 0xDF { return 2 }
+    if b >= 0xE0 && b <= 0xEF { return 3 }
+    if b >= 0xF0 { return 4 }
+    1
+}
+
+// A keyword's token, or an identifier. A string literal allocates each time
+// it is evaluated, so this dispatches on the first byte `c` and the length
+// first, and compares the text only with the keywords that could match.
+fn keyword_or_ident(s: String, c: Int, len: Int) -> Token {
+    if len < 2 || len > 8 { return Ident(s) }
+    if c == 83 {
+        // `S`
+        if len == 4 && s == "Self" { return SelfUpper }
+    } else if c == 97 {
+        // `a`
+        if len == 2 && s == "as" { return As }
+        if len == 5 && s == "async" { return Async }
+        if len == 5 && s == "await" { return Await }
+    } else if c == 98 {
+        // `b`
+        if len == 5 && s == "break" { return Break }
+    } else if c == 99 {
+        // `c`
+        if len == 5 && s == "const" { return Const }
+        if len == 8 && s == "continue" { return Continue }
+    } else if c == 101 {
+        // `e`
+        if len == 4 && s == "else" { return Else }
+        if len == 6 && s == "extern" { return Extern }
+    } else if c == 102 {
+        // `f`
+        if len == 2 && s == "fn" { return Fn }
+        if len == 3 && s == "for" { return For }
+        if len == 5 && s == "false" { return False }
+    } else if c == 105 {
+        // `i`
+        if len == 2 && s == "if" { return If }
+        if len == 2 && s == "in" { return In }
+        if len == 2 && s == "is" { return Is }
+        if len == 4 && s == "impl" { return Impl }
+        if len == 6 && s == "import" { return Import }
+    } else if c == 108 {
+        // `l`
+        if len == 3 && s == "let" { return Let }
+    } else if c == 109 {
+        // `m`
+        if len == 3 && s == "mut" { return Mut }
+        if len == 5 && s == "match" { return Match }
+        if len == 6 && s == "module" { return Module }
+    } else if c == 112 {
+        // `p`
+        if len == 3 && s == "pub" { return Pub }
+    } else if c == 114 {
+        // `r`
+        if len == 6 && s == "return" { return Return }
+        if len == 6 && s == "record" { return Record }
+    } else if c == 115 {
+        // `s`
+        if len == 4 && s == "self" { return SelfLower }
+    } else if c == 116 {
+        // `t`
+        if len == 4 && s == "type" { return Type }
+        if len == 4 && s == "true" { return True }
+        if len == 5 && s == "trait" { return Trait }
+    } else if c == 117 {
+        // `u`
+        if len == 6 && s == "unsafe" { return Unsafe }
+    } else if c == 119 {
+        // `w`
+        if len == 4 && s == "with" { return With }
+        if len == 5 && s == "while" { return While }
+        if len == 5 && s == "where" { return Where }
+    }
+    Ident(s)
+}
+
+fn is_digit(c: Int) -> Bool { c >= ZERO && c <= NINE }
+
+// `[a-zA-Z_]`
+fn is_ident_start(c: Int) -> Bool {
+    (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || c == UNDERSCORE
+}
+
+// `[a-zA-Z0-9_]`
+fn is_ident_continue(c: Int) -> Bool { is_ident_start(c) || is_digit(c) }
+
+// A digit's value in any radix up to 16, or 99 for a byte that is none.
+fn digit_value(c: Int) -> Int {
+    if c >= ZERO && c <= NINE { return c - ZERO }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    99
+}
+
+// Unicode's White_Space property, which Rust's `char::is_whitespace` tests.
+fn is_white_space(cp: Int) -> Bool {
+    if cp == 32 || (cp >= 9 && cp <= 13) { return true }
+    if cp < 0x85 { return false }
+    cp == 0x85
+        || cp == 0xA0
+        || cp == 0x1680
+        || (cp >= 0x2000 && cp <= 0x200A)
+        || cp == 0x2028
+        || cp == 0x2029
+        || cp == 0x202F
+        || cp == 0x205F
+        || cp == 0x3000
+}
+
+fn is_dot(t: Token) -> Bool {
+    match t {
+        Dot => true
+        _ => false
+    }
+}
+
+fn is_float(t: Token) -> Bool {
+    match t {
+        Float(_) => true
+        _ => false
+    }
+}
+
+fn min(a: Int, b: Int) -> Int { if a < b { a } else { b } }
+
+fn max(a: Int, b: Int) -> Int { if a > b { a } else { b } }

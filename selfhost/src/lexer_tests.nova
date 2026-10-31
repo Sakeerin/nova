@@ -1,0 +1,329 @@
+// N's own tests of the lexer's edges: escapes, raw strings, interpolation
+// holes, the overflow quirk, the float split and the line-break marks. Each
+// expected dump is S0's (`nova parse --dump-tokens`) for the same source.
+// The last test checks some kinds' descriptions against token.rs's, which
+// no dump prints; 5.1b's parser messages compare every one.
+//
+// They live in `src/`, imported by `main.nova`, rather than in `tests/`: a
+// module in a package's `tests/` sees only the files beside it and the
+// package's `src/lib.nova`, and Nova has no re-exports, so it could not
+// reach `lexer.nova` (ADR 0051).
+
+import dump
+import token
+
+// The lines, each ended by a line break, as a dump ends each.
+fn dump_lines(lines: [String]) -> String { "\n".join(lines) + "\n" }
+
+// A backslash, `u` and `rest`: a Unicode escape, or a broken one, in a
+// source, spelled so that no escape of this file's own is one.
+fn u(rest: String) -> String { "\\" + "u" + rest }
+
+@test
+fn escapes_are_decoded_and_bad_ones_reported() {
+    // Each escape decodes into the segment's text; `\q` is an error that drops
+    // the text before it, after which the string goes on (lib.rs's
+    // `lex_string_content`).
+    let source = "\"a\\n\\t\\r\\\"\\\\\\0b\" \""
+        + u("{41}")
+        + u("{1F600}")
+        + "\" \"x\\qy\" \""
+        + u("{D800}")
+        + "\" \""
+        + u("Z")
+        + "\" \""
+        + u("{+41}")
+        + "\""
+    let expected = dump_lines(
+        [
+            "0 1 StrStart",
+            "1 15 StrPart \"a\\x0a\\x09\\x0d\\x22\\x5c\\x00b\"",
+            "15 16 StrEnd",
+            "17 18 StrStart",
+            "18 33 StrPart \"A😀\"",
+            "33 34 StrEnd",
+            "35 36 StrStart",
+            "38 40 StrPart \"qy\"",
+            "40 41 StrEnd",
+            "42 43 StrStart",
+            "51 52 StrEnd",
+            "53 54 StrStart",
+            "56 57 StrPart \"Z\"",
+            "57 58 StrEnd",
+            "59 60 StrStart",
+            "60 67 StrPart \"A\"",
+            "67 68 StrEnd",
+            "68 68 Eof",
+            "ERR 36 38 invalid escape sequence `\\q`",
+            "ERR 43 51 invalid unicode escape sequence",
+            "ERR 54 56 invalid escape sequence `\\u`",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn raw_strings_and_the_one_invalid_number_literal() {
+    // A raw string ends at a `"` with as many `#`s as opened it. `r#` with no
+    // `"` is `InvalidNumberLiteral`, the only source of it; an unterminated
+    // raw string runs to the end.
+    let source = "r\"a\\nb\" r#\"say \"hi\"\"# r##\"x\"#y\"## r#abc r\"open"
+    let expected = dump_lines(
+        [
+            "0 7 RawStr \"a\\x5cnb\"",
+            "8 21 RawStr \"say \\x22hi\\x22\"",
+            "22 33 RawStr \"x\\x22#y\"",
+            "36 39 Ident \"abc\"",
+            "46 46 Eof",
+            "ERR 34 36 invalid numeric literal",
+            "ERR 40 46 unterminated string literal",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn interpolation_holes_nest_and_count_their_braces() {
+    // A hole ends at the `}` that matches its `${`, through record braces and
+    // nested strings; an open hole at the end is reported at its `${`.
+    let source = "\"a$" + "{f(R { v: 1 })}b$" + "{\"c$" + "{d}\"}\" \"x$" + "{ y"
+    let expected = dump_lines(
+        [
+            "0 1 StrStart",
+            "1 2 StrPart \"a\"",
+            "2 4 InterpOpen",
+            "4 5 Ident \"f\"",
+            "5 6 LParen",
+            "6 7 Ident \"R\"",
+            "8 9 LBrace",
+            "10 11 Ident \"v\"",
+            "11 12 Colon",
+            "13 14 Int 1 PD",
+            "15 16 RBrace",
+            "16 17 RParen",
+            "17 18 InterpClose",
+            "18 19 StrPart \"b\"",
+            "19 21 InterpOpen",
+            "21 22 StrStart",
+            "22 23 StrPart \"c\"",
+            "23 25 InterpOpen",
+            "25 26 Ident \"d\"",
+            "26 27 InterpClose",
+            "27 28 StrEnd",
+            "28 29 InterpClose",
+            "29 30 StrEnd",
+            "31 32 StrStart",
+            "32 33 StrPart \"x\"",
+            "33 35 InterpOpen",
+            "36 37 Ident \"y\"",
+            "37 37 Eof",
+            "ERR 33 35 unterminated string interpolation: this `$" + "{` has no matching `}`",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn an_overflowing_integer_is_an_unexpected_first_digit() {
+    // logos's callback refuses an integer past `Int`, which is an
+    // `UnexpectedCharacter` at its first digit; lexing then moves on one
+    // character, so 20 nines give two errors and an integer of 18.
+    let source = "99999999999999999999 0xFFFFFFFFFFFFFFFFF 9223372036854775807 0b2 0x_1"
+    let expected = dump_lines(
+        [
+            "2 20 Int 999999999999999999 PD",
+            "22 40 Ident \"xFFFFFFFFFFFFFFFFF\"",
+            "41 60 Int 9223372036854775807 PD",
+            "61 62 Int 0 PD",
+            "62 64 Ident \"b2\"",
+            "65 66 Int 0 PD",
+            "66 69 Ident \"x_1\"",
+            "69 69 Eof",
+            "ERR 0 1 unexpected character `9`",
+            "ERR 1 2 unexpected character `9`",
+            "ERR 21 22 unexpected character `0`",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn a_float_after_a_dot_splits_into_tuple_indexes() {
+    // After a `.`, `digits.digits` becomes `Int . Int` with exact spans; an
+    // `_`, an exponent, `..` before it, or a part past `Int` keeps the float.
+    let source = "t.1.0 t.0.1.2 t.1.10 t..1.5 1.5 t.1_0.5 t.1e5 x.007.5 t.1.99999999999999999999 0_81.5"
+    let expected = dump_lines(
+        [
+            "0 1 Ident \"t\"",
+            "1 2 Dot",
+            "2 3 Int 1 PD",
+            "3 4 Dot",
+            "4 5 Int 0 PD",
+            "6 7 Ident \"t\"",
+            "7 8 Dot",
+            "8 9 Int 0 PD",
+            "9 10 Dot",
+            "10 11 Int 1 PD",
+            "11 12 Dot",
+            "12 13 Int 2 PD",
+            "14 15 Ident \"t\"",
+            "15 16 Dot",
+            "16 17 Int 1 PD",
+            "17 18 Dot",
+            "18 20 Int 10 PD",
+            "21 22 Ident \"t\"",
+            "22 24 DotDot",
+            "24 27 Float 3ff8000000000000",
+            "28 31 Float 3ff8000000000000",
+            "32 33 Ident \"t\"",
+            "33 34 Dot",
+            "34 39 Float 4025000000000000",
+            "40 41 Ident \"t\"",
+            "41 42 Dot",
+            "42 45 Float 40f86a0000000000",
+            "46 47 Ident \"x\"",
+            "47 48 Dot",
+            "48 51 Int 7",
+            "51 52 Dot",
+            "52 53 Int 5 PD",
+            "54 55 Ident \"t\"",
+            "55 56 Dot",
+            "56 78 Float 4000000000000000",
+            "79 85 Float 4054600000000000",
+            "85 85 Eof",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn line_breaks_are_marked_through_comments() {
+    // A `\n` or a lone `\r` between two tokens marks the second, also inside
+    // a comment; a line comment's span stops before a `\r\n`.
+    let source = "a\n// c\nb /* x\n */ c\r d /* e */ f // g\r\nh \"i\nj\" k"
+    let expected = dump_lines(
+        [
+            "0 1 Ident \"a\"",
+            "7 8 Ident \"b\" NL",
+            "18 19 Ident \"c\" NL",
+            "21 22 Ident \"d\" NL",
+            "31 32 Ident \"f\"",
+            "39 40 Ident \"h\" NL",
+            "41 42 StrStart",
+            "42 45 StrPart \"i\\x0aj\"",
+            "45 46 StrEnd",
+            "47 48 Ident \"k\"",
+            "48 48 Eof",
+            "COMMENT 2 6 Line",
+            "COMMENT 9 17 Block",
+            "COMMENT 23 30 Block",
+            "COMMENT 33 37 Line",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn char_literals_and_the_three_errors_of_a_bad_escape() {
+    // `'\q'` matches the char regex, but its callback refuses it: three
+    // `UnexpectedCharacter`s, at `'`, `\` and `'`, around an identifier.
+    let source = "'a' '\\n' '\\'' '\\q' 'é' '\\\\' ''' "
+    let expected = dump_lines(
+        [
+            "0 3 Char 97",
+            "4 8 Char 10",
+            "9 13 Char 39",
+            "16 17 Ident \"q\"",
+            "17 20 Char 32",
+            "22 25 Char 32",
+            "27 30 Char 32",
+            "33 33 Eof",
+            "ERR 14 15 unexpected character `'`",
+            "ERR 15 16 unexpected character `\\`",
+            "ERR 20 22 unexpected character `é`",
+            "ERR 25 26 unexpected character `\\`",
+            "ERR 26 27 unexpected character `\\`",
+            "ERR 30 31 unexpected character `'`",
+            "ERR 31 32 unexpected character `'`",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn doc_comments_are_exactly_three_slashes() {
+    // `///` is a `DocComment`, its leading space kept and its end trimmed;
+    // `////` is a plain comment.
+    let source = "/// doc  \n//// not a doc\n///x\r\nfn"
+    let expected = dump_lines(
+        [
+            "0 9 DocComment \" doc\"",
+            "25 30 DocComment \"x\" NL",
+            "31 33 Fn NL",
+            "33 33 Eof",
+            "COMMENT 10 24 Line",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn keywords_are_whole_identifiers() {
+    // A keyword is a whole match: `lets` and `self_` are identifiers.
+    let source = "let lets Self self_ _ r rx fn fnx continue where with"
+    let expected = dump_lines(
+        [
+            "0 3 Let",
+            "4 8 Ident \"lets\"",
+            "9 13 SelfUpper",
+            "14 19 Ident \"self_\"",
+            "20 21 Ident \"_\"",
+            "22 23 Ident \"r\"",
+            "24 26 Ident \"rx\"",
+            "27 29 Fn",
+            "30 33 Ident \"fnx\"",
+            "34 42 Continue",
+            "43 48 Where",
+            "49 53 With",
+            "53 53 Eof",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn unexpected_characters_and_an_open_block_comment() {
+    // Non-ASCII text outside strings, and a `/*` with no `*/`.
+    let source = "a é € # ` /* open"
+    let expected = dump_lines(
+        [
+            "0 1 Ident \"a\"",
+            "20 20 Eof",
+            "ERR 2 4 unexpected character `é`",
+            "ERR 5 8 unexpected character `€`",
+            "ERR 9 10 unexpected character `#`",
+            "ERR 11 12 unexpected character ```",
+            "ERR 13 20 unterminated block comment",
+        ],
+    )
+    assert_eq(dump_tokens(source), expected)
+}
+
+@test
+fn descriptions_are_the_rust_ones() {
+    // token.rs's `description`, word for word: keywords, punctuation, a
+    // string's quote, a hole's opening, literals and the end of the file.
+    assert_eq(Let.description(), "`let`")
+    assert_eq(Continue.description(), "`continue`")
+    assert_eq(FatArrow.description(), "`=>`")
+    assert_eq(LtLtEq.description(), "`<<=`")
+    assert_eq(StrStart.description(), "`\"`")
+    assert_eq(InterpOpen.description(), "`$" + "{`")
+    assert_eq(InterpClose.description(), "`}`")
+    assert_eq(Int(7).description(), "integer literal")
+    assert_eq(Float(2.5).description(), "float literal")
+    assert_eq(StrPart("a").description(), "string segment")
+    assert_eq(RawStr("a").description(), "raw string literal")
+    assert_eq(Ident("a").description(), "identifier")
+    assert_eq(Eof.description(), "end of file")
+}
