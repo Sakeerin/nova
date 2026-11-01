@@ -58,7 +58,7 @@ pub fn action(answer: &Answer, uri_of: &dyn Fn(&Path) -> String) -> Option<lsp::
 /// E0001s a dropped item causes.
 fn may_remove(a: &Analysis, file: FileId) -> bool {
     !a.diagnostics.iter().any(|d| {
-        matches!(d.code.as_str(), "L0001" | "P0001")
+        matches!(d.code.as_str(), "L0001" | "P0001" | "P0002")
             || (d.severity == Severity::Error && d.labels.iter().any(|l| l.span.file == file))
     })
 }

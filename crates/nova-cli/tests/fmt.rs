@@ -165,6 +165,29 @@ fn a_file_with_a_syntax_error_is_left_untouched_and_the_rest_are_formatted() {
     nova().arg("fmt").arg("--check").arg(&dir).assert().code(2);
 }
 
+/// A file nested past the parser's limit is one error, P0002, and left as
+/// it is (spec
+/// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+/// §6.2): no crash, and no error for what follows it.
+#[test]
+fn a_file_nested_too_deeply_is_one_p0002_and_left_untouched() {
+    let dir = fresh_dir("too-deep");
+    let deep = format!(
+        "fn main() {{\n    let x = {}1{}\n}}\nfn after( {{\n",
+        "(".repeat(300),
+        ")".repeat(300)
+    );
+    let file = write(&dir, "a.nova", &deep);
+    let out = nova().arg("fmt").arg(&file).assert().code(2);
+    let err = stderr(&out);
+    assert_eq!(err.matches("error[").count(), 1, "{err}");
+    assert!(
+        err.contains("error[P0002]: this is nested too deeply (more than 128 levels)"),
+        "{err}"
+    );
+    assert_eq!(read(&file), deep);
+}
+
 #[test]
 fn an_already_formatted_file_is_not_rewritten() {
     let dir = fresh_dir("unchanged");

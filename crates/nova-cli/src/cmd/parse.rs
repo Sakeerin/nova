@@ -102,7 +102,7 @@ pub fn run(cmd: ParseCmd) -> Result<()> {
         .iter()
         .map(|e| {
             e.notes().into_iter().fold(
-                nova_diagnostics::Diagnostic::error("P0001", e.to_string())
+                nova_diagnostics::Diagnostic::error(e.code(), e.to_string())
                     .with_primary_label(e.span(), "here"),
                 |d, n| d.with_note(n),
             )

@@ -20,7 +20,7 @@ use nova_ast::{
 use nova_diagnostics::{FileId, Span, Spanned};
 use nova_lexer::{Token, Tokens};
 
-use crate::ParseError;
+use crate::{ParseError, MAX_DEPTH};
 
 /// The error for a `///` that documents nothing (spec
 /// `docs/superpowers/specs/2026-10-07-phase-3-1-formatter-design.md` §4).
@@ -69,6 +69,21 @@ struct Parser<'a> {
     /// The split that ended the last match arm's body: a P0001 in the head
     /// of the arm that begins there gets a note naming the rule.
     arm_end_split: Option<NewlineSplit>,
+    /// How many levels have been entered at the cursor, the outermost
+    /// included: one more than the cursor's level ([`Parser::deeper`]).
+    depth: usize,
+    /// Where the depth first passed [`MAX_DEPTH`]: how many errors there
+    /// were then, and the span of the token at the cursor. From then on
+    /// the parser reads the end of the file (`peek`), and when the file
+    /// ends, P0002 at that span replaces every error pushed since.
+    too_deep: Option<(usize, Span)>,
+    /// A crossing that an abandoned attempt made ([`Parser::roll_back`]):
+    /// how many errors there were then, its span, and the token where it
+    /// was made. The parser reads those tokens again another way, and the
+    /// crossing stands, as `too_deep` ([`Parser::crossing_stands`]), if
+    /// an error comes before that token is read; once it is read, the
+    /// crossing goes.
+    rolled_back: Option<(usize, Span, usize)>,
 }
 
 impl<'a> Parser<'a> {
@@ -85,7 +100,66 @@ impl<'a> Parser<'a> {
             splits: Vec::new(),
             halt: None,
             arm_end_split: None,
+            depth: 0,
+            too_deep: None,
+            rolled_back: None,
         }
+    }
+
+    /// One level deeper (spec
+    /// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+    /// §4.4, ADR 0052). Whether the parser may go on: past [`MAX_DEPTH`]
+    /// levels it may not, and the first time, it records P0002 at the
+    /// token at the cursor (`too_deep`). A level is:
+    ///
+    /// - an expression ([`Parser::parse_expr`]), a type
+    ///   ([`Parser::parse_type`]) or a pattern ([`Parser::parse_pattern`]),
+    ///   so each operand, type argument or sub-pattern inside another;
+    /// - the operand of a prefix operator, and each `else if`;
+    /// - each binary operator, `as` and assignment included, for the rest
+    ///   of its chain: the right operand of a chain's `k`th operator is `k`
+    ///   levels deeper than the chain, and so is the type after its `k`th
+    ///   `as`;
+    /// - an item inside a block, and the children of a view or an element.
+    ///
+    /// The file's outermost expression, type, pattern or nested item is
+    /// level 0, so `n` nested parentheses, blocks, calls, `if`s or types
+    /// are `n` levels, and 128 of any one kind parse: `depth`, which counts
+    /// every entry, the outermost's included, is one more than the level.
+    /// A block is not a level of its own: its statements' expressions are.
+    /// Each of these is entered through [`Parser::nested`], which restores
+    /// the depth after it, but for the binary operators, whose function
+    /// restores it when the chain ends.
+    fn deeper(&mut self) -> bool {
+        self.depth += 1;
+        if self.depth <= MAX_DEPTH + 1 {
+            return true;
+        }
+        if self.too_deep.is_none() {
+            let here = (self.errors.len(), self.peek_span());
+            self.too_deep = Some(self.crossing_stands().unwrap_or(here));
+        }
+        false
+    }
+
+    /// The crossing an abandoned attempt made (`rolled_back`), if an error
+    /// has come since: the tokens read again the other way failed before
+    /// the token where it was made, so it stands, as the parser's own
+    /// crossing does, and the parser reads the end of the file (`peek`).
+    fn crossing_stands(&self) -> Option<(usize, Span)> {
+        match self.rolled_back {
+            Some((errors, span, _)) if self.errors.len() > errors => Some((errors, span)),
+            _ => None,
+        }
+    }
+
+    /// `f`, one level deeper ([`Parser::deeper`]), with the depth restored
+    /// after it however it ends; `None`, without `f`, past the limit.
+    fn nested<R>(&mut self, f: impl FnOnce(&mut Self) -> Option<R>) -> Option<R> {
+        let depth = self.depth;
+        let result = if self.deeper() { f(self) } else { None };
+        self.depth = depth;
+        result
     }
 
     /// Run `f` with `no_struct_literal = true`, then restore the previous value.
@@ -221,7 +295,8 @@ impl<'a> Parser<'a> {
     // --- Token access ---
 
     fn peek(&self) -> &Token {
-        if self.halted() {
+        // Past the depth limit, the file has ended.
+        if self.halted() || self.too_deep.is_some() || self.crossing_stands().is_some() {
             return &HALT;
         }
         self.tokens
@@ -238,6 +313,16 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) -> Spanned<Token> {
+        // A crossing an abandoned attempt made stands if an error came
+        // first, and goes once its token is read.
+        if let Some((_, _, at)) = self.rolled_back {
+            if let Some(crossing) = self.crossing_stands() {
+                self.too_deep.get_or_insert(crossing);
+                self.rolled_back = None;
+            } else if self.pos >= at {
+                self.rolled_back = None;
+            }
+        }
         let tok = self
             .tokens
             .get(self.pos)
@@ -519,6 +604,12 @@ impl<'a> Parser<'a> {
                     }
                 }
             }
+        }
+        // Past the depth limit: one error, P0002, for all that came after
+        // (spec §4.4).
+        if let Some((errors, span)) = self.too_deep.or(self.crossing_stands()) {
+            self.errors.truncate(errors);
+            self.errors.push(ParseError::TooDeep { span });
         }
         let mut newline_splits = std::mem::take(&mut self.splits);
         newline_splits.sort_by_key(|s| s.at.start);
@@ -1337,6 +1428,13 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_type(&mut self, ctx: &str) -> Option<Spanned<Type>> {
+        self.nested(|p| p.parse_type_here(ctx))
+    }
+
+    /// A type at the cursor's level, which is not one more: the type after
+    /// `as`, which its operator's level counts, as a binary operator's
+    /// counts its right operand ([`Parser::deeper`]).
+    fn parse_type_here(&mut self, ctx: &str) -> Option<Spanned<Type>> {
         let start = self.peek_span();
         let mut ty = self.parse_type_atom(ctx)?;
 
@@ -1508,6 +1606,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Undo a speculative parse that began at `pos`, with `pending_gt`
+    /// pending `>`s and the P0002 state `too_deep`. The errors it pushed
+    /// stand, as the parser before the depth limit left them, but for
+    /// those after it crossed the limit, which it read at the end of the
+    /// file. Its crossing does not decide alone (ADR 0052): it waits in
+    /// `rolled_back`, at the token at the cursor, where it was made, for
+    /// the tokens to be read again the other way.
+    fn roll_back(&mut self, pos: usize, pending_gt: usize, too_deep: Option<(usize, Span)>) {
+        if let (None, Some((errors, span))) = (too_deep, self.too_deep) {
+            self.errors.truncate(errors);
+            self.rolled_back = Some((errors, span, self.pos));
+        }
+        self.pos = pos;
+        self.pending_gt = pending_gt;
+        self.too_deep = too_deep;
+    }
+
     fn parse_generic_args_opt(&mut self, ctx: &str) -> Vec<Spanned<Type>> {
         if !self.check(&Token::Lt) {
             return Vec::new();
@@ -1516,6 +1631,7 @@ impl<'a> Parser<'a> {
         // Otherwise this `<` might be a comparison operator.
         let saved = self.pos;
         let saved_pending = self.pending_gt;
+        let saved_deep = self.too_deep;
         self.advance(); // consume `<`
         let mut args = Vec::new();
         while !self.at_generic_close() && !self.is_at_end() {
@@ -1523,8 +1639,7 @@ impl<'a> Parser<'a> {
                 args.push(t);
             } else {
                 // Wasn't a type — roll back
-                self.pos = saved;
-                self.pending_gt = saved_pending;
+                self.roll_back(saved, saved_pending, saved_deep);
                 return Vec::new();
             }
             // A `>` split from a `>>` now closes this list; a following comma (if
@@ -1538,8 +1653,7 @@ impl<'a> Parser<'a> {
         }
         if !self.eat_generic_close() {
             // Didn't close — roll back
-            self.pos = saved;
-            self.pending_gt = saved_pending;
+            self.roll_back(saved, saved_pending, saved_deep);
             return Vec::new();
         }
         args
@@ -1621,7 +1735,7 @@ impl<'a> Parser<'a> {
 
         // Nested items, documented or not (spec §4)
         if self.is_item_start_at(self.docs_end()) {
-            let item = self.in_stmt_ctx(false, |p| p.try_parse_item())?;
+            let item = self.nested(|p| p.in_stmt_ctx(false, |p| p.try_parse_item()))?;
             let span = item.span;
             return Some(Spanned::new(Stmt::Item(Box::new(item.value)), span));
         }
@@ -1679,7 +1793,7 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_expr(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let expr = self.parse_assign(ctx);
+        let expr = self.nested(|p| p.parse_assign(ctx));
         self.end_halt();
         expr
     }
@@ -1693,7 +1807,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_assign(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let lhs = self.parse_range(ctx)?;
 
         let op = match self.peek() {
@@ -1713,7 +1827,11 @@ impl<'a> Parser<'a> {
 
         if let Some(op) = op {
             self.advance();
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_assign(ctx)?; // right-associative
+            self.depth = depth;
             let span = start.merge(rhs.span);
             Some(Spanned::new(
                 Expr::Assign {
@@ -1731,7 +1849,7 @@ impl<'a> Parser<'a> {
     /// Range expressions `lo..hi` / `lo..=hi`, just above assignment in
     /// precedence and non-chainable.
     fn parse_range(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let lo = self.parse_or(ctx)?;
         let inclusive = if self.eat(&Token::DotDotEq).is_some() {
             true
@@ -1740,7 +1858,11 @@ impl<'a> Parser<'a> {
         } else {
             return Some(lo);
         };
+        if !self.deeper() {
+            return None;
+        }
         let hi = self.parse_or(ctx)?;
+        self.depth = depth;
         let span = start.merge(hi.span);
         Some(Spanned::new(
             Expr::Range {
@@ -1753,9 +1875,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_or(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_and(ctx)?;
         while self.eat(&Token::PipePipe).is_some() {
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_and(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1767,13 +1892,17 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_and(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_compare(ctx)?;
         while self.eat(&Token::AmpAmp).is_some() {
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_compare(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1785,11 +1914,12 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_compare(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let lhs = self.parse_bitor(ctx)?;
 
         let op = match self.peek() {
@@ -1804,7 +1934,11 @@ impl<'a> Parser<'a> {
 
         if let Some(op) = op {
             self.advance();
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_bitor(ctx)?;
+            self.depth = depth;
             let span = start.merge(rhs.span);
             let result = Spanned::new(
                 Expr::Binary {
@@ -1830,9 +1964,12 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_bitor(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_bitxor(ctx)?;
         while self.eat(&Token::Pipe).is_some() {
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_bitxor(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1844,13 +1981,17 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_bitxor(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_bitand(ctx)?;
         while self.eat(&Token::Caret).is_some() {
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_bitand(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1862,13 +2003,17 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_bitand(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_shift(ctx)?;
         while self.eat(&Token::Amp).is_some() {
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_shift(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1880,11 +2025,12 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_shift(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_add(ctx)?;
         loop {
             let op = match self.peek() {
@@ -1893,6 +2039,9 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_add(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1904,11 +2053,12 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_add(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_mul(ctx)?;
         loop {
             let op = match self.peek() {
@@ -1923,6 +2073,9 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_mul(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1934,11 +2087,12 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_mul(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut lhs = self.parse_cast(ctx)?;
         loop {
             let op = match self.peek() {
@@ -1948,6 +2102,9 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            if !self.deeper() {
+                return None;
+            }
             let rhs = self.parse_cast(ctx)?;
             let span = start.merge(rhs.span);
             lhs = Spanned::new(
@@ -1959,15 +2116,19 @@ impl<'a> Parser<'a> {
                 span,
             );
         }
+        self.depth = depth;
         Some(lhs)
     }
 
     fn parse_cast(&mut self, ctx: &str) -> Option<Spanned<Expr>> {
-        let start = self.peek_span();
+        let (start, depth) = (self.peek_span(), self.depth);
         let mut expr = self.parse_unary(ctx)?;
         loop {
             if self.eat(&Token::As).is_some() {
-                let ty = self.parse_type(ctx)?;
+                if !self.deeper() {
+                    return None;
+                }
+                let ty = self.parse_type_here(ctx)?;
                 let span = start.merge(ty.span);
                 expr = Spanned::new(
                     Expr::Cast {
@@ -1980,6 +2141,7 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        self.depth = depth;
         Some(expr)
     }
 
@@ -1994,7 +2156,7 @@ impl<'a> Parser<'a> {
                 // Could be `&` or `&mut`
                 self.advance();
                 let is_mut = self.eat(&Token::Mut).is_some();
-                let expr = self.parse_postfix(ctx)?;
+                let expr = self.nested(|p| p.parse_postfix(ctx))?;
                 let span = start.merge(expr.span);
                 let op = if is_mut { UnOp::RefMut } else { UnOp::Ref };
                 return Some(Spanned::new(
@@ -2010,7 +2172,7 @@ impl<'a> Parser<'a> {
 
         if let Some(op) = op {
             self.advance();
-            let expr = self.parse_unary(ctx)?;
+            let expr = self.nested(|p| p.parse_unary(ctx))?;
             let span = start.merge(expr.span);
             Some(Spanned::new(
                 Expr::Unary {
@@ -2031,16 +2193,35 @@ impl<'a> Parser<'a> {
     }
 
     /// The calls, indexes, fields, `.await`s and `?`s after `expr`, which
-    /// began at `start`.
+    /// began at `start`: each after the first one level deeper than the one
+    /// before it, for the rest of the chain, a method call `.name(…)` one
+    /// operator ([`Parser::deeper`]); the depth restored after the chain
+    /// however it ends.
     fn parse_postfix_from(
+        &mut self,
+        start: Span,
+        expr: Spanned<Expr>,
+        ctx: &str,
+    ) -> Option<Spanned<Expr>> {
+        let depth = self.depth;
+        let expr = self.parse_postfix_chain(start, expr, ctx);
+        self.depth = depth;
+        expr
+    }
+
+    /// [`Parser::parse_postfix_from`]'s operators, the depth raised after
+    /// each but the first, as after a binary operator: past the limit, at
+    /// the token after it.
+    fn parse_postfix_chain(
         &mut self,
         start: Span,
         mut expr: Spanned<Expr>,
         ctx: &str,
     ) -> Option<Spanned<Expr>> {
+        let (mut first, mut after_dot) = (true, false);
         loop {
             let cur_span = expr.span;
-            match self.peek().clone() {
+            let op = match self.peek() {
                 // A `(` or `[` after a line break in statement context
                 // begins the next statement (spec §3.5).
                 Token::LParen | Token::LBracket if self.newline_ends_expr() => {
@@ -2052,9 +2233,20 @@ impl<'a> Parser<'a> {
                     self.record_split(kind);
                     break;
                 }
+                op @ (Token::LParen | Token::LBracket | Token::Dot | Token::Question) => op.clone(),
+                _ => break,
+            };
+            self.advance();
+            // A method call's `(…)` counts with its `.name`.
+            let method_call = after_dot && matches!(op, Token::LParen);
+            after_dot = matches!(op, Token::Dot);
+            if !first && !method_call && !self.deeper() {
+                return None;
+            }
+            first = false;
+            match op {
                 Token::LParen => {
                     // Function call
-                    self.advance();
                     let args = self.in_stmt_ctx(false, |p| {
                         let mut args = Vec::new();
                         while !p.check(&Token::RParen) && !p.is_at_end() {
@@ -2083,7 +2275,6 @@ impl<'a> Parser<'a> {
                 }
                 Token::LBracket => {
                     // Index
-                    self.advance();
                     let index = self.in_stmt_ctx(false, |p| p.parse_expr(ctx))?;
                     self.expect(&Token::RBracket, "index expression")?;
                     let end = self
@@ -2100,7 +2291,6 @@ impl<'a> Parser<'a> {
                     );
                 }
                 Token::Dot => {
-                    self.advance();
                     // `.await` or `.field` or `.method()`
                     if self.eat(&Token::Await).is_some() {
                         let end = self
@@ -2167,8 +2357,8 @@ impl<'a> Parser<'a> {
                         );
                     }
                 }
-                Token::Question => {
-                    self.advance();
+                _ => {
+                    // `?`
                     let end = self
                         .tokens
                         .get(self.pos.saturating_sub(1))
@@ -2176,7 +2366,6 @@ impl<'a> Parser<'a> {
                         .unwrap_or(cur_span);
                     expr = Spanned::new(Expr::Try(Box::new(expr)), start.merge(end));
                 }
-                _ => break,
             }
         }
 
@@ -2478,7 +2667,7 @@ impl<'a> Parser<'a> {
         let then = self.parse_block(ctx)?;
         let else_ = if self.eat(&Token::Else).is_some() {
             if self.check(&Token::If) {
-                let e = self.parse_if_expr(ctx)?;
+                let e = self.nested(|p| p.parse_if_expr(ctx))?;
                 Some(Box::new(e))
             } else {
                 let b = self.parse_block(ctx)?;
@@ -2648,6 +2837,11 @@ impl<'a> Parser<'a> {
     /// `{ child* }`, the children of a `view` or an element. A `{` inside is
     /// an element's or a block's again, whatever context the view is in.
     fn parse_view_children(&mut self) -> Option<Vec<Spanned<ViewNode>>> {
+        self.nested(|p| p.parse_view_children_here())
+    }
+
+    /// [`Parser::parse_view_children`] at the cursor's level.
+    fn parse_view_children_here(&mut self) -> Option<Vec<Spanned<ViewNode>>> {
         self.expect(&Token::LBrace, "view children")?;
         let saved = std::mem::replace(&mut self.no_struct_literal, false);
         let mut children = Vec::new();
@@ -2838,6 +3032,12 @@ impl<'a> Parser<'a> {
 
 impl<'a> Parser<'a> {
     fn parse_pattern(&mut self, ctx: &str) -> Option<Spanned<Pattern>> {
+        self.nested(|p| p.parse_pattern_here(ctx))
+    }
+
+    /// [`Parser::parse_pattern`] at the cursor's level: an atom, or
+    /// alternatives.
+    fn parse_pattern_here(&mut self, ctx: &str) -> Option<Spanned<Pattern>> {
         let start = self.peek_span();
         let pat = self.parse_pattern_atom(ctx)?;
 
@@ -2845,13 +3045,13 @@ impl<'a> Parser<'a> {
         if self.check(&Token::Pipe) {
             let mut alternatives = vec![pat];
             while self.eat(&Token::Pipe).is_some() {
-                if let Some(p) = self.parse_pattern_atom(ctx) {
-                    alternatives.push(p);
+                if let Some(alt) = self.parse_pattern_atom(ctx) {
+                    alternatives.push(alt);
                 } else {
                     break;
                 }
             }
-            let end = alternatives.last().map(|p| p.span).unwrap_or(start);
+            let end = alternatives.last().map(|a| a.span).unwrap_or(start);
             return Some(Spanned::new(Pattern::Or(alternatives), start.merge(end)));
         }
 
