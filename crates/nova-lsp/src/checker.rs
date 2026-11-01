@@ -55,8 +55,11 @@ impl Checker {
         let dirs: Arc<Mutex<HashMap<ProjectKey, Vec<PathKey>>>> = Arc::default();
         let seen = Arc::clone(&newest);
         let written = Arc::clone(&dirs);
+        // The analysis is the pipeline's, so its thread has the pipeline's
+        // stack (ADR 0052).
         std::thread::Builder::new()
             .name("nova-lsp-checker".to_string())
+            .stack_size(nova_driver::PIPELINE_STACK)
             .spawn(move || serve(&queue, &seen, &written, &publish))
             .expect("start the checker thread");
         Checker { jobs, newest, dirs }

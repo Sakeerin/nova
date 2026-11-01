@@ -96,7 +96,11 @@ pub fn run(cmd: DevCmd) -> Result<()> {
         open(&url);
     }
 
-    std::thread::spawn(move || watch(seen, || watched.poll(), || builder.build()));
+    // Each rebuild runs the pipeline, so on a stack of its size (ADR 0052).
+    std::thread::Builder::new()
+        .stack_size(nova_driver::PIPELINE_STACK)
+        .spawn(move || watch(seen, || watched.poll(), || builder.build()))
+        .context("could not start the thread that rebuilds")?;
     server::serve(
         listener,
         Server {

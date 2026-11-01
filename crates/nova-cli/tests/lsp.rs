@@ -332,6 +332,25 @@ fn loose(name: &str, text: &str) -> (Client, String) {
     (client, uri)
 }
 
+/// A file nested past the parser's limit gets one diagnostic, P0002, from
+/// the server's analysis, which runs on the pipeline's stack (spec
+/// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+/// §6.2); and the server goes on.
+#[test]
+fn a_file_nested_too_deeply_gets_one_p0002() {
+    let text = format!(
+        "fn main() {{\n    let x = {}1{}\n}}\n",
+        "(".repeat(300),
+        ")".repeat(300)
+    );
+    let (mut client, uri) = loose("too-deep", &text);
+    let diagnostics = client.diagnostics(&uri, nonempty);
+    assert_eq!(codes(&diagnostics), ["P0002"], "{diagnostics}");
+    // A fix clears it.
+    change(&mut client, &uri, 2, "fn main() {}\n");
+    client.diagnostics(&uri, |p| !nonempty(p));
+}
+
 const BROKEN_WITH_DOTS: &str = "record Point { x: Int, y: Int }\n\
 fn broken( {\n}\n\
 fn main() {\n    let p = Point { x: 1, y: 2 }\n    let v: Vec<Int> = Vec::new()\n    p.\n    let n = 1\n    v.\n}\n";

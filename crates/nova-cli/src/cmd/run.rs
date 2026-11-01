@@ -123,15 +123,45 @@ fn entry(program: &Program) -> PathBuf {
         .unwrap_or_default()
 }
 
-pub fn run(cmd: RunCmd) -> Result<()> {
+/// A program `nova run` compiled, with the arguments it runs with. The
+/// command's thread compiles it, and `main` runs it on the process's main
+/// thread (`crate::main`): so the program keeps the stack it had before the
+/// pipeline moved to a thread of its own, the platform's main thread's,
+/// which is the stack it has when built (ADR 0052).
+pub struct Compiled {
+    program: nova_driver::CompiledProgram,
+    args: Vec<String>,
+}
+
+// SAFETY: a `CompiledProgram` is the JIT module that owns the program's
+// code and data, and a pointer to its `main` in that memory; it is not
+// `Send` only because the module holds raw pointers. That memory is mapped
+// for the process, not for a thread, and nothing in it belongs to the
+// thread that compiled it, which has ended by the time `main` runs it, so
+// one thread uses it at a time. The runtime's own state (its heap, its
+// executor, its file and socket tables) is per thread, made on first use
+// by the thread that runs the program: compiling calls nothing of the
+// runtime but its symbol table, and `set_args` is process-wide (ADR 0052).
+unsafe impl Send for Compiled {}
+
+impl Compiled {
+    /// Run the program on the calling thread, which `main` makes the main
+    /// thread.
+    pub fn run(self) {
+        self.program.run_with_args(self.args);
+    }
+}
+
+/// `nova run`'s compiling half: the program, ready for [`Compiled::run`].
+pub fn compile(cmd: RunCmd) -> Result<Compiled> {
     let mode = project::mode(cmd.file)?;
     project::refuse_library(&mode)?;
     project::sync(&mode)?;
     let program = project::program_to_run(&mode)?;
     let mut args = vec![entry(&program).to_string_lossy().into_owned()];
     args.extend(cmd.args.iter().map(|a| a.to_string_lossy().into_owned()));
-    match nova_driver::run_program(program, args)? {
-        Outcome::Ok(()) => Ok(()),
+    match nova_driver::compile_program(program)? {
+        Outcome::Ok(program) => Ok(Compiled { program, args }),
         Outcome::Failed { errors } => anyhow::bail!(
             "could not compile due to {errors} previous error{}",
             if errors == 1 { "" } else { "s" }
