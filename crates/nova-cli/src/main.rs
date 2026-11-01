@@ -90,6 +90,14 @@ enum Command {
     Version,
 }
 
+/// What a command's thread hands the main thread: the command's result,
+/// or, for `nova run`, the program it compiled, which runs on the main
+/// thread.
+enum Ran {
+    Done(Result<()>),
+    Program(Box<cmd::run::Compiled>),
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let filter = tracing_subscriber::EnvFilter::from_default_env()
@@ -108,9 +116,44 @@ fn main() -> Result<()> {
     }
 
     nova_driver::set_embedded_runtime(embedded::runtime());
-    match cli.command {
+    // The command runs on a thread with the pipeline's stack, so that a
+    // deeply nested source meets the parser's limit, not the platform's
+    // stack (spec
+    // `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+    // §4.4, ADR 0052). The thread is named `main`, so a panic's message
+    // reads as it did; the panic then resumes here, unwinding out of `main`
+    // as it did, with the exit code 101, and is not printed again. A
+    // stack overflow aborts the process from either thread, and
+    // `std::process::exit` ends it from either.
+    let command = cli.command;
+    let thread = std::thread::Builder::new()
+        .name("main".to_string())
+        .stack_size(nova_driver::PIPELINE_STACK)
+        .spawn(move || dispatch(command));
+    let ran = match thread {
+        Ok(thread) => thread.join(),
+        Err(e) => anyhow::bail!("could not start the compiler's thread: {e}"),
+    };
+    match ran {
+        Ok(Ran::Done(result)) => result,
+        Ok(Ran::Program(program)) => {
+            program.run();
+            Ok(())
+        }
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// Run `command`, on the thread `main` starts for it.
+fn dispatch(command: Command) -> Ran {
+    let result = match command {
         Command::Parse(cmd) => cmd::parse::run(cmd),
-        Command::Run(cmd) => cmd::run::run(cmd),
+        Command::Run(cmd) => {
+            return match cmd::run::compile(cmd) {
+                Ok(program) => Ran::Program(Box::new(program)),
+                Err(e) => Ran::Done(Err(e)),
+            }
+        }
         Command::Build(cmd) => cmd::run::build(cmd),
         Command::Bundle(cmd) => cmd::run::bundle(cmd),
         Command::Dev(cmd) => cmd::dev::run(cmd),
@@ -131,5 +174,6 @@ fn main() -> Result<()> {
         Command::Package => cmd::package::package(),
         Command::Publish => cmd::package::publish(),
         Command::Version => cmd::version::run(),
-    }
+    };
+    Ran::Done(result)
 }

@@ -887,3 +887,115 @@ fn a_missing_final_line_break_is_marked() {
     let m = first_difference(b"== a.nova\n0 0 Eof\n", b"== a.nova\n0 1 Eof").expect("a difference");
     assert_eq!(m.n.as_deref(), Some("0 1 Eof"));
 }
+
+// --- 5.1b: the AST dump, the depth limit and S0's thread (ADR 0052) ---
+
+/// A panic on the pipeline's thread is printed once, naming the thread
+/// `main` as before, and `nova` exits 101: here `println!` into a full
+/// device, Linux's `/dev/full`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_panic_on_the_pipelines_thread_exits_101_with_its_message() {
+    let dir = fresh_dir("panic");
+    std::fs::write(dir.join("a.nova"), "fn main() {}\n").expect("write a.nova");
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("open /dev/full");
+    let out = Command::new(nova())
+        .current_dir(&dir)
+        .args(["parse", "a.nova"])
+        .env("RUST_BACKTRACE", "0")
+        .stdout(full)
+        .output()
+        .expect("run nova parse");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(101), "{stderr}");
+    assert!(
+        stderr.starts_with("\nthread 'main' ") || stderr.starts_with("thread 'main' "),
+        "{stderr}"
+    );
+    assert_eq!(stderr.matches("panicked at").count(), 1, "{stderr}");
+    assert!(
+        stderr.contains("failed printing to stdout: No space left on device"),
+        "{stderr}"
+    );
+}
+
+/// ADR 0051's known bug: a decimal number of 4,000 characters overflowed
+/// S0's main thread at 1 MB, Windows' size. On the pipeline's thread,
+/// `nova parse --dump-tokens` lexes it with the main thread held at 1 MB.
+#[cfg(unix)]
+#[test]
+fn a_long_decimal_number_lexes_with_a_1_mb_main_thread() {
+    let dir = fresh_dir("long-number");
+    std::fs::write(
+        dir.join("a.nova"),
+        format!("let a = {}\n", "1".repeat(4000)),
+    )
+    .expect("write a.nova");
+    let script = format!(
+        "ulimit -s 1024 && exec '{}' parse --dump-tokens a.nova",
+        nova().display()
+    );
+    let out = output_within(
+        Command::new("sh")
+            .current_dir(&dir)
+            .args(["-c", &script])
+            .stdin(Stdio::null()),
+        CHILD_LIMIT,
+        "nova parse --dump-tokens under ulimit -s 1024",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains(" Eof NL\n"), "{stdout}");
+}
+
+/// `nova run` compiles on the pipeline's thread and runs the program on the
+/// main thread, so the program has the stack it has when built, the
+/// platform's main thread's (ADR 0052): with the main thread held at 8 MB,
+/// a recursion 100,000 deep runs, and one 2,000,000 deep, which 64 MB would
+/// hold, overflows it.
+#[cfg(unix)]
+#[test]
+fn nova_run_runs_the_program_on_the_main_thread() {
+    let dir = fresh_dir("run-stack");
+    let program = |n: usize| {
+        format!(
+            "fn down(n: Int) -> Int {{\n    if n == 0 {{ return 0 }}\n    1 + down(n - 1)\n}}\n\n\
+             fn main() {{\n    println(\"${{down({n})}}\")\n}}\n"
+        )
+    };
+    for (n, file) in [(100_000, "shallow.nova"), (2_000_000, "deep.nova")] {
+        std::fs::write(dir.join(file), program(n)).expect("write a program");
+    }
+    let run = |file: &str| {
+        let script = format!("ulimit -s 8192 && exec '{}' run {file}", nova().display());
+        let out = output_within(
+            Command::new("sh")
+                .current_dir(&dir)
+                .env("NOVA_HOME", dir.join("home"))
+                .args(["-c", &script])
+                .stdin(Stdio::null()),
+            CHILD_LIMIT,
+            &format!("nova run {file} under ulimit -s 8192"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (code, stdout, stderr) = run("shallow.nova");
+    assert_eq!((code, stdout.as_str()), (Some(0), "100000\n"), "{stderr}");
+    let (code, _, stderr) = run("deep.nova");
+    assert_ne!(code, Some(0), "{stderr}");
+    assert!(stderr.contains("has overflowed its stack"), "{stderr}");
+}

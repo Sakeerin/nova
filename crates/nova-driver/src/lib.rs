@@ -12,6 +12,7 @@ mod program;
 mod runtime_cache;
 
 pub use analyze::{analyze, analyze_program, Analysis, DiskSources, Options, Probe, Sources};
+pub use nova_codegen_cranelift::CompiledProgram;
 pub use nova_resolver::CompileTarget as Target;
 pub use program::{package_of, Program, Root, RootKind, Roots};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
@@ -21,7 +22,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use nova_codegen_cranelift::CompiledProgram;
 use nova_diagnostics::{render, Diagnostic, FileDb, FileId, Severity, Span};
 use nova_hir as hir;
 use nova_hir::Ty;
@@ -109,6 +109,17 @@ pub fn check_program_counted_for(program: Program, target: Target) -> Result<Che
         warnings: ctx.warnings,
     })
 }
+
+/// The stack of the threads the pipeline runs on: every command's (`nova`'s
+/// `main`), the language server's checker's and `nova dev`'s rebuilds'
+/// (spec
+/// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+/// §4.4, ADR 0052). The parser recurses once per level of nesting, up to
+/// `nova_parser::MAX_DEPTH`, and the stages after it about once per node,
+/// so a debug build on Windows' 1 MB main thread could overflow before the
+/// parser's limit; with 64 MB, the limit, not the platform, decides what a
+/// deep input meets. The WASM backend's own thread has 256 MB.
+pub const PIPELINE_STACK: usize = 64 << 20;
 
 /// Compile a file to native code via the Cranelift JIT.
 pub fn compile_file(path: &Path) -> Result<Outcome<CompiledProgram>> {
