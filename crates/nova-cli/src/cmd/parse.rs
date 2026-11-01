@@ -3,7 +3,9 @@
 //! The hidden `--dump-tokens FILE…` prints each file's token dump instead,
 //! what the self-hosted lexer's `selfhost tokens` prints (spec
 //! `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
-//! §3.3, ADR 0051).
+//! §3.3, ADR 0051), and the hidden `--dump-ast FILE…` each file's AST
+//! dump, what the self-hosted parser's `selfhost ast` prints (spec §4.3,
+//! ADR 0052).
 
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
@@ -35,20 +37,31 @@ pub struct ParseCmd {
     #[arg(long, hide = true, conflicts_with_all = ["ast", "check"])]
     dump_tokens: bool,
 
-    /// The files after FILE, which only `--dump-tokens` takes. Taken as
-    /// they are, an empty one included, so that without the flag `run`
-    /// refuses them in clap's words, and with it an empty one is a file
-    /// that is not there, as N reads it.
+    /// Print the AST dump of FILE and of every further file given, for the
+    /// self-hosted parser's differential test. Hidden: it carries no
+    /// stability promise.
+    #[arg(long, hide = true, conflicts_with_all = ["ast", "check", "dump_tokens"])]
+    dump_ast: bool,
+
+    /// The files after FILE, which only `--dump-tokens` and `--dump-ast`
+    /// take. Taken as they are, an empty one included, so that without
+    /// either flag `run` refuses them in clap's words, and with one an
+    /// empty one is a file that is not there, as N reads it.
     #[arg(hide = true, value_parser = OsStringValueParser::new().map(PathBuf::from))]
     more: Vec<PathBuf>,
 }
 
 pub fn run(cmd: ParseCmd) -> Result<()> {
-    if cmd.dump_tokens {
+    if cmd.dump_tokens || cmd.dump_ast {
         let files: Vec<&Path> = std::iter::once(cmd.file.as_path())
             .chain(cmd.more.iter().map(PathBuf::as_path))
             .collect();
-        let code = dump_tokens(&files)?;
+        let dump = if cmd.dump_ast {
+            nova_parser::dump_ast
+        } else {
+            nova_lexer::dump_tokens
+        };
+        let code = dump_each(&files, dump)?;
         if code != 0 {
             std::process::exit(code);
         }
@@ -56,7 +69,7 @@ pub fn run(cmd: ParseCmd) -> Result<()> {
     }
     if let Some(extra) = cmd.more.first() {
         // What clap said before `more` existed, without naming the hidden
-        // flag: its "unexpected argument" error, built as clap builds it,
+        // flags: its "unexpected argument" error, built as clap builds it,
         // so a terminal shows it in the same colours, with its usage line
         // naming the command as clap does (`parse_bin_name`).
         use clap::error::{ContextKind, ContextValue, ErrorKind};
@@ -156,17 +169,18 @@ fn parse_bin_name(arg0: Option<OsString>) -> String {
     }
 }
 
-/// `--dump-tokens`: for each file, `== FILE` (the path as given), then its
-/// token dump; for a file that cannot be read, `== FILE` then `IOERR` and
-/// its kind, after which the rest are dumped and the exit code is 2.
-fn dump_tokens(files: &[&Path]) -> Result<i32> {
+/// `--dump-tokens` and `--dump-ast`: for each file, `== FILE` (the path as
+/// given), then its `dump`; for a file that cannot be read, `== FILE` then
+/// `IOERR` and its kind, after which the rest are dumped and the exit code
+/// is 2.
+fn dump_each(files: &[&Path], dump: fn(&str) -> String) -> Result<i32> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut code = 0;
     for file in files {
         writeln!(out, "== {}", file.display())?;
         match std::fs::read_to_string(file) {
-            Ok(source) => out.write_all(nova_lexer::dump_tokens(&source).as_bytes())?,
+            Ok(source) => out.write_all(dump(&source).as_bytes())?,
             Err(e) => {
                 writeln!(out, "IOERR {}", io_kind_name(e.kind()))?;
                 code = 2;

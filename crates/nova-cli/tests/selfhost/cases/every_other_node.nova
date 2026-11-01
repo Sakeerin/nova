@@ -1,0 +1,41 @@
+// The kinds of node and values that no corpus file holds (ADR 0052), so
+// that the corpus and this file name every kind: a cast; `@`, record and
+// array patterns, a record pattern with and without `..`, its fields with
+// and without a pattern; reference, pointer (with and without `mut`) and
+// optional types; an import alias; the prefix operators `~`, `&`, `&mut`
+// and `*`; a module, a type alias, a trait's `async` signature and an item
+// in a block; and the newline rule's splits before a `[`, a `-` and the
+// value after a bare `return`.
+import json as j
+
+module m
+
+type Alias = Int
+
+trait Load {
+    async fn load() -> Int
+}
+
+fn g(a: &Int, b: *mut Int, c: Int?, d: &mut Point, e: *Int) -> Int {
+    let n = 1 as Float
+    let m = ~n
+    let r = &n
+    let s = &mut n
+    let t = *r
+    match d {
+        whole @ Point { x, y: 0, .. } => x,
+        Point { x } => x,
+        _ => 0,
+    }
+}
+
+fn h(xs: [Int]) -> Int {
+    fn inner() {}
+    let [a, b] = xs
+    xs
+    [0]
+    a
+    - b
+    return
+    a
+}

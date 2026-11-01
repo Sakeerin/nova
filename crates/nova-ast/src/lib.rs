@@ -8,7 +8,10 @@
 //! - `expr` — expressions
 //! - `pattern` — match patterns
 //! - `ty` — type expressions
+//!
+//! `dump` renders a tree as the canonical text both parsers print (ADR 0052).
 
+pub mod dump;
 pub mod expr;
 pub mod item;
 pub mod pattern;

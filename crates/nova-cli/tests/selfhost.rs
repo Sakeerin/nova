@@ -890,6 +890,122 @@ fn a_missing_final_line_break_is_marked() {
 
 // --- 5.1b: the AST dump, the depth limit and S0's thread (ADR 0052) ---
 
+#[test]
+fn the_ast_dump_flag_is_hidden_and_dumps_each_file_after_a_header() {
+    let help = Command::new(nova())
+        .args(["parse", "--help"])
+        .output()
+        .expect("run nova parse --help");
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--check"), "{help}");
+    assert!(!help.contains("dump-ast"), "{help}");
+    for other in ["--ast", "--check", "--dump-tokens"] {
+        let both = Command::new(nova())
+            .args(["parse", "--dump-ast", other, "a.nova"])
+            .output()
+            .expect("run nova parse");
+        let stderr = String::from_utf8_lossy(&both.stderr);
+        assert_eq!(both.status.code(), Some(2), "{other}: {stderr}");
+        assert!(stderr.contains("cannot be used with"), "{other}: {stderr}");
+    }
+    let dir = fresh_dir("ast-headers");
+    std::fs::write(dir.join("a.nova"), "fn f() {}\n").expect("write a.nova");
+    std::fs::write(dir.join("b.nova"), "fn g( {").expect("write b.nova");
+    let out = Command::new(nova())
+        .current_dir(&dir)
+        .args(["parse", "--dump-ast", "a.nova", "missing.nova", "b.nova"])
+        .output()
+        .expect("run nova parse --dump-ast");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "== a.nova\n(File\n  (Item.Function 0..9\n    \
+         (Function vis=Private is_async=false is_component=false name=\"f\"@3..4\n      \
+         (Block 7..9))))\n\
+         == missing.nova\nIOERR NotFound\n\
+         == b.nova\n(File)\n\
+         PARSE 6 7 expected identifier (in parameter name), found `{`\n\
+         PARSE 6 7 expected `)` (in function parameters), found `{`\n"
+    );
+    assert_eq!(out.status.code(), Some(2));
+}
+
+/// What `line` of an AST dump names among [`nova_ast::dump::KINDS`]'s
+/// forms: its node's kind, `(Kind`; each word outside quotes that is a
+/// field `key=value`, after the kind, `(Kind key=value`, when the value
+/// is a `bool`'s or `children=`'s; and each word that begins with a
+/// literal's prefix, `Int:`.
+fn kinds_on(line: &str, found: &mut std::collections::HashSet<String>) {
+    let node = line.trim_start();
+    let mut kind = String::new();
+    if let Some(rest) = node.strip_prefix('(') {
+        kind = rest
+            .chars()
+            .take_while(|c| *c != ' ' && *c != ')')
+            .collect();
+        found.insert(format!("({kind}"));
+    }
+    // Words, split at the spaces outside quotes; a quote inside one is
+    // written `\x22`, so each `"` opens or closes one.
+    let mut quoted = false;
+    let mut word = String::new();
+    for c in node.chars().chain([' ']) {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                word.push(c);
+            }
+            ' ' if !quoted => {
+                let w = word.trim_end_matches(')');
+                if let Some((prefix, _)) = w.split_once(':') {
+                    if ["Int", "Float", "Str", "Char", "Bool"].contains(&prefix) {
+                        found.insert(format!("{prefix}:"));
+                    }
+                }
+                match w.split_once('=') {
+                    Some((_, "true" | "false" | "Some" | "None")) => {
+                        found.insert(format!("({kind} {w}"));
+                    }
+                    Some(_) if !w.contains('"') => {
+                        found.insert(w.to_string());
+                    }
+                    _ => {}
+                }
+                word.clear();
+            }
+            _ => word.push(c),
+        }
+    }
+}
+
+/// Every kind of node, field-less value and literal the dump can print
+/// appears in S0's dump of some corpus file or fixed case (spec §4.3).
+#[test]
+fn every_kind_appears_in_the_dumps_of_the_corpus_and_the_cases() {
+    let root = root();
+    let mut files = corpus();
+    nova_files(&root, &cases_dir(), &[], &mut files);
+    let s0: &[&str] = &["parse", "--dump-ast"];
+    for (side, program, args) in [("S0", nova(), s0)] {
+        let mut found = std::collections::HashSet::new();
+        for chunk in files.chunks(BATCH) {
+            let out = run(&program, args, &root, chunk).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(out.code, Some(0), "{side}: {}", out.stderr);
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                kinds_on(line, &mut found);
+            }
+        }
+        let missing: Vec<&str> = nova_ast::dump::KINDS
+            .iter()
+            .copied()
+            .filter(|k| !found.contains(*k))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "no file's dump by {side} holds {missing:?}"
+        );
+    }
+}
+
 /// A panic on the pipeline's thread is printed once, naming the thread
 /// `main` as before, and `nova` exits 101: here `println!` into a full
 /// device, Linux's `/dev/full`.

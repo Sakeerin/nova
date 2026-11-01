@@ -21,14 +21,17 @@
 //! let (ast, _parse_errs) = parse(&tokens, file_id);
 //! ```
 
+mod dump;
 mod error;
 mod grammar;
 
+pub use dump::dump_ast;
 pub use error::ParseError;
 
 use nova_ast::File;
 use nova_diagnostics::{FileId, Spanned};
 use nova_lexer::Tokens;
+
 /// How deeply source may nest: past it, the parser reports
 /// [`ParseError::TooDeep`] (P0002) and stops (spec
 /// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
