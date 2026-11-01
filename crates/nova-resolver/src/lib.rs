@@ -2455,7 +2455,7 @@ fn std_module(src: &str, file_id: FileId) -> (Option<File>, Vec<Diagnostic>) {
     let (ast, parse_errors) = nova_parser::parse(&tokens, file_id);
     diags.extend(parse_errors.iter().map(|e| {
         e.notes().into_iter().fold(
-            Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here"),
+            Diagnostic::error(e.code(), e.to_string()).with_primary_label(e.span(), "here"),
             |d, n| d.with_note(n),
         )
     }));

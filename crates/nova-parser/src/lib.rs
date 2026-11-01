@@ -29,6 +29,11 @@ pub use error::ParseError;
 use nova_ast::File;
 use nova_diagnostics::{FileId, Spanned};
 use nova_lexer::Tokens;
+/// How deeply source may nest: past it, the parser reports
+/// [`ParseError::TooDeep`] (P0002) and stops (spec
+/// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+/// §4.4, ADR 0052). `grammar.rs`'s `Parser::deeper` says what a level is.
+pub const MAX_DEPTH: usize = 128;
 
 /// Parse a token stream into a `File` AST.
 ///

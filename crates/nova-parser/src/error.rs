@@ -22,6 +22,13 @@ pub enum ParseError {
     #[error("{message}")]
     Custom { message: String, span: Span },
 
+    /// More than [`MAX_DEPTH`](crate::MAX_DEPTH) levels of nesting, at the
+    /// token where the limit was crossed: P0002 (spec
+    /// `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+    /// §4.4). The parser stops there, so it is the file's last error.
+    #[error("this is nested too deeply (more than {} levels)", crate::MAX_DEPTH)]
+    TooDeep { span: Span },
+
     /// `error`, with a note that says why it may have come about.
     #[error("{error}")]
     Noted {
@@ -37,7 +44,18 @@ impl ParseError {
             ParseError::UnexpectedEof { span } => *span,
             ParseError::ChainedComparison { span } => *span,
             ParseError::Custom { span, .. } => *span,
+            ParseError::TooDeep { span } => *span,
             ParseError::Noted { error, .. } => error.span(),
+        }
+    }
+
+    /// The code a caller gives the error's diagnostic: P0002 for
+    /// [`ParseError::TooDeep`], P0001 for every other.
+    pub fn code(&self) -> &'static str {
+        match self {
+            ParseError::TooDeep { .. } => "P0002",
+            ParseError::Noted { error, .. } => error.code(),
+            _ => "P0001",
         }
     }
 

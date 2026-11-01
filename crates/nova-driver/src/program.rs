@@ -431,7 +431,7 @@ pub(crate) fn load_program(
         let parsed = nova_parser::parse_recovering(&tokens, file);
         load.diagnostics.extend(parsed.errors.iter().map(|e| {
             e.notes().into_iter().fold(
-                Diagnostic::error("P0001", e.to_string()).with_primary_label(e.span(), "here"),
+                Diagnostic::error(e.code(), e.to_string()).with_primary_label(e.span(), "here"),
                 |d, n| d.with_note(n),
             )
         }));
