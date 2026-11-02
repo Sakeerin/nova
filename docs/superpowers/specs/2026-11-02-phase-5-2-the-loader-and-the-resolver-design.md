@@ -1,7 +1,7 @@
 # Phase 5.2, "The loader and the resolver": design
 
 - **Date:** 2026-11-02.
-- **Status:** draft, for the user's approval.
+- **Status:** approved by the user (2026-11-02).
 - **The user's decisions, 2026-11-02:**
   1. **5.2 is the loader and the resolver, and HIR moves to 5.3.**
      - HIR is the type checker's output in S0, and paths, locals and types
