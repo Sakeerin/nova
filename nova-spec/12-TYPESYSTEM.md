@@ -280,6 +280,9 @@ types differ.
 | E0103 | This value is not used, or a line break ended a statement; a warning (added 2026-10-26, Phase 5.0a) |
 | E0104 | A pattern binds a name that starts with an upper-case letter, not a plain `let X` or `for X`; a warning (added 2026-10-28, Phase 5.0b) |
 | E0105 | One of std's inherent methods hides a program's trait method of the same name; a warning (added 2026-10-29, Phase 5.0c) |
+| L0001 | Any lexical error: an unexpected character, an unterminated string, interpolation or block comment, an invalid escape or numeric literal (row added 2026-10-31, Phase 5.1b; the code is older) |
+| P0001 | Any syntax error but P0002: expected one thing, found another; an unexpected end of file; chained comparisons (row added 2026-10-31, Phase 5.1b; the code is older) |
+| P0002 | This is nested too deeply (more than 128 levels): a parser code, beside P0001, any other syntax error, and L0001, any lexical error (added 2026-10-31, Phase 5.1b; `11-PARSER.md` §5) |
 
 Each gets a fully detailed error in `nova-diagnostics::messages` with example, suggestion, and link.
 

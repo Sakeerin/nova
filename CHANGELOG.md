@@ -15,7 +15,8 @@ Phase 5.0a, the small language and CI (spec
 patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050). Phase 5.1a, the
 self-hosted lexer and the differential (spec
 `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
-§3; ADR 0051).
+§3; ADR 0051), and 5.1b, the self-hosted parser, the AST dump and the
+depth limit (§4; ADR 0052).
 
 ### Added
 
@@ -168,8 +169,58 @@ self-hosted lexer and the differential (spec
   stability promise. `nova parse` without it still takes one file, and
   refuses a second in clap's words as before; the further files are a
   hidden argument only the flag reads (ADR 0051).
+- **`nova parse --dump-ast FILE…`, hidden:** each file's tree as an
+  indented S-expression, one node per line with its span and fields, its
+  newline splits, then its lex errors, its parse errors and their notes,
+  after a header `== FILE`, with `--dump-tokens`'s further files, `IOERR`
+  and exit code 2. The text comes from `nova_parser::dump_ast`. It is
+  absent from `--help` and carries no stability promise (ADR 0052).
+- **The self-hosted parser and its tree, in `selfhost/`:** N parses a file
+  as `nova-parser` does, function for function, and builds the same tree;
+  `selfhost ast FILE…` prints the same dump as `nova parse --dump-ast`,
+  errors, notes and newline splits included. The differential compares
+  the two dumps on every input set it compares the token dumps on (one
+  soup seed of three), checks that every kind of node appears in both
+  sides' dumps, and runs N on 128 and 129 levels of every kind of nesting
+  on a 1 MB main thread. A change to the grammar now changes both parsers
+  in one pull request. N lexes, parses and dumps all of std about 6× as
+  slowly as release S0 with a release runtime (ADR 0052).
 
 ### Changed
+
+- **Deeply nested source is now P0002, not a crash.** Past 128 levels of
+  nesting, "this is nested too deeply (more than 128 levels)" at the token
+  where the limit was crossed; the parser stops there, so it is the
+  file's last error and the items before it are kept. A level is an
+  expression, a type or a pattern inside another, a prefix operator's
+  operand, an `else if`, each further operator of a binary chain, each
+  further operator of a postfix chain (a method call `.f(…)` is one), an
+  item inside a block, or a view's children; the outermost is level 0, so
+  128 nested parentheses, blocks, calls, `if`s or types parse and 129 do
+  not. A call's arguments are a level deeper than the call, so after a
+  name a chain of 129 method calls without arguments parses and 130 does
+  not, and of 128 with arguments parses and 129 does not; a router built
+  as one chain from `Router::new()`, a route a `.get("/", h)`, parses 127
+  routes and not 128. Counting postfix chains, which the 5.1 spec's
+  levels do not name, is the user's ruling of 2026-10-31 (ADR 0052).
+  Before, a debug `nova check` aborted with a stack overflow: it passed
+  230 nested parentheses and aborted at 240, passed 190 nested `if`s and
+  aborted at 200, passed a chain of 750 operators and aborted at 800, and
+  passed a chain of 500 method calls and aborted at 600. But for the test
+  cases written to sit at the limit, the deepest file in the repository
+  nests 25 levels. `ParseError::code` gives P0002 or P0001, and every
+  caller attaches it.
+- **Every command runs its pipeline on a thread with a 64 MB stack,** as
+  do the language server's checker and `nova dev`'s rebuilds, so the
+  depth limit, not the platform's main-thread stack (1 MB on Windows),
+  decides what deeply nested source meets. A decimal number of 4,000
+  characters no longer overflows `nova` on a 1 MB main thread (ADR 0051's
+  known bug), though one of 210,000 digits or more still aborts a debug
+  build's 64 MB thread, `logos`'s per-digit recursion being no level of
+  the limit, and shorter ones lex in time quadratic in their length
+  (20,000 digits take about 8 s). A panic prints and exits 101 as
+  before; `nova run` still runs the program on the main thread, the stack
+  it has when built (ADR 0052).
 
 - **The newline rule.** In a block, a line break ends an expression
   before a `(`, a `[` or a binary `-`: the token begins the next
