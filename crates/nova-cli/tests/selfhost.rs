@@ -1176,6 +1176,9 @@ fn nova_on(dir: &Path, args: &[&str], file: &str) -> (Option<i32>, String) {
         Command::new(nova())
             .current_dir(dir)
             .env("NOVA_HOME", dir.join("home"))
+            // The diagnostics are matched as plain text; termcolor's
+            // `Auto` colours them on Windows, where it asks no terminal.
+            .env("NO_COLOR", "1")
             .args(args)
             .arg(file)
             .stdin(Stdio::null()),
