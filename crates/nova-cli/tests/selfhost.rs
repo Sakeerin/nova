@@ -14,6 +14,18 @@
 //!   `tests/selfhost/cases/`; on the edge inputs; and on the fuzzer's soup
 //!   and mutated corpus files from fixed seeds (`tests/selfhost/fuzz.rs`).
 //!
+//! 5.1b (spec §4, ADR 0052): the hidden `nova parse --dump-ast FILE…`, and
+//! N's `selfhost ast FILE…`, which must print the same tree, errors and
+//! notes byte for byte on every input set above, the token dump's beside
+//! it, and must each name every kind of node somewhere in the corpus and
+//! the cases; the error cases in `tests/selfhost/cases/`, the lexer's and
+//! the parser's tests' inline sources; the deep inputs, through both
+//! differentials, through S0's `parse --check` and `check`, which must meet
+//! the depth limit, P0002, and never overflow their stack, and through N on
+//! a 1 MB main thread, Windows' size, at 128 and 129 levels; and S0's
+//! big-stack thread, which keeps a panic's message and exit code, and
+//! leaves `nova run`'s program on the main thread.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -35,19 +47,28 @@ use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use compare::{first_difference, report, Dump, TOKENS};
+use compare::{first_difference, report, Dump, AST, TOKENS};
 use fuzz::SplitMix64;
 
 /// How many files one process lexes.
 const BATCH: usize = 50;
 
 /// The fixed seeds and counts every run checks: 6,000 inputs of soup and
-/// 750 mutated corpus files. Measured on a 4-core Linux machine, debug
-/// build: the whole file runs in about 10 s, building N included.
+/// 750 mutated corpus files through the token dump, and 2,000 of the soup's
+/// ([`AST_SOUP_SEED`]'s) and all 750 mutated files through the AST dump
+/// too. Measured on a 4-core Linux machine, debug build: the whole file ran
+/// in about 10 s with the token dump alone, building N included, and runs
+/// in about 21 s (about 50 s of CPU) with the AST dump; all the soup through
+/// both would add about 1 s of CPU.
 const SOUP_SEEDS: [u64; 3] = [1, 2, 3];
 const SOUP_COUNT: usize = 2000;
+/// The one soup seed whose inputs go through the AST dump as well: soup is
+/// made for the lexer, and most of it is one parse error after another, so
+/// a third of it is kept for the parser, and its time for the mutations.
+const AST_SOUP_SEED: u64 = 1;
 const MUTATION_SEEDS: [u64; 3] = [101, 102, 103];
 const MUTATION_COUNT: usize = 250;
+
 /// The deep inputs' seeds, and how many of each seed's are mixed: with
 /// every other kind at each of five depths, 90 inputs a seed.
 const DEEP_SEEDS: [u64; 2] = [201, 202];
@@ -516,16 +537,20 @@ fn agree_on(dump: &Dump, dir: &Path, files: &[String], batch: usize, code: i32) 
     all
 }
 
-/// [`agree_on`] the token dump.
+/// [`agree_on`] the token dump, then the AST dump (ADR 0052): every input
+/// set goes through both. Returns S0's token dump, then its AST dump.
 fn agree(dir: &Path, files: &[String], batch: usize, code: i32) -> String {
-    agree_on(&TOKENS, dir, files, batch, code)
+    let tokens = agree_on(&TOKENS, dir, files, batch, code);
+    let ast = agree_on(&AST, dir, files, batch, code);
+    tokens + &ast
 }
 
 /// Write `inputs` to a fixed directory named after `name`, as
-/// `f00000.nova` and on, and check that both sides agree on them. Returns
-/// S0's output. The fuzzer's generators all come through here, 5.1b's deep
-/// nesting included.
-fn agree_on_inputs(name: &str, inputs: &[String]) -> String {
+/// `f00000.nova` and on, and check that both sides agree on them, in the
+/// token dump, and in the AST dump too if `ast`. Returns S0's output, its
+/// token dump and, if `ast`, its AST dump after it. The fuzzer's generators all come through here, 5.1b's deep nesting
+/// included.
+fn agree_on_inputs(name: &str, inputs: &[String], ast: bool) -> String {
     let dir = fresh_dir(name);
     let mut files = Vec::with_capacity(inputs.len());
     for (i, input) in inputs.iter().enumerate() {
@@ -533,7 +558,11 @@ fn agree_on_inputs(name: &str, inputs: &[String]) -> String {
         std::fs::write(dir.join(&file), input).expect("write a fuzz input");
         files.push(file);
     }
-    agree(&dir, &files, 100, 0)
+    if ast {
+        agree(&dir, &files, 100, 0)
+    } else {
+        agree_on(&TOKENS, &dir, &files, 100, 0)
+    }
 }
 
 /// `count` mutated files from `seed`, each one of `files`, under `root`,
@@ -597,7 +626,10 @@ fn the_corpus_dumps_agree() {
     // 281 under std/, tests/ and examples/ alone at 5.0c.
     assert!(files.len() >= 290, "only {} corpus files", files.len());
     assert!(files.iter().any(|f| f == "selfhost/src/lexer.nova"));
-    agree(&root(), &files, BATCH, 0);
+    let dumps = agree(&root(), &files, BATCH, 0);
+    // Each file's tree, so the AST dumps were compared too.
+    let trees = dumps.lines().filter(|l| l.starts_with("(File")).count();
+    assert_eq!(trees, files.len());
 }
 
 /// Both lexers must agree on the corpus as a Windows checkout has it
@@ -636,7 +668,7 @@ fn the_fixed_cases_agree() {
 
 #[test]
 fn the_edge_inputs_agree() {
-    agree_on_inputs("edges", &fuzz::edges());
+    agree_on_inputs("edges", &fuzz::edges(), true);
 }
 
 #[test]
@@ -646,8 +678,11 @@ fn the_soup_agrees_and_holds_every_lex_error() {
         dumps.push_str(&agree_on_inputs(
             &format!("soup-{seed}"),
             &fuzz::soups(seed, SOUP_COUNT),
+            seed == AST_SOUP_SEED,
         ));
     }
+    // One seed's trees were compared too.
+    assert!(dumps.contains("\n(File"), "no tree in the soup's dumps");
     for error in LEX_ERRORS {
         let found = dumps.lines().any(|line| {
             line.starts_with("ERR ")
@@ -663,7 +698,13 @@ fn the_soup_agrees_and_holds_every_lex_error() {
 #[test]
 fn the_mutated_corpus_agrees() {
     for seed in MUTATION_SEEDS {
-        agree_on_inputs(&format!("mutated-{seed}"), &mutations(seed, MUTATION_COUNT));
+        let out = agree_on_inputs(
+            &format!("mutated-{seed}"),
+            &mutations(seed, MUTATION_COUNT),
+            true,
+        );
+        // Their trees were compared too.
+        assert!(out.contains("\n(File"), "seed {seed}");
     }
 }
 
@@ -678,7 +719,7 @@ fn a_longer_search_from_the_environment() {
         .split_once(':')
         .and_then(|(s, c)| Some((s.parse::<u64>().ok()?, c.parse::<usize>().ok()?)))
         .expect("NOVA_SELFHOST_FUZZ is SEED:COUNT");
-    agree_on_inputs("search-soup", &fuzz::soups(seed, count));
+    agree_on_inputs("search-soup", &fuzz::soups(seed, count), true);
     // Mutations go in batches of 500, each from a seed of its own, so a long
     // search keeps few inputs on disk at a time.
     let mut done = 0;
@@ -687,6 +728,7 @@ fn a_longer_search_from_the_environment() {
         agree_on_inputs(
             "search-mutated",
             &mutations(seed.wrapping_add(done as u64), n),
+            true,
         );
         done += n;
     }
@@ -714,11 +756,14 @@ fn unreadable_files_are_reported_alike() {
     assert!(out.ends_with("== \nIOERR NotFound\n"), "{out}");
 }
 
-/// No file at all: both sides refuse it, print nothing and exit 2.
+/// No file at all: both sides refuse it, print nothing and exit 2, for
+/// either dump.
 #[test]
 fn both_sides_refuse_no_file() {
-    let out = compare_batch(&TOKENS, &root(), &[], 2, &nova(), selfhost());
-    assert_eq!(out, Ok(String::new()));
+    for dump in [&TOKENS, &AST] {
+        let out = compare_batch(dump, &root(), &[], 2, &nova(), selfhost());
+        assert_eq!(out, Ok(String::new()));
+    }
 }
 
 #[test]
@@ -764,6 +809,31 @@ fn the_mismatch_report_names_the_file_and_line() {
     )
     .expect("a difference");
     assert_eq!((m.file.as_deref(), m.dump_line), (Some("a.nova"), 1));
+    // An AST dump's line names its source line by its node's start or its
+    // error's.
+    std::fs::write(dir.join("c.nova"), "fn f() {\n    1\n}\n").expect("write c.nova");
+    let files = ["b.nova", "c.nova"].map(String::from);
+    let s0 = run(&nova(), AST.s0, &dir, &files).expect("run S0").stdout;
+    let s0 = String::from_utf8(s0).expect("a dump of UTF-8 files is UTF-8");
+    for (from, to, part) in [
+        (
+            "found `let`",
+            "found `lot`",
+            "in b.nova, at line 5 of its dump, source line 3",
+        ),
+        (
+            "Int:1)",
+            "Int:2)",
+            "in c.nova, at line 5 of its dump, source line 2",
+        ),
+    ] {
+        let wrong = s0.replace(from, to);
+        assert_ne!(s0, wrong, "{from} is not in:\n{s0}");
+        let m = first_difference(s0.as_bytes(), wrong.as_bytes()).expect("a difference");
+        let text = report(&m, &AST, &dir, &nova(), Path::new("selfhost"));
+        assert!(text.contains(part), "{part:?} is not in:\n{text}");
+        assert!(text.contains("selfhost ast "), "{text}");
+    }
 }
 
 /// A side that fails, here a stand-in for N that is `nova` given an
@@ -982,14 +1052,16 @@ fn kinds_on(line: &str, found: &mut std::collections::HashSet<String>) {
 }
 
 /// Every kind of node, field-less value and literal the dump can print
-/// appears in S0's dump of some corpus file or fixed case (spec §4.3).
+/// appears in S0's dump of some corpus file or fixed case, and in N's
+/// (spec §4.3): it follows from the dumps' being equal, which
+/// `the_corpus_dumps_agree` and `the_fixed_cases_agree` check, and each
+/// side is checked on its own all the same.
 #[test]
 fn every_kind_appears_in_the_dumps_of_the_corpus_and_the_cases() {
     let root = root();
     let mut files = corpus();
     nova_files(&root, &cases_dir(), &[], &mut files);
-    let s0: &[&str] = &["parse", "--dump-ast"];
-    for (side, program, args) in [("S0", nova(), s0)] {
+    for (side, program, args) in [("S0", nova(), AST.s0), ("N", selfhost().into(), AST.n)] {
         let mut found = std::collections::HashSet::new();
         for chunk in files.chunks(BATCH) {
             let out = run(&program, args, &root, chunk).unwrap_or_else(|e| panic!("{e}"));
@@ -1017,7 +1089,84 @@ fn the_deep_inputs_agree() {
             .into_iter()
             .map(|(_, _, src)| src)
             .collect();
-        agree_on_inputs(&format!("deep-{seed}"), &inputs);
+        let out = agree_on_inputs(&format!("deep-{seed}"), &inputs, true);
+        // The AST dumps were compared too: past the limit, P0002.
+        assert!(out.contains(" this is nested too deeply"), "seed {seed}");
+    }
+}
+
+/// N, on a main thread of `stack` KB where `ulimit -s` can set it (Unix),
+/// or of the platform's size (Windows: 1 MB): `selfhost ast file` in `dir`,
+/// its exit code and stdout.
+fn n_on_stack(dir: &Path, stack: Option<u32>, file: &str) -> (Option<i32>, String) {
+    let mut cmd = match stack {
+        Some(kb) => {
+            let mut sh = Command::new("sh");
+            sh.args([
+                "-c",
+                &format!(
+                    "ulimit -s {kb} && exec '{}' ast '{file}'",
+                    selfhost().display()
+                ),
+            ]);
+            sh
+        }
+        None => {
+            let mut n = Command::new(selfhost());
+            n.args(["ast", file]);
+            n
+        }
+    };
+    let out = output_within(
+        cmd.current_dir(dir).stdin(Stdio::null()),
+        CHILD_LIMIT,
+        &format!("selfhost ast {file} on a {stack:?} KB stack"),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    )
+}
+
+/// N's own stack (spec §4.4, §4.8): every kind of nesting the deep
+/// generator writes, at 128 levels and at 129, through N on a main thread
+/// of 8 MB, Linux's, and of 1 MB, Windows', on every system: it neither
+/// overflows nor reports P0002 at 128, and reports one P0002 at 129. A
+/// Nova program runs on its platform's main thread, so on Windows N runs
+/// as it is, and elsewhere `ulimit -s` sets the size. N needed 256 KB at
+/// most when measured (ADR 0052).
+#[test]
+fn n_parses_128_levels_of_every_kind_on_a_1_mb_main_thread() {
+    let dir = fresh_dir("deep-n");
+    let mut rng = SplitMix64::new(DEEP_SEEDS[0]);
+    let mut files = Vec::new();
+    for kind in fuzz::DEEP_KINDS {
+        for depth in [128, 129] {
+            let file = format!("{kind}-{depth}.nova");
+            std::fs::write(dir.join(&file), fuzz::deep(&mut rng, kind, depth))
+                .expect("write a deep input");
+            files.push((depth, file));
+        }
+    }
+    let stacks: &[Option<u32>] = if cfg!(unix) {
+        &[Some(8192), Some(1024)]
+    } else {
+        &[None]
+    };
+    for &stack in stacks {
+        for (depth, file) in &files {
+            let (code, out) = n_on_stack(&dir, stack, file);
+            let p0002 = out
+                .lines()
+                .filter(|l| l.starts_with("PARSE ") && l.contains("nested too deeply"))
+                .count();
+            let expected = usize::from(*depth > 128);
+            assert!(
+                code == Some(0) && p0002 == expected,
+                "N on {file} with a {stack:?} KB stack: exit {code:?}, {p0002} P0002\n{out}"
+            );
+        }
     }
 }
 

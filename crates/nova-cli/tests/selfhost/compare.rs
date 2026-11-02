@@ -11,10 +11,16 @@ pub struct Dump {
     pub n: &'static [&'static str],
 }
 
-/// 5.1a's token dump. 5.1b's AST dump is a second `Dump` beside it.
+/// 5.1a's token dump.
 pub const TOKENS: Dump = Dump {
     s0: &["parse", "--dump-tokens"],
     n: &["tokens"],
+};
+
+/// 5.1b's AST dump (ADR 0052).
+pub const AST: Dump = Dump {
+    s0: &["parse", "--dump-ast"],
+    n: &["ast"],
 };
 
 /// Where two dumps first differ.
@@ -100,12 +106,14 @@ fn text(bytes: &[u8]) -> String {
 }
 
 /// The 1-based source line of the offset a dump line starts with (a token's
-/// start, or an error's or comment's), if `file` can be read from `dir`.
+/// start, or an error's or comment's; in an AST dump, a node's span's start
+/// or a parse error's), if `file` can be read from `dir`.
 fn source_line(dir: &Path, file: &str, line: &str) -> Option<usize> {
-    let mut fields = line.split(' ');
+    let mut fields = line.trim_start().split(' ');
     let first = fields.next()?;
     let offset: usize = match first {
-        "ERR" | "COMMENT" => fields.next()?.parse().ok()?,
+        "ERR" | "COMMENT" | "PARSE" => fields.next()?.parse().ok()?,
+        node if node.starts_with('(') => fields.next()?.split_once("..")?.0.parse().ok()?,
         _ => first.parse().ok()?,
     };
     let source = std::fs::read(dir.join(file)).ok()?;
