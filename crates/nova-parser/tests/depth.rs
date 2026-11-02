@@ -104,6 +104,13 @@ fn kinds() -> Vec<Kind> {
             // A method call's `(…)` counts with its `.name`.
             in_body(format!("a{}.leaf()", rep(".f()", d)))
         }),
+        ("calls after `.await` and tuple indexes", |d| {
+            // A call directly after any `.` postfix counts with it, as a
+            // method call's `(…)` with its `.name`.
+            let ops = [".await()", ".0()"];
+            let chain: String = (0..d).map(|i| ops[i % ops.len()]).collect();
+            in_body(format!("a{chain}.leaf()"))
+        }),
         ("assignments", |d| {
             in_body(format!("{}leaf", rep("a = ", d)))
         }),
@@ -166,6 +173,12 @@ fn kinds() -> Vec<Kind> {
                 close.insert_str(0, c);
             }
             format!("fn f(x: {open}Leaf{close}) {{}}\n")
+        }),
+        ("optional types", |d| {
+            // `T?`: each `?` after the first is a level, as a postfix
+            // chain's operators are, so `d + 1` of them are `d` levels; the
+            // line break ends the `let`, and `leaf` is the next statement.
+            in_body(format!("let x: Int{}\n    leaf", rep("?", d + 1)))
         }),
         ("patterns", |d| {
             let wrappers: [(&str, &str); 6] = [
@@ -303,9 +316,10 @@ fn errors_before_the_limit_stay_and_there_is_one_p0002() {
 }
 
 /// The depth goes back down after each operand, operator chain, postfix
-/// chain and sub-pattern: many siblings, each nested deep, are fine, and so
-/// is a chain of operators in each of many parentheses, and an operand 100
-/// deep after a chain of 99 operators of a higher precedence.
+/// chain, optional type and sub-pattern: many siblings, each nested deep,
+/// are fine, and so is a chain of operators in each of many parentheses,
+/// an operand 100 deep after a chain of 99 operators of a higher
+/// precedence, and a second cast after one whose type holds 100 `?`s.
 #[test]
 fn the_depth_goes_back_down_after_each_sibling() {
     let nest = format!("{}1{}", rep("(", 100), rep(")", 100));
@@ -331,7 +345,8 @@ fn the_depth_goes_back_down_after_each_sibling() {
     ]
     .map(|(op, lower)| format!("x{}{lower}{deep}", rep(op, 99)))
     .join("\n    ")
-        + &format!("\n    view {{ a{} g({deep}) }}", rep(".x", 99));
+        + &format!("\n    view {{ a{} g({deep}) }}", rep(".x", 99))
+        + &format!("\n    x as Int{q} as Int{q} * {deep}", q = rep("?", 100));
     let types = vec![format!("{}Int{}", rep("Vec<", 100), rep(">", 100)); 50].join(", ");
     let pats = vec![format!("{}x{}", rep("S(", 100), rep(")", 100)); 50].join(" | ");
     let src = format!(
@@ -394,6 +409,24 @@ fn a_rolled_back_crossing_stands_only_if_the_tokens_fail_the_other_way() {
     }
 }
 
+/// A call directly after any `.` postfix, `.await` or a tuple index as
+/// well as a field, counts with it, as a method call's `(…)` with its
+/// `.name`: after a name, 129 `.await()`s or `.0()`s parse, and 130 are
+/// one P0002, at the 130th's `await` or `0`.
+#[test]
+fn a_call_right_after_any_dot_postfix_counts_with_it() {
+    for op in [".await()", ".0()"] {
+        let (_, errors) = parse_src(in_body(format!("a{}", rep(op, MAX_DEPTH + 1))));
+        assert!(errors.is_empty(), "{op} x 129: {errors:?}");
+        let src = in_body(format!("a{}", rep(op, MAX_DEPTH + 2)));
+        let at = src.rfind(op).expect("an operator") + 1;
+        let (_, errors) = parse_src(src);
+        let codes: Vec<&str> = errors.iter().map(|e| e.code()).collect();
+        assert_eq!(codes, ["P0002"], "{op} x 130");
+        assert_eq!(errors[0].span().start as usize, at, "{op} x 130");
+    }
+}
+
 /// Far past the limit, as a fuzzer could write, the parser stops at 129
 /// and never overflows its stack.
 #[test]
@@ -406,6 +439,7 @@ fn far_past_the_limit_it_stops_without_overflowing() {
         in_body(format!("a{}", rep(".f()", 100_000))),
         in_body(rep("if c { ", 50_000)),
         format!("fn f(x: {}Int) {{}}\n", rep("Vec<", 100_000)),
+        format!("fn f(x: Int{}) {{}}\n", rep("?", 100_000)),
         in_body(format!("let {}x = 0", rep("S(", 100_000))),
     ] {
         let (_, errors) = parse_src(src);

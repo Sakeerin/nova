@@ -193,6 +193,9 @@ impl Parser {
     ///   of its chain: the right operand of a chain's `k`th operator is `k`
     ///   levels deeper than the chain, and so is the type after its `k`th
     ///   `as`;
+    /// - each postfix operator after a chain's first, for the rest of the
+    ///   chain, a call directly after a `.` postfix counting with it, and
+    ///   each `?` of an optional type `T?` after the first;
     /// - an item inside a block, and the children of a view or an element.
     ///
     /// The file's outermost expression, type, pattern or nested item is
@@ -201,8 +204,8 @@ impl Parser {
     /// every entry, the outermost's included, is one more than the level.
     /// A block is not a level of its own: its statements' expressions are.
     /// Each of these is entered as `nested` enters it, with the depth
-    /// restored after it, but for the binary operators, whose function
-    /// restores it when the chain ends.
+    /// restored after it, but for the chains, binary, postfix and
+    /// optional, whose functions restore it when the chain ends.
     pub fn deeper(mut self) -> Bool {
         self.depth += 1
         if self.depth <= MAX_DEPTH + 1 { return true }

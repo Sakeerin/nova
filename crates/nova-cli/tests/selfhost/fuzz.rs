@@ -446,9 +446,9 @@ pub fn edges() -> Vec<String> {
 
 /// The kinds of nesting [`deep`] writes: the spec's parentheses, blocks,
 /// `if`, `match`, calls, types and patterns, and its `else if` chains,
-/// binary chains and prefix operators, with `while`, `for`, postfix chains
-/// and items in blocks; and all of them mixed.
-pub const DEEP_KINDS: [&str; 15] = [
+/// binary chains and prefix operators, with `while`, `for`, postfix chains,
+/// optional types `T?` and items in blocks; and all of them mixed.
+pub const DEEP_KINDS: [&str; 16] = [
     "parentheses",
     "blocks",
     "ifs",
@@ -461,6 +461,7 @@ pub const DEEP_KINDS: [&str; 15] = [
     "binary",
     "postfix",
     "types",
+    "optionals",
     "patterns",
     "items",
     "mixed",
@@ -474,8 +475,9 @@ pub const DEEP_DEPTHS: std::ops::RangeInclusive<usize> = 126..=130;
 /// expression, type or pattern is level 0, and each wrapper one more, so
 /// `depth` is how many wrappers there are: 128 parentheses parse, 129 are
 /// P0002.
-/// Up to the limit, each is well typed but `items`, whose nested functions
-/// are E0900; `rng` picks the wrappers of `mixed`.
+/// Up to the limit, each is well typed but `items` and `optionals`, whose
+/// nested functions and `T?` are E0900; `rng` picks the wrappers of
+/// `mixed`.
 pub fn deep(rng: &mut SplitMix64, kind: &str, depth: usize) -> String {
     let d = depth;
     let wrap = |open: &str, inner: &str, close: &str, n: usize| {
@@ -513,6 +515,9 @@ pub fn deep(rng: &mut SplitMix64, kind: &str, depth: usize) -> String {
             "fn f(x: {}) {{}}\n\nfn main() {{}}\n",
             wrap("Option<", "Int", ">", d)
         ),
+        // `d + 1` `?`s: each after the first is a level, as a postfix
+        // chain's operators are.
+        "optionals" => format!("fn f(x: Int{}) {{}}\n\nfn main() {{}}\n", "?".repeat(d + 1)),
         "patterns" => main(format!(
             "let {} = 1\n    println(\"${{x}}\")",
             wrap("(", "x", ")", d)

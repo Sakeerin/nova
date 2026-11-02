@@ -120,6 +120,9 @@ impl<'a> Parser<'a> {
     ///   of its chain: the right operand of a chain's `k`th operator is `k`
     ///   levels deeper than the chain, and so is the type after its `k`th
     ///   `as`;
+    /// - each postfix operator after a chain's first, for the rest of the
+    ///   chain, a call directly after a `.` postfix counting with it, and each
+    ///   `?` of an optional type `T?` after the first;
     /// - an item inside a block, and the children of a view or an element.
     ///
     /// The file's outermost expression, type, pattern or nested item is
@@ -128,8 +131,8 @@ impl<'a> Parser<'a> {
     /// every entry, the outermost's included, is one more than the level.
     /// A block is not a level of its own: its statements' expressions are.
     /// Each of these is entered through [`Parser::nested`], which restores
-    /// the depth after it, but for the binary operators, whose function
-    /// restores it when the chain ends.
+    /// the depth after it, but for the chains, binary, postfix and
+    /// optional, whose functions restore it when the chain ends.
     fn deeper(&mut self) -> bool {
         self.depth += 1;
         if self.depth <= MAX_DEPTH + 1 {
@@ -1435,11 +1438,24 @@ impl<'a> Parser<'a> {
     /// `as`, which its operator's level counts, as a binary operator's
     /// counts its right operand ([`Parser::deeper`]).
     fn parse_type_here(&mut self, ctx: &str) -> Option<Spanned<Type>> {
-        let start = self.peek_span();
-        let mut ty = self.parse_type_atom(ctx)?;
+        let (start, depth) = (self.peek_span(), self.depth);
+        let ty = self.parse_optional_chain(start, ctx);
+        self.depth = depth;
+        ty
+    }
 
-        // Optional sugar: `T?`
+    /// The type at the cursor and its optional sugar, `T?`: each `?` after
+    /// the first one level deeper than the one before it, as a postfix
+    /// chain's operators are ([`Parser::deeper`]): past the limit, at the
+    /// token after it. [`Parser::parse_type_here`] restores the depth.
+    fn parse_optional_chain(&mut self, start: Span, ctx: &str) -> Option<Spanned<Type>> {
+        let mut ty = self.parse_type_atom(ctx)?;
+        let mut first = true;
         while self.eat(&Token::Question).is_some() {
+            if !first && !self.deeper() {
+                return None;
+            }
+            first = false;
             let end = self
                 .tokens
                 .get(self.pos.saturating_sub(1))
@@ -1447,7 +1463,6 @@ impl<'a> Parser<'a> {
                 .unwrap_or(start);
             ty = Spanned::new(Type::Optional(Box::new(ty)), start.merge(end));
         }
-
         Some(ty)
     }
 
