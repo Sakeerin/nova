@@ -1,0 +1,1 @@
+trait It { type Item: Display }

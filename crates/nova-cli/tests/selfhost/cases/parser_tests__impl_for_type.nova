@@ -1,0 +1,6 @@
+
+impl Display for Point {
+    fn fmt(self) -> String {
+        "point"
+    }
+}

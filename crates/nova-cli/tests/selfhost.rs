@@ -48,6 +48,10 @@ const SOUP_SEEDS: [u64; 3] = [1, 2, 3];
 const SOUP_COUNT: usize = 2000;
 const MUTATION_SEEDS: [u64; 3] = [101, 102, 103];
 const MUTATION_COUNT: usize = 250;
+/// The deep inputs' seeds, and how many of each seed's are mixed: with
+/// every other kind at each of five depths, 90 inputs a seed.
+const DEEP_SEEDS: [u64; 2] = [201, 202];
+const DEEP_MIXED: usize = 20;
 
 /// The beginning of each of the seven lex errors' messages
 /// (nova-lexer's `error.rs`).
@@ -1003,6 +1007,77 @@ fn every_kind_appears_in_the_dumps_of_the_corpus_and_the_cases() {
             missing.is_empty(),
             "no file's dump by {side} holds {missing:?}"
         );
+    }
+}
+
+#[test]
+fn the_deep_inputs_agree() {
+    for seed in DEEP_SEEDS {
+        let inputs: Vec<String> = fuzz::deeps(seed, DEEP_MIXED)
+            .into_iter()
+            .map(|(_, _, src)| src)
+            .collect();
+        agree_on_inputs(&format!("deep-{seed}"), &inputs);
+    }
+}
+
+/// `nova` with `args` and `file`, in `dir`: its exit code and stderr.
+fn nova_on(dir: &Path, args: &[&str], file: &str) -> (Option<i32>, String) {
+    let out = output_within(
+        Command::new(nova())
+            .current_dir(dir)
+            .env("NOVA_HOME", dir.join("home"))
+            .args(args)
+            .arg(file)
+            .stdin(Stdio::null()),
+        CHILD_LIMIT,
+        &format!("nova {} {file}", args.join(" ")),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// S0 meets the depth limit, not its stack, on every deep input, on every
+/// system (spec §4.4, §4.8): `nova parse --check` passes each at 128 levels
+/// and below and gives one P0002 past it, as `nova check` does at 128 and
+/// 129, every stage after the parser included.
+#[test]
+fn s0_meets_the_depth_limit_on_the_deep_inputs_not_its_stack() {
+    let dir = fresh_dir("deep-s0");
+    for (i, (kind, depth, src)) in fuzz::deeps(DEEP_SEEDS[0], DEEP_MIXED)
+        .into_iter()
+        .enumerate()
+    {
+        let file = format!("{kind}-{depth}-{i}.nova");
+        std::fs::write(dir.join(&file), &src).expect("write a deep input");
+        let mut commands: Vec<&[&str]> = vec![&["parse", "--check"]];
+        if depth == 128 || depth == 129 {
+            commands.push(&["check"]);
+        }
+        for args in commands {
+            let (code, stderr) = nova_on(&dir, args, &file);
+            let what = format!("nova {} {file}", args.join(" "));
+            assert!(!stderr.contains("overflowed"), "{what}:\n{stderr}");
+            let p0002 = stderr
+                .matches("error[P0002]: this is nested too deeply")
+                .count();
+            if depth <= 128 {
+                // Nested items are E0900 to the checker; nothing else is an
+                // error.
+                let errors_ok =
+                    stderr.matches("error[").count() == stderr.matches("error[E0900]").count();
+                let code_ok = code == Some(0) || (kind == "items" && code == Some(1));
+                assert!(
+                    p0002 == 0 && errors_ok && code_ok,
+                    "{what}: {code:?}\n{stderr}"
+                );
+            } else {
+                assert!(p0002 == 1 && code == Some(1), "{what}: {code:?}\n{stderr}");
+            }
+        }
     }
 }
 

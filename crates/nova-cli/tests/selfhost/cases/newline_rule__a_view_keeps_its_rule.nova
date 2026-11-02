@@ -1,0 +1,2 @@
+fn f() -> Html { view { g
+(x) } }

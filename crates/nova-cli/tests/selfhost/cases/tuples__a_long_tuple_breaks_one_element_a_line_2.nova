@@ -1,0 +1,1 @@
+fn main() { let t = ("a long string here", "another long string", "and a third, much, much longer one", 12345) }

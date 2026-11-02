@@ -1,0 +1,24 @@
+// A type after a cast and `<` is first tried as generic arguments, a level
+// deeper than the expression the tokens then are, and after two casts two
+// levels. At 127 and 126 parentheses that attempt crosses the depth limit
+// and is rolled back, and the tokens read again as an expression do not
+// cross it: no P0002, and no error the attempt pushed after it crossed
+// (the tuple type's missing `)`). The crossing waits until its token is
+// read, so the error in `k` is the file's only one. A parser whose
+// rollback keeps the crossing, or keeps it waiting, reports P0002 here
+// (ADR 0052).
+fn f(x: Int, a: Int) -> Bool {
+    x as Int < (((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((a)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+}
+
+fn g(x: Int, a: Int, b: Int) -> Bool {
+    x as Int < (b, ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((a)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+}
+
+fn h(x: Int, a: Int) -> Bool {
+    x as A as B < ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((a))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+}
+
+fn k() {
+    let = 1
+}

@@ -1,0 +1,7 @@
+record R { v: Int }
+fn f(r: R) -> Int { r.v }
+fn main() {
+if "${f(R { v: 1 })}" == "1" { println("y") }
+while "${f(R { v: 2 })}" == "" { println("n") }
+match "${f(R { v: 3 })}" { _ => println("m") }
+}

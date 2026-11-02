@@ -1,0 +1,3 @@
+record R { v: Int }
+fn f(r: R) -> Int { r.v }
+fn main() { println("${f(R { v: 1 })}") }

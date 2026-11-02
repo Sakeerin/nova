@@ -1,0 +1,7 @@
+fn f() {
+match x {
+    None => return
+    0,
+    Some(y) => y,
+}
+}

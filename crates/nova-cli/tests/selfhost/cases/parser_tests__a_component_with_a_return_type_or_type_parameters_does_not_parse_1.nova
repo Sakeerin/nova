@@ -1,0 +1,2 @@
+component A() -> Int { 1 }
+fn main() { }

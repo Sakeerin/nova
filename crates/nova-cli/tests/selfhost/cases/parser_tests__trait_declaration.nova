@@ -1,0 +1,4 @@
+
+trait Greet {
+    fn hello(self) -> String;
+}

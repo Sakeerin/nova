@@ -1,0 +1,28 @@
+trait Tr {
+    /// req
+    fn a(self)
+    /// prov
+    fn b(self) {}
+    /// assoc
+    type Item
+}
+impl Tr for R {
+    /// m
+    fn a(self) {}
+    /// k
+    const K: Int = 1
+    /// bind
+    type Item = Int
+}
+record R {
+    /// x
+    x: Int,
+}
+type T =
+    /// a
+    | A
+    | B
+extern "C" {
+    /// ext
+    fn ext(x: Int) -> Int
+}

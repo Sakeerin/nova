@@ -1,0 +1,11 @@
+fn f() {
+    view {
+        div(class: "a", for: "b", type: "c", attr("d", "e")) {
+            text("x")
+            input(value: v)
+            span { }
+            Counter()
+            show(open, || view { p { } })
+        }
+    }
+}

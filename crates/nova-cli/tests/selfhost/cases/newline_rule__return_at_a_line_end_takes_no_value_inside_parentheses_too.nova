@@ -1,0 +1,4 @@
+fn f() {
+g(return
+    x)
+}

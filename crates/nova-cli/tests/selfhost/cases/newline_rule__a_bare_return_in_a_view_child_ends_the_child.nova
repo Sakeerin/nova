@@ -1,0 +1,6 @@
+fn f() -> Html {
+    view {
+        return
+        (1)
+    }
+}

@@ -1,0 +1,4 @@
+fn f() {
+return
+let y = 1
+}

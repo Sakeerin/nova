@@ -1,0 +1,2 @@
+// one
+fn /* two */ main() { f(/* three */"s") } // four

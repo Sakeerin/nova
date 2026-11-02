@@ -1,0 +1,2 @@
+component Card(title: String) { 1 }
+pub component Page() { 2 }

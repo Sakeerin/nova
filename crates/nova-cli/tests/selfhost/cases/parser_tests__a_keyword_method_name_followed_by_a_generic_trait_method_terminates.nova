@@ -1,0 +1,4 @@
+record B<T> { v: T }
+impl<T> B<T> { fn with(self) -> Int { 1 } }
+trait M { fn remap<U>(self, u: U) -> Int }
+fn main() { }

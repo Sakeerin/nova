@@ -1,0 +1,1 @@
+impl It for W { type Item = Int  const N: Int = 1  fn get(self) -> Int { 1 } }
