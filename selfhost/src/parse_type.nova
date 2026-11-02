@@ -1,0 +1,204 @@
+// Types: a port of crates/nova-parser/src/grammar.rs's "Types" section,
+// function by function (parser.nova says how its idioms translate).
+
+import ast
+import parser
+import token
+
+impl Parser {
+    pub fn parse_type(mut self, ctx: String) -> Option<Spanned<Type>> {
+        // `nested`
+        let depth = self.depth
+        let result = if self.deeper() { self.parse_type_here(ctx) } else { None }
+        self.depth = depth
+        result
+    }
+
+    /// A type at the cursor's level, which is not one more: the type after
+    /// `as`, which its operator's level counts, as a binary operator's
+    /// counts its right operand (`deeper`).
+    pub fn parse_type_here(mut self, ctx: String) -> Option<Spanned<Type>> {
+        let start = self.peek_span()
+        let mut ty = self.parse_type_atom(ctx)?
+
+        // Optional sugar: `T?`
+        while self.eat(Question).is_some() {
+            let end = self.prev_span_or(start)
+            ty = Spanned::new(TypeOptional(ty), start.merge(end))
+        }
+
+        Some(ty)
+    }
+
+    pub fn parse_type_atom(mut self, ctx: String) -> Option<Spanned<Type>> {
+        let start = self.peek_span()
+        match self.peek() {
+            Amp => {
+                let _ = self.advance()
+                let is_mut = self.eat(Mut).is_some()
+                let inner = self.parse_type(ctx)?
+                let span = start.merge(inner.span)
+                Some(Spanned::new(TypeRef(is_mut, inner), span))
+            }
+            Star => {
+                let _ = self.advance()
+                let is_mut = self.eat(Mut).is_some()
+                let inner = self.parse_type(ctx)?
+                let span = start.merge(inner.span)
+                Some(Spanned::new(TypePtr(is_mut, inner), span))
+            }
+            LBracket => {
+                let _ = self.advance()
+                let inner = self.parse_type(ctx)?
+                let _ = self.expect(RBracket, "array type")?
+                let end = self.prev_span_or(start)
+                Some(Spanned::new(TypeArray(inner), start.merge(end)))
+            }
+            LParen => {
+                let _ = self.advance()
+                if self.eat(RParen).is_some() {
+                    // unit type `()`
+                    let end = self.prev_span_or(start)
+                    return Some(Spanned::new(TypeTuple(Vec::new()), start.merge(end)))
+                }
+                let first = self.parse_type(ctx)?
+                if self.eat(RParen).is_some() {
+                    // Single-element paren: not a tuple, just the type
+                    let end = self.prev_span_or(start)
+                    return Some(Spanned::new(first.value, start.merge(end)))
+                }
+                // Tuple
+                let mut elems: Vec<Spanned<Type>> = Vec::new()
+                elems.push(first)
+                while self.eat(Comma).is_some() && !self.check(RParen) {
+                    match self.parse_type(ctx) {
+                        Some(t) => elems.push(t)
+                        None => ()
+                    }
+                }
+                let _ = self.expect(RParen, "tuple type")?
+                let end = self.prev_span_or(start)
+                Some(Spanned::new(TypeTuple(elems), start.merge(end)))
+            }
+            Fn => {
+                let _ = self.advance()
+                let _ = self.expect(LParen, "fn type params")?
+                let mut params: Vec<Spanned<Type>> = Vec::new()
+                while !self.check(RParen) && !self.is_at_end() {
+                    match self.parse_type(ctx) {
+                        Some(t) => params.push(t)
+                        None => ()
+                    }
+                    if self.eat(Comma).is_none() { break }
+                }
+                let _ = self.expect(RParen, "fn type params")?
+                let ret = if self.eat(Arrow).is_some() {
+                    self.parse_type(ctx)?
+                } else {
+                    let unit_span = self.peek_span()
+                    Spanned::new(TypeTuple(Vec::new()), unit_span)
+                }
+                let end = ret.span
+                Some(Spanned::new(TypeFn(params, ret), start.merge(end)))
+            }
+            Ident(_) | SelfUpper => {
+                let path = self.parse_path(ctx)?
+                // Generic args `<T, U>`
+                let args = self.parse_generic_args_opt(ctx)
+                let end = self.prev_span_or(start)
+                Some(Spanned::new(TypePath(path, args), start.merge(end)))
+            }
+            _ => {
+                let span = self.peek_span()
+                self.errors.push(Expected("type (in ${ctx})", self.peek().description(), span))
+                None
+            }
+        }
+    }
+
+    /// Whether the cursor is at a closing `>` for a generic argument list:
+    /// a `>` pending from an earlier split `>>`, or a `>` / `>>` token.
+    pub fn at_generic_close(self) -> Bool {
+        if self.pending_gt > 0 { return true }
+        match self.peek() {
+            Gt | GtGt => true
+            _ => false
+        }
+    }
+
+    /// Consume one closing `>`. A glued `>>` token yields one `>` now and
+    /// records the other in `pending_gt` for the enclosing list, so
+    /// `Option<Option<Int>>` closes correctly. Returns false if not at a
+    /// `>`.
+    pub fn eat_generic_close(mut self) -> Bool {
+        if self.pending_gt > 0 {
+            self.pending_gt -= 1
+            return true
+        }
+        match self.peek() {
+            Gt => {
+                let _ = self.advance()
+                true
+            }
+            GtGt => {
+                let _ = self.advance()
+                self.pending_gt += 1
+                true
+            }
+            _ => false
+        }
+    }
+
+    /// Undo a speculative parse that began at `pos`, with `pending_gt`
+    /// pending `>`s and the P0002 state `too_deep`. The errors it pushed
+    /// stand, as the parser before the depth limit left them, but for
+    /// those after it crossed the limit, which it read at the end of the
+    /// file. Its crossing does not decide alone: it waits in
+    /// `rolled_back`, at the token at the cursor, where it was made, for
+    /// the tokens to be read again the other way.
+    pub fn roll_back(mut self, pos: Int, pending_gt: Int, too_deep: Option<(Int, Span)>) {
+        match (too_deep, self.too_deep) {
+            (None, Some((errors, span))) => {
+                while self.errors.len() > errors { let _ = self.errors.pop() }
+                self.rolled_back = Some((errors, span, self.pos))
+            }
+            _ => ()
+        }
+        self.pos = pos
+        self.pending_gt = pending_gt
+        self.too_deep = too_deep
+    }
+
+    pub fn parse_generic_args_opt(mut self, ctx: String) -> Vec<Spanned<Type>> {
+        let mut args: Vec<Spanned<Type>> = Vec::new()
+        if !self.check(Lt) { return args }
+        // Peek ahead: if next after `<` looks like a type, treat as generic
+        // args. Otherwise this `<` might be a comparison operator. A rollback
+        // restores the position, and keeps the errors pushed meanwhile
+        // (`roll_back`).
+        let saved = self.pos
+        let saved_pending = self.pending_gt
+        let saved_deep = self.too_deep
+        let _ = self.advance()
+        while !self.at_generic_close() && !self.is_at_end() {
+            match self.parse_type(ctx) {
+                Some(t) => args.push(t)
+                None => {
+                    // Wasn't a type: roll back
+                    self.roll_back(saved, saved_pending, saved_deep)
+                    return Vec::new()
+                }
+            }
+            // A `>` split from a `>>` now closes this list; a following
+            // comma (if any) belongs to an enclosing list, so stop here.
+            if self.pending_gt > 0 { break }
+            if self.eat(Comma).is_none() { break }
+        }
+        if !self.eat_generic_close() {
+            // Didn't close: roll back
+            self.roll_back(saved, saved_pending, saved_deep)
+            return Vec::new()
+        }
+        args
+    }
+}

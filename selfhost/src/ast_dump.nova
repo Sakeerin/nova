@@ -1,0 +1,906 @@
+// The AST dump: one source's tree and errors as text, one node per line,
+// exactly as S0's `nova parse --dump-ast` prints them: a port of
+// crates/nova-ast/src/dump.rs (the tree) and crates/nova-parser/src/dump.rs
+// (the errors), function by function. ADR 0052 writes the grammar out, with
+// an example of every kind; dump.nova's rules for strings are the token
+// dump's.
+
+import ast
+import dump
+import lexer
+import parser
+import token
+
+/// The AST dump of `source`: its tree, then `ERR` for each lex error,
+/// `PARSE` for each parse error and `NOTE` for each of its notes
+/// (nova-parser's `dump_ast`).
+pub fn dump_ast(source: String) -> String {
+    let (tokens, lex_errors) = lex(source)
+    let (file, errors) = parse(tokens)
+    let mut out = dump_file(file)
+    for e in lex_errors.iter() {
+        let span = e.span()
+        out.push("ERR ${span.start} ${span.end} ")
+        push_escaped(out, "${e}", false)
+        out.push("\n")
+    }
+    for e in errors.iter() {
+        let span = e.span()
+        out.push("PARSE ${span.start} ${span.end} ")
+        push_escaped(out, "${e}", false)
+        out.push("\n")
+        for note in e.notes().iter() {
+            out.push("NOTE ")
+            push_escaped(out, note, false)
+            out.push("\n")
+        }
+    }
+    out.to_string()
+}
+
+/// The dump of `file`'s tree, into a builder the errors are added to
+/// (nova-ast's `dump_file`).
+pub fn dump_file(file: File) -> StringBuilder {
+    let mut d = Dump { out: StringBuilder::new() }
+    d.open(0, "File", None)
+    for item in file.items.iter() { d.item(1, Some(item.span), item.value) }
+    for split in file.newline_splits.iter() {
+        d.open(1, "Split", Some(split.at))
+        d.field("kind", split_kind_name(split.kind))
+        d.close()
+    }
+    d.close()
+    d.out.push("\n")
+    d.out
+}
+
+// The dump being written (dump.rs's `Dump`).
+record Dump { out: StringBuilder }
+
+impl Dump {
+    // --- Lines and values ---
+
+    // A node's line, up to its kind and span.
+    fn open(mut self, depth: Int, kind: String, span: Option<Span>) {
+        if !self.out.is_empty() { self.out.push("\n") }
+        let mut i = 0
+        while i < depth {
+            self.out.push("  ")
+            i += 1
+        }
+        self.out.push("(")
+        self.out.push(kind)
+        match span {
+            Some(s) => self.out.push(" ${s.start}..${s.end}")
+            None => ()
+        }
+    }
+
+    fn close(mut self) { self.out.push(")") }
+
+    // ` key=value`.
+    fn field(mut self, key: String, value: String) { self.out.push(" ${key}=${value}") }
+
+    fn bool_field(mut self, key: String, value: Bool) { self.field(key, "${value}") }
+
+    // ` key=` and the name.
+    fn name_field(mut self, key: String, name: Spanned<String>) {
+        self.out.push(" ${key}=")
+        self.name(name)
+    }
+
+    // ` key=` and the path.
+    fn path_field(mut self, key: String, path: Path) {
+        self.out.push(" ${key}=")
+        self.path(path)
+    }
+
+    // A name: quoted, `@`, its span.
+    fn name(mut self, name: Spanned<String>) {
+        self.quote(name.value)
+        self.out.push("@${name.span.start}..${name.span.end}")
+    }
+
+    // A path: its segments' names, joined by `::`.
+    fn path(mut self, path: Path) {
+        let mut i = 0
+        while i < path.segments.len() {
+            if i > 0 { self.out.push("::") }
+            self.name(path.segments.at(i))
+            i += 1
+        }
+    }
+
+    // `text` in double quotes, escaped as the token dump escapes it
+    // (dump.rs's `quote`).
+    fn quote(mut self, text: String) {
+        self.out.push("\"")
+        push_escaped(self.out, text, true)
+        self.out.push("\"")
+    }
+
+    // ` ` and a positional string.
+    fn text(mut self, text: String) {
+        self.out.push(" ")
+        self.quote(text)
+    }
+
+    // ` ` and a literal.
+    fn literal(mut self, lit: Literal) {
+        match lit {
+            LiteralInt(n) => self.out.push(" Int:${n}")
+            LiteralFloat(f) => {
+                self.out.push(" Float:")
+                self.out.push(hex16(f.to_bits()))
+            }
+            LiteralStr(s) => {
+                self.out.push(" Str:")
+                self.quote(s)
+            }
+            LiteralChar(c) => self.out.push(" Char:${c.to_int()}")
+            LiteralBool(b) => self.out.push(" Bool:${b}")
+        }
+    }
+
+    // --- Shared children ---
+
+    fn docs(mut self, depth: Int, docs: Vec<Spanned<String>>) {
+        for doc in docs.iter() {
+            self.open(depth, "Doc", Some(doc.span))
+            self.text(doc.value)
+            self.close()
+        }
+    }
+
+    fn attrs(mut self, depth: Int, attrs: Vec<Attribute>) {
+        for attr in attrs.iter() {
+            self.open(depth, "Attr", Some(attr.span))
+            self.out.push(" ")
+            self.name(attr.name)
+            for arg in attr.args.iter() {
+                self.out.push(" ")
+                self.name(arg)
+            }
+            self.close()
+        }
+    }
+
+    fn path_node(mut self, depth: Int, path: Spanned<Path>) {
+        self.open(depth, "Path", Some(path.span))
+        self.out.push(" ")
+        self.path(path.value)
+        self.close()
+    }
+
+    fn paths(mut self, depth: Int, paths: Vec<Spanned<Path>>) {
+        for path in paths.iter() { self.path_node(depth, path) }
+    }
+
+    fn generics(mut self, depth: Int, generics: Vec<TypeParam>) {
+        for g in generics.iter() {
+            self.open(depth, "TypeParam", None)
+            self.name_field("name", g.name)
+            self.paths(depth + 1, g.bounds)
+            self.close()
+        }
+    }
+
+    fn params(mut self, depth: Int, params: Vec<Param>) {
+        for p in params.iter() {
+            self.open(depth, "Param", None)
+            self.bool_field("is_mut", p.is_mut)
+            self.name_field("name", p.name)
+            self.ty(depth + 1, p.ty)
+            self.close()
+        }
+    }
+
+    fn where_clause(mut self, depth: Int, bounds: Vec<WhereBound>) {
+        for b in bounds.iter() {
+            self.open(depth, "WhereBound", None)
+            self.ty(depth + 1, b.ty)
+            self.paths(depth + 1, b.bounds)
+            self.close()
+        }
+    }
+
+    // --- Items ---
+
+    fn item(mut self, depth: Int, span: Option<Span>, item: Item) {
+        let kind = match item {
+            ItemFunction(_) => "Item.Function"
+            ItemRecord(_) => "Item.Record"
+            ItemType(_) => "Item.Type"
+            ItemTrait(_) => "Item.Trait"
+            ItemImpl(_) => "Item.Impl"
+            ItemConst(_) => "Item.Const"
+            ItemImport(_) => "Item.Import"
+            ItemModule(_) => "Item.Module"
+            ItemExtern(_) => "Item.Extern"
+        }
+        self.open(depth, kind, span)
+        let depth = depth + 1
+        match item {
+            ItemFunction(f) => self.function(depth, f)
+            ItemRecord(r) => self.record_decl(depth, r)
+            ItemType(t) => self.type_decl(depth, t)
+            ItemTrait(t) => self.trait_decl(depth, t)
+            ItemImpl(i) => self.impl_block(depth, i)
+            ItemConst(c) => self.const_decl(depth, c)
+            ItemImport(i) => self.import_decl(depth, i)
+            ItemModule(m) => self.module_decl(depth, m)
+            ItemExtern(e) => self.extern_block(depth, e)
+        }
+        self.close()
+    }
+
+    fn function(mut self, depth: Int, f: Function) {
+        self.open(depth, "Function", None)
+        self.field("vis", visibility_name(f.vis))
+        self.bool_field("is_async", f.is_async)
+        self.bool_field("is_component", f.is_component)
+        self.name_field("name", f.name)
+        let depth = depth + 1
+        self.docs(depth, f.docs)
+        self.attrs(depth, f.attrs)
+        self.generics(depth, f.generics)
+        self.params(depth, f.params)
+        match f.return_ty {
+            Some(t) => self.ty(depth, t)
+            None => ()
+        }
+        self.where_clause(depth, f.where_clause)
+        self.block(depth, Some(f.body.span), f.body.value)
+        self.close()
+    }
+
+    fn function_sig(mut self, depth: Int, f: FunctionSig) {
+        self.open(depth, "FunctionSig", None)
+        self.bool_field("is_async", f.is_async)
+        self.name_field("name", f.name)
+        let depth = depth + 1
+        self.docs(depth, f.docs)
+        self.generics(depth, f.generics)
+        self.params(depth, f.params)
+        match f.return_ty {
+            Some(t) => self.ty(depth, t)
+            None => ()
+        }
+        self.where_clause(depth, f.where_clause)
+        self.close()
+    }
+
+    // `record`, a keyword in Nova.
+    fn record_decl(mut self, depth: Int, r: Record) {
+        self.open(depth, "Record", None)
+        self.field("vis", visibility_name(r.vis))
+        self.name_field("name", r.name)
+        let depth = depth + 1
+        self.docs(depth, r.docs)
+        self.attrs(depth, r.attrs)
+        self.generics(depth, r.generics)
+        for f in r.fields.iter() { self.record_field(depth, f) }
+        self.close()
+    }
+
+    fn record_field(mut self, depth: Int, f: RecordField) {
+        self.open(depth, "RecordField", None)
+        self.field("vis", visibility_name(f.vis))
+        self.name_field("name", f.name)
+        self.docs(depth + 1, f.docs)
+        self.ty(depth + 1, f.ty)
+        self.close()
+    }
+
+    fn type_decl(mut self, depth: Int, t: TypeDecl) {
+        self.open(depth, "TypeDecl", None)
+        self.field("vis", visibility_name(t.vis))
+        self.name_field("name", t.name)
+        let depth = depth + 1
+        self.docs(depth, t.docs)
+        self.attrs(depth, t.attrs)
+        self.generics(depth, t.generics)
+        match t.def {
+            TypeDefAlias(ty) => {
+                self.open(depth, "TypeDef.Alias", None)
+                self.ty(depth + 1, ty)
+                self.close()
+            }
+            TypeDefSum(variants) => {
+                self.open(depth, "TypeDef.Sum", None)
+                for v in variants.iter() { self.variant(depth + 1, v) }
+                self.close()
+            }
+        }
+        self.close()
+    }
+
+    fn variant(mut self, depth: Int, v: Variant) {
+        self.open(depth, "Variant", None)
+        self.name_field("name", v.name)
+        self.docs(depth + 1, v.docs)
+        for t in v.fields.iter() { self.ty(depth + 1, t) }
+        self.close()
+    }
+
+    fn trait_decl(mut self, depth: Int, t: TraitDecl) {
+        self.open(depth, "TraitDecl", None)
+        self.field("vis", visibility_name(t.vis))
+        self.name_field("name", t.name)
+        let depth = depth + 1
+        self.docs(depth, t.docs)
+        self.attrs(depth, t.attrs)
+        self.generics(depth, t.generics)
+        self.paths(depth, t.supertraits)
+        self.where_clause(depth, t.where_clause)
+        for item in t.items.iter() {
+            match item {
+                TraitItemRequired(sig) => {
+                    self.open(depth, "TraitItem.Required", None)
+                    self.function_sig(depth + 1, sig)
+                }
+                TraitItemProvided(f) => {
+                    self.open(depth, "TraitItem.Provided", None)
+                    self.function(depth + 1, f)
+                }
+                TraitItemAssocType(docs, name, bounds) => {
+                    self.open(depth, "TraitItem.AssocType", None)
+                    self.name_field("name", name)
+                    self.docs(depth + 1, docs)
+                    self.paths(depth + 1, bounds)
+                }
+            }
+            self.close()
+        }
+        self.close()
+    }
+
+    fn impl_block(mut self, depth: Int, i: ImplBlock) {
+        self.open(depth, "ImplBlock", None)
+        let depth = depth + 1
+        self.docs(depth, i.docs)
+        self.attrs(depth, i.attrs)
+        self.generics(depth, i.generics)
+        match i.trait_ {
+            Some(t) => self.path_node(depth, t)
+            None => ()
+        }
+        self.ty(depth, i.ty)
+        self.where_clause(depth, i.where_clause)
+        for f in i.functions.iter() { self.function(depth, f) }
+        for c in i.consts.iter() { self.const_decl(depth, c) }
+        for a in i.assoc_types.iter() { self.assoc_type_binding(depth, a) }
+        self.close()
+    }
+
+    fn assoc_type_binding(mut self, depth: Int, a: AssocTypeBinding) {
+        self.open(depth, "AssocTypeBinding", None)
+        self.name_field("name", a.name)
+        self.docs(depth + 1, a.docs)
+        self.ty(depth + 1, a.ty)
+        self.close()
+    }
+
+    fn const_decl(mut self, depth: Int, c: ConstDecl) {
+        self.open(depth, "ConstDecl", None)
+        self.field("vis", visibility_name(c.vis))
+        self.name_field("name", c.name)
+        let depth = depth + 1
+        self.docs(depth, c.docs)
+        self.attrs(depth, c.attrs)
+        self.ty(depth, c.ty)
+        self.expr(depth, c.value)
+        self.close()
+    }
+
+    // `import`, a keyword in Nova.
+    fn import_decl(mut self, depth: Int, i: Import) {
+        self.open(depth, "Import", None)
+        let depth = depth + 1
+        self.docs(depth, i.docs)
+        self.attrs(depth, i.attrs)
+        self.path_node(depth, i.path)
+        match i.kind {
+            ImportKindSimple => self.open(depth, "ImportKind.Simple", None)
+            ImportKindAlias(name) => {
+                self.open(depth, "ImportKind.Alias", None)
+                self.out.push(" ")
+                self.name(name)
+            }
+            ImportKindList(names) => {
+                self.open(depth, "ImportKind.List", None)
+                for name in names.iter() {
+                    self.out.push(" ")
+                    self.name(name)
+                }
+            }
+        }
+        self.close()
+        self.close()
+    }
+
+    // `module`, a keyword in Nova.
+    fn module_decl(mut self, depth: Int, m: Module) {
+        self.open(depth, "Module", None)
+        self.docs(depth + 1, m.docs)
+        self.attrs(depth + 1, m.attrs)
+        self.path_node(depth + 1, m.path)
+        self.close()
+    }
+
+    fn extern_block(mut self, depth: Int, e: ExternBlock) {
+        self.open(depth, "ExternBlock", None)
+        match e.abi {
+            Some(abi) => {
+                self.out.push(" abi=")
+                self.quote(abi)
+            }
+            None => ()
+        }
+        let depth = depth + 1
+        self.docs(depth, e.docs)
+        self.attrs(depth, e.attrs)
+        for item in e.items.iter() {
+            match item {
+                ExternItemFn(sig) => {
+                    self.open(depth, "ExternItem.Fn", None)
+                    self.function_sig(depth + 1, sig)
+                    self.close()
+                }
+            }
+        }
+        self.close()
+    }
+
+    // --- Blocks and statements ---
+
+    fn block(mut self, depth: Int, span: Option<Span>, b: Block) {
+        self.open(depth, "Block", span)
+        for s in b.stmts.iter() { self.stmt(depth + 1, s) }
+        match b.trailing {
+            Some(t) => self.expr(depth + 1, t)
+            None => ()
+        }
+        self.close()
+    }
+
+    fn stmt(mut self, depth: Int, s: Spanned<Stmt>) {
+        match s.value {
+            StmtLet(is_mut, pattern, ty, init) => {
+                self.open(depth, "Stmt.Let", Some(s.span))
+                self.bool_field("is_mut", is_mut)
+                self.pattern(depth + 1, pattern)
+                match ty {
+                    Some(t) => self.ty(depth + 1, t)
+                    None => ()
+                }
+                match init {
+                    Some(e) => self.expr(depth + 1, e)
+                    None => ()
+                }
+            }
+            StmtExpr(e) => {
+                self.open(depth, "Stmt.Expr", Some(s.span))
+                self.expr(depth + 1, e)
+            }
+            StmtItem(item) => {
+                self.open(depth, "Stmt.Item", Some(s.span))
+                self.item(depth + 1, None, item)
+            }
+        }
+        self.close()
+    }
+
+    // --- Expressions ---
+
+    fn exprs(mut self, depth: Int, exprs: Vec<Spanned<Expr>>) {
+        for e in exprs.iter() { self.expr(depth, e) }
+    }
+
+    fn expr(mut self, depth: Int, e: Spanned<Expr>) {
+        let span = Some(e.span)
+        let inner = depth + 1
+        match e.value {
+            ExprLit(lit) => {
+                self.open(depth, "Expr.Lit", span)
+                self.literal(lit)
+            }
+            ExprPath(path) => {
+                self.open(depth, "Expr.Path", span)
+                self.out.push(" ")
+                self.path(path)
+            }
+            ExprTuple(items) => {
+                self.open(depth, "Expr.Tuple", span)
+                self.exprs(inner, items)
+            }
+            ExprArray(items) => {
+                self.open(depth, "Expr.Array", span)
+                self.exprs(inner, items)
+            }
+            ExprArrayRepeat(init, len) => {
+                self.open(depth, "Expr.ArrayRepeat", span)
+                self.expr(inner, init)
+                self.expr(inner, len)
+            }
+            ExprBlock(b) => {
+                self.open(depth, "Expr.Block", span)
+                self.block(inner, None, b)
+            }
+            ExprIf(cond, then, else_) => {
+                self.open(depth, "Expr.If", span)
+                self.expr(inner, cond)
+                self.block(inner, Some(then.span), then.value)
+                match else_ {
+                    Some(e) => self.expr(inner, e)
+                    None => ()
+                }
+            }
+            ExprMatch(scrutinee, arms) => {
+                self.open(depth, "Expr.Match", span)
+                self.expr(inner, scrutinee)
+                for arm in arms.iter() { self.match_arm(inner, arm) }
+            }
+            ExprWhile(cond, body) => {
+                self.open(depth, "Expr.While", span)
+                self.expr(inner, cond)
+                self.block(inner, Some(body.span), body.value)
+            }
+            ExprFor(pattern, iter, body) => {
+                self.open(depth, "Expr.For", span)
+                self.pattern(inner, pattern)
+                self.expr(inner, iter)
+                self.block(inner, Some(body.span), body.value)
+            }
+            ExprRange(lo, hi, inclusive) => {
+                self.open(depth, "Expr.Range", span)
+                self.bool_field("inclusive", inclusive)
+                self.expr(inner, lo)
+                self.expr(inner, hi)
+            }
+            ExprReturn(value) => {
+                self.open(depth, "Expr.Return", span)
+                match value {
+                    Some(v) => self.expr(inner, v)
+                    None => ()
+                }
+            }
+            ExprBreak(value) => {
+                self.open(depth, "Expr.Break", span)
+                match value {
+                    Some(v) => self.expr(inner, v)
+                    None => ()
+                }
+            }
+            ExprContinue => self.open(depth, "Expr.Continue", span)
+            ExprClosure(params, ret, body) => {
+                self.open(depth, "Expr.Closure", span)
+                self.params(inner, params)
+                match ret {
+                    Some(t) => self.ty(inner, t)
+                    None => ()
+                }
+                self.expr(inner, body)
+            }
+            ExprRecord(path, fields, base) => {
+                self.open(depth, "Expr.Record", span)
+                self.path_field("path", path)
+                for f in fields.iter() { self.field_init(inner, f) }
+                match base {
+                    Some(b) => self.expr(inner, b)
+                    None => ()
+                }
+            }
+            ExprBinary(op, lhs, rhs) => {
+                self.open(depth, "Expr.Binary", span)
+                self.field("op", bin_op_name(op))
+                self.expr(inner, lhs)
+                self.expr(inner, rhs)
+            }
+            ExprUnary(op, operand) => {
+                self.open(depth, "Expr.Unary", span)
+                self.field("op", un_op_name(op))
+                self.expr(inner, operand)
+            }
+            ExprCall(callee, args) => {
+                self.open(depth, "Expr.Call", span)
+                self.expr(inner, callee)
+                self.exprs(inner, args)
+            }
+            ExprIndex(target, index) => {
+                self.open(depth, "Expr.Index", span)
+                self.expr(inner, target)
+                self.expr(inner, index)
+            }
+            ExprField(target, field) => {
+                self.open(depth, "Expr.Field", span)
+                self.name_field("field", field)
+                self.expr(inner, target)
+            }
+            ExprTry(operand) => {
+                self.open(depth, "Expr.Try", span)
+                self.expr(inner, operand)
+            }
+            ExprAwait(operand) => {
+                self.open(depth, "Expr.Await", span)
+                self.expr(inner, operand)
+            }
+            ExprCast(operand, ty) => {
+                self.open(depth, "Expr.Cast", span)
+                self.expr(inner, operand)
+                self.ty(inner, ty)
+            }
+            ExprAssign(op, lhs, rhs) => {
+                self.open(depth, "Expr.Assign", span)
+                self.field("op", assign_op_name(op))
+                self.expr(inner, lhs)
+                self.expr(inner, rhs)
+            }
+            ExprStringInterp(parts) => {
+                self.open(depth, "Expr.StringInterp", span)
+                for part in parts.iter() {
+                    match part {
+                        StringPartLit(text) => {
+                            self.open(inner, "StringPart.Lit", None)
+                            self.text(text)
+                        }
+                        StringPartExpr(e) => {
+                            self.open(inner, "StringPart.Expr", None)
+                            self.expr(inner + 1, e)
+                        }
+                    }
+                    self.close()
+                }
+            }
+            ExprView(nodes) => {
+                self.open(depth, "Expr.View", span)
+                self.view_nodes(inner, nodes)
+            }
+        }
+        self.close()
+    }
+
+    fn match_arm(mut self, depth: Int, arm: MatchArm) {
+        self.open(depth, "MatchArm", None)
+        self.pattern(depth + 1, arm.pattern)
+        match arm.guard {
+            Some(g) => self.expr(depth + 1, g)
+            None => ()
+        }
+        self.expr(depth + 1, arm.body)
+        self.close()
+    }
+
+    fn field_init(mut self, depth: Int, f: FieldInit) {
+        self.open(depth, "FieldInit", None)
+        self.name_field("name", f.name)
+        match f.value {
+            Some(v) => self.expr(depth + 1, v)
+            None => ()
+        }
+        self.close()
+    }
+
+    fn view_nodes(mut self, depth: Int, nodes: Vec<Spanned<ViewNode>>) {
+        for node in nodes.iter() {
+            match node.value {
+                ViewNodeElement(name, args, children) => {
+                    self.open(depth, "ViewNode.Element", Some(node.span))
+                    self.name_field("name", name)
+                    let some = match children {
+                        Some(_) => "Some"
+                        None => "None"
+                    }
+                    self.field("children", some)
+                    for arg in args.iter() {
+                        match arg {
+                            ViewArgNamed(arg_name, value) => {
+                                self.open(depth + 1, "ViewArg.Named", None)
+                                self.name_field("name", arg_name)
+                                self.expr(depth + 2, value)
+                            }
+                            ViewArgPositional(e) => {
+                                self.open(depth + 1, "ViewArg.Positional", None)
+                                self.expr(depth + 2, e)
+                            }
+                        }
+                        self.close()
+                    }
+                    match children {
+                        Some(c) => self.view_nodes(depth + 1, c)
+                        None => ()
+                    }
+                }
+                ViewNodeExpr(e) => {
+                    self.open(depth, "ViewNode.Expr", Some(node.span))
+                    self.expr(depth + 1, e)
+                }
+            }
+            self.close()
+        }
+    }
+
+    // --- Patterns ---
+
+    fn patterns(mut self, depth: Int, patterns: Vec<Spanned<Pattern>>) {
+        for p in patterns.iter() { self.pattern(depth, p) }
+    }
+
+    fn pattern(mut self, depth: Int, p: Spanned<Pattern>) {
+        let span = Some(p.span)
+        let inner = depth + 1
+        match p.value {
+            PatternWildcard => self.open(depth, "Pattern.Wildcard", span)
+            PatternLit(lit) => {
+                self.open(depth, "Pattern.Lit", span)
+                self.literal(lit)
+            }
+            PatternIdent(is_mut, name) => {
+                self.open(depth, "Pattern.Ident", span)
+                self.bool_field("is_mut", is_mut)
+                self.name_field("name", name)
+            }
+            PatternBinding(name, pat) => {
+                self.open(depth, "Pattern.Binding", span)
+                self.name_field("name", name)
+                self.pattern(inner, pat)
+            }
+            PatternTupleStruct(path, fields) => {
+                self.open(depth, "Pattern.TupleStruct", span)
+                self.path_field("path", path)
+                self.patterns(inner, fields)
+            }
+            PatternRecord(path, fields, rest) => {
+                self.open(depth, "Pattern.Record", span)
+                self.path_field("path", path)
+                self.bool_field("rest", rest)
+                for f in fields.iter() { self.field_pat(inner, f) }
+            }
+            PatternTuple(items) => {
+                self.open(depth, "Pattern.Tuple", span)
+                self.patterns(inner, items)
+            }
+            PatternArray(items) => {
+                self.open(depth, "Pattern.Array", span)
+                self.patterns(inner, items)
+            }
+            PatternOr(items) => {
+                self.open(depth, "Pattern.Or", span)
+                self.patterns(inner, items)
+            }
+            PatternRange(lo, hi, inclusive) => {
+                self.open(depth, "Pattern.Range", span)
+                self.bool_field("inclusive", inclusive)
+                self.pattern(inner, lo)
+                self.pattern(inner, hi)
+            }
+            PatternPath(path) => {
+                self.open(depth, "Pattern.Path", span)
+                self.out.push(" ")
+                self.path(path)
+            }
+        }
+        self.close()
+    }
+
+    fn field_pat(mut self, depth: Int, f: FieldPat) {
+        self.open(depth, "FieldPat", None)
+        self.name_field("name", f.name)
+        match f.pattern {
+            Some(p) => self.pattern(depth + 1, p)
+            None => ()
+        }
+        self.close()
+    }
+
+    // --- Types ---
+
+    fn ty(mut self, depth: Int, t: Spanned<Type>) {
+        let span = Some(t.span)
+        let inner = depth + 1
+        match t.value {
+            TypePath(path, args) => {
+                self.open(depth, "Type.Path", span)
+                self.path_field("path", path)
+                for a in args.iter() { self.ty(inner, a) }
+            }
+            TypeRef(is_mut, ty) => {
+                self.open(depth, "Type.Ref", span)
+                self.bool_field("is_mut", is_mut)
+                self.ty(inner, ty)
+            }
+            TypePtr(is_mut, ty) => {
+                self.open(depth, "Type.Ptr", span)
+                self.bool_field("is_mut", is_mut)
+                self.ty(inner, ty)
+            }
+            TypeArray(ty) => {
+                self.open(depth, "Type.Array", span)
+                self.ty(inner, ty)
+            }
+            TypeTuple(items) => {
+                self.open(depth, "Type.Tuple", span)
+                for ty in items.iter() { self.ty(inner, ty) }
+            }
+            TypeFn(params, ret) => {
+                self.open(depth, "Type.Fn", span)
+                for ty in params.iter() { self.ty(inner, ty) }
+                self.ty(inner, ret)
+            }
+            TypeOptional(ty) => {
+                self.open(depth, "Type.Optional", span)
+                self.ty(inner, ty)
+            }
+            TypeInfer => self.open(depth, "Type.Infer", span)
+        }
+        self.close()
+    }
+}
+
+// The field-less enums' values, as the Rust `Debug` names them.
+
+fn visibility_name(v: Visibility) -> String {
+    match v {
+        VisibilityPub => "Pub"
+        VisibilityPrivate => "Private"
+    }
+}
+
+fn split_kind_name(k: SplitKind) -> String {
+    match k {
+        SplitKindCall => "Call"
+        SplitKindIndex => "Index"
+        SplitKindMinus => "Minus"
+        SplitKindValue => "Value"
+    }
+}
+
+fn bin_op_name(op: BinOp) -> String {
+    match op {
+        BinOpOr => "Or"
+        BinOpAnd => "And"
+        BinOpEq => "Eq"
+        BinOpNe => "Ne"
+        BinOpLt => "Lt"
+        BinOpLe => "Le"
+        BinOpGt => "Gt"
+        BinOpGe => "Ge"
+        BinOpBitOr => "BitOr"
+        BinOpBitXor => "BitXor"
+        BinOpBitAnd => "BitAnd"
+        BinOpShl => "Shl"
+        BinOpShr => "Shr"
+        BinOpAdd => "Add"
+        BinOpSub => "Sub"
+        BinOpMul => "Mul"
+        BinOpDiv => "Div"
+        BinOpRem => "Rem"
+    }
+}
+
+fn un_op_name(op: UnOp) -> String {
+    match op {
+        UnOpNeg => "Neg"
+        UnOpNot => "Not"
+        UnOpBitNot => "BitNot"
+        UnOpRef => "Ref"
+        UnOpRefMut => "RefMut"
+        UnOpDeref => "Deref"
+    }
+}
+
+fn assign_op_name(op: AssignOp) -> String {
+    match op {
+        AssignOpAssign => "Assign"
+        AssignOpAddAssign => "AddAssign"
+        AssignOpSubAssign => "SubAssign"
+        AssignOpMulAssign => "MulAssign"
+        AssignOpDivAssign => "DivAssign"
+        AssignOpRemAssign => "RemAssign"
+        AssignOpBitOrAssign => "BitOrAssign"
+        AssignOpBitAndAssign => "BitAndAssign"
+        AssignOpBitXorAssign => "BitXorAssign"
+        AssignOpShlAssign => "ShlAssign"
+        AssignOpShrAssign => "ShrAssign"
+    }
+}

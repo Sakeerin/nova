@@ -1,6 +1,6 @@
 // The token kinds of the Nova language, and each kind's description: a
 // port of crates/nova-lexer/src/token.rs, kind for kind and word for word,
-// and of the `Spanned` and `Span` the Rust lexer takes from
+// and of the `Spanned` and `Span` the Rust lexer and parser take from
 // nova-diagnostics. A span is the byte offsets `start..end`; N lexes one
 // file at a time, so it keeps no `FileId`.
 
@@ -108,14 +108,32 @@ pub type Token =
     // End of file
     | Eof
 
-/// A byte range in the source: `start..end`.
+/// A byte range in the source: `start..end` (nova-diagnostics' `Span`).
 pub record Span { pub start: Int, pub end: Int }
 
-/// A token and its span (nova-diagnostics' `Spanned<Token>`).
-pub record Spanned { pub value: Token, pub span: Span }
+impl Span {
+    /// A zero-width span at `offset` (`Span::point`).
+    pub fn point(offset: Int) -> Span { Span { start: offset, end: offset } }
+
+    /// The span that covers both (`Span::merge`).
+    pub fn merge(self, other: Span) -> Span {
+        let start = if other.start < self.start { other.start } else { self.start }
+        let end = if other.end > self.end { other.end } else { self.end }
+        Span { start: start, end: end }
+    }
+}
+
+/// A value and its span (nova-diagnostics' `Spanned<T>`): a token, or a
+/// node or name of the tree.
+pub record Spanned<T> { pub value: T, pub span: Span }
+
+impl<T> Spanned<T> {
+    /// `value` at `span` (`Spanned::new`).
+    pub fn new(value: T, span: Span) -> Spanned<T> { Spanned { value: value, span: span } }
+}
 
 /// A token spanning `start..end`.
-pub fn spanned(value: Token, start: Int, end: Int) -> Spanned {
+pub fn spanned(value: Token, start: Int, end: Int) -> Spanned<Token> {
     Spanned { value: value, span: Span { start: start, end: end } }
 }
 
@@ -216,6 +234,107 @@ impl Token {
             Ident(_) => "identifier"
             DocComment(_) => "doc comment"
             Eof => "end of file"
+        }
+    }
+
+    /// The token's kind, a number for each variant in declaration order:
+    /// what the parser compares where the Rust compares
+    /// `std::mem::discriminant`s, so `Ident("a")` and `Ident("b")` are one
+    /// kind.
+    pub fn kind(self) -> Int {
+        match self {
+            Let => 0
+            Mut => 1
+            Const => 2
+            Fn => 3
+            Return => 4
+            If => 5
+            Else => 6
+            While => 7
+            For => 8
+            In => 9
+            Break => 10
+            Continue => 11
+            Match => 12
+            Type => 13
+            Record => 14
+            Trait => 15
+            Impl => 16
+            Import => 17
+            Module => 18
+            Pub => 19
+            Async => 20
+            Await => 21
+            Extern => 22
+            Unsafe => 23
+            True => 24
+            False => 25
+            As => 26
+            Is => 27
+            Where => 28
+            With => 29
+            SelfLower => 30
+            SelfUpper => 31
+            LParen => 32
+            RParen => 33
+            LBracket => 34
+            RBracket => 35
+            LBrace => 36
+            RBrace => 37
+            Comma => 38
+            Semicolon => 39
+            Colon => 40
+            ColonColon => 41
+            Arrow => 42
+            FatArrow => 43
+            Dot => 44
+            DotDot => 45
+            DotDotEq => 46
+            At => 47
+            Question => 48
+            Eq => 49
+            EqEq => 50
+            BangEq => 51
+            Lt => 52
+            LtEq => 53
+            Gt => 54
+            GtEq => 55
+            AmpAmp => 56
+            PipePipe => 57
+            Bang => 58
+            Plus => 59
+            Minus => 60
+            Star => 61
+            Slash => 62
+            Percent => 63
+            PlusEq => 64
+            MinusEq => 65
+            StarEq => 66
+            SlashEq => 67
+            PercentEq => 68
+            Amp => 69
+            Pipe => 70
+            Caret => 71
+            Tilde => 72
+            LtLt => 73
+            GtGt => 74
+            AmpEq => 75
+            PipeEq => 76
+            CaretEq => 77
+            LtLtEq => 78
+            GtGtEq => 79
+            Int(_) => 80
+            Float(_) => 81
+            Char(_) => 82
+            StrStart => 83
+            StrPart(_) => 84
+            StrEnd => 85
+            InterpOpen => 86
+            InterpClose => 87
+            RawStr(_) => 88
+            Ident(_) => 89
+            DocComment(_) => 90
+            Eof => 91
         }
     }
 }

@@ -115,6 +115,43 @@ impl Display for LexError {
 // lib.rs: comments, and the lexer's entry points
 // ---------------------------------------------------------------------------
 
+/// Every keyword, in the order the lexer declares its tokens (lib.rs's
+/// `KEYWORDS`). The parser reads one as an element's argument name.
+pub const KEYWORDS: [String] = [
+    "let",
+    "mut",
+    "const",
+    "fn",
+    "return",
+    "if",
+    "else",
+    "while",
+    "for",
+    "in",
+    "break",
+    "continue",
+    "match",
+    "type",
+    "record",
+    "trait",
+    "impl",
+    "import",
+    "module",
+    "pub",
+    "async",
+    "await",
+    "extern",
+    "unsafe",
+    "true",
+    "false",
+    "as",
+    "is",
+    "where",
+    "with",
+    "self",
+    "Self",
+]
+
 /// Which kind of comment (lib.rs's `CommentKind`).
 pub type CommentKind =
     /// `// …`, including `//// …`.
@@ -149,13 +186,13 @@ pub fn lex_with_comments(source: String) -> (Tokens, Vec<Comment>, Vec<LexError>
 /// The tokens of one source, ending with `Eof`, each marked with whether a
 /// line break comes before it, and whether it is an integer in plain decimal
 /// digits (tokens.rs's `Tokens`).
-pub record Tokens { pub tokens: Vec<Spanned>, breaks: Vec<Bool>, plain: Vec<Bool> }
+pub record Tokens { pub tokens: Vec<Spanned<Token>>, breaks: Vec<Bool>, plain: Vec<Bool> }
 
 /// `tokens`, lexed from `source`, each marked by the source text between it
 /// and the token before it, or the start of the source (tokens.rs's
 /// `Tokens::marked`). A line break is a `\n` or a `\r`, and one inside a
 /// comment counts.
-pub fn marked(tokens: Vec<Spanned>, source: String) -> Tokens {
+pub fn marked(tokens: Vec<Spanned<Token>>, source: String) -> Tokens {
     let n = source.byte_len()
     let mut prev_end = 0
     let mut breaks: Vec<Bool> = Vec::new()
@@ -181,7 +218,7 @@ pub fn marked(tokens: Vec<Spanned>, source: String) -> Tokens {
 
 // An `Int` whose text is ASCII digits with no leading zero, unless it is
 // exactly `0`.
-fn is_plain_decimal(t: Spanned, source: String) -> Bool {
+fn is_plain_decimal(t: Spanned<Token>, source: String) -> Bool {
     let is_int = match t.value {
         Int(_) => true
         _ => false
@@ -203,7 +240,7 @@ impl Tokens {
     pub fn len(self) -> Int { self.tokens.len() }
 
     /// The token at `index`, which must be less than `len()`.
-    pub fn at(self, index: Int) -> Spanned { self.tokens.at(index) }
+    pub fn at(self, index: Int) -> Spanned<Token> { self.tokens.at(index) }
 
     /// Whether a line break comes before the token at `index`; `false` past
     /// the end (tokens.rs's `line_break_before`).
@@ -259,8 +296,8 @@ pub fn new_lexer(source: String) -> Lexer {
 
 impl Lexer {
     /// Every token, `Eof` last, and every error (lib.rs's `tokenize`).
-    pub fn tokenize(mut self) -> (Vec<Spanned>, Vec<LexError>) {
-        let mut tokens: Vec<Spanned> = Vec::new()
+    pub fn tokenize(mut self) -> (Vec<Spanned<Token>>, Vec<LexError>) {
+        let mut tokens: Vec<Spanned<Token>> = Vec::new()
         let mut errors: Vec<LexError> = Vec::new()
         while self.pos < self.len {
             match self.next_token() {
@@ -285,8 +322,8 @@ impl Lexer {
     // fitting an `Int`, becomes an integer, a `.` and an integer, so `t.1.0`
     // reads as `(t.1).0` (lib.rs's `split_tuple_indexes`). It splits by the
     // text, not the value.
-    fn split_tuple_indexes(self, tokens: Vec<Spanned>) -> Vec<Spanned> {
-        let mut out: Vec<Spanned> = Vec::new()
+    fn split_tuple_indexes(self, tokens: Vec<Spanned<Token>>) -> Vec<Spanned<Token>> {
+        let mut out: Vec<Spanned<Token>> = Vec::new()
         for tok in tokens.iter() {
             let after_dot = !out.is_empty() && is_dot(out.last().value)
             if after_dot && is_float(tok.value) {
@@ -393,7 +430,7 @@ impl Lexer {
     }
 
     // The next token, nothing, or an error (lib.rs's `next_token`).
-    fn next_token(mut self) -> Result<Option<Spanned>, LexError> {
+    fn next_token(mut self) -> Result<Option<Spanned<Token>>, LexError> {
         // Inside a string, whitespace is text: lex the content before any
         // skipping.
         if self.in_string {
@@ -412,7 +449,7 @@ impl Lexer {
     }
 
     // lib.rs's `lex_string_start`.
-    fn lex_string_start(mut self) -> Result<Option<Spanned>, LexError> {
+    fn lex_string_start(mut self) -> Result<Option<Spanned<Token>>, LexError> {
         let start = self.pos
         self.pos += 1
         self.in_string = true
@@ -423,7 +460,7 @@ impl Lexer {
     // its escapes decoded (lib.rs's `lex_string_content`). Runs of plain text
     // are copied a run at a time rather than a character at a time, which
     // gives the same text.
-    fn lex_string_content(mut self) -> Result<Option<Spanned>, LexError> {
+    fn lex_string_content(mut self) -> Result<Option<Spanned<Token>>, LexError> {
         let src = self.source
         let n = self.len
         let start = self.pos
@@ -538,7 +575,7 @@ impl Lexer {
     // `r"…"` and `r#"…"#`, with any number of `#`s (lib.rs's
     // `lex_raw_string`). An `r#` with no `"` after its `#`s is the one
     // source of `InvalidNumberLiteral`.
-    fn lex_raw_string(mut self) -> Result<Option<Spanned>, LexError> {
+    fn lex_raw_string(mut self) -> Result<Option<Spanned<Token>>, LexError> {
         let src = self.source
         let n = self.len
         let start = self.pos
@@ -579,7 +616,7 @@ impl Lexer {
     // A `}` closes the innermost hole only when that hole has no unmatched
     // `{` of its own; otherwise it is an ordinary `RBrace` (lib.rs's
     // `maybe_close_interp`).
-    fn maybe_close_interp(mut self, start: Int) -> Spanned {
+    fn maybe_close_interp(mut self, start: Int) -> Spanned<Token> {
         if self.interp.is_empty() { return spanned(RBrace, start, self.pos) }
         let mut frame = self.interp.last()
         if frame.braces > 0 {
@@ -594,7 +631,7 @@ impl Lexer {
     // What logos recognizes, at `pos` (lib.rs's `lex_logos`). Braces are
     // the one pair that interacts with interpolation: a `{` opened inside a
     // hole must be matched before the hole's own `}`.
-    fn lex_logos(mut self) -> Result<Option<Spanned>, LexError> {
+    fn lex_logos(mut self) -> Result<Option<Spanned<Token>>, LexError> {
         let start = self.pos
         match self.raw_token(start) {
             Some((tok, end)) => {

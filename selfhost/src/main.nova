@@ -1,25 +1,32 @@
-// N, the self-hosted Nova compiler, so far its lexer (spec
+// N, the self-hosted Nova compiler, so far its lexer and its parser (spec
 // docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
-// §3.2, ADR 0051).
+// §3.2 and §4.3, ADR 0051 and ADR 0052).
 //
 //   selfhost tokens FILE...   prints each file's token dump, after a header
 //                             line `== FILE`, as `nova parse --dump-tokens`
 //                             does
+//   selfhost ast FILE...      prints each file's AST dump, its tree and its
+//                             errors, after the same header, as
+//                             `nova parse --dump-ast` does
 //
-// A file with lex errors is dumped with them, and the exit code stays 0. A
-// file that cannot be read prints `IOERR` and its kind after its header;
-// the rest are dumped, then the exit code is 2.
+// A file with lex or parse errors is dumped with them, and the exit code
+// stays 0. A file that cannot be read prints `IOERR` and its kind after its
+// header; the rest are dumped, then the exit code is 2.
 
+import ast_dump
 import dump
 import lexer
 import lexer_tests
+import parser_tests
 import token
 
 async fn main() {
     let argv = args()
     // No file is refused, as S0's clap refuses it.
-    if argv.len() < 3 || argv.at(1) != "tokens" {
-        eprintln("usage: selfhost tokens FILE...")
+    let command = if argv.len() < 3 { "" } else { argv.at(1) }
+    let tokens = command == "tokens"
+    if !tokens && command != "ast" {
+        eprintln("usage: selfhost tokens|ast FILE...")
         exit(2)
         return
     }
@@ -28,7 +35,10 @@ async fn main() {
     while i < argv.len() {
         let path = argv.at(i)
         match read_to_string(path).await {
-            Ok(source) => print("== ${path}\n${dump_tokens(source)}")
+            Ok(source) => {
+                let out = if tokens { dump_tokens(source) } else { dump_ast(source) }
+                print("== ${path}\n${out}")
+            }
             Err(e) => {
                 print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
                 failed = true

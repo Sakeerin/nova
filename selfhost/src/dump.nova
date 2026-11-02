@@ -70,7 +70,7 @@ fn push_quoted(mut out: StringBuilder, kind: String, text: String) {
 // hex digits, and, when `quoted`, `"` and `\` too. Every other byte is kept,
 // so a non-ASCII character prints as it is. The bytes escaped are all ASCII,
 // so the runs between them are whole characters.
-fn push_escaped(mut out: StringBuilder, text: String, quoted: Bool) {
+pub fn push_escaped(mut out: StringBuilder, text: String, quoted: Bool) {
     let n = text.byte_len()
     let mut run = 0
     let mut i = 0
@@ -89,7 +89,7 @@ fn push_escaped(mut out: StringBuilder, text: String, quoted: Bool) {
 }
 
 // The 64 bits of `bits` as 16 lowercase hex digits, the sign bit first.
-fn hex16(bits: Int) -> String {
+pub fn hex16(bits: Int) -> String {
     let mut out = StringBuilder::new()
     let mut shift = 60
     while shift >= 0 {

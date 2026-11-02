@@ -1,0 +1,286 @@
+// Patterns: a port of crates/nova-parser/src/grammar.rs's "Patterns"
+// section, function by function (parser.nova says how its idioms
+// translate).
+
+import ast
+import parser
+import token
+
+impl Parser {
+    pub fn parse_pattern(mut self, ctx: String) -> Option<Spanned<Pattern>> {
+        // `nested`
+        let depth = self.depth
+        let result = if self.deeper() { self.parse_pattern_here(ctx) } else { None }
+        self.depth = depth
+        result
+    }
+
+    /// `parse_pattern` at the cursor's level: an atom, or alternatives.
+    pub fn parse_pattern_here(mut self, ctx: String) -> Option<Spanned<Pattern>> {
+        let start = self.peek_span()
+        let pat = self.parse_pattern_atom(ctx)?
+
+        // Or patterns
+        if self.check(Pipe) {
+            let mut alternatives: Vec<Spanned<Pattern>> = Vec::new()
+            alternatives.push(pat)
+            while self.eat(Pipe).is_some() {
+                match self.parse_pattern_atom(ctx) {
+                    Some(alt) => alternatives.push(alt)
+                    None => break
+                }
+            }
+            let end = alternatives.last().span
+            return Some(Spanned::new(PatternOr(alternatives), start.merge(end)))
+        }
+
+        Some(pat)
+    }
+
+    pub fn parse_pattern_atom(mut self, ctx: String) -> Option<Spanned<Pattern>> {
+        let start = self.peek_span()
+        match self.peek() {
+            Ident(s) if s == "_" => {
+                let _ = self.advance()
+                Some(Spanned::new(PatternWildcard, start))
+            }
+            Int(n) => {
+                let _ = self.advance()
+                // Range pattern?
+                if self.eat(DotDot).is_some() {
+                    let inclusive = self.eat(Eq).is_some()
+                    let hi_start = self.peek_span()
+                    match self.peek() {
+                        Int(hi) => {
+                            let _ = self.advance()
+                            let end = self.prev_span_or(hi_start)
+                            return Some(
+                                Spanned::new(
+                                    PatternRange(
+                                        Spanned::new(PatternLit(LiteralInt(n)), start),
+                                        Spanned::new(PatternLit(LiteralInt(hi)), end),
+                                        inclusive,
+                                    ),
+                                    start.merge(end),
+                                ),
+                            )
+                        }
+                        _ => ()
+                    }
+                } else if self.eat(DotDotEq).is_some() {
+                    let hi_start = self.peek_span()
+                    match self.peek() {
+                        Int(hi) => {
+                            let _ = self.advance()
+                            let end = self.prev_span_or(hi_start)
+                            return Some(
+                                Spanned::new(
+                                    PatternRange(
+                                        Spanned::new(PatternLit(LiteralInt(n)), start),
+                                        Spanned::new(PatternLit(LiteralInt(hi)), end),
+                                        true,
+                                    ),
+                                    start.merge(end),
+                                ),
+                            )
+                        }
+                        _ => ()
+                    }
+                }
+                Some(Spanned::new(PatternLit(LiteralInt(n)), start))
+            }
+            Float(f) => {
+                let _ = self.advance()
+                Some(Spanned::new(PatternLit(LiteralFloat(f)), start))
+            }
+            Char(c) => {
+                let _ = self.advance()
+                // Range: 'a'..='z'
+                if self.eat(DotDotEq).is_some() {
+                    let hi_start = self.peek_span()
+                    match self.peek() {
+                        Char(hi) => {
+                            let _ = self.advance()
+                            let end = self.prev_span_or(hi_start)
+                            return Some(
+                                Spanned::new(
+                                    PatternRange(
+                                        Spanned::new(PatternLit(LiteralChar(c)), start),
+                                        Spanned::new(PatternLit(LiteralChar(hi)), end),
+                                        true,
+                                    ),
+                                    start.merge(end),
+                                ),
+                            )
+                        }
+                        _ => ()
+                    }
+                }
+                Some(Spanned::new(PatternLit(LiteralChar(c)), start))
+            }
+            True => {
+                let _ = self.advance()
+                Some(Spanned::new(PatternLit(LiteralBool(true)), start))
+            }
+            False => {
+                let _ = self.advance()
+                Some(Spanned::new(PatternLit(LiteralBool(false)), start))
+            }
+            StrStart => {
+                // A string literal in a pattern
+                let _ = self.advance()
+                let mut s = StringBuilder::new()
+                while true {
+                    match self.peek() {
+                        StrPart(p) => {
+                            s.push(p)
+                            let _ = self.advance()
+                        }
+                        StrEnd => {
+                            let _ = self.advance()
+                            break
+                        }
+                        _ => break
+                    }
+                }
+                let end = self.prev_span_or(start)
+                Some(Spanned::new(PatternLit(LiteralStr(s.to_string())), start.merge(end)))
+            }
+            LParen => {
+                let _ = self.advance()
+                // Spans over the parentheses, as for expressions and types,
+                // so the formatter can keep them.
+                match self.eat(RParen) {
+                    Some(close) => {
+                        return Some(Spanned::new(PatternTuple(Vec::new()), start.merge(close.span)))
+                    }
+                    None => ()
+                }
+                let first = self.parse_pattern(ctx)?
+                match self.eat(RParen) {
+                    Some(close) => return Some(Spanned::new(first.value, start.merge(close.span)))
+                    None => ()
+                }
+                let mut elems: Vec<Spanned<Pattern>> = Vec::new()
+                elems.push(first)
+                while self.eat(Comma).is_some() && !self.check(RParen) {
+                    match self.parse_pattern(ctx) {
+                        Some(p) => elems.push(p)
+                        None => ()
+                    }
+                }
+                let _ = self.expect(RParen, "tuple pattern")?
+                let end = self.prev_span_or(start)
+                Some(Spanned::new(PatternTuple(elems), start.merge(end)))
+            }
+            LBracket => {
+                let _ = self.advance()
+                let mut elems: Vec<Spanned<Pattern>> = Vec::new()
+                while !self.check(RBracket) && !self.is_at_end() {
+                    match self.parse_pattern(ctx) {
+                        Some(p) => elems.push(p)
+                        None => ()
+                    }
+                    if self.eat(Comma).is_none() { break }
+                }
+                let _ = self.expect(RBracket, "array pattern")?
+                let end = self.prev_span_or(start)
+                Some(Spanned::new(PatternArray(elems), start.merge(end)))
+            }
+            Ident(_) | SelfLower => {
+                let name = self.parse_ident(ctx)?
+
+                // Path with `::`: could be an enum variant
+                if self.check(ColonColon) {
+                    let mut path = single_path(name)
+                    while self.eat(ColonColon).is_some() {
+                        match self.parse_ident(ctx) {
+                            Some(seg) => path.segments.push(seg)
+                            None => break
+                        }
+                    }
+                    // Tuple variant: `Variant(pat, ...)`
+                    if self.check(LParen) {
+                        let _ = self.advance()
+                        let mut fields: Vec<Spanned<Pattern>> = Vec::new()
+                        while !self.check(RParen) && !self.is_at_end() {
+                            match self.parse_pattern(ctx) {
+                                Some(p) => fields.push(p)
+                                None => ()
+                            }
+                            if self.eat(Comma).is_none() { break }
+                        }
+                        let _ = self.expect(RParen, "variant pattern")?
+                        let end = self.prev_span_or(start)
+                        return Some(
+                            Spanned::new(PatternTupleStruct(path, fields), start.merge(end)),
+                        )
+                    }
+                    let end = self.prev_span_or(start)
+                    return Some(Spanned::new(PatternPath(path), start.merge(end)))
+                }
+
+                // Binding with `@`
+                if self.eat(At).is_some() {
+                    let inner = self.parse_pattern(ctx)?
+                    let span = start.merge(inner.span)
+                    return Some(Spanned::new(PatternBinding(name, inner), span))
+                }
+
+                // Tuple struct: `Some(pat)`
+                if self.check(LParen) {
+                    let path = single_path(name)
+                    let _ = self.advance()
+                    let mut fields: Vec<Spanned<Pattern>> = Vec::new()
+                    while !self.check(RParen) && !self.is_at_end() {
+                        match self.parse_pattern(ctx) {
+                            Some(p) => fields.push(p)
+                            None => ()
+                        }
+                        if self.eat(Comma).is_none() { break }
+                    }
+                    let _ = self.expect(RParen, "tuple struct pattern")?
+                    let end = self.prev_span_or(start)
+                    return Some(Spanned::new(PatternTupleStruct(path, fields), start.merge(end)))
+                }
+
+                // Record pattern: `Point { x, y }`
+                if self.check(LBrace) {
+                    let path = single_path(name)
+                    let _ = self.advance()
+                    let mut field_pats: Vec<FieldPat> = Vec::new()
+                    let mut rest = false
+                    while !self.check(RBrace) && !self.is_at_end() {
+                        if self.eat(DotDot).is_some() {
+                            rest = true
+                            break
+                        }
+                        let fname = match self.parse_ident(ctx) {
+                            Some(n) => n
+                            None => break
+                        }
+                        let pattern = if self.eat(Colon).is_some() {
+                            Some(self.parse_pattern(ctx)?)
+                        } else {
+                            None
+                        }
+                        field_pats.push(FieldPat { name: fname, pattern: pattern })
+                        if self.eat(Comma).is_none() { break }
+                    }
+                    let _ = self.expect(RBrace, "record pattern")?
+                    let end = self.prev_span_or(start)
+                    return Some(
+                        Spanned::new(PatternRecord(path, field_pats, rest), start.merge(end)),
+                    )
+                }
+
+                Some(Spanned::new(PatternIdent(false, name), start))
+            }
+            _ => {
+                let span = self.peek_span()
+                self.errors.push(Expected("pattern (in ${ctx})", self.peek().description(), span))
+                None
+            }
+        }
+    }
+}
