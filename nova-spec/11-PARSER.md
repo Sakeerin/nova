@@ -512,8 +512,10 @@ sub-pattern inside another); the operand of a prefix operator; each `else
 if`; each operator of a binary chain, assignment, range and `as` included,
 for the rest of its chain (the type after the `k`th `as` is at its
 operator's level); each postfix operator of a chain after its first (a
-call, an index, a field, `?`, `.await`; a method call `.f(…)` is one), for
-the rest of the chain; an item inside a block; and the children of a
+call, an index, a field, `?`, `.await`; a call directly after any `.`
+postfix counts with it, so `.f(…)`, `.await(…)` and `.0(…)` are one each),
+for the rest of the chain; each `?` of an optional type `T?` after the
+first, for the rest of the type; an item inside a block; and the children of a
 `view` or of an element. The outermost is level 0, so `n` nested constructs of one
 kind are `n` levels: 128 nested parentheses parse and 129 do not. A block
 is no level of its own; its statements' expressions are. Past
@@ -535,11 +537,14 @@ build`, it parses 128 levels of every kind on a 1 MB main thread with
 four times the stack it needs to spare, as measured on Linux; Windows
 x64 frames may be larger, and CI's run of that test on Windows' own 1 MB
 main thread is the check. S0 runs its pipeline on a thread with a 64 MB
-stack, so no nesting meets the platform's stack first; the lexer's
+stack, so no nesting meets the platform's stack first, since every chain
+that makes the tree deeper (binary, postfix, and a type's `?`s) is
+counted; the lexer's
 per-digit recursion (ADR 0051) is no level, and a decimal literal of
 210,000 digits or more still aborts a debug build's thread (shorter ones
 do not, but take time quadratic in their length).
-Counting postfix chains is the user's ruling of 2026-10-31.
+Counting postfix chains is the user's ruling of 2026-10-31, which covers
+the `?`s of an optional type by the same principle.
 
 ---
 

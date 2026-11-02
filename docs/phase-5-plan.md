@@ -389,8 +389,9 @@ decision 8's 10×, and about 30× with the debug runtime CI uses; and at
 the depth limit N needs at most 256 KB of stack, so Windows' 1 MB main
 thread needs no larger link. The depth counts the outermost construct as
 level 0, so 128 nested parentheses parse and 129 are P0002; by the
-user's ruling of 2026-10-31 it counts postfix chains too, which the spec
-does not list, so a chain of 130 method calls is P0002 (129 with
+user's ruling of 2026-10-31 it counts postfix chains too, and by the
+same principle the `?`s of an optional type `T?`, which the spec does not
+list, so a chain of 130 method calls is P0002 (129 with
 arguments, a call's arguments being a level deeper than the call).
 
 - **N's first modules:** the tokens, a hand-written scanner, the AST,

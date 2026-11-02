@@ -338,4 +338,25 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn a_file_nested_too_deeply_elsewhere_keeps_unused_imports() {
+        // Plan decision 30: P0002 drops the item it is in, as a P0001 does,
+        // so it blocks removal too. A chain of 130 fields is past the limit
+        // without recursing, so the test's own stack is enough.
+        let deep = format!(
+            "pub fn origin() -> Int {{\n    1\n}}\n\npub fn manhattan() -> Int {{\n    a{}\n}}\n",
+            ".x".repeat(130)
+        );
+        assert_eq!(
+            organized(
+                "too-deep",
+                &[
+                    ("main.nova", "import geometry::{manhattan, origin}\n\nfn main() {\n    let o = origin()\n    let m = manhattan()\n}\n"),
+                    ("geometry.nova", &deep),
+                ]
+            ),
+            None
+        );
+    }
 }

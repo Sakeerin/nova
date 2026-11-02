@@ -15,7 +15,14 @@ recommendations, which the user did not overturn; the dump's indented
 S-expression with spans is the user's decision 3 of 2026-10-30; counting
 each postfix operator after a chain's first toward the same 128 levels,
 which the spec's list of levels does not name, is the user's choice of
-2026-10-31 (their ruling 8); the rest is what the spec left to the plan.
+2026-10-31 (their ruling 8), which covers each `?` of an optional type
+`T?` after the first by the same principle (§2). Six departures from the
+spec are the plan's, each marked **(differs)** where it is described: a
+split's and an attribute's form in the dump (§1), the dump split between
+two crates (§1), a block that is not a level (§2), P0002 dropping the
+item in progress (§2), N's own tests in `src/` (§6), and S0's release
+speed measured as a library (§9). The rest is what the spec left to the
+plan.
 
 ## Context
 
@@ -42,7 +49,8 @@ each file, `== FILE` (the path as given) and its dump, or `IOERR` and the
 error's kind for a file it cannot read, then exits 2 after the rest, as
 `--dump-tokens` does (ADR 0051). The tree lives in `nova-ast`, where the
 nodes are; the errors need the parser's and the lexer's types, so the
-whole dump is `nova-parser`'s. The flag refuses `--ast`, `--check` and
+whole dump is `nova-parser`'s **(differs from the spec**, whose §7 puts
+one `dump` module in `nova-ast`). The flag refuses `--ast`, `--check` and
 `--dump-tokens`, and `--help` is unchanged.
 
 **The grammar.** Every line ends with `\n`, the last included.
@@ -584,14 +592,25 @@ is entered through it. It counts:
   the type after its `k`th `as` (`Parser::parse_type_here` reads a type at
   the cursor's level; `parse_type` is `nested(parse_type_here)`);
 - each postfix operator of a chain after its first (a call, an index, a
-  field, `?`, `.await`), for the rest of the chain, a method call
-  `.name(…)` counting as one operator: the `k`th operator of a chain is
+  field, `?`, `.await`), for the rest of the chain, a call directly after
+  any `.` postfix counting with it as one operator (a method call
+  `.name(…)`, and as well `.await(…)` and a tuple field's `.0(…)`, which
+  both parsers count alike): the `k`th operator of a chain is
   `k - 1` levels deeper than its receiver, and a call's or an index's
   expressions one deeper again, as any expression is. The spec does not
   list postfix chains: they are counted by the user's choice of
   2026-10-31 (ruling 8), asked because, uncounted, a chain of about
   5,000 method calls overflowed `nova check` even on the 64 MB thread
   (§3); see below;
+- each `?` of an optional type `T?` after the first, for the rest of the
+  type: `T` followed by `k` `?`s is `k - 1` levels deeper than `T`. It is
+  a chain as a postfix chain is, which the first build missed: uncounted,
+  each `?` wrapped one more `Type::Optional`, and 40,000 of them after a
+  parameter's type overflowed `nova fmt --check` on S0's 64 MB thread,
+  while N crashed on a 1 MB stack at 14,000 where S0 printed the tree
+  (5.1b's review). The user's ruling 8 covers it by the same principle:
+  after a type's name, 129 `?`s parse, 128 levels, and 130 are P0002, at
+  the token after the 130th;
 - an item inside a block;
 - the children of a `view` and of each element.
 
@@ -605,13 +624,18 @@ more than the level, and `deeper` refuses once it passes `MAX_DEPTH + 1`.
 (The first build of this counted the outermost as level 1, so only 127
 parentheses fitted, and the type after `as` was a level of its own beyond
 its operator's.) A block is no level of its own: its statements'
-expressions are. Each entry but the binary and postfix operators' is
+expressions are **(differs from the spec**, which lists a block: counting
+a block and its statements' expressions both would make `{ x }` two
+levels and 64 nested blocks the limit). Each entry but the chains' is
 `Parser::nested(f)`, which saves the depth, calls `deeper`, runs `f` and
 restores the depth however `f` ends. `parse_postfix_from` saves the depth,
 runs the chain (`parse_postfix_chain`, which calls `deeper` after taking
 each operator but the first and a method call's `(`) and restores it
 however the chain ends, so a view child, which reads a postfix expression
-outside `parse_expr`, gets it back too. Each binary function
+outside `parse_expr`, gets it back too. `parse_type_here` saves the depth,
+reads the type and its `?`s (`parse_optional_chain`, which calls `deeper`
+after each `?` but the first) and restores it, so a type's siblings, and
+the type after the next `as`, do not add up. Each binary function
 (`parse_assign`, `parse_range`, `parse_or`, …, `parse_mul`, `parse_cast`)
 saves the depth on entry, calls `deeper` after each operator it takes, and
 restores the depth when its chain ends; a failure returns `None` straight
@@ -620,7 +644,7 @@ levels deep, `{ { x } }` 2, `if c { if d { x } }` 2 (an `if`'s condition
 and its block's tail are one deeper than the `if`), `if a { x } else if b
 { y }` 2, `1 + 2 + x` 2, `!!x` 2, `0 as Int as T` 2, `a.b.c` 1,
 `a.f().g()` 1, `a.f(x)` 0 with `x` at 1, and `fn g() { fn h() { x } }` 2;
-as a parameter's type, `Vec<Vec<Int>>` is 2. So after a name 129 field
+as a parameter's type, `Vec<Vec<Int>>` is 2 and `Int???` 2. So after a name 129 field
 accesses in a row parse, and 129 method calls without arguments; a call's
 arguments are a level deeper than the call, so 128 calls with arguments
 parse and the 129th's are P0002. `Router::new()` is itself the chain's
@@ -637,8 +661,10 @@ bare `return`, so every function unwinds as at the end of the file. When
 the file ends, the errors pushed since are dropped and
 `ParseError::TooDeep { span }` is pushed: "this is nested too deeply (more
 than 128 levels)". The items finished before are kept, the one being
-parsed is dropped, no split is recorded after it, and P0002 is the
-file's last error. `ParseError::code()` gives "P0002" for it, "P0001" for
+parsed is dropped, however far it got, no split is recorded after it, and
+P0002 is the file's last error **(differs from the spec**, which says the
+tree holds what came before: one clean error, and both parsers stop at
+the same point without carrying a half-built tree). `ParseError::code()` gives "P0002" for it, "P0001" for
 every other, and every caller (`nova parse`, the driver's loader, the
 resolver's std loader, `nova fmt`) attaches it; the language server's
 organize-imports treats P0002 as a syntax error too. The dump's `PARSE`
@@ -678,7 +704,9 @@ nesting. `depth.rs` and two cases hold each shape.
 **Measured.** Over the repository's tracked `.nova` files, N's new
 sources and the cases (588 files), but for the three cases written to sit
 at or past the limit (`chains_and_casts_at_the_limit.nova` and the two of
-the rollback), the deepest is 25 levels
+the rollback; the review's `optional_types_at_and_past_the_limit.nova`
+came later, and no other file holds a type with two `?`s, so counting
+them changes no figure here), the deepest is 25 levels
 (`examples/07-fullstack-blog/src/server.nova`, whose router is one chain
 of 21 calls, `Server::new()` and 20 method calls, 41 postfix operators,
 the repository's longest); the next are 18 (`selfhost/src/lexer.nova`)
@@ -696,7 +724,8 @@ assignments, ranges, casts, a cast's generic type, generic arguments in a
 parameter's and a `let`'s type, tuple, function and optional types,
 tuple-struct, tuple, record and or-patterns, items in blocks, `while`,
 `for`, `return`, record literals, views, and chains of fields, indexes,
-`?`, `.await`, tuple fields, calls and method calls: every one parses at
+`?`, `.await`, tuple fields, calls and method calls, and a type's `?`s
+(since the review): every one parses at
 128 and is one P0002, the file's last line, at 129; `nova check` runs
 every stage on each at 128 without overflowing, and `nova fmt` on each at
 129 reports the one P0002 and leaves the file as it is. Uncounted, a
@@ -751,8 +780,10 @@ runtime, then runs the command on a thread with
 The language server's checker thread, and `nova dev`'s rebuild thread,
 get the same stack; its protocol thread is the command's.
 
-The thread bounds what the parser's recursion needs, since the depth
-limit bounds that recursion, but not every overflow: `logos`'s per-digit
+The thread bounds what the parser's recursion needs, and the later
+stages' recursion over the tree, since the depth limit bounds both: every
+chain that makes the tree deeper is counted toward it (binary, postfix,
+and a type's `?`s, §2). It does not bound every overflow: `logos`'s per-digit
 recursion (ADR 0051) is not a level, so a decimal literal of 210,000
 digits or more aborts debug S0's 64 MB thread (measured with `nova parse
 --dump-tokens` and `--dump-ast`: 210,000, 250,000 and 300,000 digits abort
@@ -794,22 +825,27 @@ lower one whose operand is 100 parentheses deep, a view whose first
 child is a postfix chain and whose second's argument is 100 deep, and 128
 casts: a parser that does not lower the depth after a chain, or counts a
 cast's type one level deeper, reports P0002 there (the mutants found that
-no input did). Both lexers agree on all of them.
+no input did). Another, `optional_types_at_and_past_the_limit.nova` (from
+5.1b's review), holds a field's type with 129 `?`s, two casts whose types
+hold 100 `?`s each, and a parameter's type with 130: a parser that does
+not count a type's `?`s, or does not lower the depth when the type ends,
+differs from the other there. Both lexers agree on all of them.
 
 ### 5. The deep generator
 
 `fuzz::deep(rng, kind, depth)` writes a program whose deepest level is
-`depth`, nested as one of 14 kinds (parentheses, blocks, `if`, `else if`
+`depth`, nested as one of 15 kinds (parentheses, blocks, `if`, `else if`
 chains, `match`, `while`, `for`, calls, prefix operators, binary chains,
-chains of method calls, types, patterns, items in blocks) or mixed, eight
+chains of method calls, types, optional types `T?`, patterns, items in
+blocks) or mixed, eight
 wrappers of one level each in a random order. Up to the limit each is well
-typed (but nested items, which the checker refuses as E0900), so `nova
+typed (but nested items and `T?`, which the checker refuses as E0900), so `nova
 check` runs every stage on it. `fuzz::deeps(seed, mixed)` gives each kind
 at 126 to 130 levels and `mixed` inputs at depths in that range: seeds 201
-and 202, 20 mixed each, 180 inputs, through the token and AST
+and 202, 20 mixed each, 190 inputs, through the token and AST
 differentials (§7). S0's `parse --check` gives no error up to 128 and
 exactly one P0002 past it on all of seed 201's, and `check` the same at
-128 and 129, but for the nested items' E0900; neither overflows.
+128 and 129, but for the nested items' and `T?`'s E0900; neither overflows.
 
 ### 6. N's AST and parser
 
@@ -818,21 +854,24 @@ exactly one P0002 past it on all of seed 201's, and `check` the same at
 | Module | What it ports | Code lines | Rust's |
 |---|---|---:|---:|
 | `ast.nova` | `nova-ast`'s `lib`, `expr`, `item`, `pattern`, `ty` | 245 | 477 |
-| `parser.nova` | `grammar.rs`'s state, token access, recovery, docs, `component` lookahead, paths and helpers; `error.rs`; `lib.rs` | 420 | |
-| `parse_item.nova` | the file, attributes, items, functions, records … `extern` | 681 | |
-| `parse_type.nova` | types, generic arguments, `>>` | 151 | |
+| `parser.nova` | `grammar.rs`'s state, token access, recovery, docs, `component` lookahead, paths and helpers; `error.rs`; `lib.rs` | 450 | |
+| `parse_item.nova` | the file, attributes, items, functions, records … `extern` | 685 | |
+| `parse_type.nova` | types, generic arguments, `>>`, `T?` | 171 | |
 | `parse_stmt.nova` | blocks and statements | 78 | |
 | `parse_expr.nova` | the precedence ladder, postfix, atoms, `if`/`match`, closures, record literals | 762 | |
 | `parse_view.nova` | `view { … }` | 134 | |
 | `parse_pattern.nova` | patterns | 259 | |
-| the parser, together | `grammar.rs`, `error.rs`, `lib.rs` | 2,485 | 2,948 |
-| `ast_dump.nova` | `nova-ast`'s `dump.rs` and `nova-parser`'s | 813 | 962 |
+| the parser, together | `grammar.rs`, `error.rs`, `lib.rs` | 2,539 | 2,983 |
+| `ast_dump.nova` | `nova-ast`'s `dump.rs` and `nova-parser`'s | 813 | 985 |
 | `parser_tests.nova` | N's own tests (six) | 145 | – |
 
-Code lines are counted as 5.1a counted them (no blank or comment lines,
-no `#[cfg(test)]` item); the Rust parser was 2,836 at the spec's base and
-is 2,948 after P0002 and this ADR's changes, the AST 476 and 477; the Rust
-dump's figure holds `KINDS`, which N has no use for. `token.nova` grows
+Code lines are counted as 5.1a counted them: no blank line, no line that
+begins with `//` (so no doc comment), and nothing of a Rust file from its
+first `#[cfg(test)]` on. The Rust parser was 2,836 at the spec's base and
+is 2,983 after P0002, this ADR's changes and the review's (`grammar.rs`
+2,909, `error.rs` 53, `lib.rs` 21), the AST 476 and 477; the Rust dump's
+985 are `nova-ast/src/dump.rs`'s 958, `KINDS` included, which N has no
+use for, and `nova-parser/src/dump.rs`'s 27. `token.nova` grows
 from 196 code lines to 303 (`Token.kind`, `Span::point`, `Span.merge`,
 `Spanned::new`), and `lexer.nova` from 793 to 827 (`KEYWORDS`).
 
@@ -905,8 +944,9 @@ code 2 after the rest, and refuses no file with exit code 2, as `selfhost
 tokens` does (ADR 0051). `ast_dump.nova` writes the grammar of §1 byte for
 byte, through `dump.nova`'s `push_escaped` and `hex16`.
 
-**N's own tests.** Six `@test`s in `parser_tests.nova` (in `src/`, as
-5.1a's are, ADR 0051): the generic-arguments rollback and `>>`, statement
+**N's own tests.** Six `@test`s in `parser_tests.nova`, in `src/` as
+5.1a's are **(differs from the spec**, which puts them in
+`selfhost/tests/`, where a module cannot reach the parser; ADR 0051): the generic-arguments rollback and `>>`, statement
 recovery, the trailing expression, `component` and `view`, a bare
 `return` and the arm note, and 128 against 129 parentheses. Each expected
 dump is S0's. `nova test` in `selfhost/` runs 17.
@@ -922,12 +962,13 @@ was added.
 and `selfhost ast` after the token dumps, so the AST dumps, errors and
 notes included, are compared byte for byte on: the corpus (every tracked
 `.nova` file outside `selfhost/`, then N's sources) and its Windows
-checkout; the 278 cases (5.1a's 12, the 262 recorded in §4,
-`every_other_node.nova`, `chains_and_casts_at_the_limit.nova` and the two
-of the rollback, §2); the
+checkout; the 279 cases (5.1a's 12, the 262 recorded in §4,
+`every_other_node.nova`, `chains_and_casts_at_the_limit.nova`,
+`optional_types_at_and_past_the_limit.nova` and the two of the rollback,
+§2); the
 edge inputs; the soup of seed 1 (2,000 inputs; seeds 2 and 3 go through
 the token dump alone); the 750 mutated corpus files of seeds 101–103; and
-the 180 deep inputs of seeds 201 and 202. The every-kind test reads N's
+the 190 deep inputs of seeds 201 and 202. The every-kind test reads N's
 dumps of the corpus and the cases as well as S0's, and each holds all 167
 forms of `KINDS`. A mismatch's report names the source line of an AST line
 too (a node's start, or a `PARSE` line's). A command with no file is
@@ -963,7 +1004,7 @@ input of every kind (and 126, 127, 129, 130) with `ulimit -s 8192` and
 |---|---|---|---|
 | parentheses, blocks, `if`, `match`, `while`, `for`, calls | passes | passes | 256 KB |
 | items in blocks | passes | passes | 128 KB |
-| `else if`, prefix operators, binary chains, method calls, types, patterns | passes | passes | 64 KB |
+| `else if`, prefix operators, binary chains, method calls, types, optional types, patterns | passes | passes | 64 KB |
 
 So N has at least four times the stack it needs at 128 levels on 1 MB,
 measured on Linux, and past the limit it stops at 129 like S0. Windows
@@ -983,7 +1024,8 @@ Measured locally on 4 cores (spec §4.7), best of three, peak memory by
 `selfhost ast`, built by `nova build` with `NOVA_RUNTIME_LIB` pointing at
 a release `libnova_runtime.a` built in an isolated target directory, and
 with the debug runtime. A release `nova` would have taken the disk below
-the 6.3 GB this work keeps free, so S0 was measured two ways: its debug
+the 6.3 GB this work keeps free, so S0 was measured two ways **(differs
+from the spec**, which times S0 built in release mode): its debug
 `nova parse` (the `nova` binary), and its release lexer, parser and dump
 (`nova_parser::dump_ast`, or `lex` and `parse` alone for `--check`)
 built into a temporary example of `nova-parser` that reads the files and
@@ -1034,8 +1076,10 @@ once showed a difference becomes a case under `cases/`.
   that impl is the place to look.
 - A postfix chain counts too, by the user's choice of 2026-10-31, which
   the spec does not list (§2): each postfix operator after a chain's
-  first is a level, a method call one, and a call's arguments are a level
-  deeper than the call. After a name, a chain of 130 field accesses, or
+  first is a level, a call directly after any `.` postfix one with it (a
+  method call, `.await(…)`, `.0(…)`), and a call's arguments are a level
+  deeper than the call; so is each `?` of a type `T?` after the first, by
+  the same principle, 130 of them P0002. After a name, a chain of 130 field accesses, or
   of 130 method calls without arguments, is P0002, and of 129 with
   arguments. A router built as one chain from `Router::new()`, one
   `.get("/", h)` a route, parses 127 routes and is P0002 at the 128th;

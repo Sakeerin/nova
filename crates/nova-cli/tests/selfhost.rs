@@ -1214,11 +1214,12 @@ fn s0_meets_the_depth_limit_on_the_deep_inputs_not_its_stack() {
                 .matches("error[P0002]: this is nested too deeply")
                 .count();
             if depth <= 128 {
-                // Nested items are E0900 to the checker; nothing else is an
-                // error.
+                // Nested items and optional types are E0900 to the
+                // checker; nothing else is an error.
                 let errors_ok =
                     stderr.matches("error[").count() == stderr.matches("error[E0900]").count();
-                let code_ok = code == Some(0) || (kind == "items" && code == Some(1));
+                let unsupported = kind == "items" || kind == "optionals";
+                let code_ok = code == Some(0) || (unsupported && code == Some(1));
                 assert!(
                     p0002 == 0 && errors_ok && code_ok,
                     "{what}: {code:?}\n{stderr}"

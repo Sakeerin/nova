@@ -194,15 +194,20 @@ depth limit (§4; ADR 0052).
   file's last error and the items before it are kept. A level is an
   expression, a type or a pattern inside another, a prefix operator's
   operand, an `else if`, each further operator of a binary chain, each
-  further operator of a postfix chain (a method call `.f(…)` is one), an
-  item inside a block, or a view's children; the outermost is level 0, so
+  further operator of a postfix chain (a call directly after any `.`
+  postfix counts with it: `.f(…)`, `.await(…)` and `.0(…)` are one each),
+  each further `?` of an optional type `T?`, an item inside a block, or a
+  view's children; the outermost is level 0, so
   128 nested parentheses, blocks, calls, `if`s or types parse and 129 do
   not. A call's arguments are a level deeper than the call, so after a
   name a chain of 129 method calls without arguments parses and 130 does
   not, and of 128 with arguments parses and 129 does not; a router built
   as one chain from `Router::new()`, a route a `.get("/", h)`, parses 127
-  routes and not 128. Counting postfix chains, which the 5.1 spec's
-  levels do not name, is the user's ruling of 2026-10-31 (ADR 0052).
+  routes and not 128; a parameter's type `Int` with 129 `?`s parses and
+  with 130 does not. Counting postfix chains, which the 5.1 spec's levels
+  do not name, is the user's ruling of 2026-10-31, and it covers a type's
+  `?`s by the same principle: uncounted, 40,000 of them overflowed `nova
+  fmt --check` even on the 64 MB thread (ADR 0052).
   Before, a debug `nova check` aborted with a stack overflow: it passed
   230 nested parentheses and aborted at 240, passed 190 nested `if`s and
   aborted at 200, passed a chain of 750 operators and aborted at 800, and

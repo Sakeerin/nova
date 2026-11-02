@@ -19,14 +19,25 @@ impl Parser {
     /// counts its right operand (`deeper`).
     pub fn parse_type_here(mut self, ctx: String) -> Option<Spanned<Type>> {
         let start = self.peek_span()
-        let mut ty = self.parse_type_atom(ctx)?
+        let depth = self.depth
+        let ty = self.parse_optional_chain(start, ctx)
+        self.depth = depth
+        ty
+    }
 
-        // Optional sugar: `T?`
+    /// The type at the cursor and its optional sugar, `T?`: each `?` after
+    /// the first one level deeper than the one before it, as a postfix
+    /// chain's operators are (`deeper`): past the limit, at the token after
+    /// it. `parse_type_here` restores the depth.
+    pub fn parse_optional_chain(mut self, start: Span, ctx: String) -> Option<Spanned<Type>> {
+        let mut ty = self.parse_type_atom(ctx)?
+        let mut first = true
         while self.eat(Question).is_some() {
+            if !first && !self.deeper() { return None }
+            first = false
             let end = self.prev_span_or(start)
             ty = Spanned::new(TypeOptional(ty), start.merge(end))
         }
-
         Some(ty)
     }
 
