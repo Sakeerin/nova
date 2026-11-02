@@ -1,0 +1,771 @@
+// Items: a port of crates/nova-parser/src/grammar.rs's "File", "Functions"
+// and "Records, types, traits, impls, const, import, module, extern"
+// sections, function by function (parser.nova says how its idioms
+// translate).
+
+import ast
+import parse_expr
+import parse_stmt
+import parse_type
+import parser
+import token
+
+// ---------------------------------------------------------------------------
+// File
+// ---------------------------------------------------------------------------
+
+impl Parser {
+    pub fn parse_file(mut self) -> File {
+        let mut items: Vec<Spanned<Item>> = Vec::new()
+        while !self.is_at_end() {
+            match self.try_parse_item() {
+                Some(item) => items.push(item)
+                None => {
+                    // Progress, guaranteed here rather than assumed from the
+                    // two halves: neither `try_parse_item`'s fallthrough nor
+                    // `sync_to_item_boundary` consumes a stop token.
+                    let before = self.pos
+                    self.sync_to_item_boundary()
+                    if self.pos == before { let _ = self.advance() }
+                }
+            }
+        }
+        // Past the depth limit: one error, P0002, for all that came after.
+        let crossing = match self.too_deep {
+            Some(crossing) => Some(crossing)
+            None => self.crossing_stands()
+        }
+        match crossing {
+            Some((errors, span)) => {
+                while self.errors.len() > errors { let _ = self.errors.pop() }
+                self.errors.push(TooDeep(span))
+            }
+            None => ()
+        }
+        let newline_splits = sorted_by_start(self.splits)
+        self.splits = Vec::new()
+        File { items: items, newline_splits: newline_splits }
+    }
+
+    /// Parse zero or more leading `@name` / `@name(a, b)` attributes.
+    /// Placement is not checked here: that is the resolver's decision.
+    pub fn parse_attributes(mut self) -> Vec<Attribute> {
+        let mut attrs: Vec<Attribute> = Vec::new()
+        while self.check(At) {
+            let start = self.peek_span()
+            let _ = self.advance()
+            let name = match self.parse_ident("in attribute name") {
+                Some(n) => n
+                None => break
+            }
+            let mut args: Vec<Spanned<String>> = Vec::new()
+            if self.check(LParen) {
+                let _ = self.advance()
+                while !self.check(RParen) && !self.is_at_end() {
+                    let arg = match self.parse_ident("in attribute arguments") {
+                        Some(a) => a
+                        None => break
+                    }
+                    args.push(arg)
+                    if self.check(Comma) { let _ = self.advance() } else { break }
+                }
+                let _ = self.expect(RParen, "in attribute arguments")
+            }
+            let span = start
+            attrs.push(Attribute { name: name, args: args, span: span })
+        }
+        attrs
+    }
+
+    pub fn try_parse_item(mut self) -> Option<Spanned<Item>> {
+        let start = self.peek_span()
+        let (docs, attrs) = self.parse_item_prefix()
+        let vis = self.parse_visibility()
+
+        let item = match self.peek() {
+            Fn | Async => {
+                let mut func = self.parse_function(vis)?
+                func.attrs = attrs
+                func.docs = docs
+                ItemFunction(func)
+            }
+            Record => {
+                let _ = self.advance()
+                let mut rec = self.parse_record(vis)?
+                rec.attrs = attrs
+                rec.docs = docs
+                ItemRecord(rec)
+            }
+            Type => {
+                let _ = self.advance()
+                let mut td = self.parse_type_decl(vis)?
+                td.attrs = attrs
+                td.docs = docs
+                ItemType(td)
+            }
+            Trait => {
+                let _ = self.advance()
+                let mut tr = self.parse_trait_decl(vis)?
+                tr.attrs = attrs
+                tr.docs = docs
+                ItemTrait(tr)
+            }
+            Impl => {
+                let _ = self.advance()
+                let mut impl_ = self.parse_impl_block()?
+                impl_.attrs = attrs
+                impl_.docs = docs
+                ItemImpl(impl_)
+            }
+            Const => {
+                let _ = self.advance()
+                let mut c = self.parse_const_decl(vis)?
+                c.attrs = attrs
+                c.docs = docs
+                ItemConst(c)
+            }
+            Import => {
+                let _ = self.advance()
+                let mut imp = self.parse_import()?
+                imp.attrs = attrs
+                imp.docs = docs
+                ItemImport(imp)
+            }
+            Module => {
+                let _ = self.advance()
+                let mut m = self.parse_module()?
+                m.attrs = attrs
+                m.docs = docs
+                ItemModule(m)
+            }
+            Extern => {
+                let _ = self.advance()
+                let mut e = self.parse_extern_block()?
+                e.attrs = attrs
+                e.docs = docs
+                ItemExtern(e)
+            }
+            Ident(_) if self.component_at(self.pos) => {
+                let mut func = self.parse_component(vis)?
+                func.attrs = attrs
+                func.docs = docs
+                ItemFunction(func)
+            }
+            _ => {
+                let span = self.peek_span()
+                if !docs.is_empty() {
+                    // Docs with no item after them.
+                    self.misplaced_doc(docs.at(0).span)
+                    return None
+                }
+                self.errors.push(
+                    Expected(
+                        "item (fn, record, type, trait, impl, const, import, module, extern)",
+                        self.peek().description(),
+                        span,
+                    ),
+                )
+                return None
+            }
+        }
+
+        let end = self.prev_span_or(start)
+        let span = start.merge(end)
+        Some(Spanned::new(item, span))
+    }
+
+    pub fn parse_visibility(mut self) -> Visibility {
+        if self.eat(Pub).is_some() { VisibilityPub } else { VisibilityPrivate }
+    }
+}
+
+// `splits`, sorted by their starts, stably (`sort_by_key(|s| s.at.start)`):
+// they are recorded nearly in order, so an insertion sort.
+fn sorted_by_start(splits: Vec<NewlineSplit>) -> Vec<NewlineSplit> {
+    let mut out: Vec<NewlineSplit> = Vec::new()
+    for s in splits.iter() {
+        out.push(s)
+        let mut i = out.len() - 1
+        while i > 0 && out.at(i - 1).at.start > s.at.start {
+            out.set(i, out.at(i - 1))
+            i -= 1
+        }
+        out.set(i, s)
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Functions
+// ---------------------------------------------------------------------------
+
+impl Parser {
+    pub fn parse_function(mut self, vis: Visibility) -> Option<Function> {
+        let is_async = self.eat(Async).is_some()
+        let _ = self.expect(Fn, "function declaration")?
+        let name = self.parse_ident("function name")?
+        let generics = self.parse_generics_opt()
+        let _ = self.expect(LParen, "function parameters")?
+        let params = self.parse_params()
+        let _ = self.expect(RParen, "function parameters")?
+        let return_ty = if self.eat(Arrow).is_some() {
+            Some(self.parse_type("return type")?)
+        } else {
+            None
+        }
+        let where_clause = self.parse_where_clause_opt()
+        let body = self.parse_block("function body")?
+
+        Some(
+            Function {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                vis: vis,
+                is_async: is_async,
+                is_component: false,
+                name: name,
+                generics: generics,
+                params: params,
+                return_ty: return_ty,
+                where_clause: where_clause,
+                body: body,
+            },
+        )
+    }
+
+    /// `component Name(params) { body }` (RFC 0001): a function returning
+    /// `std/ui`'s `View`, with no type parameters and no written return
+    /// type.
+    pub fn parse_component(mut self, vis: Visibility) -> Option<Function> {
+        let _ = self.advance()
+        let name = self.parse_ident("component name")?
+        let _ = self.expect(LParen, "component parameters")?
+        let params = self.parse_params()
+        let _ = self.expect(RParen, "component parameters")?
+        match self.eat(Arrow) {
+            Some(arrow) => {
+                self.errors.push(
+                    Custom("a component returns a `View`, which it does not write", arrow.span),
+                )
+                // The type is read and dropped, so that the body still parses.
+                let _ = self.parse_type("return type")?
+            }
+            None => ()
+        }
+        let body = self.parse_block("component body")?
+        Some(
+            Function {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                vis: vis,
+                is_async: false,
+                is_component: true,
+                name: name,
+                generics: Vec::new(),
+                params: params,
+                return_ty: None,
+                where_clause: Vec::new(),
+                body: body,
+            },
+        )
+    }
+
+    pub fn parse_function_sig(mut self) -> Option<FunctionSig> {
+        let is_async = self.eat(Async).is_some()
+        let _ = self.expect(Fn, "function signature")?
+        let name = self.parse_ident("function name")?
+        let generics = self.parse_generics_opt()
+        let _ = self.expect(LParen, "function parameters")?
+        let params = self.parse_params()
+        let _ = self.expect(RParen, "function parameters")?
+        let return_ty = if self.eat(Arrow).is_some() {
+            Some(self.parse_type("return type")?)
+        } else {
+            None
+        }
+        let where_clause = self.parse_where_clause_opt()
+        Some(
+            FunctionSig {
+                docs: Vec::new(),
+                is_async: is_async,
+                name: name,
+                generics: generics,
+                params: params,
+                return_ty: return_ty,
+                where_clause: where_clause,
+            },
+        )
+    }
+
+    pub fn parse_params(mut self) -> Vec<Param> {
+        let mut params: Vec<Param> = Vec::new()
+        while !self.check(RParen) && !self.is_at_end() {
+            if self.reject_docs() { continue }
+            match self.parse_param() {
+                Some(p) => params.push(p)
+                None => ()
+            }
+            if self.eat(Comma).is_none() { break }
+        }
+        params
+    }
+
+    pub fn parse_param(mut self) -> Option<Param> {
+        let is_mut = self.eat(Mut).is_some()
+        let name = self.parse_ident("parameter name")?
+
+        // `self` may appear without a type annotation in method signatures.
+        if name.value == "self" && !self.check(Colon) {
+            let span = name.span
+            return Some(Param { is_mut: is_mut, name: name, ty: Spanned::new(TypeInfer, span) })
+        }
+
+        let _ = self.expect(Colon, "parameter type")?
+        let ty = self.parse_type("parameter type")?
+        Some(Param { is_mut: is_mut, name: name, ty: ty })
+    }
+
+    pub fn parse_generics_opt(mut self) -> Vec<TypeParam> {
+        let mut params: Vec<TypeParam> = Vec::new()
+        if !self.check(Lt) { return params }
+        let _ = self.advance()
+        while !self.check(Gt) && !self.is_at_end() {
+            let name = match self.parse_ident("type parameter") {
+                Some(n) => n
+                None => break
+            }
+            let mut bounds: Vec<Spanned<Path>> = Vec::new()
+            if self.eat(Colon).is_some() { bounds = self.parse_trait_bounds() }
+            params.push(TypeParam { name: name, bounds: bounds })
+            if self.eat(Comma).is_none() { break }
+        }
+        let _ = self.eat(Gt)
+        params
+    }
+
+    pub fn parse_trait_bounds(mut self) -> Vec<Spanned<Path>> {
+        let mut bounds: Vec<Spanned<Path>> = Vec::new()
+        while true {
+            let span = self.peek_span()
+            match self.try_parse_path() {
+                Some(path) => bounds.push(Spanned::new(path, span))
+                None => break
+            }
+            if self.eat(Plus).is_none() { break }
+        }
+        bounds
+    }
+
+    pub fn parse_where_clause_opt(mut self) -> Vec<WhereBound> {
+        let mut bounds: Vec<WhereBound> = Vec::new()
+        if !self.check(Where) { return bounds }
+        let _ = self.advance()
+        while true {
+            let ty = match self.parse_type("where bound type") {
+                Some(t) => t
+                None => break
+            }
+            if self.expect(Colon, "where bound").is_none() { break }
+            let trait_bounds = self.parse_trait_bounds()
+            bounds.push(WhereBound { ty: ty, bounds: trait_bounds })
+            if self.eat(Comma).is_none() { break }
+            // A trailing comma: the clause ends at the body or the end of a
+            // signature.
+            match self.peek() {
+                LBrace | Semicolon | RBrace => break
+                _ => ()
+            }
+        }
+        bounds
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Records, types, traits, impls, const, import, module, extern
+// ---------------------------------------------------------------------------
+
+impl Parser {
+    pub fn parse_record(mut self, vis: Visibility) -> Option<Record> {
+        let name = self.parse_ident("record name")?
+        let generics = self.parse_generics_opt()
+        let _ = self.expect(LBrace, "record body")?
+        let mut fields: Vec<RecordField> = Vec::new()
+        while !self.check(RBrace) && !self.is_at_end() {
+            let docs = self.take_docs()
+            if self.check(RBrace) || self.is_at_end() {
+                if !docs.is_empty() { self.misplaced_doc(docs.at(0).span) }
+                continue
+            }
+            let fvis = self.parse_visibility()
+            let fname = match self.parse_ident("field name") {
+                Some(n) => n
+                None => {
+                    self.sync_to_stmt_boundary()
+                    continue
+                }
+            }
+            if self.expect(Colon, "field type").is_none() {
+                self.sync_to_stmt_boundary()
+                continue
+            }
+            let fty = match self.parse_type("field type") {
+                Some(t) => t
+                None => {
+                    self.sync_to_stmt_boundary()
+                    continue
+                }
+            }
+            let _ = self.eat(Comma)
+            fields.push(RecordField { docs: docs, vis: fvis, name: fname, ty: fty })
+        }
+        let _ = self.expect(RBrace, "record body")?
+        Some(
+            Record {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                vis: vis,
+                name: name,
+                generics: generics,
+                fields: fields,
+            },
+        )
+    }
+
+    pub fn parse_type_decl(mut self, vis: Visibility) -> Option<TypeDecl> {
+        let name = self.parse_ident("type name")?
+        let generics = self.parse_generics_opt()
+        let _ = self.expect(Eq, "type definition")?
+
+        // Sum type: starts with `|`, after the first variant's docs if any.
+        // A variant's docs come before its `|`; docs with no `|` after them
+        // belong to whatever follows the type, so they are left for it.
+        let def = if self.next_after_docs_is(Pipe) {
+            let mut variants: Vec<Variant> = Vec::new()
+            while self.next_after_docs_is(Pipe) {
+                let docs = self.take_docs()
+                let _ = self.advance()
+                let vname = match self.parse_ident("variant name") {
+                    Some(n) => n
+                    None => break
+                }
+                let mut fields: Vec<Spanned<Type>> = Vec::new()
+                if self.eat(LParen).is_some() {
+                    while !self.check(RParen) && !self.is_at_end() {
+                        match self.parse_type("variant field type") {
+                            Some(t) => fields.push(t)
+                            None => ()
+                        }
+                        if self.eat(Comma).is_none() { break }
+                    }
+                    let _ = self.eat(RParen)
+                }
+                variants.push(Variant { docs: docs, name: vname, fields: fields })
+            }
+            TypeDefSum(variants)
+        } else {
+            let ty = self.parse_type("type alias")?
+            TypeDefAlias(ty)
+        }
+
+        let _ = self.eat(Semicolon)
+        Some(
+            TypeDecl {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                vis: vis,
+                name: name,
+                generics: generics,
+                def: def,
+            },
+        )
+    }
+
+    pub fn parse_trait_decl(mut self, vis: Visibility) -> Option<TraitDecl> {
+        let name = self.parse_ident("trait name")?
+        let generics = self.parse_generics_opt()
+        let mut supertraits: Vec<Spanned<Path>> = Vec::new()
+        if self.eat(Colon).is_some() { supertraits = self.parse_trait_bounds() }
+        let where_clause = self.parse_where_clause_opt()
+        let _ = self.expect(LBrace, "trait body")?
+        let mut items: Vec<TraitItem> = Vec::new()
+        while !self.check(RBrace) && !self.is_at_end() {
+            let docs = self.take_docs()
+            if self.check(RBrace) || self.is_at_end() {
+                if !docs.is_empty() { self.misplaced_doc(docs.at(0).span) }
+                continue
+            }
+            // An associated type declaration (`type Item` or `type Item:
+            // Display`) must be handled before the speculative
+            // `parse_function_sig()` below.
+            if self.eat(Type).is_some() {
+                match self.parse_ident("associated type name") {
+                    Some(name) => {
+                        let bounds = if self.eat(Colon).is_some() {
+                            self.parse_trait_bounds()
+                        } else {
+                            Vec::new()
+                        }
+                        let _ = self.eat(Semicolon)
+                        items.push(TraitItemAssocType(docs, name, bounds))
+                    }
+                    None => self.sync_to_stmt_boundary()
+                }
+                continue
+            }
+            // Look ahead: if there's a body `{`, it's a provided method
+            let saved_pos = self.pos
+            let saved_errors_len = self.errors.len()
+            match self.parse_function_sig() {
+                Some(sig) => {
+                    let mut sig = sig
+                    if self.check(LBrace) {
+                        // Provided method: roll back and parse as a full
+                        // function.
+                        self.pos = saved_pos
+                        while self.errors.len() > saved_errors_len { let _ = self.errors.pop() }
+                        let func_vis = VisibilityPrivate
+                        match self.parse_function(func_vis) {
+                            Some(func) => {
+                                let mut func = func
+                                func.docs = docs
+                                items.push(TraitItemProvided(func))
+                            }
+                            None => ()
+                        }
+                    } else {
+                        // Required method: expect semicolon.
+                        let _ = self.eat(Semicolon)
+                        sig.docs = docs
+                        items.push(TraitItemRequired(sig))
+                    }
+                }
+                None => self.sync_to_stmt_boundary()
+            }
+        }
+        let _ = self.expect(RBrace, "trait body")?
+        Some(
+            TraitDecl {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                vis: vis,
+                name: name,
+                generics: generics,
+                supertraits: supertraits,
+                where_clause: where_clause,
+                items: items,
+            },
+        )
+    }
+
+    pub fn parse_impl_block(mut self) -> Option<ImplBlock> {
+        let generics = self.parse_generics_opt()
+
+        // Could be `impl Type` or `impl Trait for Type`: parse a type; if
+        // followed by `for`, treat it as the trait path.
+        let first_ty = self.parse_type("impl target")?
+        let mut trait_: Option<Spanned<Path>> = None
+        let mut ty = first_ty
+        if self.eat(For).is_some() {
+            let for_ty = self.parse_type("impl target type")?
+            let trait_path = type_to_path(first_ty)?
+            let trait_span = first_ty.span
+            trait_ = Some(Spanned::new(trait_path, trait_span))
+            ty = for_ty
+        }
+
+        let where_clause = self.parse_where_clause_opt()
+        let _ = self.expect(LBrace, "impl block")?
+        let mut functions: Vec<Function> = Vec::new()
+        let mut consts: Vec<ConstDecl> = Vec::new()
+        let mut assoc_types: Vec<AssocTypeBinding> = Vec::new()
+        // Loop invariant: every arm below advances `self.pos` by at least
+        // one token, so this terminates.
+        while !self.check(RBrace) && !self.is_at_end() {
+            let docs = self.take_docs()
+            if self.check(RBrace) || self.is_at_end() {
+                if !docs.is_empty() { self.misplaced_doc(docs.at(0).span) }
+                continue
+            }
+            // Captured before `parse_visibility` consumes it, so the `pub`
+            // rejection in the `type` arm can point at the `pub` itself.
+            let vis_span = self.peek_span()
+            let vis = self.parse_visibility()
+            match self.peek() {
+                Fn | Async => {
+                    match self.parse_function(vis) {
+                        Some(f) => {
+                            let mut f = f
+                            f.docs = docs
+                            functions.push(f)
+                        }
+                        None => self.sync_to_item_boundary()
+                    }
+                }
+                // An associated-type binding: `type Item = Int`.
+                Type => {
+                    let _ = self.advance()
+                    match vis {
+                        VisibilityPrivate => ()
+                        _ => self.errors.push(
+                            Custom(
+                                "an associated type binding in an impl cannot be `pub`",
+                                vis_span,
+                            ),
+                        )
+                    }
+                    match self.parse_ident("associated type name") {
+                        Some(name) => {
+                            if self.expect(Eq, "associated type binding").is_some() {
+                                match self.parse_type("associated type binding") {
+                                    Some(ty) => {
+                                        let _ = self.eat(Semicolon)
+                                        assoc_types.push(
+                                            AssocTypeBinding { docs: docs, name: name, ty: ty },
+                                        )
+                                    }
+                                    None => self.sync_to_stmt_boundary()
+                                }
+                            } else {
+                                self.sync_to_stmt_boundary()
+                            }
+                        }
+                        None => self.sync_to_stmt_boundary()
+                    }
+                }
+                Const => {
+                    let _ = self.advance()
+                    match self.parse_const_decl(vis) {
+                        Some(c) => {
+                            let mut c = c
+                            c.docs = docs
+                            consts.push(c)
+                        }
+                        None => self.sync_to_stmt_boundary()
+                    }
+                }
+                _ => {
+                    let span = self.peek_span()
+                    self.errors.push(
+                        Expected("fn or const inside impl", self.peek().description(), span),
+                    )
+                    // Consume the offending token before syncing: the arm's
+                    // half of the loop invariant above.
+                    let _ = self.advance()
+                    self.sync_to_item_boundary()
+                }
+            }
+        }
+        let _ = self.expect(RBrace, "impl block")?
+        Some(
+            ImplBlock {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                generics: generics,
+                trait_: trait_,
+                ty: ty,
+                where_clause: where_clause,
+                functions: functions,
+                consts: consts,
+                assoc_types: assoc_types,
+            },
+        )
+    }
+
+    pub fn parse_const_decl(mut self, vis: Visibility) -> Option<ConstDecl> {
+        let name = self.parse_ident("const name")?
+        let _ = self.expect(Colon, "const type")?
+        let ty = self.parse_type("const type")?
+        let _ = self.expect(Eq, "const value")?
+        let value = self.parse_expr("const value")?
+        let _ = self.eat(Semicolon)
+        Some(
+            ConstDecl {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                vis: vis,
+                name: name,
+                ty: ty,
+                value: value,
+            },
+        )
+    }
+
+    pub fn parse_import(mut self) -> Option<Import> {
+        let start = self.peek_span()
+        let path = self.parse_path("import path")?
+        let path_span = start.merge(self.prev_span_or(start))
+
+        let kind = if self.eat(As).is_some() {
+            let alias = self.parse_ident("import alias")?
+            ImportKindAlias(alias)
+        } else if self.eat(LBrace).is_some() {
+            let mut names: Vec<Spanned<String>> = Vec::new()
+            while !self.check(RBrace) && !self.is_at_end() {
+                match self.parse_ident("import name") {
+                    Some(n) => names.push(n)
+                    None => ()
+                }
+                if self.eat(Comma).is_none() { break }
+            }
+            let _ = self.expect(RBrace, "import list")?
+            ImportKindList(names)
+        } else {
+            ImportKindSimple
+        }
+
+        let _ = self.eat(Semicolon)
+        Some(
+            Import {
+                docs: Vec::new(),
+                attrs: Vec::new(),
+                path: Spanned::new(path, path_span),
+                kind: kind,
+            },
+        )
+    }
+
+    pub fn parse_module(mut self) -> Option<Module> {
+        let start = self.peek_span()
+        let path = self.parse_path("module path")?
+        let span = start.merge(self.prev_span_or(start))
+        let _ = self.eat(Semicolon)
+        Some(Module { docs: Vec::new(), attrs: Vec::new(), path: Spanned::new(path, span) })
+    }
+
+    pub fn parse_extern_block(mut self) -> Option<ExternBlock> {
+        let mut abi: Option<String> = None
+        if self.check(StrStart) {
+            // consume StrStart, StrPart (the ABI string), StrEnd
+            let _ = self.advance()
+            match self.peek() {
+                StrPart(s) => {
+                    let _ = self.advance()
+                    abi = Some(s)
+                }
+                _ => ()
+            }
+            let _ = self.eat(StrEnd)
+        }
+
+        let _ = self.expect(LBrace, "extern block")?
+        let mut items: Vec<ExternItem> = Vec::new()
+        while !self.check(RBrace) && !self.is_at_end() {
+            let docs = self.take_docs()
+            if self.check(RBrace) || self.is_at_end() {
+                if !docs.is_empty() { self.misplaced_doc(docs.at(0).span) }
+                continue
+            }
+            match self.parse_function_sig() {
+                Some(sig) => {
+                    let mut sig = sig
+                    sig.docs = docs
+                    let _ = self.eat(Semicolon)
+                    items.push(ExternItemFn(sig))
+                }
+                None => self.sync_to_stmt_boundary()
+            }
+        }
+        let _ = self.expect(RBrace, "extern block")?
+        Some(ExternBlock { docs: Vec::new(), attrs: Vec::new(), abi: abi, items: items })
+    }
+}

@@ -1,0 +1,182 @@
+// N's own tests of the parser's edges: the generic-arguments rollback that
+// keeps its errors, `>>` splitting, statement recovery, the trailing
+// expression, the `component` and `view` lookahead, the newline rule's
+// splits and notes, and the depth limit. Each expected dump is S0's
+// (`nova parse --dump-ast`) for the same source; the differential compares
+// every other input.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import ast_dump
+
+// The lines, each ended by a line break, as a dump ends each.
+fn ast_lines(lines: [String]) -> String { "\n".join(lines) + "\n" }
+
+// `fn f() { (…(1)…) }`, `n` parentheses deep.
+fn parenthesised(n: Int) -> String {
+    let mut out = StringBuilder::new()
+    out.push("fn f() { ")
+    let mut i = 0
+    while i < n {
+        out.push("(")
+        i += 1
+    }
+    out.push("1")
+    while i > 0 {
+        out.push(")")
+        i -= 1
+    }
+    out.push(" }\n")
+    out.to_string()
+}
+
+@test
+fn generic_arguments_that_fail_roll_back_and_keep_their_errors() {
+    // A type's `<…>` that does not parse as types is rolled back to its `<`,
+    // and the errors pushed while trying stay (grammar.rs's
+    // `parse_generic_args_opt`); `>>` closing two lists is split.
+    let source = "fn g(y: Option<Vec<Int>>) {}\nfn f(x: Vec<1>) {}\n"
+    let expected = ast_lines(
+        [
+            "(File",
+            "  (Item.Function 0..28",
+            "    (Function vis=Private is_async=false is_component=false name=\"g\"@3..4",
+            "      (Param is_mut=false name=\"y\"@5..6",
+            "        (Type.Path 8..24 path=\"Option\"@8..14",
+            "          (Type.Path 15..24 path=\"Vec\"@15..18",
+            "            (Type.Path 19..22 path=\"Int\"@19..22))))",
+            "      (Block 26..28))))",
+            "PARSE 41 42 expected type (in parameter type), found integer literal",
+            "PARSE 40 41 expected `)` (in function parameters), found `<`",
+            "PARSE 46 47 expected item (fn, record, type, trait, impl, const, import, module, extern), found `}`",
+        ],
+    )
+    assert_eq(dump_ast(source), expected)
+}
+
+@test
+fn statement_recovery_skips_to_a_semicolon_or_a_brace_not_a_line_break() {
+    // After a bad statement the parser skips to the next `;` or `}`, so the
+    // next line's error is never reported (`sync_to_stmt_boundary`).
+    let source = "fn f() {\n    let = 1\n    let y = (1 +\n    g()\n}\n"
+    let expected = ast_lines(
+        [
+            "(File",
+            "  (Item.Function 0..47",
+            "    (Function vis=Private is_async=false is_component=false name=\"f\"@3..4",
+            "      (Block 7..47))))",
+            "PARSE 17 18 expected pattern (in let pattern), found `=`",
+        ],
+    )
+    assert_eq(dump_ast(source), expected)
+}
+
+@test
+fn the_last_expression_is_the_trailing_one_with_or_without_its_semicolon() {
+    // `try_parse_stmt` drops `has_semi`: the expression before `}` is the
+    // block's value either way.
+    let source = "fn f() { g(); 1; }\n"
+    let expected = ast_lines(
+        [
+            "(File",
+            "  (Item.Function 0..18",
+            "    (Function vis=Private is_async=false is_component=false name=\"f\"@3..4",
+            "      (Block 7..18",
+            "        (Stmt.Expr 9..13",
+            "          (Expr.Call 9..12",
+            "            (Expr.Path 9..10 \"g\"@9..10)))",
+            "        (Expr.Lit 14..15 Int:1)))))",
+        ],
+    )
+    assert_eq(dump_ast(source), expected)
+}
+
+@test
+fn component_and_view_are_keywords_only_where_they_begin_one() {
+    // `component Name (` with a body after its `)` is an item, and `view {`
+    // a view; elsewhere each is a name (`component_at`, `parse_atom`).
+    let source = "component Card(t: String) {\n    view { div(class: \"c\") { text(t) } }\n}\nfn g() {\n    component\n    (f)\n    view\n}\n"
+    let expected = ast_lines(
+        [
+            "(File",
+            "  (Item.Function 0..70",
+            "    (Function vis=Private is_async=false is_component=true name=\"Card\"@10..14",
+            "      (Param is_mut=false name=\"t\"@15..16",
+            "        (Type.Path 18..24 path=\"String\"@18..24))",
+            "      (Block 26..70",
+            "        (Expr.View 32..68",
+            "          (ViewNode.Element 39..66 name=\"div\"@39..42 children=Some",
+            "            (ViewArg.Named name=\"class\"@43..48",
+            "              (Expr.StringInterp 50..53",
+            "                (StringPart.Lit \"c\")))",
+            "            (ViewNode.Expr 57..64",
+            "              (Expr.Call 57..64",
+            "                (Expr.Path 57..61 \"text\"@57..61)",
+            "                (Expr.Path 62..63 \"t\"@62..63))))))))",
+            "  (Item.Function 71..112",
+            "    (Function vis=Private is_async=false is_component=false name=\"g\"@74..75",
+            "      (Block 78..112",
+            "        (Stmt.Expr 84..93",
+            "          (Expr.Path 84..93 \"component\"@84..93))",
+            "        (Stmt.Expr 98..101",
+            "          (Expr.Path 98..101 \"f\"@99..100))",
+            "        (Expr.Path 106..110 \"view\"@106..110))))",
+            "  (Split 98..99 kind=Call))",
+        ],
+    )
+    assert_eq(dump_ast(source), expected)
+}
+
+@test
+fn a_bare_return_ends_at_its_line_and_the_next_arm_gets_a_note() {
+    // A `return` at the end of a line takes no value, and the line after it
+    // is split off as a `Value`: in a match, it begins the next arm, whose
+    // error then names the newline rule (`bare_keyword_ends`,
+    // `note_arm_split`).
+    let source = "fn f() -> Int {\n    match x {\n        A => return\n        (a + 1) => h\n    }\n    return\n    1\n}\n"
+    let expected = ast_lines(
+        [
+            "(File",
+            "  (Item.Function 0..95",
+            "    (Function vis=Private is_async=false is_component=false name=\"f\"@3..4",
+            "      (Type.Path 10..13 path=\"Int\"@10..13)",
+            "      (Block 14..95",
+            "        (Stmt.Expr 20..76",
+            "          (Expr.Match 20..76",
+            "            (Expr.Path 26..27 \"x\"@26..27)",
+            "            (MatchArm",
+            "              (Pattern.Ident 38..39 is_mut=false name=\"A\"@38..39)",
+            "              (Expr.Return 43..49))))",
+            "        (Stmt.Expr 81..87",
+            "          (Expr.Return 81..87))",
+            "        (Expr.Lit 92..93 Int:1))))",
+            "  (Split 92..93 kind=Value))",
+            "PARSE 61 62 expected `)` (in tuple pattern), found `+`",
+            "NOTE a `return` or `break` at the end of a line takes no value, so the next line begins the next match arm (the newline rule); to return that line's value, put it on the same line as the `return` or `break`",
+        ],
+    )
+    assert_eq(dump_ast(source), expected)
+}
+
+@test
+fn one_hundred_and_twenty_eight_parentheses_parse_and_129_are_p0002() {
+    // 128 levels of nesting parse; at 129 the parser reports P0002 at the
+    // token where the limit was crossed and stops, dropping the item it
+    // was in (`deeper`, `parse_file`). Parentheses are no node of their
+    // own: the literal's span widens over them.
+    let expected = ast_lines(
+        [
+            "(File",
+            "  (Item.Function 0..268",
+            "    (Function vis=Private is_async=false is_component=false name=\"f\"@3..4",
+            "      (Block 7..268",
+            "        (Expr.Lit 9..266 Int:1)))))",
+        ],
+    )
+    assert_eq(dump_ast(parenthesised(128)), expected)
+    let expected = ast_lines(
+        ["(File)", "PARSE 138 139 this is nested too deeply (more than 128 levels)"],
+    )
+    assert_eq(dump_ast(parenthesised(129)), expected)
+}

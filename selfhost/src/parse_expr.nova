@@ -1,0 +1,913 @@
+// Expressions: a port of crates/nova-parser/src/grammar.rs's "Expressions
+// (precedence climbing)" section, but for its views (parse_view.nova),
+// function by function (parser.nova says how its idioms translate). The
+// precedence ladder is a function a level, as in Rust: `parse_expr` →
+// `parse_assign` → `parse_range` → `parse_or` → `parse_and` →
+// `parse_compare` → `parse_bitor` → `parse_bitxor` → `parse_bitand` →
+// `parse_shift` → `parse_add` → `parse_mul` → `parse_cast` →
+// `parse_unary` → `parse_postfix` → `parse_atom`.
+
+import ast
+import parse_pattern
+import parse_stmt
+import parse_type
+import parse_view
+import parser
+import token
+
+impl Parser {
+    pub fn parse_expr(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        // `nested`
+        let depth = self.depth
+        let expr = if self.deeper() { self.parse_assign(ctx) } else { None }
+        self.depth = depth
+        self.end_halt()
+        expr
+    }
+
+    /// The expression that holds a bare `return` or `break` ends here: what
+    /// follows reads the token again.
+    pub fn end_halt(mut self) { if self.halted() { self.halt = -1 } }
+
+    pub fn parse_assign(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let lhs = self.parse_range(ctx)?
+
+        let op = match self.peek() {
+            Eq => Some(AssignOpAssign)
+            PlusEq => Some(AssignOpAddAssign)
+            MinusEq => Some(AssignOpSubAssign)
+            StarEq => Some(AssignOpMulAssign)
+            SlashEq => Some(AssignOpDivAssign)
+            PercentEq => Some(AssignOpRemAssign)
+            PipeEq => Some(AssignOpBitOrAssign)
+            AmpEq => Some(AssignOpBitAndAssign)
+            CaretEq => Some(AssignOpBitXorAssign)
+            LtLtEq => Some(AssignOpShlAssign)
+            GtGtEq => Some(AssignOpShrAssign)
+            _ => None
+        }
+
+        match op {
+            Some(op) => {
+                let _ = self.advance()
+                if !self.deeper() { return None }
+                // right-associative
+                let rhs = self.parse_assign(ctx)?
+                self.depth = depth
+                let span = start.merge(rhs.span)
+                Some(Spanned::new(ExprAssign(op, lhs, rhs), span))
+            }
+            None => Some(lhs)
+        }
+    }
+
+    /// Range expressions `lo..hi` / `lo..=hi`, just above assignment in
+    /// precedence and non-chainable.
+    pub fn parse_range(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let lo = self.parse_or(ctx)?
+        let inclusive = if self.eat(DotDotEq).is_some() {
+            true
+        } else if self.eat(DotDot).is_some() {
+            false
+        } else {
+            return Some(lo)
+        }
+        if !self.deeper() { return None }
+        let hi = self.parse_or(ctx)?
+        self.depth = depth
+        let span = start.merge(hi.span)
+        Some(Spanned::new(ExprRange(lo, hi, inclusive), span))
+    }
+
+    pub fn parse_or(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_and(ctx)?
+        while self.eat(PipePipe).is_some() {
+            if !self.deeper() { return None }
+            let rhs = self.parse_and(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(BinOpOr, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_and(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_compare(ctx)?
+        while self.eat(AmpAmp).is_some() {
+            if !self.deeper() { return None }
+            let rhs = self.parse_compare(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(BinOpAnd, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_compare(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let lhs = self.parse_bitor(ctx)?
+
+        let op = match self.peek() {
+            EqEq => Some(BinOpEq)
+            BangEq => Some(BinOpNe)
+            Lt => Some(BinOpLt)
+            LtEq => Some(BinOpLe)
+            Gt => Some(BinOpGt)
+            GtEq => Some(BinOpGe)
+            _ => None
+        }
+
+        match op {
+            Some(op) => {
+                let _ = self.advance()
+                if !self.deeper() { return None }
+                let rhs = self.parse_bitor(ctx)?
+                self.depth = depth
+                let span = start.merge(rhs.span)
+                let result = Spanned::new(ExprBinary(op, lhs, rhs), span)
+                // Non-chainable: `a < b < c` is an error
+                match self.peek() {
+                    EqEq | BangEq | Lt | LtEq | Gt | GtEq => {
+                        let chain_span = self.peek_span()
+                        self.errors.push(ChainedComparison(chain_span))
+                    }
+                    _ => ()
+                }
+                Some(result)
+            }
+            None => Some(lhs)
+        }
+    }
+
+    pub fn parse_bitor(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_bitxor(ctx)?
+        while self.eat(Pipe).is_some() {
+            if !self.deeper() { return None }
+            let rhs = self.parse_bitxor(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(BinOpBitOr, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_bitxor(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_bitand(ctx)?
+        while self.eat(Caret).is_some() {
+            if !self.deeper() { return None }
+            let rhs = self.parse_bitand(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(BinOpBitXor, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_bitand(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_shift(ctx)?
+        while self.eat(Amp).is_some() {
+            if !self.deeper() { return None }
+            let rhs = self.parse_shift(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(BinOpBitAnd, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_shift(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_add(ctx)?
+        while true {
+            let op = match self.peek() {
+                LtLt => BinOpShl
+                GtGt => BinOpShr
+                _ => break
+            }
+            let _ = self.advance()
+            if !self.deeper() { return None }
+            let rhs = self.parse_add(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(op, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_add(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_mul(ctx)?
+        while true {
+            let op = match self.peek() {
+                Plus => BinOpAdd
+                // A `-` after a line break in statement context begins the
+                // next statement.
+                Minus if self.newline_ends_expr() => {
+                    self.record_split(SplitKindMinus)
+                    break
+                }
+                Minus => BinOpSub
+                _ => break
+            }
+            let _ = self.advance()
+            if !self.deeper() { return None }
+            let rhs = self.parse_mul(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(op, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_mul(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut lhs = self.parse_cast(ctx)?
+        while true {
+            let op = match self.peek() {
+                Star => BinOpMul
+                Slash => BinOpDiv
+                Percent => BinOpRem
+                _ => break
+            }
+            let _ = self.advance()
+            if !self.deeper() { return None }
+            let rhs = self.parse_cast(ctx)?
+            let span = start.merge(rhs.span)
+            lhs = Spanned::new(ExprBinary(op, lhs, rhs), span)
+        }
+        self.depth = depth
+        Some(lhs)
+    }
+
+    pub fn parse_cast(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let depth = self.depth
+        let mut expr = self.parse_unary(ctx)?
+        while true {
+            if self.eat(As).is_some() {
+                if !self.deeper() { return None }
+                let ty = self.parse_type_here(ctx)?
+                let span = start.merge(ty.span)
+                expr = Spanned::new(ExprCast(expr, ty), span)
+            } else {
+                break
+            }
+        }
+        self.depth = depth
+        Some(expr)
+    }
+
+    pub fn parse_unary(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let op = match self.peek() {
+            Minus => Some(UnOpNeg)
+            Bang => Some(UnOpNot)
+            Tilde => Some(UnOpBitNot)
+            Star => Some(UnOpDeref)
+            Amp => {
+                // Could be `&` or `&mut`
+                let _ = self.advance()
+                let is_mut = self.eat(Mut).is_some()
+                // `nested`
+                let depth = self.depth
+                let expr = if self.deeper() { self.parse_postfix(ctx) } else { None }
+                self.depth = depth
+                let expr = expr?
+                let span = start.merge(expr.span)
+                let op = if is_mut { UnOpRefMut } else { UnOpRef }
+                return Some(Spanned::new(ExprUnary(op, expr), span))
+            }
+            _ => None
+        }
+
+        match op {
+            Some(op) => {
+                let _ = self.advance()
+                // `nested`
+                let depth = self.depth
+                let expr = if self.deeper() { self.parse_unary(ctx) } else { None }
+                self.depth = depth
+                let expr = expr?
+                let span = start.merge(expr.span)
+                Some(Spanned::new(ExprUnary(op, expr), span))
+            }
+            None => self.parse_postfix(ctx)
+        }
+    }
+
+    pub fn parse_postfix(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let expr = self.parse_atom(ctx)?
+        self.parse_postfix_from(start, expr, ctx)
+    }
+
+    /// The calls, indexes, fields, `.await`s and `?`s after `expr`, which
+    /// began at `start`: each after the first one level deeper than the one
+    /// before it, for the rest of the chain, a method call `.name(…)` one
+    /// operator (`deeper`); the depth restored after the chain however it
+    /// ends.
+    pub fn parse_postfix_from(
+        mut self,
+        start: Span,
+        expr: Spanned<Expr>,
+        ctx: String,
+    ) -> Option<Spanned<Expr>> {
+        let depth = self.depth
+        let expr = self.parse_postfix_chain(start, expr, ctx)
+        self.depth = depth
+        expr
+    }
+
+    /// `parse_postfix_from`'s operators, the depth raised after each but the
+    /// first, as after a binary operator: past the limit, at the token after
+    /// it.
+    pub fn parse_postfix_chain(
+        mut self,
+        start: Span,
+        expr: Spanned<Expr>,
+        ctx: String,
+    ) -> Option<Spanned<Expr>> {
+        let mut expr = expr
+        let mut first = true
+        let mut after_dot = false
+        while true {
+            let cur_span = expr.span
+            let op = self.peek()
+            match op {
+                // A `(` or `[` after a line break in statement context
+                // begins the next statement.
+                LParen | LBracket if self.newline_ends_expr() => {
+                    let kind = if self.check(LParen) { SplitKindCall } else { SplitKindIndex }
+                    self.record_split(kind)
+                    break
+                }
+                LParen | LBracket | Dot | Question => ()
+                _ => break
+            }
+            let _ = self.advance()
+            // A method call's `(…)` counts with its `.name`.
+            let method_call = match op {
+                LParen => after_dot
+                _ => false
+            }
+            after_dot = match op {
+                Dot => true
+                _ => false
+            }
+            if !first && !method_call && !self.deeper() { return None }
+            first = false
+            match op {
+                LParen => {
+                    // Function call
+                    // `in_stmt_ctx(false)`
+                    let prev = self.enter_stmt_ctx(false)
+                    let mut args: Vec<Spanned<Expr>> = Vec::new()
+                    while !self.check(RParen) && !self.is_at_end() {
+                        match self.parse_expr(ctx) {
+                            Some(a) => args.push(a)
+                            None => ()
+                        }
+                        if self.eat(Comma).is_none() { break }
+                    }
+                    self.stmt_ctx = prev
+                    let _ = self.expect(RParen, "call arguments")?
+                    let end = self.prev_span_or(cur_span)
+                    expr = Spanned::new(ExprCall(expr, args), start.merge(end))
+                }
+                LBracket => {
+                    // Index
+                    // `in_stmt_ctx(false)`
+                    let prev = self.enter_stmt_ctx(false)
+                    let index = self.parse_expr(ctx)
+                    self.stmt_ctx = prev
+                    let index = index?
+                    let _ = self.expect(RBracket, "index expression")?
+                    let end = self.prev_span_or(cur_span)
+                    expr = Spanned::new(ExprIndex(expr, index), start.merge(end))
+                }
+                Dot => {
+                    // `.await` or `.field` or `.method()`
+                    if self.eat(Await).is_some() {
+                        let end = self.prev_span_or(cur_span)
+                        expr = Spanned::new(ExprAwait(expr), start.merge(end))
+                    } else {
+                        match self.peek() {
+                            Int(n) => {
+                                // `t.N`, a tuple's element: plain decimal
+                                // digits only, so `t.01`, `t.1_0` and `t.0x1`
+                                // are refused, as Rust does.
+                                let span = self.peek_span()
+                                if !self.tokens.plain_decimal(self.pos) {
+                                    self.errors.push(
+                                        Custom(
+                                            "a tuple index is plain decimal digits, with no leading "
+                                                + "zero, `_` or prefix: write `.${n}`",
+                                            span,
+                                        ),
+                                    )
+                                }
+                                let _ = self.advance()
+                                expr = Spanned::new(
+                                    ExprField(expr, Spanned::new("${n}", span)),
+                                    start.merge(span),
+                                )
+                            }
+                            Ident(_) | SelfLower | SelfUpper => {
+                                let field = self.parse_ident("field access")?
+                                let end = field.span
+                                expr = Spanned::new(ExprField(expr, field), start.merge(end))
+                            }
+                            _ => {
+                                // An unfinished `foo.` keeps its receiver, so
+                                // an editor can complete after the `.`. The
+                                // error is the one `parse_ident` reports.
+                                self.errors.push(
+                                    Expected(
+                                        "identifier (in field access)",
+                                        self.peek().description(),
+                                        self.peek_span(),
+                                    ),
+                                )
+                                let dot_end = self.tokens.at(self.pos - 1).span.end
+                                let gap = Span { start: dot_end, end: dot_end }
+                                expr = Spanned::new(
+                                    ExprField(expr, Spanned::new("", gap)),
+                                    start.merge(gap),
+                                )
+                                break
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    // `?`
+                    let end = self.prev_span_or(cur_span)
+                    expr = Spanned::new(ExprTry(expr), start.merge(end))
+                }
+            }
+        }
+
+        Some(expr)
+    }
+
+    pub fn parse_atom(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        match self.peek() {
+            // Literals
+            Int(n) => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprLit(LiteralInt(n)), start))
+            }
+            Float(f) => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprLit(LiteralFloat(f)), start))
+            }
+            Char(c) => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprLit(LiteralChar(c)), start))
+            }
+            True => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprLit(LiteralBool(true)), start))
+            }
+            False => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprLit(LiteralBool(false)), start))
+            }
+
+            // String interpolation
+            StrStart => self.parse_string_expr()
+            RawStr(s) => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprLit(LiteralStr(s)), start))
+            }
+
+            // Parenthesised / tuple: `in_stmt_ctx(false)`
+            LParen => {
+                let prev = self.enter_stmt_ctx(false)
+                let e = self.parse_paren(start, ctx)
+                self.stmt_ctx = prev
+                e
+            }
+
+            // Array literal, `[a, b, c]` or the repeat form `[init; n]`:
+            // `in_stmt_ctx(false)`
+            LBracket => {
+                let prev = self.enter_stmt_ctx(false)
+                let e = self.parse_array_literal(start, ctx)
+                self.stmt_ctx = prev
+                e
+            }
+
+            // Block expression
+            LBrace => {
+                let block = self.parse_block(ctx)?
+                let span = block.span
+                Some(Spanned::new(ExprBlock(block.value), span))
+            }
+
+            // If
+            If => self.parse_if_expr(ctx)
+
+            // Match
+            Match => self.parse_match_expr(ctx)
+
+            // While
+            While => {
+                let _ = self.advance()
+                // `in_head_ctx`
+                let ns = self.enter_no_struct_ctx(true)
+                let sc = self.enter_stmt_ctx(false)
+                let cond = self.parse_expr(ctx)
+                self.stmt_ctx = sc
+                self.no_struct_literal = ns
+                let cond = cond?
+                let body = self.parse_block(ctx)?
+                let span = start.merge(body.span)
+                Some(Spanned::new(ExprWhile(cond, body), span))
+            }
+
+            // For
+            For => {
+                let _ = self.advance()
+                let pattern = self.parse_pattern(ctx)?
+                let _ = self.expect(In, "for loop")?
+                // `in_head_ctx`
+                let ns = self.enter_no_struct_ctx(true)
+                let sc = self.enter_stmt_ctx(false)
+                let iter = self.parse_expr(ctx)
+                self.stmt_ctx = sc
+                self.no_struct_literal = ns
+                let iter = iter?
+                let body = self.parse_block(ctx)?
+                let span = start.merge(body.span)
+                Some(Spanned::new(ExprFor(pattern, iter, body), span))
+            }
+
+            // Return
+            Return => {
+                let _ = self.advance()
+                // Optional expression; none at the end of a line.
+                let val = if !self.bare_keyword_ends() { Some(self.parse_expr(ctx)?) } else { None }
+                let end = match val {
+                    Some(e) => e.span
+                    None => start
+                }
+                Some(Spanned::new(ExprReturn(val), start.merge(end)))
+            }
+
+            // Break
+            Break => {
+                let _ = self.advance()
+                let val = if !self.bare_keyword_ends() { Some(self.parse_expr(ctx)?) } else { None }
+                let end = match val {
+                    Some(e) => e.span
+                    None => start
+                }
+                Some(Spanned::new(ExprBreak(val), start.merge(end)))
+            }
+
+            Continue => {
+                let _ = self.advance()
+                Some(Spanned::new(ExprContinue, start))
+            }
+
+            // Closure: |params| body, or `||` with none (RFC 0001).
+            Pipe | PipePipe => self.parse_closure(ctx)
+
+            // `view { … }`, where `view` is a keyword (RFC 0001).
+            Ident(w) if w == "view"
+                && !self.no_struct_literal
+                && self.value_at(self.pos + 1).kind() == LBrace.kind() => {
+                self.parse_view()
+            }
+
+            // Path or record literal
+            Ident(_) | SelfLower | SelfUpper => {
+                let path = self.parse_path(ctx)?
+                let path_end = self.prev_span_or(start)
+
+                // Record literal: `Type { field: val, ... }`, only when not
+                // in a scrutinee context (if/while/for/match conditions),
+                // where `{` is the block.
+                if self.check(LBrace) && !self.no_struct_literal {
+                    return self.parse_record_literal(path, start)
+                }
+
+                Some(Spanned::new(ExprPath(path), start.merge(path_end)))
+            }
+
+            _ => {
+                let span = self.peek_span()
+                self.errors.push(
+                    Expected("expression (in ${ctx})", self.peek().description(), span),
+                )
+                None
+            }
+        }
+    }
+
+    /// `()`, `(e)` or a tuple, at `(`, which began at `start`.
+    pub fn parse_paren(mut self, start: Span, ctx: String) -> Option<Spanned<Expr>> {
+        let _ = self.advance()
+        if self.eat(RParen).is_some() {
+            // Unit `()`
+            let end = self.prev_span_or(start)
+            return Some(Spanned::new(ExprTuple(Vec::new()), start.merge(end)))
+        }
+        let first = self.parse_expr(ctx)?
+        if self.eat(RParen).is_some() {
+            // Just a parenthesised expression
+            let end = self.prev_span_or(start)
+            return Some(Spanned::new(first.value, start.merge(end)))
+        }
+        // Tuple
+        let mut elems: Vec<Spanned<Expr>> = Vec::new()
+        elems.push(first)
+        while self.eat(Comma).is_some() && !self.check(RParen) {
+            match self.parse_expr(ctx) {
+                Some(e) => elems.push(e)
+                None => ()
+            }
+        }
+        let _ = self.expect(RParen, "tuple")?
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(ExprTuple(elems), start.merge(end)))
+    }
+
+    /// An array literal, `[a, b, c]` or `[init; n]`, at `[`, which began at
+    /// `start`.
+    pub fn parse_array_literal(mut self, start: Span, ctx: String) -> Option<Spanned<Expr>> {
+        let _ = self.advance()
+        let mut elems: Vec<Spanned<Expr>> = Vec::new()
+        let mut first = true
+        while !self.check(RBracket) && !self.is_at_end() {
+            match self.parse_expr(ctx) {
+                Some(e) => {
+                    // `[init; n]`: a `;` after the *first* element switches
+                    // to the repeat form, whose second operand is a length
+                    // rather than another element.
+                    if first && self.eat(Semicolon).is_some() {
+                        let len = self.parse_expr(ctx)?
+                        let _ = self.expect(RBracket, "repeat array literal")?
+                        let end = self.prev_span_or(start)
+                        return Some(Spanned::new(ExprArrayRepeat(e, len), start.merge(end)))
+                    }
+                    elems.push(e)
+                }
+                None => ()
+            }
+            first = false
+            if self.eat(Comma).is_none() { break }
+        }
+        let _ = self.expect(RBracket, "array literal")?
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(ExprArray(elems), start.merge(end)))
+    }
+
+    pub fn parse_string_expr(mut self) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let _ = self.expect(StrStart, "string literal")?
+        let mut parts: Vec<StringPart> = Vec::new()
+
+        while true {
+            match self.peek() {
+                StrEnd => {
+                    let _ = self.advance()
+                    break
+                }
+                StrPart(s) => {
+                    let _ = self.advance()
+                    parts.push(StringPartLit(s))
+                }
+                InterpOpen => {
+                    let _ = self.advance()
+                    // A hole is delimited, so a record literal inside it is
+                    // unambiguous even when the string itself sits in a
+                    // no-struct-literal position: `in_struct_ok_ctx`.
+                    let ns = self.enter_no_struct_ctx(false)
+                    let sc = self.enter_stmt_ctx(false)
+                    let expr = self.parse_expr("string interpolation")
+                    self.stmt_ctx = sc
+                    self.no_struct_literal = ns
+                    match expr {
+                        Some(e) => parts.push(StringPartExpr(e))
+                        None => ()
+                    }
+                    let _ = self.expect(InterpClose, "string interpolation")?
+                }
+                Eof => {
+                    let span = self.peek_span()
+                    self.errors.push(UnexpectedEof(span))
+                    break
+                }
+                _ => { let _ = self.advance() }
+            }
+        }
+
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(ExprStringInterp(parts), start.merge(end)))
+    }
+
+    pub fn parse_if_expr(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let _ = self.expect(If, "if expression")?
+        // `in_head_ctx`
+        let ns = self.enter_no_struct_ctx(true)
+        let sc = self.enter_stmt_ctx(false)
+        let cond = self.parse_expr(ctx)
+        self.stmt_ctx = sc
+        self.no_struct_literal = ns
+        let cond = cond?
+        let then = self.parse_block(ctx)?
+        let else_ = if self.eat(Else).is_some() {
+            if self.check(If) {
+                // `nested`
+                let depth = self.depth
+                let e = if self.deeper() { self.parse_if_expr(ctx) } else { None }
+                self.depth = depth
+                Some(e?)
+            } else {
+                let b = self.parse_block(ctx)?
+                let span = b.span
+                Some(Spanned::new(ExprBlock(b.value), span))
+            }
+        } else {
+            None
+        }
+        let end = match else_ {
+            Some(e) => e.span
+            None => then.span
+        }
+        Some(Spanned::new(ExprIf(cond, then, else_), start.merge(end)))
+    }
+
+    pub fn parse_match_expr(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let _ = self.expect(Match, "match expression")?
+        // `in_head_ctx`
+        let ns = self.enter_no_struct_ctx(true)
+        let sc = self.enter_stmt_ctx(false)
+        let scrutinee = self.parse_expr(ctx)
+        self.stmt_ctx = sc
+        self.no_struct_literal = ns
+        let scrutinee = scrutinee?
+        let _ = self.expect(LBrace, "match body")?
+        let mut arms: Vec<MatchArm> = Vec::new()
+        while !self.check(RBrace) && !self.is_at_end() {
+            if self.reject_docs() { continue }
+            match self.parse_match_arm(ctx) {
+                Some(arm) => arms.push(arm)
+                None => self.sync_to_stmt_boundary()
+            }
+        }
+        let _ = self.expect(RBrace, "match body")?
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(ExprMatch(scrutinee, arms), start.merge(end)))
+    }
+
+    pub fn parse_match_arm(mut self, ctx: String) -> Option<MatchArm> {
+        // The split that ended the arm before, if this arm begins at it.
+        let start = self.peek_span().start
+        let begun = match self.arm_end_split {
+            Some(s) if s.at.start == start => Some(s)
+            _ => None
+        }
+        self.arm_end_split = None
+        let errors = self.errors.len()
+        let (pattern, guard) = match self.parse_match_arm_head(ctx) {
+            Some(head) => head
+            None => {
+                self.note_arm_split(begun, errors)
+                return None
+            }
+        }
+        // An arm's body is statement context, so a line that starts with
+        // `(` begins the next arm: `in_stmt_ctx(true)`.
+        let splits = self.splits.len()
+        let prev = self.enter_stmt_ctx(true)
+        let body = self.parse_expr(ctx)
+        self.stmt_ctx = prev
+        let body = body?
+        // A split at the body's end begins the next arm: no warning for it,
+        // however many times it was met. Where the parser before the rule
+        // read that line into the body, the next arm cannot parse, and its
+        // P0001 gets a note naming the rule.
+        let end = self.peek_span().start
+        self.arm_end_split = None
+        while self.splits.len() > splits && self.splits.last().at.start == end {
+            self.arm_end_split = self.splits.pop()
+        }
+        let _ = self.eat(Comma)
+        Some(MatchArm { pattern: pattern, guard: guard, body: body })
+    }
+
+    /// An arm's pattern, its guard if any, and its `=>`.
+    pub fn parse_match_arm_head(
+        mut self,
+        ctx: String,
+    ) -> Option<(Spanned<Pattern>, Option<Spanned<Expr>>)> {
+        let pattern = self.parse_pattern(ctx)?
+        // A guard ends at its `=>`, as a head ends at its `{`:
+        // `in_stmt_ctx(false)`.
+        let guard = if self.eat(If).is_some() {
+            let prev = self.enter_stmt_ctx(false)
+            let g = self.parse_expr(ctx)
+            self.stmt_ctx = prev
+            Some(g?)
+        } else {
+            None
+        }
+        let _ = self.expect(FatArrow, "match arm")?
+        Some((pattern, guard))
+    }
+
+    pub fn parse_closure(mut self, ctx: String) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        let mut params: Vec<Param> = Vec::new()
+        if self.eat(PipePipe).is_none() {
+            let _ = self.expect(Pipe, "closure")?
+            let _ = self.parse_closure_params(params, ctx)?
+        }
+        let ret = if self.eat(Arrow).is_some() { Some(self.parse_type(ctx)?) } else { None }
+        let body = self.parse_expr(ctx)?
+        let span = start.merge(body.span)
+        Some(Spanned::new(ExprClosure(params, ret, body), span))
+    }
+
+    /// A closure's parameters, after its `|`, up to and with its closing
+    /// `|`.
+    pub fn parse_closure_params(mut self, mut params: Vec<Param>, ctx: String) -> Option<()> {
+        while !self.check(Pipe) && !self.is_at_end() {
+            if self.reject_docs() { continue }
+            let is_mut = self.eat(Mut).is_some()
+            let name = self.parse_ident("closure parameter")?
+            let ty = if self.eat(Colon).is_some() {
+                self.parse_type(ctx)?
+            } else {
+                // Inferred type
+                let span = name.span
+                Spanned::new(TypeInfer, span)
+            }
+            params.push(Param { is_mut: is_mut, name: name, ty: ty })
+            if self.eat(Comma).is_none() { break }
+        }
+        let _ = self.expect(Pipe, "closure parameters end")?
+        Some(())
+    }
+
+    pub fn parse_record_literal(mut self, path: Path, start: Span) -> Option<Spanned<Expr>> {
+        // `in_stmt_ctx(false)`
+        let prev = self.enter_stmt_ctx(false)
+        let e = self.parse_record_literal_inner(path, start)
+        self.stmt_ctx = prev
+        e
+    }
+
+    pub fn parse_record_literal_inner(mut self, path: Path, start: Span) -> Option<Spanned<Expr>> {
+        let _ = self.expect(LBrace, "record literal")?
+        let mut fields: Vec<FieldInit> = Vec::new()
+        let mut base: Option<Spanned<Expr>> = None
+
+        while !self.check(RBrace) && !self.is_at_end() {
+            if self.eat(DotDot).is_some() {
+                base = Some(self.parse_expr("record spread")?)
+                let _ = self.eat(Comma)
+                break
+            }
+            let name = match self.parse_ident("field name") {
+                Some(n) => n
+                None => break
+            }
+            let value = if self.eat(Colon).is_some() {
+                Some(self.parse_expr("field value")?)
+            } else {
+                None
+            }
+            fields.push(FieldInit { name: name, value: value })
+            if self.eat(Comma).is_none() { break }
+        }
+
+        let _ = self.expect(RBrace, "record literal")?
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(ExprRecord(path, fields, base), start.merge(end)))
+    }
+}

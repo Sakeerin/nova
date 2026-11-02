@@ -1,0 +1,403 @@
+// The syntax tree: a port of crates/nova-ast/src/{lib,expr,item,pattern,ty}.rs,
+// one record for each struct and one sum for each enum, with the same
+// fields in the same order (spec
+// docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
+// §4.1, ADR 0052).
+//
+// - A variant is named `EnumVariant` (`Expr::If` is `ExprIf`): a variant's
+//   name is a value of the module, and one module may not hold two of a
+//   name or import two, so the 119 variants, many of whose Rust names repeat
+//   from one enum to the next (`Lit`, `Path`, `Tuple`) or a token's (`If`,
+//   `Fn`), each carry their enum's.
+// - A variant with named fields holds them positionally, in their order;
+//   the comment after it names them.
+// - A `Spanned` is token.nova's `Spanned<T>`, and a span two `Int`s, with no
+//   `FileId`: N parses one file at a time.
+// - A sum is recursive without a box, so `Box<Spanned<Expr>>` is
+//   `Spanned<Expr>` and `Option<Box<…>>` is `Option<…>`.
+
+import token
+
+// ---------------------------------------------------------------------------
+// lib.rs
+// ---------------------------------------------------------------------------
+
+/// The root of a parsed source file.
+pub record File { pub items: Vec<Spanned<Item>>, pub newline_splits: Vec<NewlineSplit> }
+
+/// A place where the newline rule ended a statement that the parser before
+/// it would have continued; the checker reports E0103 at it.
+pub record NewlineSplit { pub at: Span, pub kind: SplitKind }
+
+/// Which construct the newline rule declined at a split.
+pub type SplitKind =
+    /// A `(` after a line break: no call.
+    | SplitKindCall
+    /// A `[` after a line break: no index.
+    | SplitKindIndex
+    /// A `-` after a line break: no subtraction.
+    | SplitKindMinus
+    /// A line after a bare `return` or `break`: not its value.
+    | SplitKindValue
+
+/// A top-level item.
+pub type Item =
+    | ItemFunction(Function)
+    | ItemRecord(Record)
+    | ItemType(TypeDecl)
+    | ItemTrait(TraitDecl)
+    | ItemImpl(ImplBlock)
+    | ItemConst(ConstDecl)
+    | ItemImport(Import)
+    | ItemModule(Module)
+    | ItemExtern(ExternBlock)
+
+/// A statement inside a block.
+pub type Stmt =
+    // is_mut, pattern, ty, init
+    | StmtLet(Bool, Spanned<Pattern>, Option<Spanned<Type>>, Option<Spanned<Expr>>)
+    | StmtExpr(Spanned<Expr>)
+    | StmtItem(Item)
+
+/// A block: statements, and the trailing expression that is its value.
+pub record Block { pub stmts: Vec<Spanned<Stmt>>, pub trailing: Option<Spanned<Expr>> }
+
+/// A `::`-separated path.
+pub record Path { pub segments: Vec<Spanned<String>> }
+
+/// A path of one segment (`Path::single`).
+pub fn single_path(name: Spanned<String>) -> Path {
+    let mut segments: Vec<Spanned<String>> = Vec::new()
+    segments.push(name)
+    Path { segments: segments }
+}
+
+// ---------------------------------------------------------------------------
+// expr.rs
+// ---------------------------------------------------------------------------
+
+/// An expression.
+pub type Expr =
+    | ExprLit(Literal)
+    | ExprPath(Path)
+    | ExprTuple(Vec<Spanned<Expr>>)
+    | ExprArray(Vec<Spanned<Expr>>)
+    // init, len
+    | ExprArrayRepeat(Spanned<Expr>, Spanned<Expr>)
+    | ExprBlock(Block)
+    // cond, then, else_
+    | ExprIf(Spanned<Expr>, Spanned<Block>, Option<Spanned<Expr>>)
+    // scrutinee, arms
+    | ExprMatch(Spanned<Expr>, Vec<MatchArm>)
+    // cond, body
+    | ExprWhile(Spanned<Expr>, Spanned<Block>)
+    // pattern, iter, body
+    | ExprFor(Spanned<Pattern>, Spanned<Expr>, Spanned<Block>)
+    // lo, hi, inclusive
+    | ExprRange(Spanned<Expr>, Spanned<Expr>, Bool)
+    | ExprReturn(Option<Spanned<Expr>>)
+    | ExprBreak(Option<Spanned<Expr>>)
+    | ExprContinue
+    // params, ret, body
+    | ExprClosure(Vec<Param>, Option<Spanned<Type>>, Spanned<Expr>)
+    // path, fields, base
+    | ExprRecord(Path, Vec<FieldInit>, Option<Spanned<Expr>>)
+    // op, lhs, rhs
+    | ExprBinary(BinOp, Spanned<Expr>, Spanned<Expr>)
+    // op, expr
+    | ExprUnary(UnOp, Spanned<Expr>)
+    // callee, args
+    | ExprCall(Spanned<Expr>, Vec<Spanned<Expr>>)
+    // target, index
+    | ExprIndex(Spanned<Expr>, Spanned<Expr>)
+    // target, field
+    | ExprField(Spanned<Expr>, Spanned<String>)
+    | ExprTry(Spanned<Expr>)
+    | ExprAwait(Spanned<Expr>)
+    // expr, ty
+    | ExprCast(Spanned<Expr>, Spanned<Type>)
+    // op, lhs, rhs
+    | ExprAssign(AssignOp, Spanned<Expr>, Spanned<Expr>)
+    | ExprStringInterp(Vec<StringPart>)
+    | ExprView(Vec<Spanned<ViewNode>>)
+
+/// One node of a `view { … }` (RFC 0001).
+pub type ViewNode =
+    // name, args, children
+    | ViewNodeElement(Spanned<String>, Vec<ViewArg>, Option<Vec<Spanned<ViewNode>>>)
+    | ViewNodeExpr(Spanned<Expr>)
+
+/// One argument of an element.
+pub type ViewArg =
+    // name, value
+    | ViewArgNamed(Spanned<String>, Spanned<Expr>)
+    | ViewArgPositional(Spanned<Expr>)
+
+/// A part of an interpolated string.
+pub type StringPart = | StringPartLit(String) | StringPartExpr(Spanned<Expr>)
+
+/// A literal.
+pub type Literal =
+    | LiteralInt(Int)
+    | LiteralFloat(Float)
+    | LiteralStr(String)
+    | LiteralChar(Char)
+    | LiteralBool(Bool)
+
+/// One arm of a `match`.
+pub record MatchArm {
+    pub pattern: Spanned<Pattern>,
+    pub guard: Option<Spanned<Expr>>,
+    pub body: Spanned<Expr>,
+}
+
+/// One field of a record literal; `value` is absent for the shorthand
+/// `R { x }`.
+pub record FieldInit { pub name: Spanned<String>, pub value: Option<Spanned<Expr>> }
+
+/// A binary operator.
+pub type BinOp =
+    | BinOpOr
+    | BinOpAnd
+    | BinOpEq
+    | BinOpNe
+    | BinOpLt
+    | BinOpLe
+    | BinOpGt
+    | BinOpGe
+    | BinOpBitOr
+    | BinOpBitXor
+    | BinOpBitAnd
+    | BinOpShl
+    | BinOpShr
+    | BinOpAdd
+    | BinOpSub
+    | BinOpMul
+    | BinOpDiv
+    | BinOpRem
+
+/// A prefix operator.
+pub type UnOp = | UnOpNeg | UnOpNot | UnOpBitNot | UnOpRef | UnOpRefMut | UnOpDeref
+
+/// An assignment operator.
+pub type AssignOp =
+    | AssignOpAssign
+    | AssignOpAddAssign
+    | AssignOpSubAssign
+    | AssignOpMulAssign
+    | AssignOpDivAssign
+    | AssignOpRemAssign
+    | AssignOpBitOrAssign
+    | AssignOpBitAndAssign
+    | AssignOpBitXorAssign
+    | AssignOpShlAssign
+    | AssignOpShrAssign
+
+// ---------------------------------------------------------------------------
+// item.rs
+// ---------------------------------------------------------------------------
+
+/// `@name` or `@name(arg, …)` before an item; `span` covers the `@`.
+pub record Attribute { pub name: Spanned<String>, pub args: Vec<Spanned<String>>, pub span: Span }
+
+/// An item's visibility.
+pub type Visibility = | VisibilityPub | VisibilityPrivate
+
+/// A function's or a closure's parameter.
+pub record Param { pub is_mut: Bool, pub name: Spanned<String>, pub ty: Spanned<Type> }
+
+/// One bound of a `where` clause: `ty: bounds`.
+pub record WhereBound { pub ty: Spanned<Type>, pub bounds: Vec<Spanned<Path>> }
+
+/// A function, or a component (RFC 0001).
+pub record Function {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub vis: Visibility,
+    pub is_async: Bool,
+    pub is_component: Bool,
+    pub name: Spanned<String>,
+    pub generics: Vec<TypeParam>,
+    pub params: Vec<Param>,
+    pub return_ty: Option<Spanned<Type>>,
+    pub where_clause: Vec<WhereBound>,
+    pub body: Spanned<Block>,
+}
+
+/// A record declaration.
+pub record Record {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub vis: Visibility,
+    pub name: Spanned<String>,
+    pub generics: Vec<TypeParam>,
+    pub fields: Vec<RecordField>,
+}
+
+/// One field of a record declaration.
+pub record RecordField {
+    pub docs: Vec<Spanned<String>>,
+    pub vis: Visibility,
+    pub name: Spanned<String>,
+    pub ty: Spanned<Type>,
+}
+
+/// A `type` declaration.
+pub record TypeDecl {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub vis: Visibility,
+    pub name: Spanned<String>,
+    pub generics: Vec<TypeParam>,
+    pub def: TypeDef,
+}
+
+/// What a `type` declares: an alias, or a sum of variants.
+pub type TypeDef = | TypeDefAlias(Spanned<Type>) | TypeDefSum(Vec<Variant>)
+
+/// One variant of a sum.
+pub record Variant {
+    pub docs: Vec<Spanned<String>>,
+    pub name: Spanned<String>,
+    pub fields: Vec<Spanned<Type>>,
+}
+
+/// A trait declaration.
+pub record TraitDecl {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub vis: Visibility,
+    pub name: Spanned<String>,
+    pub generics: Vec<TypeParam>,
+    pub supertraits: Vec<Spanned<Path>>,
+    pub where_clause: Vec<WhereBound>,
+    pub items: Vec<TraitItem>,
+}
+
+/// An item inside a trait.
+pub type TraitItem =
+    | TraitItemRequired(FunctionSig)
+    | TraitItemProvided(Function)
+    // docs, name, bounds
+    | TraitItemAssocType(Vec<Spanned<String>>, Spanned<String>, Vec<Spanned<Path>>)
+
+/// A function's signature, without a body.
+pub record FunctionSig {
+    pub docs: Vec<Spanned<String>>,
+    pub is_async: Bool,
+    pub name: Spanned<String>,
+    pub generics: Vec<TypeParam>,
+    pub params: Vec<Param>,
+    pub return_ty: Option<Spanned<Type>>,
+    pub where_clause: Vec<WhereBound>,
+}
+
+/// An `impl` block, of a type or of a trait for a type.
+pub record ImplBlock {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub generics: Vec<TypeParam>,
+    pub trait_: Option<Spanned<Path>>,
+    pub ty: Spanned<Type>,
+    pub where_clause: Vec<WhereBound>,
+    pub functions: Vec<Function>,
+    pub consts: Vec<ConstDecl>,
+    pub assoc_types: Vec<AssocTypeBinding>,
+}
+
+/// `type Name = Ty` inside an `impl`.
+pub record AssocTypeBinding {
+    pub docs: Vec<Spanned<String>>,
+    pub name: Spanned<String>,
+    pub ty: Spanned<Type>,
+}
+
+/// A `const` declaration.
+pub record ConstDecl {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub vis: Visibility,
+    pub name: Spanned<String>,
+    pub ty: Spanned<Type>,
+    pub value: Spanned<Expr>,
+}
+
+/// An `import`.
+pub record Import {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub path: Spanned<Path>,
+    pub kind: ImportKind,
+}
+
+/// What an `import` brings in.
+pub type ImportKind =
+    | ImportKindSimple
+    | ImportKindAlias(Spanned<String>)
+    | ImportKindList(Vec<Spanned<String>>)
+
+/// A `module` declaration.
+pub record Module {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub path: Spanned<Path>,
+}
+
+/// An `extern` block.
+pub record ExternBlock {
+    pub docs: Vec<Spanned<String>>,
+    pub attrs: Vec<Attribute>,
+    pub abi: Option<String>,
+    pub items: Vec<ExternItem>,
+}
+
+/// An item inside an `extern` block.
+pub type ExternItem = | ExternItemFn(FunctionSig)
+
+// ---------------------------------------------------------------------------
+// pattern.rs
+// ---------------------------------------------------------------------------
+
+/// A pattern.
+pub type Pattern =
+    | PatternWildcard
+    | PatternLit(Literal)
+    // is_mut, name
+    | PatternIdent(Bool, Spanned<String>)
+    // name, inner
+    | PatternBinding(Spanned<String>, Spanned<Pattern>)
+    // path, fields
+    | PatternTupleStruct(Path, Vec<Spanned<Pattern>>)
+    // path, fields, rest
+    | PatternRecord(Path, Vec<FieldPat>, Bool)
+    | PatternTuple(Vec<Spanned<Pattern>>)
+    | PatternArray(Vec<Spanned<Pattern>>)
+    | PatternOr(Vec<Spanned<Pattern>>)
+    // lo, hi, inclusive
+    | PatternRange(Spanned<Pattern>, Spanned<Pattern>, Bool)
+    | PatternPath(Path)
+
+/// One field of a record pattern; `pattern` is absent for the shorthand.
+pub record FieldPat { pub name: Spanned<String>, pub pattern: Option<Spanned<Pattern>> }
+
+// ---------------------------------------------------------------------------
+// ty.rs
+// ---------------------------------------------------------------------------
+
+/// A type, as written.
+pub type Type =
+    // path, args
+    | TypePath(Path, Vec<Spanned<Type>>)
+    // is_mut, inner
+    | TypeRef(Bool, Spanned<Type>)
+    // is_mut, inner
+    | TypePtr(Bool, Spanned<Type>)
+    | TypeArray(Spanned<Type>)
+    | TypeTuple(Vec<Spanned<Type>>)
+    // params, ret
+    | TypeFn(Vec<Spanned<Type>>, Spanned<Type>)
+    | TypeOptional(Spanned<Type>)
+    | TypeInfer
+
+/// A type parameter and its bounds.
+pub record TypeParam { pub name: Spanned<String>, pub bounds: Vec<Spanned<Path>> }

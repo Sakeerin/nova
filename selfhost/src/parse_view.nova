@@ -1,0 +1,166 @@
+// Views (RFC 0001's `view { … }`): a port of the view functions of
+// crates/nova-parser/src/grammar.rs's expressions section, function by
+// function (parser.nova says how its idioms translate).
+
+import ast
+import lexer
+import parse_expr
+import parser
+import token
+
+impl Parser {
+    /// `view { child* }` (RFC 0001), at `view`.
+    pub fn parse_view(mut self) -> Option<Spanned<Expr>> {
+        let start = self.peek_span()
+        // A view's children keep their `;` rule: the newline rule is off in
+        // them, as in an element's arguments: `in_stmt_ctx(false)`.
+        let _ = self.advance()
+        let prev = self.enter_stmt_ctx(false)
+        let children = self.parse_view_children()
+        self.stmt_ctx = prev
+        let children = children?
+        let span = start.merge(self.prev_span_or(start))
+        Some(Spanned::new(ExprView(children), span))
+    }
+
+    /// `{ child* }`, the children of a `view` or an element, one level
+    /// deeper (`nested`). A `{` inside is an element's or a block's again,
+    /// whatever context the view is in.
+    pub fn parse_view_children(mut self) -> Option<Vec<Spanned<ViewNode>>> {
+        let depth = self.depth
+        let result = if self.deeper() { self.parse_view_children_here() } else { None }
+        self.depth = depth
+        result
+    }
+
+    /// `parse_view_children` at the cursor's level.
+    pub fn parse_view_children_here(mut self) -> Option<Vec<Spanned<ViewNode>>> {
+        let _ = self.expect(LBrace, "view children")?
+        let saved = self.enter_no_struct_ctx(false)
+        let mut children: Vec<Spanned<ViewNode>> = Vec::new()
+        while !self.check(RBrace) && !self.is_at_end() {
+            // A `;` may end a child, as one ends a statement, so that the
+            // next can start with `(`, `[` or `{`.
+            if self.reject_docs() || self.eat(Semicolon).is_some() { continue }
+            match self.parse_view_child() {
+                Some(child) => children.push(child)
+                None => {
+                    self.no_struct_literal = saved
+                    return None
+                }
+            }
+        }
+        self.no_struct_literal = saved
+        let _ = self.expect(RBrace, "view children")?
+        Some(children)
+    }
+
+    /// One child of a view: an element, or a postfix expression.
+    pub fn parse_view_child(mut self) -> Option<Spanned<ViewNode>> {
+        let start = self.peek_span()
+        match self.peek() {
+            Ident(name) => {
+                let next = self.value_at(self.pos + 1)
+                let brace_next = next.kind() == LBrace.kind()
+                if name != "view" && brace_next {
+                    let name = Spanned::new(name, start)
+                    let _ = self.advance()
+                    let children = self.parse_view_children()?
+                    let span = start.merge(self.prev_span_or(start))
+                    return Some(
+                        Spanned::new(ViewNodeElement(name, Vec::new(), Some(children)), span),
+                    )
+                }
+                if next.kind() == LParen.kind() {
+                    let name = Spanned::new(name, start)
+                    // the name, then `(`
+                    let _ = self.advance()
+                    let _ = self.advance()
+                    let args = self.parse_view_args()?
+                    let mut named = false
+                    for a in args.iter() {
+                        match a {
+                            ViewArgNamed(_, _) => named = true
+                            _ => ()
+                        }
+                    }
+                    if self.check(LBrace) {
+                        let children = self.parse_view_children()?
+                        let span = start.merge(self.prev_span_or(start))
+                        return Some(Spanned::new(ViewNodeElement(name, args, Some(children)), span))
+                    }
+                    let span = start.merge(self.prev_span_or(start))
+                    if named { return Some(Spanned::new(ViewNodeElement(name, args, None), span)) }
+                    // Positional arguments alone and no block: an ordinary
+                    // call.
+                    let mut call_args: Vec<Spanned<Expr>> = Vec::new()
+                    for a in args.iter() {
+                        match a {
+                            ViewArgPositional(e) => call_args.push(e)
+                            ViewArgNamed(_, value) => call_args.push(value)
+                        }
+                    }
+                    let callee = Spanned::new(ExprPath(single_path(name)), name.span)
+                    let call = Spanned::new(ExprCall(callee, call_args), span)
+                    let expr = self.parse_postfix_from(start, call, "view child")?
+                    self.end_halt()
+                    let span = expr.span
+                    return Some(Spanned::new(ViewNodeExpr(expr), span))
+                }
+            }
+            _ => ()
+        }
+        // A child is an expression of its own, as `parse_expr` reads one: a
+        // bare `return` or `break` in it ends with it.
+        let expr = self.parse_postfix("view child")
+        self.end_halt()
+        let expr = expr?
+        let span = expr.span
+        Some(Spanned::new(ViewNodeExpr(expr), span))
+    }
+
+    /// An element's arguments, after its `(`, up to and with its `)`:
+    /// `name: value` or an expression, separated by commas.
+    pub fn parse_view_args(mut self) -> Option<Vec<ViewArg>> {
+        let mut args: Vec<ViewArg> = Vec::new()
+        while !self.check(RParen) && !self.is_at_end() {
+            let colon_next = self.value_at(self.pos + 1).kind() == Colon.kind()
+            match (self.arg_name(), colon_next) {
+                (Some(word), true) => {
+                    let name = Spanned::new(word, self.peek_span())
+                    // the name, then `:`
+                    let _ = self.advance()
+                    let _ = self.advance()
+                    let value = self.parse_expr("element argument")?
+                    args.push(ViewArgNamed(name, value))
+                }
+                _ => args.push(ViewArgPositional(self.parse_expr("element argument")?))
+            }
+            if self.eat(Comma).is_none() { break }
+        }
+        let _ = self.expect(RParen, "element arguments")?
+        Some(args)
+    }
+
+    /// The word at the cursor, if it can name an element's argument: an
+    /// identifier, or a keyword such as `type` or `for`.
+    pub fn arg_name(self) -> Option<String> {
+        match self.peek() {
+            Ident(w) => Some(w)
+            other => {
+                let word = trim_backticks(other.description())
+                for k in KEYWORDS.iter() { if k == word { return Some(word) } }
+                None
+            }
+        }
+    }
+}
+
+// `text` without the backticks at either end (`trim_matches('`')`).
+fn trim_backticks(text: String) -> String {
+    let mut start = 0
+    let mut end = text.byte_len()
+    while start < end && text.byte_at(start) == 96 { start += 1 }
+    while end > start && text.byte_at(end - 1) == 96 { end -= 1 }
+    text.byte_slice(start, end)
+}

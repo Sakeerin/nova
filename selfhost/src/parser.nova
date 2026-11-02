@@ -1,0 +1,676 @@
+// The parser's state, its token access, recovery and errors: a port of
+// crates/nova-parser/src/grammar.rs's "Parser state" and "Paths and
+// identifiers" sections and its helpers, of error.rs and of lib.rs (spec
+// docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
+// §4.2, ADR 0052). parse_item.nova, parse_type.nova, parse_stmt.nova,
+// parse_expr.nova, parse_view.nova and parse_pattern.nova hold the rest of
+// grammar.rs, area by area; each Rust function has a Nova one of the same
+// name and shape. A change to the grammar changes both parsers in one pull
+// request; the differential test in crates/nova-cli/tests/selfhost.rs holds
+// their trees and errors equal.
+//
+// The Rust idioms, each translated one way (ADR 0052):
+// - `std::mem::discriminant` comparisons compare `Token.kind()`;
+// - a match on `self.peek().clone()` is a match on the token `peek` returns;
+// - the `in_*_ctx(|p| …)` closures are an explicit save of the flag before
+//   the call and its restore after; `nested(|p| …)` is the same with the
+//   depth, and a closure with more than a call in it is a function named
+//   `…_here`, as S0's are;
+// - `static HALT` is the field `eof`, an `Eof` token;
+// - the `&'a Tokens` is the field `tokens`;
+// - `self.tokens.get(self.pos.saturating_sub(1)).map(|s| s.span)
+//   .unwrap_or(start)` is `self.prev_span_or(start)`.
+// The names of dropped items are not kept: only the language server reads
+// them, and it stays Rust (ADR 0048).
+
+import ast
+import lexer
+import parse_expr
+import parse_item
+import parse_pattern
+import parse_stmt
+import parse_type
+import parse_view
+import token
+
+/// How deeply source may nest: past it, the parser reports `TooDeep`
+/// (P0002) and stops (lib.rs's `MAX_DEPTH`).
+pub const MAX_DEPTH: Int = 128
+
+// The error for a `///` that documents nothing.
+const MISPLACED_DOC: String = "a doc comment must come right before an item, a field or a variant; use `//` for a plain comment"
+
+// ---------------------------------------------------------------------------
+// error.rs
+// ---------------------------------------------------------------------------
+
+/// A parse error with source location (error.rs's `ParseError`).
+pub type ParseError =
+    // expected, found, span
+    | Expected(String, String, Span)
+    | UnexpectedEof(Span)
+    | ChainedComparison(Span)
+    // message, span
+    | Custom(String, Span)
+    /// More than `MAX_DEPTH` levels of nesting, at the token where the
+    /// limit was crossed: P0002. The parser stops there, so it is the
+    /// file's last error.
+    | TooDeep(Span)
+    /// `error`, with a note that says why it may have come about.
+    // error, note
+    | Noted(ParseError, String)
+
+impl ParseError {
+    pub fn span(self) -> Span {
+        match self {
+            Expected(_, _, span) => span
+            UnexpectedEof(span) => span
+            ChainedComparison(span) => span
+            Custom(_, span) => span
+            TooDeep(span) => span
+            Noted(error, _) => error.span()
+        }
+    }
+
+    /// The code a caller gives the error's diagnostic: P0002 for `TooDeep`,
+    /// P0001 for every other.
+    pub fn code(self) -> String {
+        match self {
+            TooDeep(_) => "P0002"
+            Noted(error, _) => error.code()
+            _ => "P0001"
+        }
+    }
+
+    /// The notes that go with the error's diagnostic.
+    pub fn notes(self) -> Vec<String> {
+        match self {
+            Noted(error, note) => {
+                let mut notes = error.notes()
+                notes.push(note)
+                notes
+            }
+            _ => Vec::new()
+        }
+    }
+}
+
+// The `#[error(…)]` texts, word for word.
+impl Display for ParseError {
+    fn fmt(self) -> String {
+        match self {
+            Expected(expected, found, _) => "expected ${expected}, found ${found}"
+            UnexpectedEof(_) => "unexpected end of file"
+            ChainedComparison(_) => "chained comparison operators are not allowed (use parentheses)"
+            Custom(message, _) => message
+            TooDeep(_) => "this is nested too deeply (more than ${MAX_DEPTH} levels)"
+            Noted(error, _) => "${error}"
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Parser state
+// ---------------------------------------------------------------------------
+
+/// The parser's state (grammar.rs's `Parser`).
+pub record Parser {
+    tokens: Tokens,
+    pos: Int,
+    errors: Vec<ParseError>,
+    // When `true`, `Ident {` in expression position is NOT parsed as a
+    // record literal. Set by scrutinee positions (if/while/for/match
+    // conditions) to avoid ambiguity with the following `{ block }`.
+    no_struct_literal: Bool,
+    // Whether the parser is in statement context, where the newline rule
+    // holds: a line break ends the expression before a `(`, a `[` or a
+    // binary `-`. On for a block's statements and tail and a match arm's
+    // body; off inside parentheses, brackets, arguments, record literals,
+    // interpolation holes, views, items, and the heads of `if`, `while`,
+    // `for` and `match`. Saved and restored like `no_struct_literal`.
+    stmt_ctx: Bool,
+    // Count of closing `>` "borrowed" from a `>>` token while closing
+    // nested generic argument lists (`Option<Option<Int>>`).
+    pending_gt: Int,
+    // Each place the newline rule ended a statement the parser before it
+    // would have continued, for the checker's E0103.
+    splits: Vec<NewlineSplit>,
+    // The position after a `return` or `break` that a line break ended, or
+    // -1: no operator, call or index there takes the bare keyword as its
+    // operand. Cleared when the expression that holds it ends.
+    halt: Int,
+    // The split that ended the last match arm's body: a P0001 in the head
+    // of the arm that begins there gets a note naming the rule.
+    arm_end_split: Option<NewlineSplit>,
+    // How many levels have been entered at the cursor, the outermost
+    // included: one more than the cursor's level (`deeper`).
+    depth: Int,
+    // Where the depth first passed `MAX_DEPTH`: how many errors there were
+    // then, and the span of the token at the cursor. From then on the
+    // parser reads the end of the file (`peek`), and when the file ends,
+    // P0002 at that span replaces every error pushed since.
+    too_deep: Option<(Int, Span)>,
+    // A crossing that an abandoned attempt made (`roll_back`): how many
+    // errors there were then, its span, and the token where it was made.
+    // The parser reads those tokens again another way, and the crossing
+    // stands, as `too_deep` (`crossing_stands`), if an error comes before
+    // that token is read; once it is read, the crossing goes.
+    rolled_back: Option<(Int, Span, Int)>,
+    // What `peek` reads where a line break ended a bare `return` or `break`
+    // (`halted`), or past the depth limit: nothing (grammar.rs's `HALT`).
+    eof: Token,
+}
+
+/// A parser at the start of `tokens` (`Parser::new`).
+pub fn new_parser(tokens: Tokens) -> Parser {
+    Parser {
+        tokens: tokens,
+        pos: 0,
+        errors: Vec::new(),
+        no_struct_literal: false,
+        stmt_ctx: false,
+        pending_gt: 0,
+        splits: Vec::new(),
+        halt: -1,
+        arm_end_split: None,
+        depth: 0,
+        too_deep: None,
+        rolled_back: None,
+        eof: Eof,
+    }
+}
+
+impl Parser {
+    /// One level deeper. Whether the parser may go on: past `MAX_DEPTH`
+    /// levels it may not, and the first time, it records P0002 at the token
+    /// at the cursor (`too_deep`). A level is:
+    ///
+    /// - an expression (`parse_expr`), a type (`parse_type`) or a pattern
+    ///   (`parse_pattern`), so each operand, type argument or sub-pattern
+    ///   inside another;
+    /// - the operand of a prefix operator, and each `else if`;
+    /// - each binary operator, `as` and assignment included, for the rest
+    ///   of its chain: the right operand of a chain's `k`th operator is `k`
+    ///   levels deeper than the chain, and so is the type after its `k`th
+    ///   `as`;
+    /// - an item inside a block, and the children of a view or an element.
+    ///
+    /// The file's outermost expression, type, pattern or nested item is
+    /// level 0, so `n` nested parentheses, blocks, calls, `if`s or types
+    /// are `n` levels, and 128 of any one kind parse: `depth`, which counts
+    /// every entry, the outermost's included, is one more than the level.
+    /// A block is not a level of its own: its statements' expressions are.
+    /// Each of these is entered as `nested` enters it, with the depth
+    /// restored after it, but for the binary operators, whose function
+    /// restores it when the chain ends.
+    pub fn deeper(mut self) -> Bool {
+        self.depth += 1
+        if self.depth <= MAX_DEPTH + 1 { return true }
+        if self.too_deep.is_none() {
+            self.too_deep = match self.crossing_stands() {
+                Some(crossing) => Some(crossing)
+                None => Some((self.errors.len(), self.peek_span()))
+            }
+        }
+        false
+    }
+
+    /// The crossing an abandoned attempt made (`rolled_back`), if an error
+    /// has come since: the tokens read again the other way failed before
+    /// the token where it was made, so it stands, as the parser's own
+    /// crossing does, and the parser reads the end of the file (`peek`).
+    pub fn crossing_stands(self) -> Option<(Int, Span)> {
+        match self.rolled_back {
+            Some((errors, span, _)) => {
+                if self.errors.len() > errors { return Some((errors, span)) }
+                None
+            }
+            None => None
+        }
+    }
+
+    /// `in_stmt_ctx`'s save: `stmt_ctx` becomes `on`, and what it was is
+    /// returned, for the caller to restore.
+    pub fn enter_stmt_ctx(mut self, on: Bool) -> Bool {
+        let prev = self.stmt_ctx
+        self.stmt_ctx = on
+        prev
+    }
+
+    /// `in_no_struct_ctx`'s and `in_struct_ok_ctx`'s save:
+    /// `no_struct_literal` becomes `on`, and what it was is returned.
+    pub fn enter_no_struct_ctx(mut self, on: Bool) -> Bool {
+        let prev = self.no_struct_literal
+        self.no_struct_literal = on
+        prev
+    }
+
+    /// Whether a line break comes before the token at the cursor.
+    pub fn line_break_here(self) -> Bool { self.tokens.line_break_before(self.pos) }
+
+    /// Whether the newline rule ends the expression before the token at
+    /// the cursor: a line break before it, in statement context. The
+    /// callers ask it of a `(`, a `[` and a binary `-`.
+    pub fn newline_ends_expr(self) -> Bool { self.stmt_ctx && self.line_break_here() }
+
+    /// Whether a `return` or `break` just read takes no value: the next
+    /// token ends a statement or a block, or a line break comes before it,
+    /// in any context.
+    pub fn bare_keyword_ends(mut self) -> Bool {
+        match self.peek() {
+            Semicolon | RBrace | Eof => return true
+            _ => ()
+        }
+        if !self.line_break_here() { return false }
+        // A `let` or an item after the line break is a statement of its own.
+        if self.check(Let) || self.is_item_start_at(self.pos) {
+            self.halt = self.pos
+            return true
+        }
+        // A token that cannot begin an expression, such as `)`, `,` or
+        // `=>`, is read as before the rule: as the value's start, an error.
+        if !can_start_expr(self.peek()) { return false }
+        // The line after would have been the value: the rule split it off.
+        self.record_split(SplitKindValue)
+        self.halt = self.pos
+        true
+    }
+
+    /// Whether the parser stands where a line break ended a bare `return`
+    /// or `break`: the token there belongs to whatever follows the
+    /// keyword's expression, not to the expression.
+    pub fn halted(self) -> Bool { self.halt == self.pos }
+
+    /// A P0001 in the head of an arm that the newline rule began, by ending
+    /// the arm before at a line break: the first error the arm gave, from
+    /// `first` on, wherever it lands, gets a note naming the rule.
+    pub fn note_arm_split(mut self, begun: Option<NewlineSplit>, first: Int) {
+        let split = match begun {
+            Some(s) => s
+            None => return
+        }
+        if first >= self.errors.len() { return }
+        let note = match split.kind {
+            SplitKindValue => {
+                "a `return` or `break` at the end of a line takes no value, so the "
+                    + "next line begins the next match arm (the newline rule); to return "
+                    + "that line's value, put it on the same line as the `return` or `break`"
+            }
+            _ => {
+                "a line that starts with `(`, `[` or `-` begins the next match arm "
+                    + "(the newline rule); to continue the arm's body, end the line before "
+                    + "with the operator"
+            }
+        }
+        let error = self.errors.at(first)
+        self.errors.set(first, Noted(error, note))
+    }
+
+    /// Record that the newline rule ends a statement before the token at
+    /// the cursor. One split a token: the first recorded there stands.
+    pub fn record_split(mut self, kind: SplitKind) {
+        let at = self.peek_span()
+        for s in self.splits.iter() { if s.at.start == at.start && s.at.end == at.end { return } }
+        self.splits.push(NewlineSplit { at: at, kind: kind })
+    }
+
+    // --- Token access ---
+
+    pub fn peek(self) -> Token {
+        // Past the depth limit, the file has ended.
+        if self.halted() || self.too_deep.is_some() || self.crossing_stands().is_some() {
+            return self.eof
+        }
+        if self.pos < self.tokens.len() { self.tokens.at(self.pos).value } else { self.eof }
+    }
+
+    pub fn peek_span(self) -> Span {
+        if self.pos < self.tokens.len() { self.tokens.at(self.pos).span } else { Span::point(0) }
+    }
+
+    pub fn advance(mut self) -> Spanned<Token> {
+        // A crossing an abandoned attempt made stands if an error came
+        // first, and goes once its token is read.
+        match self.rolled_back {
+            Some((_, _, at)) => {
+                match self.crossing_stands() {
+                    Some(crossing) => {
+                        if self.too_deep.is_none() { self.too_deep = Some(crossing) }
+                        self.rolled_back = None
+                    }
+                    None => if self.pos >= at { self.rolled_back = None }
+                }
+            }
+            None => ()
+        }
+        if self.pos < self.tokens.len() {
+            let tok = self.tokens.at(self.pos)
+            self.pos += 1
+            return tok
+        }
+        Spanned::new(Eof, Span::point(0))
+    }
+
+    pub fn check(self, tok: Token) -> Bool { self.peek().kind() == tok.kind() }
+
+    pub fn eat(mut self, tok: Token) -> Option<Spanned<Token>> {
+        if self.peek().kind() == tok.kind() { Some(self.advance()) } else { None }
+    }
+
+    pub fn expect(mut self, tok: Token, ctx: String) -> Option<Spanned<Token>> {
+        if self.peek().kind() == tok.kind() { return Some(self.advance()) }
+        let span = self.peek_span()
+        self.errors.push(
+            Expected("${tok.description()} (in ${ctx})", self.peek().description(), span),
+        )
+        None
+    }
+
+    pub fn is_at_end(self) -> Bool { self.check(Eof) }
+
+    /// The span of the token just consumed, or `fallback` at the start.
+    pub fn prev_span_or(self, fallback: Span) -> Span {
+        let i = if self.pos > 0 { self.pos - 1 } else { 0 }
+        if i < self.tokens.len() { self.tokens.at(i).span } else { fallback }
+    }
+
+    // The token at `i`, or `Eof` past the end, where the Rust reads
+    // `self.tokens.get(i).map(|t| &t.value)`: every caller asks for a token
+    // other than `Eof`, so `None` and `Eof` match alike.
+    pub fn value_at(self, i: Int) -> Token {
+        if i < self.tokens.len() { self.tokens.at(i).value } else { self.eof }
+    }
+
+    // --- Synchronisation (error recovery) ---
+
+    /// Skip tokens until we find something that looks like the start of an
+    /// item or a closing delimiter. Used at item level for error recovery.
+    pub fn sync_to_item_boundary(mut self) {
+        while !self.is_at_end() {
+            if self.component_at(self.pos) { break }
+            match self.peek() {
+                Fn
+                    | Pub
+                    | Record
+                    | Trait
+                    | Impl
+                    | Type
+                    | Const
+                    | Import
+                    | Module
+                    | Extern
+                    | RBrace => break
+                _ => { let _ = self.advance() }
+            }
+        }
+    }
+
+    /// Skip to next `;` or `}` for statement recovery.
+    pub fn sync_to_stmt_boundary(mut self) {
+        while !self.is_at_end() {
+            match self.peek() {
+                Semicolon => {
+                    let _ = self.advance()
+                    break
+                }
+                RBrace => break
+                _ => { let _ = self.advance() }
+            }
+        }
+    }
+
+    // --- Doc comments ---
+
+    /// Consume consecutive `///` lines and return them, in order.
+    pub fn take_docs(mut self) -> Vec<Spanned<String>> {
+        let mut docs: Vec<Spanned<String>> = Vec::new()
+        while true {
+            match self.peek() {
+                DocComment(text) => {
+                    let span = self.peek_span()
+                    let _ = self.advance()
+                    docs.push(Spanned::new(text, span))
+                }
+                _ => break
+            }
+        }
+        docs
+    }
+
+    /// Report a `///` that documents nothing.
+    pub fn misplaced_doc(mut self, span: Span) { self.errors.push(Custom(MISPLACED_DOC, span)) }
+
+    /// Report and skip the `///` lines here, which document nothing.
+    /// Returns whether there were any.
+    pub fn reject_docs(mut self) -> Bool {
+        let docs = self.take_docs()
+        for d in docs.iter() { self.misplaced_doc(d.span) }
+        !docs.is_empty()
+    }
+
+    /// The index of the first token at or after the cursor that is not a
+    /// `///` line.
+    pub fn docs_end(self) -> Int {
+        let mut i = self.pos
+        while i < self.tokens.len() && is_doc(self.tokens.at(i).value) { i += 1 }
+        i
+    }
+
+    /// Whether the token after any `///` lines is `tok`.
+    pub fn next_after_docs_is(self, tok: Token) -> Bool {
+        let i = self.docs_end()
+        i < self.tokens.len() && self.tokens.at(i).value.kind() == tok.kind()
+    }
+
+    /// Whether the tokens at `i` are `component Name (`, where `component`
+    /// is a keyword (RFC 0001); anywhere else it is an identifier.
+    pub fn component_at(self, i: Int) -> Bool {
+        let is_word = match self.value_at(i) {
+            Ident(w) => w == "component"
+            _ => false
+        }
+        if !(is_word
+            && is_ident(self.value_at(i + 1))
+            && self.value_at(i + 2).kind() == LParen.kind()) {
+            return false
+        }
+        // Its parameters' `)`, then its body's `{`, or a `->` that
+        // `parse_component` refuses.
+        let mut depth = 0
+        let mut k = i + 2
+        while true {
+            if k >= self.tokens.len() { return false }
+            match self.tokens.at(k).value {
+                LParen => depth += 1
+                RParen => {
+                    depth -= 1
+                    if depth == 0 { break }
+                }
+                Eof => return false
+                _ => ()
+            }
+            k += 1
+        }
+        match self.value_at(k + 1) {
+            LBrace => true
+            Arrow => true
+            _ => false
+        }
+    }
+
+    /// Whether the token at `i` starts an item that may appear inside a
+    /// block.
+    pub fn is_item_start_at(self, i: Int) -> Bool {
+        let at_pub = self.value_at(i).kind() == Pub.kind()
+        if self.component_at(i) || (at_pub && self.component_at(i + 1)) { return true }
+        let item = match self.value_at(i) {
+            Fn | Async | Record | Trait | Impl | Type | Const | Import | Module | Extern => true
+            _ => false
+        }
+        let pub_item = match self.value_at(i + 1) {
+            Fn | Record | Trait | Type | Const | Impl => true
+            _ => false
+        }
+        item || (at_pub && pub_item)
+    }
+
+    /// A top-level item's docs and `@attributes`, which may be interleaved.
+    pub fn parse_item_prefix(mut self) -> (Vec<Spanned<String>>, Vec<Attribute>) {
+        let mut docs: Vec<Spanned<String>> = Vec::new()
+        let mut attrs: Vec<Attribute> = Vec::new()
+        while true {
+            for d in self.take_docs().iter() { docs.push(d) }
+            if !self.check(At) { break }
+            for a in self.parse_attributes().iter() { attrs.push(a) }
+        }
+        (docs, attrs)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
+
+/// Parse a token stream into a `File` and its errors (lib.rs's `parse`,
+/// grammar.rs's `parse_file`). The file is there even when errors are.
+pub fn parse(tokens: Tokens) -> (File, Vec<ParseError>) {
+    let mut p = new_parser(tokens)
+    let file = p.parse_file()
+    (file, p.errors)
+}
+
+// ---------------------------------------------------------------------------
+// Paths and identifiers
+// ---------------------------------------------------------------------------
+
+impl Parser {
+    pub fn parse_ident(mut self, ctx: String) -> Option<Spanned<String>> {
+        let span = self.peek_span()
+        match self.peek() {
+            Ident(s) => {
+                let _ = self.advance()
+                Some(Spanned::new(s, span))
+            }
+            SelfLower => {
+                let _ = self.advance()
+                Some(Spanned::new("self", span))
+            }
+            SelfUpper => {
+                let _ = self.advance()
+                Some(Spanned::new("Self", span))
+            }
+            _ => {
+                self.errors.push(
+                    Expected("identifier (in ${ctx})", self.peek().description(), span),
+                )
+                None
+            }
+        }
+    }
+
+    pub fn try_parse_path(mut self) -> Option<Path> {
+        let span = self.peek_span()
+        let first = match self.peek() {
+            Ident(s) => {
+                let _ = self.advance()
+                Spanned::new(s, span)
+            }
+            SelfLower => {
+                let _ = self.advance()
+                Spanned::new("self", span)
+            }
+            SelfUpper => {
+                let _ = self.advance()
+                Spanned::new("Self", span)
+            }
+            _ => return None
+        }
+        let mut path = single_path(first)
+        while self.eat(ColonColon).is_some() {
+            let seg_span = self.peek_span()
+            match self.peek() {
+                Ident(s) => {
+                    let _ = self.advance()
+                    path.segments.push(Spanned::new(s, seg_span))
+                }
+                _ => break
+            }
+        }
+        Some(path)
+    }
+
+    pub fn parse_path(mut self, ctx: String) -> Option<Path> {
+        match self.try_parse_path() {
+            Some(p) => Some(p)
+            None => {
+                let span = self.peek_span()
+                self.errors.push(Expected("path (in ${ctx})", self.peek().description(), span))
+                None
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Try to convert a `Type::Path` to a `Path` (for trait-impl
+/// disambiguation).
+pub fn type_to_path(ty: Spanned<Type>) -> Option<Path> {
+    match ty.value {
+        TypePath(path, _) => Some(path)
+        _ => None
+    }
+}
+
+/// Whether `tok` can begin an expression: a literal, a name, a bracket, a
+/// prefix operator, a closure, or a keyword that begins one.
+pub fn can_start_expr(tok: Token) -> Bool {
+    match tok {
+        Int(_)
+            | Float(_)
+            | Char(_)
+            | True
+            | False
+            | StrStart
+            | RawStr(_)
+            | LParen
+            | LBracket
+            | LBrace
+            | If
+            | Match
+            | While
+            | For
+            | Return
+            | Break
+            | Continue
+            | Pipe
+            | PipePipe
+            | Ident(_)
+            | SelfLower
+            | SelfUpper
+            | Minus
+            | Bang
+            | Tilde
+            | Star
+            | Amp => true
+        _ => false
+    }
+}
+
+// Whether `tok` is a `///` line.
+pub fn is_doc(tok: Token) -> Bool {
+    match tok {
+        DocComment(_) => true
+        _ => false
+    }
+}
+
+// Whether `tok` is an identifier.
+pub fn is_ident(tok: Token) -> Bool {
+    match tok {
+        Ident(_) => true
+        _ => false
+    }
+}

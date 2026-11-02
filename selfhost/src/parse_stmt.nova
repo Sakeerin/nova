@@ -1,0 +1,102 @@
+// Blocks and statements: a port of crates/nova-parser/src/grammar.rs's
+// "Blocks and statements" section, function by function (parser.nova says
+// how its idioms translate).
+
+import ast
+import parse_expr
+import parse_item
+import parse_pattern
+import parse_type
+import parser
+import token
+
+impl Parser {
+    pub fn parse_block(mut self, ctx: String) -> Option<Spanned<Block>> {
+        // A block anywhere turns statement context on (`in_stmt_ctx(true)`).
+        let prev = self.enter_stmt_ctx(true)
+        let block = self.parse_block_inner(ctx)
+        self.stmt_ctx = prev
+        block
+    }
+
+    pub fn parse_block_inner(mut self, ctx: String) -> Option<Spanned<Block>> {
+        let start = self.peek_span()
+        let _ = self.expect(LBrace, ctx)?
+        let mut stmts: Vec<Spanned<Stmt>> = Vec::new()
+        let mut trailing: Option<Spanned<Expr>> = None
+
+        while !self.check(RBrace) && !self.is_at_end() {
+            // A `///` documents a nested item. Anywhere else in a block it is
+            // misplaced.
+            if is_doc(self.peek()) && !self.is_item_start_at(self.docs_end()) {
+                let _ = self.reject_docs()
+                continue
+            }
+            // Parse a statement; if it's an expression without semicolon at
+            // the block-final position, treat it as trailing.
+            match self.try_parse_stmt() {
+                Some(stmt) => {
+                    match stmt.value {
+                        StmtExpr(_) if !self.check(RBrace) => stmts.push(stmt)
+                        // Could be trailing, but we already consumed it:
+                        // with or without its semicolon, it is.
+                        StmtExpr(e) => trailing = Some(e)
+                        _ => stmts.push(stmt)
+                    }
+                }
+                None => self.sync_to_stmt_boundary()
+            }
+        }
+
+        let _ = self.expect(RBrace, ctx)?
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(Block { stmts: stmts, trailing: trailing }, start.merge(end)))
+    }
+
+    pub fn try_parse_stmt(mut self) -> Option<Spanned<Stmt>> {
+        let start = self.peek_span()
+
+        // `let` statement
+        if self.check(Let) { return self.parse_let_stmt() }
+
+        // Nested items, documented or not: `nested`, `in_stmt_ctx(false)`.
+        if self.is_item_start_at(self.docs_end()) {
+            let depth = self.depth
+            let mut item: Option<Spanned<Item>> = None
+            if self.deeper() {
+                let prev = self.enter_stmt_ctx(false)
+                item = self.try_parse_item()
+                self.stmt_ctx = prev
+            }
+            self.depth = depth
+            let item = item?
+            let span = item.span
+            return Some(Spanned::new(StmtItem(item.value), span))
+        }
+
+        // Expression statement
+        let expr = self.parse_expr("statement")?
+        let has_semi = self.eat(Semicolon).is_some()
+        let end = self.prev_span_or(start)
+        let span = start.merge(end)
+
+        let _ = has_semi
+        Some(Spanned::new(StmtExpr(expr), span))
+    }
+
+    pub fn parse_let_stmt(mut self) -> Option<Spanned<Stmt>> {
+        let start = self.peek_span()
+        let _ = self.expect(Let, "let statement")?
+        let is_mut = self.eat(Mut).is_some()
+        let pattern = self.parse_pattern("let pattern")?
+        let ty = if self.eat(Colon).is_some() { Some(self.parse_type("let type")?) } else { None }
+        let init = if self.eat(Eq).is_some() {
+            Some(self.parse_expr("let initializer")?)
+        } else {
+            None
+        }
+        let _ = self.eat(Semicolon)
+        let end = self.prev_span_or(start)
+        Some(Spanned::new(StmtLet(is_mut, pattern, ty, init), start.merge(end)))
+    }
+}
