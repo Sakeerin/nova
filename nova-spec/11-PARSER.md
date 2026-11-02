@@ -476,6 +476,23 @@ prints it after a `== FILE` header per file, and the self-hosted lexer's
 promise: it changes with the tokens, in both compilers at once. 5.1b adds an
 AST dump beside it.
 
+**Amended 2026-10-31 (branch `claude/loving-archimedes-frtf5q-51b`):** **the AST dump**
+(`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+§4.3; ADR 0052, which writes its grammar out with an example of every
+kind). `nova_ast::dump::dump_file` renders a tree as an indented
+S-expression, one node per line: `(Kind start..end values fields`, with
+its children on the lines after it and its `)` at the end of its last
+line. A struct's kind is its name and an enum value's `Enum.Variant`;
+scalar fields are `key=value`, names `"text"@start..end`, literals
+`Int:1`, `Float:` and the bits, `Str:"…"`, `Char:` and the code point,
+`Bool:true`; the newline splits close the tree. `nova_parser::dump_ast`
+adds `ERR`, `PARSE` and `NOTE` lines for the lex errors, the parse errors
+and their notes. The hidden `nova parse --dump-ast FILE…` prints it after a
+`== FILE` header per file, and the self-hosted parser's `selfhost ast
+FILE…` prints the same bytes, which the differential compares on every
+input; like the token dump, it changes with the tree, in both compilers
+at once.
+
 ---
 
 ## 5. Error Recovery
@@ -486,6 +503,43 @@ Chumsky's `recover_with` strategies — apply at these levels (most permissive f
 - **Expression level:** sync to operator, `,`, or `)`
 
 Every error → `ParseError` with span + expected/found info → diagnostics crate renders.
+
+**Amended 2026-10-31 (branch `claude/loving-archimedes-frtf5q-51b`): the depth limit, P0002**
+(`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+§4.4; ADR 0052). The parser counts how deeply it is nested. A level is:
+an expression, a type or a pattern (so each operand, type argument and
+sub-pattern inside another); the operand of a prefix operator; each `else
+if`; each operator of a binary chain, assignment, range and `as` included,
+for the rest of its chain (the type after the `k`th `as` is at its
+operator's level); each postfix operator of a chain after its first (a
+call, an index, a field, `?`, `.await`; a method call `.f(…)` is one), for
+the rest of the chain; an item inside a block; and the children of a
+`view` or of an element. The outermost is level 0, so `n` nested constructs of one
+kind are `n` levels: 128 nested parentheses parse and 129 do not. A block
+is no level of its own; its statements' expressions are. Past
+`nova_parser::MAX_DEPTH`, 128 levels, the parser reports **P0002**, "this
+is nested too deeply (more than 128 levels)", at the token where the limit
+was crossed, and stops: from there it reads the end of the file, the
+items it finished before are kept, and every error it would report after
+is dropped, so P0002 is the file's last error. An attempt the parser
+rolls back (generic arguments after a type's `<`, which may be a
+comparison) does not decide alone: its crossing stands only if reading
+the tokens the other way fails before the token where it was made. Every
+other parse error is P0001: the parser reports none with a code, and its
+callers attach `ParseError::code()`. But for the test cases written to
+sit at the limit, the deepest file in the repository nests 25 levels (a
+router built as one chain of 21 calls), its longest binary chain is 9
+operators and its longest `else if` chain 14. The self-hosted parser
+counts the same levels and stops at the same token; built by `nova
+build`, it parses 128 levels of every kind on a 1 MB main thread with
+four times the stack it needs to spare, as measured on Linux; Windows
+x64 frames may be larger, and CI's run of that test on Windows' own 1 MB
+main thread is the check. S0 runs its pipeline on a thread with a 64 MB
+stack, so no nesting meets the platform's stack first; the lexer's
+per-digit recursion (ADR 0051) is no level, and a decimal literal of
+210,000 digits or more still aborts a debug build's thread (shorter ones
+do not, but take time quadratic in their length).
+Counting postfix chains is the user's ruling of 2026-10-31.
 
 ---
 

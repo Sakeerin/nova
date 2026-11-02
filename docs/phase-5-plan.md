@@ -380,6 +380,19 @@ The three questions below are answered by that spec: the AST dump is an
 indented S-expression with spans (§4.3); the fuzzer mutates corpus files
 token by token (§3.5); and the depth is capped at 128 in both parsers, with
 S0's pipeline on a 64 MB stack (§4.4).
+
+**Amended 2026-10-31 (branch `claude/loving-archimedes-frtf5q-51b`):**
+5.1b is built (ADR 0052). Two figures the plan's decisions wait on: N,
+built by `nova build` with a release runtime, lexes, parses and dumps all
+of std in 0.24 s against 0.04 s for release S0's parser, about 6×, under
+decision 8's 10×, and about 30× with the debug runtime CI uses; and at
+the depth limit N needs at most 256 KB of stack, so Windows' 1 MB main
+thread needs no larger link. The depth counts the outermost construct as
+level 0, so 128 nested parentheses parse and 129 are P0002; by the
+user's ruling of 2026-10-31 it counts postfix chains too, which the spec
+does not list, so a chain of 130 method calls is P0002 (129 with
+arguments, a call's arguments being a level deeper than the call).
+
 - **N's first modules:** the tokens, a hand-written scanner, the AST,
   recursive descent with error recovery, and the P-codes.
 - **The dumps:** a token dump on both sides (the spike's format), and a

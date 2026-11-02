@@ -773,6 +773,17 @@ repository and on fuzzed inputs, on all three systems. From here a change to
 the tokens changes both compilers in one pull request. Step 2, the parser
 and the AST, is 5.1b.
 
+**Amended 2026-10-31 (branch `claude/loving-archimedes-frtf5q-51b`):** step 2, the parser and the AST, is ported
+(`docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
+§4; ADR 0052): `selfhost/` gains the tree and a parser that follows
+`nova-parser` function for function, and `selfhost ast FILE…` prints the
+AST dump S0's hidden `nova parse --dump-ast` prints, errors, notes and
+newline splits included; the differential compares the two wherever it
+compares the token dumps. Both parsers refuse source nested past 128
+levels with P0002, and S0 runs its pipeline on a 64 MB thread. N lexes and
+parses std about 6× as slowly as release S0 with a release runtime. From
+here a change to the grammar changes both compilers in one pull request.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)
