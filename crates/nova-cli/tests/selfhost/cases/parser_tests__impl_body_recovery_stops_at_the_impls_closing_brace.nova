@@ -1,0 +1,4 @@
+record W { v: Int }
+impl W { 42 }
+record R { a: Int }
+fn main() { }

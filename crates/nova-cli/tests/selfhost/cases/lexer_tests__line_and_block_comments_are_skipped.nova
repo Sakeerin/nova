@@ -1,0 +1,3 @@
+// leading
+fn /* mid */ main() {}
+// trailing

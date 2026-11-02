@@ -1,0 +1,1 @@
+fn f(a: (Int, String), b: (Int,), c: (Int), d: ()) -> (Bool, (Int, Int)) {}

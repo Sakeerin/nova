@@ -15,9 +15,10 @@
 //!    swapped with another or inserted elsewhere, or one ASCII byte
 //!    replaced. Most of the result stays well formed, so a lexer, and in
 //!    5.1b a parser, gets far into it.
-//! 3. Deep nesting is 5.1b's (spec §3.5 item 3, §4.4): a `deep(rng, kind,
-//!    depth) -> String` here, beside these two, whose inputs `selfhost.rs`
-//!    hands to `agree_on_inputs` as it does theirs.
+//! 3. [`deep`]: a program nested in one way, or in several mixed, to a
+//!    given depth around the parser's limit of 128 levels (spec §3.5 item
+//!    3, §4.4; ADR 0052): well typed up to the limit, so that `nova check`
+//!    goes through every stage on it, and P0002 past it.
 //!
 //! Beside them, [`edges`]: fixed inputs that no file under `cases/` can
 //! hold as it is, such as a lone `\r` or a NUL.
@@ -380,6 +381,32 @@ pub fn edges() -> Vec<String> {
     .collect();
     out.push(c(0xFEFF));
     out.push(format!("{}let a = 1\n", c(0xFEFF)));
+    // The lexer's tests' inline sources that a file under `cases/` cannot
+    // hold, for a `\r` or another control character (ADR 0052).
+    out.extend(
+        [
+            // lexer_tests.rs: `a_line_comments_span_stops_before_a_crlf`
+            "// a\r\nfn main() {}\r\n",
+            // lexer_tests.rs: `a_lone_carriage_return_is_a_line_break`
+            "b\r(d)",
+            // lexer_tests.rs: `a_token_after_a_line_break_is_marked`
+            "a\n(b)\r\n  - c",
+            // lexer_tests.rs: `doc_text_keeps_its_indentation_and_drops_trailing_whitespace`
+            "///   indented  \r\nfn f() {}",
+            // lexer_tests.rs: `the_token_dump_writes_every_field`
+            "let s = \"a\x01\x7f\\\"\\\\é\" r#\"q\\\"# // c\n/* b */ 07 1_0 0x1 12 2.5 'é' t.1.2 \x02 \"\\q\"\n/// doc \nfn 0.1",
+            // lexer_tests.rs: `the_token_dump_of_nothing_is_eof`
+            "\r\n1",
+        ]
+        .map(String::from),
+    );
+    // Decimal numbers of 4,000 characters, plain, with `_` and before
+    // `.5`: `logos` recurses once per character on them, which overflowed
+    // S0's 1 MB main thread on Windows until its pipeline moved to a
+    // thread of its own (ADR 0051's known bug; ADR 0052).
+    out.push(format!("let a = {}\n", "1".repeat(4000)));
+    out.push(format!("let a = {}1\n", "1_".repeat(2000)));
+    out.push(format!("let a = {}.5\n", "1".repeat(4000)));
     // Every escape, then each kind of Unicode escape, built from `BS`: the
     // largest, past it, the surrogates, a leading `+` and `-`, empty, past
     // `u32`, seventeen digits whose value wraps an `Int` into a character,
@@ -413,6 +440,132 @@ pub fn edges() -> Vec<String> {
         .chain([0x2028, 0x2029, 0x202F, 0x205F, 0x3000]);
     for code in white_space.chain([0x180E, 0x200B, 0xFEFF, 0x7F, 0x01]) {
         out.push(format!("/// d{}\n///{}", c(code), c(code)));
+    }
+    out
+}
+
+/// The kinds of nesting [`deep`] writes: the spec's parentheses, blocks,
+/// `if`, `match`, calls, types and patterns, and its `else if` chains,
+/// binary chains and prefix operators, with `while`, `for`, postfix chains
+/// and items in blocks; and all of them mixed.
+pub const DEEP_KINDS: [&str; 15] = [
+    "parentheses",
+    "blocks",
+    "ifs",
+    "else-ifs",
+    "matches",
+    "whiles",
+    "fors",
+    "calls",
+    "prefix",
+    "binary",
+    "postfix",
+    "types",
+    "patterns",
+    "items",
+    "mixed",
+];
+
+/// The depths [`deeps`] writes each kind at: around the limit, 128.
+pub const DEEP_DEPTHS: std::ops::RangeInclusive<usize> = 126..=130;
+
+/// A program whose deepest level, as the parser counts them, is `depth`
+/// (at least 2), nested as `kind` names ([`DEEP_KINDS`]). The outermost
+/// expression, type or pattern is level 0, and each wrapper one more, so
+/// `depth` is how many wrappers there are: 128 parentheses parse, 129 are
+/// P0002.
+/// Up to the limit, each is well typed but `items`, whose nested functions
+/// are E0900; `rng` picks the wrappers of `mixed`.
+pub fn deep(rng: &mut SplitMix64, kind: &str, depth: usize) -> String {
+    let d = depth;
+    let wrap = |open: &str, inner: &str, close: &str, n: usize| {
+        format!("{}{inner}{}", open.repeat(n), close.repeat(n))
+    };
+    let main = |body: String| format!("fn main() {{\n    {body}\n}}\n");
+    let value = |x: String| main(format!("let x = {x}\n    println(\"${{x}}\")"));
+    match kind {
+        "parentheses" => value(wrap("(", "1", ")", d)),
+        "blocks" => value(wrap("{ ", "1", " }", d)),
+        "ifs" => value(wrap("if true { ", "1", " } else { 0 }", d)),
+        "else-ifs" => value(format!(
+            "if false {{ 0 }}{} else {{ 1 }}",
+            " else if false { 0 }".repeat(d - 1)
+        )),
+        "matches" => value(wrap("match 0 { _ => ", "1", " }", d)),
+        "whiles" => main(wrap("while false { ", "", " }", d).replace("{  }", "{}")),
+        "fors" => main(format!(
+            "let xs = [1]\n    {}",
+            wrap("for x in xs { ", "", " }", d).replace("{  }", "{}")
+        )),
+        "calls" => format!(
+            "fn f(x: Int) -> Int {{ x }}\n\n{}",
+            value(wrap("f(", "1", ")", d))
+        ),
+        "prefix" => value(format!("{}true", "!".repeat(d))),
+        "binary" => value(format!("{}1", "1 + ".repeat(d))),
+        // `d` method calls, then a field: the chain's first operator is
+        // not a level, each after it one more, a method call one operator.
+        "postfix" => format!(
+            "record R {{ x: Int }}\n\nimpl R {{\n    fn f(self) -> R {{ self }}\n}}\n\n{}",
+            value(format!("R {{ x: 1 }}{}.x", ".f()".repeat(d)))
+        ),
+        "types" => format!(
+            "fn f(x: {}) {{}}\n\nfn main() {{}}\n",
+            wrap("Option<", "Int", ">", d)
+        ),
+        "patterns" => main(format!(
+            "let {} = 1\n    println(\"${{x}}\")",
+            wrap("(", "x", ")", d)
+        )),
+        "items" => main(wrap("fn g() { ", "()", " }", d)),
+        "mixed" => {
+            // Each wrapper one level, every one an `Int`. A prefix `-`
+            // binds tighter than `+`, so `1 + ` never comes straight
+            // inside one.
+            const WRAPPERS: [(&str, &str); 8] = [
+                ("(", ")"),
+                ("{ ", " }"),
+                ("if true { ", " } else { 0 }"),
+                ("match 0 { _ => ", " }"),
+                ("f(", ")"),
+                ("1 + ", ""),
+                ("[", "][0]"),
+                ("- ", ""),
+            ];
+            let (mut open, mut close) = (String::new(), String::new());
+            let mut last = 0;
+            for _ in 0..d {
+                let mut w = rng.below(WRAPPERS.len());
+                if last == 7 && w == 5 {
+                    w = 0;
+                }
+                last = w;
+                open.push_str(WRAPPERS[w].0);
+                close.insert_str(0, WRAPPERS[w].1);
+            }
+            format!(
+                "fn f(x: Int) -> Int {{ x }}\n\n{}",
+                value(format!("{open}1{close}"))
+            )
+        }
+        other => panic!("no kind of nesting {other}"),
+    }
+}
+
+/// Every kind but `mixed` at each of [`DEEP_DEPTHS`], then `mixed`
+/// `count` times, at depths `seed` picks among them.
+pub fn deeps(seed: u64, mixed: usize) -> Vec<(String, usize, String)> {
+    let mut rng = SplitMix64::new(seed);
+    let mut out = Vec::new();
+    for kind in DEEP_KINDS.iter().filter(|k| **k != "mixed") {
+        for depth in DEEP_DEPTHS {
+            out.push((kind.to_string(), depth, deep(&mut rng, kind, depth)));
+        }
+    }
+    let depths: Vec<usize> = DEEP_DEPTHS.collect();
+    for _ in 0..mixed {
+        let depth = *rng.pick(&depths);
+        out.push(("mixed".to_string(), depth, deep(&mut rng, "mixed", depth)));
     }
     out
 }

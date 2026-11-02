@@ -1,0 +1,3 @@
+record R { v: G }
+record G { w: Int }
+fn main() { println("${R { v: G { w: 1 } }.v.w}") }

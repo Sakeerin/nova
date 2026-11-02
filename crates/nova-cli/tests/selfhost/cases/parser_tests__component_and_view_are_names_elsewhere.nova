@@ -1,0 +1,15 @@
+fn component() -> Int { 1 }
+fn view(x: Int) -> Int { x }
+fn f() -> Int {
+    let component = component()
+    let view = 2
+    if view > component { view } else { 0 }
+}
+fn g(view: Bool) -> Int {
+    if view { 1 } else { 2 }
+}
+fn h() {
+    let mut component = 1
+    component
+    g(true)
+}

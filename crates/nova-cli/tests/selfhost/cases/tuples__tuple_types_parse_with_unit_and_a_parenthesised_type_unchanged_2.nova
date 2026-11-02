@@ -1,0 +1,1 @@
+fn f(v: Vec<(Int, String)>, o: Option<(Int,)>, a: [(Int, Int)]) {}

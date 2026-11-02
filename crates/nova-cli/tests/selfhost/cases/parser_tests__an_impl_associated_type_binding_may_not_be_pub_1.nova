@@ -1,0 +1,1 @@
+impl It for W { pub type Item = Int }

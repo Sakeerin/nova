@@ -1,0 +1,2 @@
+component A<T>() { 1 }
+fn main() { }

@@ -1,0 +1,3 @@
+record W { v: Int }
+impl W { trait Q { fn q(self) -> Int } }
+fn main() { }

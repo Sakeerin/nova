@@ -1,0 +1,2 @@
+record Box<T> { value: T }
+fn f(b: Box<Box<Box<Int>>>) -> Int { 0 }

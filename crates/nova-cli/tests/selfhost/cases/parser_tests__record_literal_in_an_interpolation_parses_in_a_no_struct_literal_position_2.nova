@@ -1,0 +1,3 @@
+record R { v: Int }
+fn main() { let r = R { v: 1 }
+ if r == r { println("y") } }

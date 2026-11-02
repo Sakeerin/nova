@@ -1,0 +1,8 @@
+
+fn describe(n: Int) -> String {
+    match n {
+        0 => "zero",
+        n if n < 0 => "negative",
+        _ => "positive",
+    }
+}

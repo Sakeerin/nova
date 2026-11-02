@@ -1,0 +1,18 @@
+/// f
+fn f() {}
+/// r
+record R { x: Int }
+/// t
+type T = Int
+/// tr
+trait Tr {}
+/// i
+impl R {}
+/// c
+const C: Int = 1
+/// im
+import m
+/// mo
+module n
+/// e
+extern "C" {}

@@ -1,0 +1,1 @@
+fn f() { view { text("a"); (text("b")) } }

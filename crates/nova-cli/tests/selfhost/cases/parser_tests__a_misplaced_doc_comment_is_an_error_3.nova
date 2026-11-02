@@ -1,0 +1,4 @@
+fn main() {
+    /// no
+    let x = 1
+}

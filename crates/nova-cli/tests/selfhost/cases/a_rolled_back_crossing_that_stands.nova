@@ -1,0 +1,8 @@
+// A cast's type 200 generic lists deep: each list's attempt is rolled
+// back from the innermost out, and the tokens, read again as comparisons,
+// fail before the token where the first attempt crossed the depth limit,
+// so that crossing stands: one P0002 there (ADR 0052). A parser that drops
+// it reports the comparisons instead.
+fn f(x: Int) -> Bool {
+    x as V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<V<I>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+}

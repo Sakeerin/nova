@@ -1,0 +1,5 @@
+fn main() {
+    let n = t.0.1.2.3
+    let m = t.1.10
+    println("${n.0}")
+}

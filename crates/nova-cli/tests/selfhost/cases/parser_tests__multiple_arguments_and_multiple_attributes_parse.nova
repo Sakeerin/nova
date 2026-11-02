@@ -1,0 +1,3 @@
+@derive(Copy, Clone)
+@test
+fn t() { }

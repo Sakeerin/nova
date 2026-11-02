@@ -1,0 +1,2 @@
+fn main() { let a = true
+ println("${if a { 1 } else { 2 }}") }
