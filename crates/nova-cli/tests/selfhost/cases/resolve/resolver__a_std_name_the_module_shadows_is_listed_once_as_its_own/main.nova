@@ -1,0 +1,2 @@
+record Vec { n: Int }
+fn main() {}

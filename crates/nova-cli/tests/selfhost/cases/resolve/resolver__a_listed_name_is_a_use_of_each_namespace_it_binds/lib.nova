@@ -1,0 +1,3 @@
+pub fn area() -> Int { 1 }
+pub type Figure = | Round(Int) | Square(Int)
+pub trait Paint { fn paint(self) -> String }

@@ -1,0 +1,4 @@
+type Token =
+    | Number(Int)
+    | Word(String)
+fn main() {}

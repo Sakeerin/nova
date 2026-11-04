@@ -1,0 +1,5 @@
+type Token =
+    | Word(String)
+record JsonValue { x: Int }
+fn args() -> Int { 1 }
+fn main() {}

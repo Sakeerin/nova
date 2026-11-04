@@ -1,0 +1,11 @@
+fn alpha() -> Int { 10 }
+fn beta() -> Int { 20 }
+fn gamma() -> Int { 30 }
+fn delta() -> Int { 40 }
+fn epsilon() -> Int { 50 }
+record Zeta { y: Int }
+record Eta { y: Int }
+trait Tau {}
+trait Sigma {}
+import lib
+fn main() { }

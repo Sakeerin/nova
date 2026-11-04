@@ -1,0 +1,2 @@
+record Future { v: Bool }
+fn main() { }

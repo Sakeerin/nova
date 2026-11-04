@@ -1,0 +1,2 @@
+type Int = | A | B
+fn main() { }

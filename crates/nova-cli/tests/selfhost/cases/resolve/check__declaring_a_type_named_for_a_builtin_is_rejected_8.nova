@@ -1,0 +1,2 @@
+type Char = | A | B
+fn main() { }

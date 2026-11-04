@@ -1,0 +1,7 @@
+trait Tr {}
+
+impl Tr for fn(Int) -> Int {}
+impl Tr for fn(Int) -> Int { fn a(self) {} }
+impl Tr for () { fn b(self) {} }
+
+fn main() {}

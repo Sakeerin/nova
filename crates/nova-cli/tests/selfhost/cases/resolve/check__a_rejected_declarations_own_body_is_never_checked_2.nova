@@ -1,0 +1,2 @@
+type Bool = | A(Nope) | B
+fn main() { }

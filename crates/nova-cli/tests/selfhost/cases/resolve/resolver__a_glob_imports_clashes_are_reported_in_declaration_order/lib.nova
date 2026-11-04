@@ -1,0 +1,9 @@
+pub fn alpha() -> Int { 1 }
+pub fn beta() -> Int { 2 }
+pub fn gamma() -> Int { 3 }
+pub fn delta() -> Int { 4 }
+pub fn epsilon() -> Int { 5 }
+pub record Zeta { x: Int }
+pub record Eta { x: Int }
+pub trait Tau {}
+pub trait Sigma {}

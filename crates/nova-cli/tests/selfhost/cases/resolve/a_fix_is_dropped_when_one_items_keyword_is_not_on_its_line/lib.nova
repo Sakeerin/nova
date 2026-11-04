@@ -1,0 +1,3 @@
+fn secret() {}
+const
+  secret: Int = 1

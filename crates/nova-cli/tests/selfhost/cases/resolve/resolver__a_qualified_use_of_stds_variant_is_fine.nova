@@ -1,0 +1,6 @@
+type Token =
+    | Number(Int)
+fn main() {
+    let j = JsonValue::Number(1.0)
+    let t = Number(1)
+}

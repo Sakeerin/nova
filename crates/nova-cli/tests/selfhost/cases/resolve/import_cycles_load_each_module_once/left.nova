@@ -1,0 +1,3 @@
+import right
+
+pub fn l() {}

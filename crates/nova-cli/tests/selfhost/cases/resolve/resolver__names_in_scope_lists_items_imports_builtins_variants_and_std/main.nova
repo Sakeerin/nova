@@ -1,0 +1,3 @@
+import lib::{area}
+record Point { x: Int }
+fn main() {}

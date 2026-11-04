@@ -1,0 +1,3 @@
+type Opt = | Some(Int) | None
+fn f(o: Opt) -> Int { match o { None => 0, Some(x) => x, None => 9 } }
+fn main() { }

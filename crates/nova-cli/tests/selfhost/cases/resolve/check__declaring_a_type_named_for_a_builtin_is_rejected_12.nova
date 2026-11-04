@@ -1,0 +1,2 @@
+type Future = | A | B
+fn main() { }

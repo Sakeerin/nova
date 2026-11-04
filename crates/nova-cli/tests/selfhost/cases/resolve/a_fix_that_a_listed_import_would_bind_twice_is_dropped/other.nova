@@ -1,0 +1,3 @@
+import lib::{secret}
+
+fn secret() -> Int { 2 }

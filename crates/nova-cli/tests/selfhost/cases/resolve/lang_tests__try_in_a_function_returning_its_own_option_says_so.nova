@@ -1,0 +1,8 @@
+type Option<T> =
+    | Some(T)
+    | None
+fn f(s: String) -> Option<Int> {
+    let i = s.index_of("b")?
+    Some(i)
+}
+fn main() {}
