@@ -12,6 +12,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+use clap::builder::{OsStringValueParser, TypedValueParser};
 use clap::Args;
 use nova_driver::{Outcome, Program, Roots};
 
@@ -475,6 +476,105 @@ pub fn check(cmd: CheckCmd) -> Result<()> {
             anyhow::bail!("found {errors} error{}", if errors == 1 { "" } else { "s" })
         }
     }
+}
+
+/// `nova check --dump-resolution …` (spec
+/// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+/// §3.4, ADR 0053 §1): the resolution dump, for the self-hosted resolver's
+/// differential test. Hidden, with no stability promise. It is taken only
+/// when `--dump-resolution` is the first argument after `check`
+/// ([`DumpResolutionCmd::from_args`]), and then parsed by this parser of
+/// its own: so [`CheckCmd`] stays as it was, and every other `nova check`
+/// command line is parsed, refused, suggested and helped exactly as
+/// before the flag. After the flag it takes `--std`, `--target native|wasm`
+/// and files, `--` before a file that starts with `-`, each option once;
+/// it refuses everything else, `--help` and `-h` included, in clap's words
+/// under the usage `nova check --dump-resolution`.
+#[derive(clap::Parser)]
+#[command(
+    name = "nova check --dump-resolution",
+    bin_name = "nova check --dump-resolution",
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct DumpResolutionCmd {
+    /// std's part of the dump, which is the same in every program for the
+    /// target, instead of a program's.
+    #[arg(long)]
+    std: bool,
+
+    /// The target whose std and rules the programs are resolved with.
+    #[arg(long, value_enum, default_value_t = TargetArg::Native)]
+    target: TargetArg,
+
+    /// Each a program's root. Taken as they are, so that an empty one is a
+    /// file that is not there.
+    #[arg(value_parser = OsStringValueParser::new().map(PathBuf::from))]
+    files: Vec<PathBuf>,
+}
+
+impl DumpResolutionCmd {
+    /// The hidden command, parsed from `args` (a process's arguments,
+    /// `argv[0]` first), when they are `check --dump-resolution` and more;
+    /// `None` for every other command line, which the ordinary parser
+    /// takes. A misuse after the flag exits as clap's errors do.
+    pub fn from_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Self> {
+        let mut args = args.into_iter().skip(1);
+        if args.next()? != "check" || args.next()? != "--dump-resolution" {
+            return None;
+        }
+        Some(<Self as clap::Parser>::parse_from(args))
+    }
+}
+
+/// Run [`DumpResolutionCmd`]: with `--std`, std's part for the target;
+/// otherwise, for each file, `== FILE` (the path as given), then its
+/// program's part, or `IOERR` and the error's kind for a root that cannot
+/// be read, after which the rest are dumped and the exit code is 2, as
+/// `parse --dump-ast` does. With neither a file nor `--std`, or with both,
+/// it prints one line to stderr, nothing to stdout, and exits 2, as N
+/// does.
+pub fn dump_resolution(cmd: DumpResolutionCmd) -> Result<()> {
+    let code = dump_resolution_code(&cmd)?;
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+fn dump_resolution_code(cmd: &DumpResolutionCmd) -> Result<i32> {
+    let target: nova_driver::Target = cmd.target.into();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if cmd.std {
+        if !cmd.files.is_empty() {
+            eprintln!("error: --dump-resolution --std takes no FILE");
+            return Ok(2);
+        }
+        out.write_all(nova_driver::dump_std_resolution(target).as_bytes())?;
+        out.flush()?;
+        return Ok(0);
+    }
+    if cmd.files.is_empty() {
+        eprintln!("error: --dump-resolution needs a FILE, or --std");
+        return Ok(2);
+    }
+    // std is parsed once for every program, as N parses it.
+    let dumps = nova_driver::ResolutionDumps::new(target);
+    let mut code = 0;
+    for file in &cmd.files {
+        writeln!(out, "== {}", file.display())?;
+        match dumps.dump(file) {
+            Ok(dump) => out.write_all(dump.as_bytes())?,
+            Err(e) => {
+                writeln!(out, "IOERR {}", crate::cmd::parse::io_kind_name(e.kind()))?;
+                code = 2;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(code)
 }
 
 #[cfg(test)]

@@ -98,15 +98,26 @@ enum Ran {
     Program(Box<cmd::run::Compiled>),
 }
 
+/// What a command line asks for: a command [`Cli`] parses, or the hidden
+/// `nova check --dump-resolution`, which has a parser of its own, so that
+/// `check`'s is as it was ([`cmd::run::DumpResolutionCmd`]).
+enum Job {
+    Cli(Command),
+    DumpResolution(cmd::run::DumpResolutionCmd),
+}
+
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let job = match cmd::run::DumpResolutionCmd::from_args(std::env::args_os()) {
+        Some(cmd) => Job::DumpResolution(cmd),
+        None => Job::Cli(Cli::parse().command),
+    };
     let filter = tracing_subscriber::EnvFilter::from_default_env()
         .add_directive(tracing::Level::WARN.into());
     // Under `nova lsp`, stdout carries only protocol messages, so logs (and
     // the `log` records tracing forwards, lsp-server's included) go to
     // stderr (spec docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md
     // §6.1). Every other command keeps its subscriber as it was.
-    if matches!(cli.command, Command::Lsp) {
+    if matches!(job, Job::Cli(Command::Lsp)) {
         tracing_subscriber::fmt()
             .with_env_filter(filter)
             .with_writer(std::io::stderr)
@@ -125,11 +136,13 @@ fn main() -> Result<()> {
     // as it did, with the exit code 101, and is not printed again. A
     // stack overflow aborts the process from either thread, and
     // `std::process::exit` ends it from either.
-    let command = cli.command;
     let thread = std::thread::Builder::new()
         .name("main".to_string())
         .stack_size(nova_driver::PIPELINE_STACK)
-        .spawn(move || dispatch(command));
+        .spawn(move || match job {
+            Job::Cli(command) => dispatch(command),
+            Job::DumpResolution(cmd) => Ran::Done(cmd::run::dump_resolution(cmd)),
+        });
     let ran = match thread {
         Ok(thread) => thread.join(),
         Err(e) => anyhow::bail!("could not start the compiler's thread: {e}"),

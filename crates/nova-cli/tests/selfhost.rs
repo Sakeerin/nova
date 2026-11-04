@@ -26,6 +26,12 @@
 //! big-stack thread, which keeps a panic's message and exit code, and
 //! leaves `nova run`'s program on the main thread.
 //!
+//! 5.2a (spec
+//! `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+//! §3.4; ADR 0053): S0's hidden `nova check --dump-resolution FILE…` and
+//! `--std`, absent from `--help`, with every other `check` command line
+//! parsed as before, a header per root and std's part its own.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -210,10 +216,22 @@ fn the_token_dump_flag_is_hidden() {
     if std::fs::hard_link(nova(), &renamed).is_err() {
         std::fs::copy(nova(), &renamed).expect("copy nova");
     }
-    let extra = Command::new(&renamed)
-        .args(["parse", "a.nova", "b.nova"])
-        .output()
-        .expect("run nova under another name");
+    // A copy, closed as it is, may still be open for writing in a child
+    // that another test's thread forked meanwhile and has not yet exec'd:
+    // running it then fails with ETXTBSY (26) until that child execs.
+    let mut tries = 0;
+    let extra = loop {
+        match Command::new(&renamed)
+            .args(["parse", "a.nova", "b.nova"])
+            .output()
+        {
+            Err(e) if cfg!(unix) && e.raw_os_error() == Some(26) && tries < 50 => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            out => break out.expect("run nova under another name"),
+        }
+    };
     let stderr = String::from_utf8_lossy(&extra.stderr);
     let usage = format!("\nUsage: nova-renamed{EXE_SUFFIX} parse [OPTIONS] <FILE>\n");
     assert!(stderr.contains(&usage), "{stderr}");
@@ -1342,4 +1360,237 @@ fn nova_run_runs_the_program_on_the_main_thread() {
     let (code, _, stderr) = run("deep.nova");
     assert_ne!(code, Some(0), "{stderr}");
     assert!(stderr.contains("has overflowed its stack"), "{stderr}");
+}
+
+// --- 5.2a: the resolution dump (spec
+// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+// §3.4, §3.5; ADR 0053) ---
+
+/// S0's arguments for the resolution dump, each file after them a
+/// program's root.
+const RESOLUTION_S0: &[&str] = &["check", "--dump-resolution"];
+
+/// `nova check`'s help names neither hidden flag, and every `nova check`
+/// command line whose first argument after `check` is not
+/// `--dump-resolution` is parsed as before the flags (ADR 0053 §1): each
+/// shape here gives the base's error, byte for byte, tips and usage line
+/// included, which names neither flag; with `--help` before the flag,
+/// `check`'s help. The dump's own parser refuses its misuses with one
+/// error and the exit code 2.
+#[test]
+fn the_resolution_dump_flags_are_hidden_and_refused_as_before() {
+    let help = Command::new(nova())
+        .args(["check", "--help"])
+        .output()
+        .expect("run nova check --help");
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    assert!(help.contains("--target"), "{help}");
+    assert!(!help.contains("dump-resolution"), "{help}");
+    assert!(!help.contains("--std"), "{help}");
+    let out = Command::new(nova())
+        .args(["check", "--help", "--dump-resolution"])
+        .output()
+        .expect("run nova check --help --dump-resolution");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), help);
+    // The base's errors: (arguments, the argument named, the usage line's
+    // arguments); a tip follows a refused flag, as clap gives it.
+    let (opts, file, target) = ("[OPTIONS] [FILE]", "<FILE>", "--target <TARGET> [FILE]");
+    for (args, named, usage) in [
+        (&["check", "a.nova", "b.nova"][..], "b.nova", opts),
+        (&["check", "a.nova", ""], "", opts),
+        (&["check", "--std"], "--std", opts),
+        (&["check", "--std", "a.nova"], "--std", opts),
+        (&["check", "--", "a.nova", "b.nova"], "b.nova", opts),
+        (
+            &["check", "--target", "wasm", "a.nova", "b.nova"],
+            "b.nova",
+            opts,
+        ),
+        (&["check", "a.nova", "--std"], "--std", file),
+        (&["check", "--st", "a.nova"], "--st", opts),
+        (&["check", "--stdd", "a.nova"], "--stdd", opts),
+        (&["check", "--std-part", "a.nova"], "--std-part", opts),
+        (&["check", "--dump", "a.nova"], "--dump", opts),
+        (&["check", "--dump-res", "a.nova"], "--dump-res", opts),
+        (
+            &["check", "--dump-resolutio", "a.nova"],
+            "--dump-resolutio",
+            opts,
+        ),
+        (&["check", "--std=1", "a.nova"], "--std", opts),
+        (
+            &["check", "--dump-resolution=1", "a.nova"],
+            "--dump-resolution",
+            opts,
+        ),
+        (&["check", "--std", "--std", "a.nova"], "--std", opts),
+        (
+            &["check", "a.nova", "b.nova", "--target", "bogus"],
+            "b.nova",
+            opts,
+        ),
+        (&["check", "--std", "--help"], "--std", opts),
+        (&["check", "--std", "-h"], "--std", opts),
+        (&["check", "a.nova", "b.nova", "--bogus"], "b.nova", opts),
+        (
+            &["check", "a.nova", "--dump-resolution"],
+            "--dump-resolution",
+            file,
+        ),
+        (
+            &["check", "--target", "native", "--dump-resolution", "a.nova"],
+            "--dump-resolution",
+            target,
+        ),
+    ] {
+        let out = Command::new(nova())
+            .args(args)
+            .output()
+            .expect("run nova check");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tip = if named.starts_with('-') {
+            format!("  tip: to pass '{named}' as a value, use '-- {named}'\n\n")
+        } else {
+            String::new()
+        };
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: unexpected argument '{named}' found\n\n{tip}\
+                 Usage: nova{EXE_SUFFIX} check {usage}\n\n\
+                 For more information, try '--help'.\n"
+            ),
+            "{args:?}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    // The dump's misuses, which the base has no form of.
+    for args in [
+        &["--stdd"][..],
+        &["--std", "--std"],
+        &["--target", "bogus", "a.nova"],
+        &["--help"],
+        &["-h"],
+        &["--dump-resolution", "a.nova"],
+    ] {
+        let out = Command::new(nova())
+            .args(RESOLUTION_S0)
+            .args(args)
+            .output()
+            .expect("run nova check --dump-resolution");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with("error: "), "{args:?}: {stderr}");
+        assert_eq!(stderr.matches("error:").count(), 1, "{args:?}: {stderr}");
+        // A usage line, when clap gives one, is the dump's own.
+        assert_eq!(
+            stderr.matches("Usage: ").count(),
+            stderr
+                .matches("Usage: nova check --dump-resolution ")
+                .count(),
+            "{args:?}: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+}
+
+/// Each root's part follows a header with its path as given; a root that
+/// cannot be read is `IOERR` and its kind, the rest are dumped, and the
+/// exit code is 2; a root in a package is `UNSUPPORTED package`; a program
+/// that fails to load holds the diagnostics so far; `--std` prints std's
+/// part for the target.
+#[test]
+fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
+    let dir = fresh_dir("resolution-headers");
+    std::fs::write(dir.join("a.nova"), "fn main() {}\n").expect("write a.nova");
+    std::fs::write(dir.join("b.nova"), "fn g( {").expect("write b.nova");
+    std::fs::create_dir_all(dir.join("pkg").join("src")).expect("create pkg/src");
+    std::fs::write(dir.join("pkg").join("nova.toml"), "").expect("write nova.toml");
+    std::fs::write(
+        dir.join("pkg").join("src").join("main.nova"),
+        "fn main() {}\n",
+    )
+    .expect("write pkg/src/main.nova");
+    let out = Command::new(nova())
+        .current_dir(&dir)
+        .args(RESOLUTION_S0)
+        .args(["a.nova", "missing.nova", "pkg/src/main.nova", "b.nova"])
+        .output()
+        .expect("run nova check --dump-resolution");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(2), "{stdout}");
+    assert!(
+        stdout.starts_with(
+            "== a.nova\n(Program target=native resolved=true\n  \
+             (Module 0 \"a\" package=None)\n  (StdStart module=1 def=1 item=1)\n  \
+             (Def.Fn u0 \"main\" \"a\":3..7 item=0)\n  (Scope 0\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  (Items 0..1 0))\n(Diagnostics)\n\
+             == missing.nova\nIOERR NotFound\n\
+             == pkg/src/main.nova\nUNSUPPORTED package\n\
+             == b.nova\n(Program target=native resolved=false\n  \
+             (Module 0 \"b\" package=None))\n(Diagnostics\n  \
+             (Error \"P0001\" \"expected identifier (in parameter name), found `{`\"\n    \
+             (Primary \"b\":6..7 \"here\"))\n"
+        ),
+        "{stdout}"
+    );
+    // A root that is not UTF-8 is `IOERR InvalidData`.
+    std::fs::write(dir.join("latin1.nova"), b"fn \xe9() {}\n").expect("write latin1.nova");
+    let out = run(&nova(), RESOLUTION_S0, &dir, &["latin1.nova".to_string()])
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(out.code, Some(2), "{}", out.stderr);
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "== latin1.nova\nIOERR InvalidData\n"
+    );
+    // No root: nothing printed, and 2; nor a root with `--std`.
+    for args in [&[][..], &["--std", "a.nova"]] {
+        let out = Command::new(nova())
+            .current_dir(&dir)
+            .args(RESOLUTION_S0)
+            .args(args)
+            .output()
+            .expect("run nova check --dump-resolution");
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    // An empty root is a file that is not there (ADR 0053 §1), not a
+    // refused argument.
+    let out = Command::new(nova())
+        .current_dir(&dir)
+        .args(RESOLUTION_S0)
+        .arg("")
+        .output()
+        .expect("run nova check --dump-resolution \"\"");
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "== \nIOERR NotFound\n"
+    );
+    assert!(out.stderr.is_empty());
+    for (target, head) in [
+        ("native", "(Std target=native modules=21 "),
+        ("wasm", "(Std target=wasm modules=16 "),
+    ] {
+        let out = Command::new(nova())
+            .args(RESOLUTION_S0)
+            .args(["--std", "--target", target])
+            .output()
+            .expect("run nova check --dump-resolution --std");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{target}");
+        assert!(stdout.starts_with(head), "{target}: {}", &stdout[..80]);
+        assert!(stdout.ends_with("))\n(Diagnostics)\n"), "{target}");
+        assert!(
+            !stdout.contains(" u"),
+            "{target}: std's part names a user definition"
+        );
+    }
 }

@@ -194,7 +194,7 @@ fn dump_each(files: &[&Path], dump: fn(&str) -> String) -> Result<i32> {
 /// The kind as std/io's `IoErrorKind` names it, so N's dump, whose reads
 /// fail with those kinds, prints the same word: the seven kinds it has, and
 /// `Other` for every other.
-fn io_kind_name(kind: std::io::ErrorKind) -> &'static str {
+pub(crate) fn io_kind_name(kind: std::io::ErrorKind) -> &'static str {
     use std::io::ErrorKind;
     match kind {
         ErrorKind::NotFound => "NotFound",
