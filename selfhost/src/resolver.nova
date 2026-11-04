@@ -1,0 +1,1486 @@
+// The item-level resolver: a port of crates/nova-resolver/src/lib.rs's
+// `resolve_program_for` and everything it calls, function by function and
+// with the same names, so that the two read side by side (spec
+// docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
+// §3.3, ADR 0053). It builds what S0's builds, the definitions and their
+// ids and names, each module's three namespaces, the exports, the tests
+// and the merged item list, and gives every diagnostic in S0's order; the
+// resolution dump (resolution_dump.nova) prints it, and the differential
+// in crates/nova-cli/tests/selfhost.rs holds it equal to S0's. A change to
+// how names resolve changes both resolvers in one pull request.
+//
+// The builtin table and the std tables are builtins.nova's. The Rust's
+// idioms, translated one way everywhere (ADR 0053 lists them):
+//
+// - `DefId`, `ModuleId` and `Option<u32>` package keys are `Int`s, -1 for
+//   none; `Builtin` is its index in `BUILTIN_VARIANTS`.
+// - A span carries no file in N, so each function that makes a definition
+//   or a diagnostic takes the label of its module's file, `file`, beside
+//   the spans of its tree.
+// - `FxHashMap`s looked up by name are `Map`s, never iterated into output;
+//   `Exports` keeps each namespace's names in the order they were exported
+//   (S0 since 5.2a), and every loop over exports follows those.
+// - `IndexMap<String, Span>` (the first definitions) is a `Map`: it is only
+//   looked up.
+// - A record is a reference, so `&mut definitions.modules[mid]` is
+//   `definitions.modules.at(mid)`, mutated through a `let mut`.
+// - std's modules are parsed once per process by the caller
+//   (`std_module`), not once per program: `resolve_program_for` takes them
+//   parsed, with their diagnostics, which it gives first, as S0's
+//   `resolve_program_with_std` takes `parse_std`'s.
+// - The language server's import occurrences (`imports`) are not built:
+//   the dump does not print them, and the server stays Rust.
+
+import ast
+import builtins
+import diagnostic
+import lexer
+import loader
+import parser
+import token
+
+// ---------------------------------------------------------------------------
+// The vocabulary
+// ---------------------------------------------------------------------------
+
+/// What a name in the value namespace resolves to (`Res`): a definition, a
+/// sum's variant (the sum and the variant's index) or a builtin.
+pub type Res = | ResDef(Int) | ResVariant(Int, Int) | ResBuiltin(Int)
+
+/// Who owns a method's body (`MethodOwner`).
+pub type MethodOwner = | MethodOwnerImpl | MethodOwnerTraitDefault
+
+/// A sum's variant (`VariantDef`).
+pub record VariantDef { pub name: String, pub file: String, pub span: Span, pub arity: Int }
+
+/// What a definition is (`DefKind`).
+pub type DefKind =
+    // item_index
+    | DefKindFn(Int)
+    // item_index, variants
+    | DefKindSum(Int, Vec<VariantDef>)
+    // item_index
+    | DefKindRecord(Int)
+    // item_index
+    | DefKindConst(Int)
+    // item_index
+    | DefKindTrait(Int)
+    // item_index, method_index, owner
+    | DefKindMethod(Int, Int, MethodOwner)
+    // item_index, fn_index
+    | DefKindExternFn(Int, Int)
+    // trait_def
+    | DefKindAssocType(Int)
+
+/// A definition (`Def`): its name, mangled for a method, where it is, and
+/// what it is.
+pub record Def { pub name: String, pub file: String, pub span: Span, pub kind: DefKind }
+
+/// One module's three namespaces (`ModuleScope`).
+pub record ModuleScope {
+    pub name: String,
+    pub values: Map<String, Res>,
+    pub types: Map<String, Int>,
+    pub traits: Map<String, Int>,
+}
+
+/// A module's public names (`Exports`), each namespace's names also in the
+/// order they were exported, which a glob import follows.
+pub record Exports {
+    pub values: Map<String, Res>,
+    pub types: Map<String, Int>,
+    pub traits: Map<String, Int>,
+    pub value_names: Vec<String>,
+    pub type_names: Vec<String>,
+    pub trait_names: Vec<String>,
+}
+
+/// Everything resolution built (`Definitions`).
+pub record Definitions {
+    pub defs: Vec<Def>,
+    pub modules: Vec<ModuleScope>,
+    pub item_module: Vec<Int>,
+    pub exports: Vec<Exports>,
+    pub importable: Vec<Vec<(String, Int)>>,
+    pub packages: Vec<Int>,
+    pub std_start: Int,
+    pub target: CompileTarget,
+    pub missing: Map<String, String>,
+}
+
+/// One module handed to the resolver (`ModuleSource`): its name, its file's
+/// label, its tree, what each import names by first segment, its source
+/// (for a fix), its package key (-1 for none) and what it could import.
+pub record ModuleSource {
+    pub name: String,
+    pub label: String,
+    pub file: File,
+    pub imports: Map<String, ImportTarget>,
+    pub text: Option<String>,
+    pub package: Int,
+    pub importable: Vec<(String, Int)>,
+}
+
+/// A module of no import table, source or package (`ModuleSource::new`).
+pub fn module_source(name: String, label: String, file: File) -> ModuleSource {
+    ModuleSource {
+        name: name,
+        label: label,
+        file: file,
+        imports: Map::new(),
+        text: None,
+        package: -1,
+        importable: Vec::new(),
+    }
+}
+
+/// A `@test` function (`TestFn`).
+pub record TestFn { pub def_id: Int, pub name: String, pub should_panic: Bool }
+
+/// A std module, parsed once per process (`std_module`'s result): its
+/// name, its file's label, its tree (`None` when it failed to parse) and
+/// its lex and parse diagnostics.
+pub record StdModule {
+    pub name: String,
+    pub label: String,
+    pub file: Option<File>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// What every program's resolution reads, made once per process: the
+/// target's std modules, parsed, `STD_MODULES` parsed (which only the WASM
+/// target's `missing` reads), and the builtin table.
+pub record StdSet {
+    pub modules: Vec<StdModule>,
+    pub natives: Vec<StdModule>,
+    pub builtins: BuiltinTable,
+}
+
+/// What `resolve_program_for` returns (`ProgramResolution`): the merged
+/// items, the user modules' newline splits with their files' labels, the
+/// definitions, the diagnostics and the tests.
+pub record ProgramResolution {
+    pub items: Vec<Spanned<Item>>,
+    pub newline_splits: Vec<(String, NewlineSplit)>,
+    pub definitions: Definitions,
+    pub diagnostics: Vec<Diagnostic>,
+    pub tests: Vec<TestFn>,
+}
+
+impl Exports {
+    /// No names yet (`Exports::default`).
+    pub fn new() -> Exports {
+        Exports {
+            values: Map::new(),
+            types: Map::new(),
+            traits: Map::new(),
+            value_names: Vec::new(),
+            type_names: Vec::new(),
+            trait_names: Vec::new(),
+        }
+    }
+
+    /// Export `name` as a value (`export_value`).
+    pub fn export_value(mut self, name: String, res: Res) {
+        if self.values.insert(name, res).is_none() { self.value_names.push(name) }
+    }
+
+    /// Export `name` as a type (`export_type`).
+    pub fn export_type(mut self, name: String, id: Int) {
+        if self.types.insert(name, id).is_none() { self.type_names.push(name) }
+    }
+
+    /// Export `name` as a trait (`export_trait`).
+    pub fn export_trait(mut self, name: String, id: Int) {
+        if self.traits.insert(name, id).is_none() { self.trait_names.push(name) }
+    }
+
+    /// The exported values, in the order they were exported
+    /// (`values_in_order`).
+    pub fn values_in_order(self) -> Vec<(String, Res)> {
+        let mut out: Vec<(String, Res)> = Vec::new()
+        for n in self.value_names.iter() { out.push((n, self.value(n))) }
+        out
+    }
+
+    /// The exported types, in the order they were exported
+    /// (`types_in_order`).
+    pub fn types_in_order(self) -> Vec<(String, Int)> {
+        let mut out: Vec<(String, Int)> = Vec::new()
+        for n in self.type_names.iter() { out.push((n, self.type_of(n))) }
+        out
+    }
+
+    /// The exported traits, in the order they were exported
+    /// (`traits_in_order`).
+    pub fn traits_in_order(self) -> Vec<(String, Int)> {
+        let mut out: Vec<(String, Int)> = Vec::new()
+        for n in self.trait_names.iter() { out.push((n, self.trait_of(n))) }
+        out
+    }
+
+    /// What the exported value `name` resolves to; it is exported.
+    pub fn value(self, name: String) -> Res { self.values.get(name).unwrap() }
+
+    /// The exported type `name`; it is exported.
+    pub fn type_of(self, name: String) -> Int { self.types.get(name).unwrap() }
+
+    /// The exported trait `name`; it is exported.
+    pub fn trait_of(self, name: String) -> Int { self.traits.get(name).unwrap() }
+}
+
+/// A scope of no name yet, `ModuleScope { name, ..Default::default() }`.
+fn new_scope(name: String) -> ModuleScope {
+    ModuleScope { name: name, values: Map::new(), types: Map::new(), traits: Map::new() }
+}
+
+/// `push_def`: the new definition's id is its index.
+fn push_def(mut defs: Vec<Def>, def: Def) -> Int {
+    let id = defs.len()
+    defs.push(def)
+    id
+}
+
+/// A definition's item index; an associated type, which has none, gives
+/// -1.
+pub fn item_index_of(kind: DefKind) -> Int {
+    match kind {
+        DefKindFn(i) => i
+        DefKindSum(i, _) => i
+        DefKindRecord(i) => i
+        DefKindConst(i) => i
+        DefKindTrait(i) => i
+        DefKindMethod(i, _, _) => i
+        DefKindExternFn(i, _) => i
+        DefKindAssocType(_) => -1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// std's modules
+// ---------------------------------------------------------------------------
+
+/// Lex and parse a std module's `source`, whose file is labelled `label`
+/// (`std_module`): its tree and its diagnostics, L0001 for each lex error
+/// and the parser's code for each parse error, each with its notes.
+pub fn std_module(name: String, label: String, source: String) -> StdModule {
+    let (tokens, lex_errors) = lex(source)
+    let mut diags: Vec<Diagnostic> = Vec::new()
+    for e in lex_errors.iter() { diags.push(error_at("L0001", "${e}", label, e.span(), "here")) }
+    let (ast, parse_errors) = parse(tokens)
+    for e in parse_errors.iter() {
+        let mut d = error_at(e.code(), "${e}", label, e.span(), "here")
+        for n in e.notes().iter() { d.add_note(n) }
+        diags.push(d)
+    }
+    StdModule { name: name, label: label, file: Some(ast), diagnostics: diags }
+}
+
+/// A std module's file label, as the driver registers it: `$std.core` is
+/// `<std/core>`.
+pub fn std_label(name: String) -> String {
+    let short = if name.starts_with("$std.") { name.slice(5, name.len()) } else { name }
+    "<std/${short}>"
+}
+
+// ---------------------------------------------------------------------------
+// resolve_program_for
+// ---------------------------------------------------------------------------
+
+/// Resolve the program of `modules`, in load order, for `target`, with
+/// `std_set`'s std modules and builtins (`resolve_program_for`).
+pub fn resolve_program_for(
+    target: CompileTarget,
+    modules: Vec<ModuleSource>,
+    std_set: StdSet,
+) -> ProgramResolution {
+    let std = std_set.modules
+    let table = std_set.builtins
+    let mut definitions = Definitions {
+        defs: Vec::new(),
+        modules: Vec::new(),
+        item_module: Vec::new(),
+        exports: Vec::new(),
+        importable: Vec::new(),
+        packages: Vec::new(),
+        std_start: 0,
+        target: target,
+        missing: Map::new(),
+    }
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    let mut merged: Vec<Spanned<Item>> = Vec::new()
+    let mut tests: Vec<TestFn> = Vec::new()
+
+    // std's parse diagnostics first, as S0 gives them parsing each std
+    // module; a module that failed to parse is skipped.
+    for s in std.iter() { for d in s.diagnostics.iter() { diagnostics.push(d) } }
+
+    // std's modules go after the user's.
+    let user_count = modules.len()
+    let mut all: Vec<ModuleSource> = Vec::new()
+    for m in modules.iter() { all.push(m) }
+    for s in std.iter() {
+        match s.file {
+            Some(file) => all.push(module_source(s.name, s.label, file))
+            None => ()
+        }
+    }
+    let std_start = user_count
+
+    let mut exports: Vec<Exports> = Vec::new()
+
+    // A scope per module, seeded with the builtins: `GLOBAL` everywhere,
+    // `STD_ONLY` (and on WASM `WASM_ONLY`) in std's alone.
+    let mut mid = 0
+    while mid < all.len() {
+        let mut scope = new_scope(all.at(mid).name)
+        seed(scope, table, table.global)
+        if mid >= std_start {
+            seed(scope, table, table.std_only)
+            match target {
+                CompileTargetWasm => seed(scope, table, table.wasm_only)
+                CompileTargetNative => ()
+            }
+        }
+        definitions.modules.push(scope)
+        exports.push(Exports::new())
+        mid += 1
+    }
+
+    // Pass 1: each module's own definitions into its scope and exports.
+    mid = 0
+    while mid < all.len() {
+        let m = all.at(mid)
+        let first_value: Map<String, Span> = Map::new()
+        let first_type: Map<String, Span> = Map::new()
+        let before = diagnostics.len()
+        for item in m.file.items.iter() {
+            let item_index = merged.len()
+            definitions.item_module.push(mid)
+            collect_item(
+                definitions.defs,
+                definitions.modules.at(mid),
+                exports.at(mid),
+                first_value,
+                first_type,
+                diagnostics,
+                tests,
+                item_index,
+                item.value,
+                m.label,
+            )
+            merged.push(item)
+        }
+        if !owned(all, std_start, mid) { clear_fixes(diagnostics, before) }
+        mid += 1
+    }
+
+    // A WASM build links no C library, so an `extern` block can name
+    // nothing (E0090).
+    match target {
+        CompileTargetWasm => {
+            mid = 0
+            while mid < std_start {
+                let m = all.at(mid)
+                for item in m.file.items.iter() {
+                    match item.value {
+                        ItemExtern(_) => {
+                            diagnostics.push(
+                                error_at(
+                                    "E0090",
+                                    "extern functions are not available on target wasm",
+                                    m.label,
+                                    item.span,
+                                    "this `extern` block",
+                                ),
+                            )
+                        }
+                        _ => ()
+                    }
+                }
+                mid += 1
+            }
+        }
+        CompileTargetNative => ()
+    }
+
+    // Pass 2: the imports, binding other modules' public names.
+    let mut public_fixes: Vec<(Int, Int, String)> = Vec::new()
+    mid = 0
+    while mid < all.len() {
+        let m = all.at(mid)
+        let before = diagnostics.len()
+        for item in m.file.items.iter() {
+            match item.value {
+                ItemImport(imp) => resolve_import(
+                    definitions,
+                    exports,
+                    all,
+                    target,
+                    mid,
+                    imp,
+                    diagnostics,
+                    public_fixes,
+                )
+                _ => ()
+            }
+        }
+        if !owned(all, std_start, mid) { clear_fixes(diagnostics, before) }
+        mid += 1
+    }
+
+    // Making an item public must not bind its name into a module that
+    // already has it.
+    for (at, fix_target, name) in public_fixes.iter() {
+        let mut clash = false
+        let mut g = 0
+        while g < all.len() && !clash {
+            if g != fix_target
+                && would_receive(all.at(g), fix_target, name)
+                && binds(definitions.modules.at(g), name) {
+                clash = true
+            }
+            g += 1
+        }
+        if clash {
+            let mut d = diagnostics.at(at)
+            d.fixes = Vec::new()
+        }
+    }
+
+    // std's glob, last and lowest-priority: each std module's public names
+    // into every other module, but an imported std module's into none and
+    // `STD_INTERNAL`'s into std's alone.
+    mid = std_start
+    while mid < exports.len() {
+        let name = all.at(mid).name
+        if !is_imported_std_module(name) {
+            let from = if holds(STD_INTERNAL, name) { std_start } else { 0 }
+            import_std_module(definitions, exports.at(mid), mid, from)
+        }
+        mid += 1
+    }
+
+    // E0102: a variant of a program's own sum that hides one of std's.
+    for d in variant_shadowing(definitions, exports, all, std_start).iter() { diagnostics.push(d) }
+
+    // What a fix needs to know.
+    for m in all.iter() {
+        definitions.importable.push(m.importable)
+        definitions.packages.push(m.package)
+    }
+    definitions.std_start = std_start
+    definitions.exports = exports
+    definitions.missing = missing_names(target, std_set.natives)
+
+    // The newline rule's splits of the user's modules.
+    let mut splits: Vec<(String, NewlineSplit)> = Vec::new()
+    mid = 0
+    while mid < std_start && mid < all.len() {
+        let m = all.at(mid)
+        for s in m.file.newline_splits.iter() { splits.push((m.label, s)) }
+        mid += 1
+    }
+    ProgramResolution {
+        items: merged,
+        newline_splits: splits,
+        definitions: definitions,
+        diagnostics: diagnostics,
+        tests: tests,
+    }
+}
+
+// Bind each builtin of `builtins` by its name in `scope`'s values.
+fn seed(mut scope: ModuleScope, table: BuiltinTable, builtins: Vec<Int>) {
+    for b in builtins.iter() { let _ = scope.values.insert(table.names[b], ResBuiltin(b)) }
+}
+
+// Whether a fix may edit module `mid`: the root package's or a loose
+// program's (`owned` in `resolve_program_for`).
+fn owned(all: Vec<ModuleSource>, std_start: Int, mid: Int) -> Bool {
+    let package = all.at(mid).package
+    mid < std_start && (package == -1 || package == 0)
+}
+
+// Drop the fixes of the diagnostics from `before` on.
+fn clear_fixes(diagnostics: Vec<Diagnostic>, before: Int) {
+    let mut i = before
+    while i < diagnostics.len() {
+        let mut d = diagnostics.at(i)
+        d.fixes = Vec::new()
+        i += 1
+    }
+}
+
+/// Each variant std brings into every module, by name, with its sum's name:
+/// the first std module's to export it wins (`std_globbed_variants`).
+fn std_globbed_variants(
+    definitions: Definitions,
+    exports: Vec<Exports>,
+    all: Vec<ModuleSource>,
+    std_start: Int,
+) -> Map<String, String> {
+    let mut out: Map<String, String> = Map::new()
+    let mut mid = std_start
+    while mid < exports.len() {
+        let name = all.at(mid).name
+        if !is_imported_std_module(name) && !holds(STD_INTERNAL, name) {
+            let e = exports.at(mid)
+            for variant in e.value_names.iter() {
+                match e.value(variant) {
+                    ResVariant(sum, _) => {
+                        if !out.contains_key(variant) {
+                            let _ = out.insert(variant, definitions.defs.at(sum).name)
+                        }
+                    }
+                    _ => ()
+                }
+            }
+        }
+        mid += 1
+    }
+    out
+}
+
+/// E0102: each variant of a user module's own sum that hides a variant std
+/// brings into every module (`variant_shadowing`).
+fn variant_shadowing(
+    definitions: Definitions,
+    exports: Vec<Exports>,
+    all: Vec<ModuleSource>,
+    std_start: Int,
+) -> Vec<Diagnostic> {
+    let std_variants = std_globbed_variants(definitions, exports, all, std_start)
+    let mut out: Vec<Diagnostic> = Vec::new()
+    let mut mid = 0
+    while mid < std_start && mid < all.len() {
+        let m = all.at(mid)
+        for item in m.file.items.iter() {
+            match item.value {
+                ItemType(t) => {
+                    match t.def {
+                        TypeDefSum(variants) => {
+                            for v in variants.iter() {
+                                match std_variants.get(v.name.value) {
+                                    Some(sum) => {
+                                        let name = v.name.value
+                                        let mut d = Diagnostic::warning(
+                                            "E0102",
+                                            "variant `${name}` hides std's `${sum}::${name}`",
+                                        )
+                                        d.add_primary(m.label, v.name.span, "this variant")
+                                        d.add_note(
+                                            "in this module the bare name `${name}` now means this variant; std's is `${sum}::${name}`",
+                                        )
+                                        out.push(d)
+                                    }
+                                    None => ()
+                                }
+                            }
+                        }
+                        _ => ()
+                    }
+                }
+                _ => ()
+            }
+        }
+        mid += 1
+    }
+    out
+}
+
+/// The names of the std modules `target` does not compile, each with its
+/// module, for a message that says which (`missing_names`). Natively every
+/// std module compiles, so there are none; `natives` are `STD_MODULES`
+/// parsed.
+fn missing_names(target: CompileTarget, natives: Vec<StdModule>) -> Map<String, String> {
+    let compiled = std_modules(target)
+    let mut missing: Map<String, String> = Map::new()
+    for s in natives.iter() {
+        let mut skip = is_imported_std_module(s.name)
+        for (n, _) in compiled.iter() { if n == s.name { skip = true } }
+        if skip { continue }
+        let file = match s.file {
+            Some(f) => f
+            None => continue
+        }
+        let exp = Exports::new()
+        let mut i = 0
+        for item in file.items.iter() {
+            collect_item(
+                Vec::new(),
+                new_scope(""),
+                exp,
+                Map::new(),
+                Map::new(),
+                Vec::new(),
+                Vec::new(),
+                i,
+                item.value,
+                s.label,
+            )
+            i += 1
+        }
+        for n in exp.value_names.iter() {
+            if !missing.contains_key(n) { let _ = missing.insert(n, s.name) }
+        }
+        for n in exp.type_names.iter() {
+            if !missing.contains_key(n) { let _ = missing.insert(n, s.name) }
+        }
+        for n in exp.trait_names.iter() {
+            if !missing.contains_key(n) { let _ = missing.insert(n, s.name) }
+        }
+    }
+    missing
+}
+
+/// Bind std module `std_mid`'s exports into every other module from
+/// `from` on, where the name is not bound already (`import_std_module`).
+fn import_std_module(definitions: Definitions, std_exports: Exports, std_mid: Int, from: Int) {
+    let values = std_exports.values_in_order()
+    let types = std_exports.types_in_order()
+    let traits = std_exports.traits_in_order()
+    let mut mid = from
+    while mid < definitions.modules.len() {
+        if mid != std_mid {
+            let mut scope = definitions.modules.at(mid)
+            for (n, r) in values.iter() {
+                if !scope.values.contains_key(n) { let _ = scope.values.insert(n, r) }
+            }
+            for (n, id) in types.iter() {
+                if !scope.types.contains_key(n) { let _ = scope.types.insert(n, id) }
+            }
+            for (n, id) in traits.iter() {
+                if !scope.traits.contains_key(n) { let _ = scope.traits.insert(n, id) }
+            }
+        }
+        mid += 1
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pass 1: collect_item
+// ---------------------------------------------------------------------------
+
+/// Collect one item, the merged item `item_index` of the module whose
+/// scope, exports and first definitions are given and whose file is
+/// labelled `file` (`collect_item`).
+fn collect_item(
+    mut defs: Vec<Def>,
+    mut scope: ModuleScope,
+    mut exp: Exports,
+    mut first_value: Map<String, Span>,
+    mut first_type: Map<String, Span>,
+    mut diagnostics: Vec<Diagnostic>,
+    mut tests: Vec<TestFn>,
+    item_index: Int,
+    item: Item,
+    file: String,
+) {
+    match item {
+        ItemFunction(f) => {
+            let name = f.name.value
+            let span = f.name.span
+            let id = push_def(
+                defs,
+                Def { name: name, file: file, span: span, kind: DefKindFn(item_index) },
+            )
+            insert_value(
+                scope,
+                exp,
+                first_value,
+                diagnostics,
+                name,
+                span,
+                ResDef(id),
+                is_pub(f.vis),
+                file,
+            )
+            validate_test_function(f, id, diagnostics, tests, file)
+        }
+        ItemType(t) => {
+            validate_attrs_reject_test(t.attrs, "a type declaration", diagnostics, file)
+            match t.def {
+                TypeDefSum(variants) => {
+                    let name = t.name.value
+                    let span = t.name.span
+                    if reject_reserved_type_name(diagnostics, name, span, file) { return }
+                    let pubv = is_pub(t.vis)
+                    let mut variant_defs: Vec<VariantDef> = Vec::new()
+                    for v in variants.iter() {
+                        variant_defs.push(
+                            VariantDef {
+                                name: v.name.value,
+                                file: file,
+                                span: v.name.span,
+                                arity: v.fields.len(),
+                            },
+                        )
+                    }
+                    let id = push_def(
+                        defs,
+                        Def {
+                            name: name,
+                            file: file,
+                            span: span,
+                            kind: DefKindSum(item_index, variant_defs),
+                        },
+                    )
+                    insert_type(scope, exp, first_type, diagnostics, name, span, id, pubv, file)
+                    // Variants live in the value namespace and take the
+                    // type's visibility.
+                    let mut vi = 0
+                    for v in variants.iter() {
+                        insert_value(
+                            scope,
+                            exp,
+                            first_value,
+                            diagnostics,
+                            v.name.value,
+                            v.name.span,
+                            ResVariant(id, vi),
+                            pubv,
+                            file,
+                        )
+                        vi += 1
+                    }
+                }
+                TypeDefAlias(_) => {
+                    diagnostics.push(
+                        unsupported(
+                            file,
+                            t.name.span,
+                            "type aliases are not supported yet in the Phase 1 compiler",
+                        ),
+                    )
+                }
+            }
+        }
+        ItemConst(c) => {
+            validate_attrs_reject_test(c.attrs, "a const", diagnostics, file)
+            let name = c.name.value
+            let span = c.name.span
+            let id = push_def(
+                defs,
+                Def { name: name, file: file, span: span, kind: DefKindConst(item_index) },
+            )
+            insert_value(
+                scope,
+                exp,
+                first_value,
+                diagnostics,
+                name,
+                span,
+                ResDef(id),
+                is_pub(c.vis),
+                file,
+            )
+        }
+        ItemRecord(r) => {
+            validate_attrs_reject_test(r.attrs, "a record", diagnostics, file)
+            let name = r.name.value
+            let span = r.name.span
+            if reject_reserved_type_name(diagnostics, name, span, file) { return }
+            let id = push_def(
+                defs,
+                Def { name: name, file: file, span: span, kind: DefKindRecord(item_index) },
+            )
+            insert_type(scope, exp, first_type, diagnostics, name, span, id, is_pub(r.vis), file)
+        }
+        ItemTrait(t) => {
+            validate_attrs_reject_test(t.attrs, "a trait", diagnostics, file)
+            let name = t.name.value
+            let span = t.name.span
+            let pubv = is_pub(t.vis)
+            let id = push_def(
+                defs,
+                Def { name: name, file: file, span: span, kind: DefKindTrait(item_index) },
+            )
+            if scope.traits.contains_key(name) {
+                diagnostics.push(
+                    error_at("E0002", "duplicate trait `${name}`", file, span, "redefined here"),
+                )
+            } else {
+                let _ = scope.traits.insert(name, id)
+                if pubv { exp.export_trait(name, id) }
+            }
+            // Default-method bodies become method definitions, and each
+            // associated type a definition of its own.
+            let mut method_index = 0
+            for ti in t.items.iter() {
+                match ti {
+                    TraitItemProvided(f) => {
+                        let _ = push_def(
+                            defs,
+                            Def {
+                                name: "${t.name.value}::${f.name.value}$" + "default",
+                                file: file,
+                                span: f.name.span,
+                                kind: DefKindMethod(
+                                    item_index,
+                                    method_index,
+                                    MethodOwnerTraitDefault,
+                                ),
+                            },
+                        )
+                    }
+                    TraitItemAssocType(_, at_name, _) => {
+                        let _ = push_def(
+                            defs,
+                            Def {
+                                name: at_name.value,
+                                file: file,
+                                span: at_name.span,
+                                kind: DefKindAssocType(id),
+                            },
+                        )
+                    }
+                    TraitItemRequired(_) => ()
+                }
+                method_index += 1
+            }
+        }
+        ItemImpl(i) => {
+            validate_attrs_reject_test(i.attrs, "an impl block", diagnostics, file)
+            // Impls are bound into no scope.
+            let self_name = type_full_name(i.ty.value)
+            let mut method_index = 0
+            for f in i.functions.iter() {
+                let mangled = match i.trait_ {
+                    Some(tr) => "${self_name}.${path_tail(tr.value)}.${f.name.value}"
+                    None => "${self_name}.${f.name.value}"
+                }
+                let _ = push_def(
+                    defs,
+                    Def {
+                        name: mangled,
+                        file: file,
+                        span: f.name.span,
+                        kind: DefKindMethod(item_index, method_index, MethodOwnerImpl),
+                    },
+                )
+                method_index += 1
+            }
+        }
+        ItemExtern(block) => {
+            validate_attrs_reject_test(block.attrs, "an extern block", diagnostics, file)
+            // Each declaration binds as a private value under its C name.
+            let mut fn_index = 0
+            for ext_item in block.items.iter() {
+                match ext_item {
+                    ExternItemFn(sig) => {
+                        let name = sig.name.value
+                        let span = sig.name.span
+                        let id = push_def(
+                            defs,
+                            Def {
+                                name: name,
+                                file: file,
+                                span: span,
+                                kind: DefKindExternFn(item_index, fn_index),
+                            },
+                        )
+                        insert_value(
+                            scope,
+                            exp,
+                            first_value,
+                            diagnostics,
+                            name,
+                            span,
+                            ResDef(id),
+                            false,
+                            file,
+                        )
+                    }
+                }
+                fn_index += 1
+            }
+        }
+        ItemImport(imp) => {
+            // Otherwise pass 2's.
+            validate_attrs_reject_test(imp.attrs, "an import", diagnostics, file)
+        }
+        ItemModule(m) => validate_attrs_reject_test(
+            m.attrs,
+            "a module declaration",
+            diagnostics,
+            file,
+        )
+    }
+}
+
+/// E0089 when `name` is a built-in type's (`reject_reserved_type_name`):
+/// whether it was.
+fn reject_reserved_type_name(
+    mut diagnostics: Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    file: String,
+) -> Bool {
+    if !holds(RESERVED_TYPE_NAMES, name) { return false }
+    diagnostics.push(
+        error_at(
+            "E0089",
+            "`${name}` is already a built-in type; a type declared under this name could never be referred to in a type annotation, since `${name}` in a type position never resolves to a declaration under this name",
+            file,
+            span,
+            "redeclares a built-in type name",
+        ),
+    )
+    true
+}
+
+/// The attributes the compiler knows (`KNOWN_ATTRIBUTES`).
+const KNOWN_ATTRIBUTES: [String] = ["test"]
+
+/// The arguments `@test` takes (`KNOWN_TEST_ARGS`).
+const KNOWN_TEST_ARGS: [String] = ["should_panic"]
+
+/// E0084's note on an `async` test (`TEST_ASYNC_NOTE`).
+const TEST_ASYNC_NOTE: String = "an `async fn` returns a future, and a `@test` function's result is discarded rather than awaited, so an `async` test's body would never run; write the test as a synchronous one that drives the future itself, e.g. `@test fn t() { assert_eq(block_on(f()), 42) }` — `block_on` runs `f()`'s future to completion and produces its value"
+
+/// E0082 for `attr` (`unknown_attribute`).
+fn unknown_attribute(attr: Attribute, file: String) -> Diagnostic {
+    error_at(
+        "E0082",
+        "unknown attribute `@${attr.name.value}`; known attributes are: ${", ".join(KNOWN_ATTRIBUTES)}",
+        file,
+        attr.name.span,
+        "unknown attribute",
+    )
+}
+
+/// E0083 for a `@test` and E0082 for an unknown attribute on an item that
+/// is not a function, `kind` (`validate_attrs_reject_test`).
+fn validate_attrs_reject_test(
+    attrs: Vec<Attribute>,
+    kind: String,
+    mut diagnostics: Vec<Diagnostic>,
+    file: String,
+) {
+    for attr in attrs.iter() {
+        if attr.name.value == "test" {
+            diagnostics.push(
+                error_at(
+                    "E0083",
+                    "`@test` can only be applied to a function, not ${kind}",
+                    file,
+                    attr.name.span,
+                    "not a function",
+                ),
+            )
+        } else if !holds(KNOWN_ATTRIBUTES, attr.name.value) {
+            diagnostics.push(unknown_attribute(attr, file))
+        }
+    }
+}
+
+/// A function's attributes: E0082 with a fix for an unknown one, and for
+/// `@test`, E0085 for an unknown argument and E0084 for a shape a test may
+/// not have; a well-formed test is collected once
+/// (`validate_test_function`).
+fn validate_test_function(
+    f: Function,
+    def_id: Int,
+    mut diagnostics: Vec<Diagnostic>,
+    mut tests: Vec<TestFn>,
+    file: String,
+) {
+    let mut collected = false
+    for attr in f.attrs.iter() {
+        if attr.name.value != "test" {
+            let mut d = unknown_attribute(attr, file)
+            match change_to(file, attr.name, KNOWN_ATTRIBUTES) {
+                Some(fix) => d.add_fix(fix)
+                None => ()
+            }
+            diagnostics.push(d)
+            continue
+        }
+        let mut well_formed = true
+        let mut should_panic = false
+        for arg in attr.args.iter() {
+            if arg.value == "should_panic" {
+                should_panic = true
+            } else {
+                let mut d = error_at(
+                    "E0085",
+                    "unknown `@test` argument `${arg.value}`; the accepted arguments are: ${", ".join(KNOWN_TEST_ARGS)}",
+                    file,
+                    arg.span,
+                    "unknown argument",
+                )
+                match change_to(file, arg, KNOWN_TEST_ARGS) {
+                    Some(fix) => d.add_fix(fix)
+                    None => ()
+                }
+                diagnostics.push(d)
+                well_formed = false
+            }
+        }
+        let violations = test_shape_violations(f)
+        if !violations.is_empty() {
+            let mut names: Vec<String> = Vec::new()
+            for (name, _, _) in violations.iter() { names.push(name) }
+            let mut diag = error_at(
+                "E0084",
+                "a `@test` function may not have ${", ".join(names.to_array())}",
+                file,
+                f.name.span,
+                "invalid test signature",
+            )
+            for (name, has_span, span) in violations.iter() {
+                if has_span { diag.add_secondary(file, span, "${name} here") }
+            }
+            if f.is_async { diag.add_note(TEST_ASYNC_NOTE) }
+            diagnostics.push(diag)
+            well_formed = false
+        }
+        if well_formed && !collected {
+            tests.push(TestFn { def_id: def_id, name: f.name.value, should_panic: should_panic })
+            collected = true
+        }
+    }
+}
+
+/// What a `@test` function may not have, each with whether it has a span
+/// and the span (`test_shape_violations`).
+fn test_shape_violations(f: Function) -> Vec<(String, Bool, Span)> {
+    let mut violations: Vec<(String, Bool, Span)> = Vec::new()
+    if f.is_async { violations.push(("an `async` body", false, Span::point(0))) }
+    if !f.params.is_empty() {
+        violations.push(
+            ("parameters", true, f.params.at(0).name.span.merge(f.params.last().ty.span)),
+        )
+    }
+    if !f.generics.is_empty() {
+        violations.push(
+            (
+                "generic parameters",
+                true,
+                f.generics.at(0).name.span.merge(f.generics.last().name.span),
+            ),
+        )
+    }
+    match f.return_ty {
+        Some(rt) => {
+            let unit = match rt.value {
+                TypeTuple(items) => items.is_empty()
+                _ => false
+            }
+            if !unit { violations.push(("a non-Unit return type", true, rt.span)) }
+        }
+        None => ()
+    }
+    violations
+}
+
+// ---------------------------------------------------------------------------
+// Pass 2: resolve_import
+// ---------------------------------------------------------------------------
+
+/// Resolve module `mid`'s `imp` (`resolve_import`): find the module it
+/// names, then bind its public names, every one for a glob, or each listed
+/// one, reporting what it cannot.
+fn resolve_import(
+    definitions: Definitions,
+    exports: Vec<Exports>,
+    modules: Vec<ModuleSource>,
+    compile_target: CompileTarget,
+    mid: Int,
+    imp: Import,
+    mut diagnostics: Vec<Diagnostic>,
+    mut public_fixes: Vec<(Int, Int, String)>,
+) {
+    let file = modules.at(mid).label
+    let span = imp.path.span
+    let segments = imp.path.value.segments
+    let mut parts: Vec<String> = Vec::new()
+    for s in segments.iter() { parts.push(s.value) }
+    let joined = "::".join(parts.to_array())
+    // Only single-segment imports, and std's nested ones (`ui::html`).
+    if segments.len() > 1 && !is_imported_std_path(joined) {
+        let first = segments.at(0).value
+        if is_imported_std_path(first) {
+            diagnostics.push(
+                error_at("E0001", "cannot find module `${joined}`", file, span, "no such module"),
+            )
+        } else {
+            diagnostics.push(
+                unsupported(
+                    file,
+                    span,
+                    "qualified or nested import paths (`a::b`) are not supported yet; import a top-level module by its name",
+                ),
+            )
+        }
+        return
+    }
+    let target_name = joined
+    let target = match modules.at(mid).imports.get(target_name) {
+        Some(ImportTargetModule(t)) => t
+        Some(ImportTargetReported) => return
+        None => {
+            // An imported std module: the target's, or E0092.
+            if is_imported_std_path(target_name) {
+                let std_name = imported_std_module(target_name)
+                let found = module_named(modules, std_name)
+                if found < 0 {
+                    let t = compile_target_name(compile_target)
+                    diagnostics.push(
+                        error_at(
+                            "E0092",
+                            "`${target_name}` is a std module, which target ${t} does not have",
+                            file,
+                            span,
+                            "not on target ${t}",
+                        ),
+                    )
+                    return
+                }
+                found
+            } else {
+                diagnostics.push(
+                    error_at(
+                        "E0001",
+                        "cannot find module `${target_name}`",
+                        file,
+                        span,
+                        "no such module",
+                    ),
+                )
+                return
+            }
+        }
+    }
+    if target == mid {
+        diagnostics.push(
+            error_at("E0001", "module `${target_name}` imports itself", file, span, "self-import"),
+        )
+        return
+    }
+    let mut scope = definitions.modules.at(mid)
+    let e = exports.at(target)
+    match imp.kind {
+        ImportKindSimple => {
+            // A glob: every public name, in the order declared.
+            for (n, r) in e.values_in_order().iter() {
+                bind_value(scope, diagnostics, n, span, r, file)
+            }
+            for (n, id) in e.types_in_order().iter() {
+                bind_type(scope, diagnostics, n, span, id, file)
+            }
+            for (n, id) in e.traits_in_order().iter() {
+                bind_trait(scope, diagnostics, n, span, id, file)
+            }
+        }
+        ImportKindList(names) => {
+            for n in names.iter() {
+                let name = n.value
+                let mut found = false
+                match e.values.get(name) {
+                    Some(r) => {
+                        bind_value(scope, diagnostics, name, n.span, r, file)
+                        found = true
+                    }
+                    None => ()
+                }
+                match e.types.get(name) {
+                    Some(id) => {
+                        bind_type(scope, diagnostics, name, n.span, id, file)
+                        found = true
+                    }
+                    None => ()
+                }
+                match e.traits.get(name) {
+                    Some(id) => {
+                        bind_trait(scope, diagnostics, name, n.span, id, file)
+                        found = true
+                    }
+                    None => ()
+                }
+                if !found {
+                    let mut diag = error_at(
+                        "E0001",
+                        "`${name}` is not a public item of module `${target_name}`",
+                        file,
+                        n.span,
+                        "not found or not `pub`",
+                    )
+                    let same_package = modules.at(mid).package == modules.at(target).package
+                    match make_public(modules.at(target), name, target_name, same_package) {
+                        Some(fix) => {
+                            diag.add_fix(fix)
+                            public_fixes.push((diagnostics.len(), target, name))
+                        }
+                        None => ()
+                    }
+                    diagnostics.push(diag)
+                }
+            }
+        }
+        ImportKindAlias(_) => diagnostics.push(
+            unsupported(file, span, "`import ... as` aliases are not supported yet"),
+        )
+    }
+}
+
+// The index of the module named `name`, or -1.
+fn module_named(modules: Vec<ModuleSource>, name: String) -> Int {
+    let mut i = 0
+    while i < modules.len() {
+        if modules.at(i).name == name { return i }
+        i += 1
+    }
+    -1
+}
+
+/// Whether a visibility is `pub` (`is_pub`).
+fn is_pub(vis: Visibility) -> Bool {
+    match vis {
+        VisibilityPub => true
+        VisibilityPrivate => false
+    }
+}
+
+/// A fix that makes `name` public in `module`, which `import` names: `pub `
+/// before each private item of that name, when the module is of the same
+/// package and its source is known (`make_public`).
+fn make_public(
+    m: ModuleSource,
+    name: String,
+    import_path: String,
+    same_package: Bool,
+) -> Option<Fix> {
+    if !same_package { return None }
+    let text = m.text?
+    let mut edits: Vec<Edit> = Vec::new()
+    for item in m.file.items.iter() {
+        let (vis, item_name) = match item.value {
+            ItemFunction(f) => (f.vis, f.name)
+            ItemRecord(r) => (r.vis, r.name)
+            ItemType(t) => (t.vis, t.name)
+            ItemTrait(t) => (t.vis, t.name)
+            ItemConst(c) => (c.vis, c.name)
+            _ => continue
+        }
+        if item_name.value != name || is_pub(vis) { continue }
+        let at = keyword_start(text, item_name.span.start)?
+        edits.push(Edit::insert(at, m.label, "pub "))
+    }
+    if edits.is_empty() {
+        None
+    } else {
+        Some(Fix { title: "make `${name}` public in `${import_path}`", edits: edits })
+    }
+}
+
+/// Whether `module` imports module `target` whole, or `name` from it
+/// (`would_receive`).
+fn would_receive(m: ModuleSource, target: Int, name: String) -> Bool {
+    for item in m.file.items.iter() {
+        match item.value {
+            ItemImport(imp) => {
+                if imp.path.value.segments.len() != 1 { continue }
+                let first = imp.path.value.segments.at(0).value
+                let names_target = match m.imports.get(first) {
+                    Some(ImportTargetModule(t)) => t == target
+                    _ => false
+                }
+                if !names_target { continue }
+                match imp.kind {
+                    ImportKindSimple => return true
+                    ImportKindList(names) => {
+                        for n in names.iter() { if n.value == name { return true } }
+                    }
+                    _ => ()
+                }
+            }
+            _ => ()
+        }
+    }
+    false
+}
+
+/// Whether `scope` binds `name` in any namespace (`binds`).
+fn binds(scope: ModuleScope, name: String) -> Bool {
+    scope.values.contains_key(name)
+        || scope.types.contains_key(name)
+        || scope.traits.contains_key(name)
+}
+
+/// Bind a module's own value, E0002 if it is bound (`insert_value`): with
+/// the first definition as a secondary label, or a note when the first is
+/// a builtin.
+fn insert_value(
+    mut scope: ModuleScope,
+    mut exp: Exports,
+    mut first: Map<String, Span>,
+    mut diagnostics: Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    res: Res,
+    is_pub: Bool,
+    file: String,
+) {
+    if scope.values.contains_key(name) {
+        let mut diag = error_at(
+            "E0002",
+            "duplicate definition of `${name}`",
+            file,
+            span,
+            "redefined here",
+        )
+        match first.get(name) {
+            Some(prev) => diag.add_secondary(file, prev, "first defined here")
+            None => diag.add_note("`${name}` is a compiler builtin")
+        }
+        diagnostics.push(diag)
+        return
+    }
+    let _ = first.insert(name, span)
+    if is_pub { exp.export_value(name, res) }
+    let _ = scope.values.insert(name, res)
+}
+
+/// Bind a module's own type, E0002 if it is bound (`insert_type`).
+fn insert_type(
+    mut scope: ModuleScope,
+    mut exp: Exports,
+    mut first: Map<String, Span>,
+    mut diagnostics: Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    id: Int,
+    is_pub: Bool,
+    file: String,
+) {
+    if scope.types.contains_key(name) {
+        let mut diag = error_at(
+            "E0002",
+            "duplicate definition of type `${name}`",
+            file,
+            span,
+            "redefined here",
+        )
+        match first.get(name) {
+            Some(prev) => diag.add_secondary(file, prev, "first defined here")
+            None => ()
+        }
+        diagnostics.push(diag)
+        return
+    }
+    let _ = first.insert(name, span)
+    if is_pub { exp.export_type(name, id) }
+    let _ = scope.types.insert(name, id)
+}
+
+/// Bind an imported value, E0002 if it is bound (`bind_value`).
+fn bind_value(
+    mut scope: ModuleScope,
+    mut diagnostics: Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    res: Res,
+    file: String,
+) {
+    if scope.values.contains_key(name) {
+        diagnostics.push(
+            error_at(
+                "E0002",
+                "`${name}` is already defined or imported in this module",
+                file,
+                span,
+                "conflicting import",
+            ),
+        )
+        return
+    }
+    let _ = scope.values.insert(name, res)
+}
+
+/// Bind an imported type, E0002 if it is bound (`bind_type`).
+fn bind_type(
+    mut scope: ModuleScope,
+    mut diagnostics: Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    id: Int,
+    file: String,
+) {
+    if scope.types.contains_key(name) {
+        diagnostics.push(
+            error_at(
+                "E0002",
+                "type `${name}` is already defined or imported in this module",
+                file,
+                span,
+                "conflicting import",
+            ),
+        )
+        return
+    }
+    let _ = scope.types.insert(name, id)
+}
+
+/// Bind an imported trait, E0002 if it is bound (`bind_trait`).
+fn bind_trait(
+    mut scope: ModuleScope,
+    mut diagnostics: Vec<Diagnostic>,
+    name: String,
+    span: Span,
+    id: Int,
+    file: String,
+) {
+    if scope.traits.contains_key(name) {
+        diagnostics.push(
+            error_at(
+                "E0002",
+                "trait `${name}` is already defined or imported in this module",
+                file,
+                span,
+                "conflicting import",
+            ),
+        )
+        return
+    }
+    let _ = scope.traits.insert(name, id)
+}
+
+/// E0900 at `span` (`unsupported`).
+fn unsupported(file: String, span: Span, msg: String) -> Diagnostic {
+    error_at("E0900", msg, file, span, "not supported yet")
+}
+
+/// The name an impl's type gives its methods (`type_full_name`):
+/// `Option_T`, `Arr_Int`, `Tup2_Int_Int`, or `anon`.
+fn type_full_name(ty: Type) -> String {
+    match ty {
+        TypePath(path, args) => {
+            let head = path_tail(path)
+            if args.is_empty() {
+                head
+            } else {
+                let mut parts: Vec<String> = Vec::new()
+                for a in args.iter() { parts.push(type_full_name(a.value)) }
+                "${head}_${"_".join(parts.to_array())}"
+            }
+        }
+        TypeArray(elem) => "Arr_${type_full_name(elem.value)}"
+        TypeTuple(items) => {
+            if items.is_empty() {
+                "anon"
+            } else {
+                let mut parts: Vec<String> = Vec::new()
+                for a in items.iter() { parts.push(type_full_name(a.value)) }
+                "Tup${items.len()}_${"_".join(parts.to_array())}"
+            }
+        }
+        _ => "anon"
+    }
+}
+
+/// A path's last segment, or "" (`path_tail`).
+fn path_tail(path: Path) -> String {
+    if path.segments.is_empty() { "" } else { path.segments.last().value }
+}

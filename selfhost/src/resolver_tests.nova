@@ -1,0 +1,206 @@
+// N's own tests of the resolver's edges: a glob import's clashes in the
+// order declared, the method names an impl's type gives (which reach
+// symbols in 5.5), a builtin's name redefined, the fix that makes a private
+// item public, and the fix for a misspelt attribute. Each expected value is
+// what S0's resolver gives for the same source (its tests in
+// crates/nova-resolver/src/lib.rs, or `nova check --dump-resolution`); the
+// differential compares every other input, std's modules included, which
+// these leave out.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import ast
+import builtins
+import diagnostic
+import lexer
+import loader
+import parser
+import resolver
+import token
+
+// The program of `sources`, each `(name, source)` a module in that order,
+// resolved natively with no std module: each module's imports named as
+// S0's `name_imports` names them, by first segment among the modules'
+// names, and every other module importable.
+fn resolve_sources(sources: [(String, String)]) -> ProgramResolution {
+    let mut names: Vec<String> = Vec::new()
+    for (name, _) in sources.iter() { names.push(name) }
+    let mut modules: Vec<ModuleSource> = Vec::new()
+    let mut i = 0
+    for (name, source) in sources.iter() {
+        let (tokens, _) = lex(source)
+        let (file, errors) = parse(tokens)
+        if !errors.is_empty() { panic("a test source does not parse") }
+        let mut m = module_source(name, name, file)
+        m.text = Some(source)
+        for item in file.items.iter() {
+            match item.value {
+                ItemImport(imp) => {
+                    let first = imp.path.value.segments.at(0).value
+                    let mut j = 0
+                    while j < names.len() {
+                        if names.at(j) == first {
+                            let _ = m.imports.insert(first, ImportTargetModule(j))
+                        }
+                        j += 1
+                    }
+                }
+                _ => ()
+            }
+        }
+        let mut j = 0
+        while j < names.len() {
+            if j != i { m.importable.push((names.at(j), j)) }
+            j += 1
+        }
+        modules.push(m)
+        i += 1
+    }
+    let std_set = StdSet { modules: Vec::new(), natives: Vec::new(), builtins: builtin_table() }
+    resolve_program_for(CompileTargetNative, modules, std_set)
+}
+
+// The texts, one to a line, to compare.
+fn lines(texts: [String]) -> String { "\n".join(texts) }
+
+// Each diagnostic's message, in order.
+fn messages(r: ProgramResolution) -> [String] {
+    let mut out: Vec<String> = Vec::new()
+    for d in r.diagnostics.iter() { out.push(d.message) }
+    out.to_array()
+}
+
+@test
+fn a_glob_imports_clashes_are_reported_in_declaration_order() {
+    // S0's `a_glob_imports_clashes_are_reported_in_declaration_order`:
+    // values, then types, then traits, each in the order the imported
+    // module declared them, whatever a map's order.
+    let main = "fn alpha() -> Int { 10 }\nfn beta() -> Int { 20 }\nfn gamma() -> Int { 30 }\nfn delta() -> Int { 40 }\nfn epsilon() -> Int { 50 }\nrecord Zeta { y: Int }\nrecord Eta { y: Int }\ntrait Tau {}\ntrait Sigma {}\nimport lib\nfn main() { }\n"
+    let lib = "pub fn alpha() -> Int { 1 }\npub fn beta() -> Int { 2 }\npub fn gamma() -> Int { 3 }\npub fn delta() -> Int { 4 }\npub fn epsilon() -> Int { 5 }\npub record Zeta { x: Int }\npub record Eta { x: Int }\npub trait Tau {}\npub trait Sigma {}\n"
+    let r = resolve_sources([("main", main), ("lib", lib)])
+    assert_eq(
+        lines(messages(r)),
+        lines(
+            [
+                "`alpha` is already defined or imported in this module",
+                "`beta` is already defined or imported in this module",
+                "`gamma` is already defined or imported in this module",
+                "`delta` is already defined or imported in this module",
+                "`epsilon` is already defined or imported in this module",
+                "type `Zeta` is already defined or imported in this module",
+                "type `Eta` is already defined or imported in this module",
+                "trait `Tau` is already defined or imported in this module",
+                "trait `Sigma` is already defined or imported in this module",
+            ],
+        ),
+    )
+    // Each at the import's path.
+    let label = r.diagnostics.at(0).labels.at(0)
+    assert_eq(label.file, "main")
+    assert_eq(label.span.start, 206)
+    assert_eq(label.message, "conflicting import")
+}
+
+@test
+fn an_impls_type_names_its_methods() {
+    // `type_full_name`: a path's last segment and its arguments after `_`,
+    // `Arr_` for an array, `TupN_` for a tuple; a trait's method is
+    // `Self.Trait.method`, a default body `Trait::method$default`; an
+    // associated type is named after itself.
+    let source = "record P { x: Int }\ntrait Show {\n    type Item\n    fn twice(self) {}\n    fn shown(self) -> Int\n}\nimpl Show for P {\n    fn twice(self) {}\n}\nimpl<T> Option<T> {\n    fn is_it(self) {}\n}\nimpl Box<(Int, Float)> {\n    fn get(self) {}\n}\nimpl Wrap<[Int]> {\n    fn first(self) {}\n}\nfn main() {}\n"
+    let r = resolve_sources([("defs", source)])
+    let mut names: Vec<String> = Vec::new()
+    for d in r.definitions.defs.iter() { names.push(d.name) }
+    assert_eq(
+        lines(names.to_array()),
+        lines(
+            [
+                "P",
+                "Show",
+                "Item",
+                "Show::twice$" + "default",
+                "P.Show.twice",
+                "Option_T.is_it",
+                "Box_Tup2_Int_Float.get",
+                "Wrap_Arr_Int.first",
+                "main",
+            ],
+        ),
+    )
+    // The default body is the trait item's second, the impl's method its
+    // first.
+    match r.definitions.defs.at(3).kind {
+        DefKindMethod(item, method, MethodOwnerTraitDefault) => {
+            assert_eq(item, 1)
+            assert_eq(method, 1)
+        }
+        _ => assert(false, "unreachable")
+    }
+    match r.definitions.defs.at(2).kind {
+        DefKindAssocType(t) => assert_eq(t, 1)
+        _ => assert(false, "unreachable")
+    }
+}
+
+@test
+fn a_builtins_name_redefined_is_e0002_with_a_note() {
+    // A module's scope holds the global builtins before its items, so the
+    // first definition of `println` is the builtin: a note, not a
+    // secondary label. A std-only builtin's name is free outside std.
+    let r = resolve_sources([("main", "fn println() {}\nfn str_cmp() {}\nfn main() {}\n")])
+    assert_eq(lines(messages(r)), "duplicate definition of `println`")
+    let d = r.diagnostics.at(0)
+    assert_eq(d.labels.len(), 1)
+    assert_eq(lines(d.notes.to_array()), "`println` is a compiler builtin")
+}
+
+@test
+fn importing_a_private_item_offers_pub_where_its_keyword_starts() {
+    // `make_public`: `pub ` before each private item of the name, at its
+    // keyword (`async` for an `async fn`), in the imported module's file.
+    let lib = "async fn secret() -> Int { 2 }\nrecord secret2 {}\n"
+    let r = resolve_sources(
+        [("main", "import lib::{secret, secret2, nothing}\nfn main() {}\n"), ("lib", lib)],
+    )
+    assert_eq(
+        lines(messages(r)),
+        lines(
+            [
+                "`secret` is not a public item of module `lib`",
+                "`secret2` is not a public item of module `lib`",
+                "`nothing` is not a public item of module `lib`",
+            ],
+        ),
+    )
+    let fix = r.diagnostics.at(0).fixes.at(0)
+    assert_eq(fix.title, "make `secret` public in `lib`")
+    assert_eq(fix.edits.at(0).file, "lib")
+    assert_eq(fix.edits.at(0).span.start, 0)
+    assert_eq(fix.edits.at(0).span.end, 0)
+    assert_eq(fix.edits.at(0).text, "pub ")
+    assert_eq(r.diagnostics.at(1).fixes.at(0).edits.at(0).span.start, 31)
+    assert(r.diagnostics.at(2).fixes.is_empty(), "no fix")
+}
+
+@test
+fn an_unknown_attribute_on_a_function_offers_the_nearest_known_one() {
+    // On a function an unknown attribute's E0082 carries a fix when a known
+    // attribute is near (`suggest::change_to`); elsewhere it never does.
+    let r = resolve_sources(
+        [("main", "@tset\nfn main() {}\n@inline\nfn f() {}\n@tset\nrecord R {}\n")],
+    )
+    assert_eq(r.diagnostics.len(), 3)
+    let fix = r.diagnostics.at(0).fixes.at(0)
+    assert_eq(fix.title, "change `tset` to `test`")
+    assert_eq(fix.edits.at(0).span.start, 1)
+    assert_eq(fix.edits.at(0).span.end, 5)
+    assert(r.diagnostics.at(1).fixes.is_empty(), "no fix")
+    assert(r.diagnostics.at(2).fixes.is_empty(), "no fix")
+    // `suggest::closest`'s edges: a name equal ignoring case at any
+    // distance, the least distance, then byte order; a third of the length.
+    assert_eq(closest("HTTPCLIENT", ["HTTPCLIENTS", "HttpClient"]).unwrap_or("-"), "HttpClient")
+    assert_eq(closest("ab", ["ac", "aa"]).unwrap_or("-"), "aa")
+    assert_eq(closest("abcde", ["axxde"]).unwrap_or("-"), "-")
+    assert_eq(distance("cuont", "count"), 1)
+}
