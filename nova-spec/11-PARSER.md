@@ -493,6 +493,22 @@ FILE…` prints the same bytes, which the differential compares on every
 input; like the token dump, it changes with the tree, in both compilers
 at once.
 
+**Amended 2026-11-02 (branch `claude/loving-archimedes-frtf5q-52a`):**
+**the resolution dump**
+(`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+§3.4; ADR 0053, which writes its grammar out with an example of every
+form) joins the two, one stage on: `nova_resolver::dump` renders what
+the loader and the resolver built for a program in the AST dump's
+S-expression style: the modules and their imports, the definitions with
+their ids and mangled names, each module's namespaces sorted by name,
+the exports, the items and newline splits, then every diagnostic with
+its labels, notes and fixes. std's part, the same in every native
+program, is printed once, and a program's part names std's definitions
+by std-relative ids. The hidden `nova check --dump-resolution FILE…`
+(and `--std`) prints it, and the self-hosted resolver's `selfhost
+resolve --std DIR FILE…` (and `--std-part`) prints the same bytes; it
+changes with resolution, in both compilers at once.
+
 ---
 
 ## 5. Error Recovery

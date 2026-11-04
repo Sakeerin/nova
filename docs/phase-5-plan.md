@@ -412,6 +412,31 @@ arguments, a call's arguments being a level deeper than the call).
   soup); how deep the recursion goes before N's stack runs out.
 
 ### 5.2 — The resolver and HIR
+
+**Amended 2026-11-02 and 2026-11-03 (branch
+`claude/loving-archimedes-frtf5q-52a`):** by the user's decisions of
+2026-11-02
+(`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`)
+and their ruling of 2026-11-03 on three of the resolver's codes, 5.2 is
+**the loader and the resolver**, in two parts, and **HIR moves to 5.3**.
+HIR is the type checker's output in S0, built where paths, locals
+and types are resolved, so it is ported, and dumped, with the type
+checker; the gate below that names HIR dumps and E0001-class diagnostics
+(most of which are the type checker's "cannot find `x`") is 5.3's. 5.2
+ports what runs before the type checker: loading a program's modules,
+and the item-level resolver (definitions, imports, std's globs, the
+builtin table, std-only names and the resolver's codes), compared
+through a canonical resolution dump on both sides.
+- **5.2a** (ADR 0053): the dump; N's loader for loose programs (a root
+  and the sibling files it imports) and its resolver, with std read from
+  `--std DIR`; S0's glob-clash E0002s in declaration order; the
+  resolver's error cases and a name-level fuzzer. Of the resolver's 11
+  codes, the 8 that `check`'s native pipeline can give occur in 5.2a's
+  inputs; E0084 and E0085 (test mode) and E0090 (WASM) wait for 5.2b,
+  as the user chose on 2026-11-03.
+- **5.2b:** packages (`nova.toml`'s name and path dependencies, `src/`
+  and `tests/`, a dependency), the WASM target, test mode, and the live
+  heap's figures, recorded (decision 8).
 - **Modules:** loading a package's flat directory, std's 21 modules, the
   imports, scopes, and the builtin table.
 - **HIR,** and a canonical dump of resolution and HIR.
@@ -427,6 +452,13 @@ arguments, a call's arguments being a level deeper than the call).
   std-only names are tabled.
 
 ### 5.3 — The type checker
+
+**Amended 2026-11-02 (branch `claude/loving-archimedes-frtf5q-52a`):**
+5.3 also ports HIR (`nova-hir`, 810 code lines), which the type checker
+builds, with its dump, the type checker's own E0001s ("cannot find `x`
+in this scope"), and the type checker's method order, which follows a
+hash map in S0 (5.2's spec §2, §10).
+
 The largest part, 7,404 code lines; its spec may split it, for example:
 - **5.3a:** inference, expressions, patterns and exhaustiveness;
 - **5.3b:** traits and associated types, generics and bounds, and async
@@ -452,6 +484,12 @@ The largest part, 7,404 code lines; its spec may split it, for example:
   numbering of locals and blocks is deterministic enough to compare.
 
 ### 5.5 — The `.ll` emitter, the driver and linking
+
+**Amended 2026-11-02 (branch `claude/loving-archimedes-frtf5q-52a`):**
+5.2 ports the module loader (loose programs in 5.2a, packages in 5.2b),
+so the driver's item narrows to what 5.2 leaves: the command line and
+its exit codes, finding std next to the executable or in `$NOVA_HOME`,
+`clang` and `cc`, finding `libnova_runtime.a`, and linking.
 - **The emitter,** a port of `nova-codegen-llvm`, and `--emit-ll`.
 - **The driver:** the module loader, `clang` and `cc` through 5.0b's
   spawn, finding `libnova_runtime.a` as `link.rs` does, and the commands
