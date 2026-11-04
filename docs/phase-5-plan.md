@@ -437,6 +437,11 @@ through a canonical resolution dump on both sides.
 - **5.2b:** packages (`nova.toml`'s name and path dependencies, `src/`
   and `tests/`, a dependency), the WASM target, test mode, and the live
   heap's figures, recorded (decision 8).
+  **Done 2026-11-04 (ADR 0054):** N's reader of `nova.toml` reads also
+  the dev-dependencies, the entries' spans and whether each library
+  exists, and refuses what would give an M-code, which stays S0's; the
+  differential compares packages, the WASM target and test mode on both
+  sides; the live heap is recorded in ADR 0054 §10.
 - **Modules:** loading a package's flat directory, std's 21 modules, the
   imports, scopes, and the builtin table.
 - **HIR,** and a canonical dump of resolution and HIR.

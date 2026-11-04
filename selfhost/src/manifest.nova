@@ -83,7 +83,7 @@ const WINDOWS_DEVICES: [String] = [
 ]
 
 // A value this reader accepts: a string, an array of strings, or an
-// inline table of strings by key, and where it ends.
+// inline table of strings by key.
 type Value = | ValueString(String) | ValueArray(Vec<String>) | ValueTable(Vec<(String, String)>)
 
 /// The manifest `text` holds, or why this reader refuses it.

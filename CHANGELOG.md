@@ -220,7 +220,11 @@ resolver for loose programs and the resolution dump (spec
   `check` gives natively occurs. A change to how names resolve now
   changes both compilers in one pull request. With the debug runtime N
   resolves and dumps the corpus's loose programs 1.5 to 2.0× as slowly as
-  S0's debug build (ADR 0053).
+  S0's debug build (ADR 0053). From 5.2b N also loads a package's module
+  with its path dependencies, reading `nova.toml` with a minimal reader
+  of its own, and resolves for `--target wasm` and under `--test`, compared
+  with S0 on the corpus's packages, WASM programs and tests, the cases of
+  each mode and the fuzzer's (ADR 0054).
 
 ### Changed
 

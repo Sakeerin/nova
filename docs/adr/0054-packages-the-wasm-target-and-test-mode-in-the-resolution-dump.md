@@ -2,14 +2,14 @@
 
 ## Status
 
-Proposed (2026-11-04), part A of 5.2b's prototype, branch
-`proto/5-2b-whole`
+Proposed (2026-11-04), 5.2b's prototype, branch `proto/5-2b-whole`
 (`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
 §4). It extends ADR 0053, whose §1 grammar and examples stay as they were
 for 5.2a's forms: §1 here is what 5.2b adds to S0's dump and to the hidden
-form; §2 the cases; §3 the fuzzer; §4 the corpus. Part B (N's loader of
-packages, its WASM target and test mode, the differential on both sides,
-and the live heap's figures, spec §4.4) writes the sections after them.
+form; §2 the cases; §3 the fuzzer; §4 the corpus (part A, S0's side);
+§5 N's manifest reader and package graph; §6 what N ports and what it
+does not; §7 the differential on both sides; §8 the decisions part A took
+and the spec's correction; §9 CI's time; §10 the live heap (part B).
 
 **Why a new ADR, not ADR 0053 amended:** ADR 0053 records 5.2a's state,
 accepted and merged, and promises this one for 5.2b (its §2 and its
@@ -43,8 +43,7 @@ dropped, as `check` hides them; no input of the differential has one.
 **The graph's diagnostics** come first in `(Diagnostics`; with an error
 among them the program stops before the loader, `resolved=false` with no
 module, as `check` stops. They are nova-pm's (M-codes), which N's minimal
-manifest reader (spec §4.1: a package's name and its path dependencies)
-does not give: no case, corpus file or fuzz input has a manifest the graph
+manifest reader (§5) does not give: no case, corpus file or fuzz input has a manifest the graph
 warns about, so they are S0's alone, and the extraction drops such
 programs (§2).
 
@@ -66,9 +65,8 @@ labels show which package a module came from.
 **Paths in messages.** E0004's message names the sibling and the
 manifest by their paths, and a package module's E0093 its file, each as
 `Path::join` writes it from the root as given, with `\` on Windows, as
-5.2a's E0093 does (ADR 0053 §5). Part A compares no message across
-systems; part B settles it for N (a case that holds one, run from inside
-its package or compared with `\` read as `/` there).
+5.2a's E0093 does (ADR 0053 §5). The differential compares these two
+messages with `\` read as `/` on Windows (§7).
 
 **The WASM target.** `--target wasm` parsed in 5.2a and resolved with the
 WASM std, its 13 WASM-only builtins in std's scopes, `IMPORTED_STD`'s
@@ -339,7 +337,203 @@ files is replaced by floors on these counts.
 **Time (part A, S0 alone).** `selfhost.rs` ran in 36.7 and 38.0 s
 locally, against 20.8 and 21.0 s for the 27 tests 5.1 had, interleaved:
 1.76 and 1.81 times, where 5.2a measured 1.40 to 1.77. Part B adds N's
-side of every 5.2b input.
+side of every 5.2b input (§9).
+
+### 5. N's manifest reader and package graph
+
+`selfhost/src/manifest.nova` reads what the loader needs of a
+`nova.toml` and nothing more (decision 2 of §8): the package's name and
+where its `[package]` table is, and each entry of `[dependencies]` and
+`[dev-dependencies]` with its `path` and where its key is. That is more
+than the spec's "name and path dependencies" (§4.1): the dev-dependencies
+(a `tests/` module sees them, and `src/` gives E0001's note for one), the
+spans E0004 prints (its secondary label is the entry's key; its message
+names the entry's manifest and line), `[package]`'s span (the entry of the
+package itself, which a `tests/` module sees by its import name, so
+E0004 there labels the whole table, from its `[` to the end of its last
+value, as toml_edit spans it), and whether each package's `src/lib.nova`
+(and the root's `src/main.nova`) is a file. The M-codes stay S0's.
+
+**It accepts** comments, blank lines, `\r\n`, and the tables `[package]`,
+`[dependencies]` and `[dev-dependencies]`, each once, headers with
+spaces inside the brackets; bare keys; strings in `"..."` without an
+escape or in `'...'`; in `[package]` the keys nova-pm reads (`name`,
+`version` and `edition`, which must be there, `description`, `license`,
+`repository` as strings, `authors`, `keywords`, `categories` as arrays of
+strings on one line, a trailing comma allowed); in the dependency tables
+`key = { path = "..." }` on one line. **It refuses**, with a message,
+everything else: another table or key (which S0 warns about, M0006), a
+dotted or quoted key, an array of tables, a multi-line string, an escape,
+a number or a boolean, a version entry (which needs the registry), a
+`path` beside a `version`, a key written twice, a name nova-pm refuses
+(`check_name`: a letter first, ASCII letters, digits, `-` and `_`, at
+most 64, not a Windows device, not `dom` or `ui`), a version other than
+`MAJOR.MINOR.PATCH` (semver's pre-release and build parts included,
+which no manifest it reads has), an edition other than 2026.
+
+**The graph** (`loader.nova`'s `read_graph`) is nova-pm's walk: the
+root, then breadth first each package's entries, and the root's
+dev-dependencies after its dependencies, a package read once by its
+identity, its directory with `.` and `x/..` folded (nova-pm's
+`real_path`, which no link changes in any input), its key its index.
+Where nova-pm gives an error the graph refuses instead: a dependency's
+directory with no manifest (M0007), a key that is not the package's name
+(M0008), a dependency with no library (M0009), its own directory or a
+cycle of `[dependencies]` (M0010), two packages of one name (M0011), an
+import name that is a keyword, taken twice or the root's own (M0012),
+a root with neither a library nor a program (M0013). A refusal stops
+`selfhost resolve`: it prints `error: selfhost resolve cannot dump ROOT:
+WHY` on stderr, the manifest's path in WHY, and exits 1, having printed
+nothing of that root's part, never a partial dump; the roots before it
+were printed. A test pins it beside S0's M-code for the same root.
+
+### 6. What N ports, and what it does not
+
+N's loader (`load_program`, `Loader::find`, `has`, `visible_edges`,
+`clash`, `module_dir`, the labels and `root_place`) is
+`program.rs`'s, function for function, for the roots §1 takes: a loose
+file, or a file directly in a package's `src/` or `tests/`
+(`package_of`). A `Place` is a package (-1 for a loose file), whether it
+is in `tests/`, and a stem; modules are found in the same order, labelled
+as S0 labels them, keyed as S0 keys them (`package=`), and each import's
+E0004, E0093 and E0001 with its two notes is S0's, word for word. The
+driver's `strip_test_functions` takes `keep_root_tests`, and
+`name_tests` names a `tests/` file's tests `<file stem>::<function>`.
+`selfhost resolve` takes `--target native|wasm` and `--test`, each once,
+as the hidden form does, and refuses `--test --target wasm` with one line
+on stderr and the exit code 2, as S0 does. For the WASM target it parses
+`WASM_STD_MODULES` and also `STD_MODULES`, which `missing` reads, a file
+both name parsed once; under test mode `std/test` follows std's modules,
+labelled `<std/test>`. The resolver needed nothing new: 5.2a had ported
+the WASM builtins, `IMPORTED_STD`, E0090, E0092, `missing`, the `@test`
+checks (E0083 to E0085) and `TestFn`s, which no comparison had reached.
+
+**Not ported**, all S0's alone: the M-codes and every manifest the reader
+refuses (§5); registry packages, `nova.lock` and `project::sync`, which
+the dump never runs; doc tests (`RootKind::Doc`) and `nova test`'s
+whole-package program of several roots (decision 1); a registry
+package's dropped warnings (no input has one); a package found through a
+link that the folded path does not see.
+
+### 7. The differential on both sides
+
+Every input part A ran through S0 alone is now compared byte for byte
+with N, exit codes included: std's native, WASM and test-mode parts; the
+corpus natively, 251 loose programs and 67 files directly in a package's
+`src/` or `tests/` (318; part A counted 66, before
+`selfhost/src/manifest.nova`), its 39 WASM programs for the WASM target
+and its 9 files with tests under test mode; the cases, `resolve/` 141
+programs (38 a package's roots), `resolve-wasm/` 30 and `resolve-test/`
+126, and all of them again with `\r\n`; and the name fuzzer's fixed
+seeds: 150 loose inputs under `check` and under test mode, 60 WASM
+inputs and 90 package inputs. The floors part A set on these counts stay
+(240 loose, 60 package files in 10 directories, 35 WASM, 8 with tests;
+130, 25 and 115 cases), and so do the floors on codes, now over dumps
+both sides print: every one of the 11 codes, E0004 and both notes twice
+or more, E0084 and E0085 only under test mode, E0090 only for the WASM
+target, every `KINDS` form somewhere and no `LATER_KINDS` form. 5.2a's
+tests of refusals, roots and manifests compare N too: a package's root
+in the header test, roots in a package named from inside and outside it,
+`Nova.toml` on a case-folding disk, a linked, a dangling and an
+unlistable manifest; and both sides refuse no root under each mode, and
+`--test --target wasm` with a root or `--std`.
+
+**What the comparison found:** nothing. The first build of N's package
+loader and its WASM and test-mode switches agreed with S0 on every input
+above, so neither N nor S0's dump was changed by it; N's own tests found
+one wrong expectation in a test (the root package's library seen from
+`tests/` is labelled `lib`, as S0 labels it).
+
+**Paths on Windows** (decision 4). E0004's message names the sibling and
+the manifest by path, and E0093's the module it refuses, each as
+`Path::join` writes it, with `\` on Windows, which the dump escapes as
+`\x5c`, where N writes `/`. The harness compares these two messages with
+`\x5c` read as `/` on Windows (`compare::settle_paths`), and nothing else;
+a test checks the rule on every system. So the package inputs are
+compared on Windows too, not skipped.
+
+### 8. The decisions part A took, and the spec's correction
+
+1. **Roots are files:** a file directly in a package's `src/` or
+   `tests/`, or a loose program; `nova test`'s whole-package program is
+   not a root. If 5.5 needs it, the loader already takes one root per
+   call and the queue would start from several.
+2. **M-codes stay S0's.** N's reader is minimal, reads what §5 lists, and
+   refuses the rest; no comparison input has an M-code.
+3. **The spec's §4.1 note "a dependency without `src/lib.nova`"** is not
+   what happens: the graph refuses a dependency with no library first
+   (M0009). E0001's note "`<name>` has no src/lib.nova" comes only when a
+   package with no library is imported, by its own import name, from its
+   own `tests/`. The spec is left as approved; this is the correction.
+4. **Windows paths** are compared with `\` read as `/` (§7), as ADR 0053
+   settles paths, not skipped.
+5. **Test names** are `name_tests`'s, `<file stem>::<function>` for a
+   `tests/` file's.
+
+### 9. CI's time
+
+Measured locally (4 cores, Linux), the test binaries prebuilt, three
+interleaved rounds (`$P/proto52b/b-time.sh`): 5.1's 27 tests alone 23.7,
+23.8 and 22.3 s; part A's `selfhost.rs` 38.2, 38.8 and 38.4 s; part B's
+56.1, 50.1 and 51.8 s, 167 to 188 s of CPU, against part A's 119 to
+124 s. Part B is 2.1 to 2.4 times 5.1's tests, part A 1.6 to 1.7. N's
+side of what part A ran through S0 alone costs about 41 s of CPU, almost
+all the debug runtime's (`b-cpu.sh`): the 67 package files 12.0 s (the
+23 of `selfhost/src/`, each reaching most of N, 8.3 s), the cases under
+the three modes about 6.5 s and again with `\r\n`, the fuzzer's
+test-mode inputs 5.5 s, its WASM inputs 2.9 s and its package inputs
+3.6 s, the files with tests 3.0 s, the WASM corpus 1.4 s. The fuzzer's
+seeds and the CRLF cases' modes now run side by side, as the corpus's
+batches did; the run is bound by CPU, not by its longest test.
+
+**Projected,** by ADR 0053's method (CI's 5.1 time times the local
+ratio: 19.3 s on Linux, 19.45 s on Windows, 22.50 s on macOS), 41 to
+46 s on Linux and Windows and 47 to 53 s on macOS; by the local time
+with Windows at 1.3 times Linux, as part A warned, 65 to 73 s on Windows,
+past the spec's minute (risk 4), which the user is asked about. The
+cheapest cuts, each measured in two interleaved rounds against the full
+run's 51.2 and 51.2 s (`b-cuts.sh`, a temporary build of the harness):
+
+| cut | wall (s) | CPU saved (s) | what is lost |
+|---|---:|---:|---|
+| the package corpus's entry files only (`src/main.nova`, `src/lib.nova`: 12 of 67) | 54.6, 49.3 | 10–12 | 55 package roots, the modules they reach still compared from the entries |
+| `selfhost/src/` once, by its `main.nova` (45 of 67) | 50.3, 47.7 | 0–17 | 22 roots that `main.nova` reaches as modules |
+| one seed, not three, for the fuzzer's test-mode, WASM and package inputs | 49.4, 47.1 | 3–17 | 100 of 150 test-mode, 40 of 60 WASM and 60 of 90 package inputs; E0085 then occurs once, under the floor of 2 |
+
+Each saves 0 to 4 s of wall time here, inside the runs' own spread
+(50 to 56 s); together about 5 s. No cut is taken: the spec gives the
+choice to the user.
+
+### 10. The live heap (spec §4.4, phase plan decision 8)
+
+N resolving its largest inputs, measured locally as the research did
+(facts §6), with the debug runtime CI uses and a release runtime
+(`libnova_runtime.a` built `--release` into an isolated target dir and
+passed as `NOVA_RUNTIME_LIB`); peak RSS and wall time are the best of
+three by `wait4`; the pauses are timed with gdb from the entry of
+`nova_gc_collect_roots` to the return of `collect`, which ends with the
+mark and `Pages::sweep` (inlined in the release runtime, so the pause
+ends at the return of the allocation that triggered it); the live heap
+is the largest `NOVA_GC_DEBUG` reports after a collection. The script is
+`$P/proto52b/b-heap.sh`, with `b-gcpause.py`.
+
+| input | runtime | wall | peak RSS | collections | median pause | p95 | max | total GC | max live |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `selfhost/src/main.nova`, a package root, all 23 of N's modules | debug | 1.25 s | 32.8 MB | 15 | 16.8 ms | 83.8 ms | 102.3 ms | 462 ms | 9.9 MB |
+| std's native part (`--std-part`) | debug | 0.54 s | 16.9 MB | 12 | 12.8 ms | 41.8 ms | 57.2 ms | 224 ms | 6.7 MB |
+| std's WASM part (`--target wasm --std-part`) | debug | 0.61 s | 19.1 MB | 12 | 12.2 ms | 44.9 ms | 58.4 ms | 240 ms | 5.5 MB |
+| `selfhost/src/main.nova` | release | 0.29 s | 31.8 MB | 15 | 4.5 ms | 23.2 ms | 29.8 ms | 132 ms | 9.9 MB |
+| std's native part | release | 0.13 s | 16.1 MB | 12 | 5.4 ms | 10.7 ms | 16.8 ms | 70 ms | 6.7 MB |
+| std's WASM part | release | 0.14 s | 18.3 MB | 12 | 5.0 ms | 10.7 ms | 13.1 ms | 67 ms | 5.5 MB |
+
+No threshold is set. The pauses grow with the live heap, about 10 ms a
+live MB at the largest with the debug runtime and 3 ms with the release
+one, as the research found (7 to 8 and 2 to 3), and the collector takes
+37 to 45% of N's time on these inputs. For 5.3, which holds a type on
+every node of std as well, a live heap five to ten times this one would
+give pauses of about 0.5 to 1 s with the debug runtime and 0.15 to 0.3 s
+with a release one: slower runs, not a failure, since N is a batch
+compiler; the cost to watch is CI's time, not the pause.
 
 ## Consequences
 
@@ -347,5 +541,14 @@ side of every 5.2b input.
   path take, packages, the WASM target and test mode; `nova check`, its
   help and every command line without `--dump-resolution` first are the
   base's.
-- The differential's new inputs run through S0 alone until part B; part B
-  replaces each `s0_resolution` call with a comparison.
+- N loads and resolves the same roots as S0, packages, the WASM target and
+  test mode included, byte for byte in the dump, on every input the
+  differential holds; 5.2 is done, and 5.3 ports the type checker and HIR
+  on top of it.
+- N reads `nova.toml` through a reader of its own that refuses what it
+  does not read; the package graph's diagnostics stay S0's until a driver
+  needs them (5.5).
+- `selfhost.rs` takes 2.1 to 2.4 times 5.1's tests locally, which may put
+  CI's Windows leg past a minute (§9); the cuts are measured, and none is
+  taken without the user.
+- The live heap is recorded (§10), with no threshold.
