@@ -1,9 +1,9 @@
 // N, the self-hosted Nova compiler, so far its lexer, its parser, its
-// loader of loose programs and its resolver (spec
+// loader of programs and packages and its resolver (spec
 // docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
 // §3.2 and §4.3, ADR 0051 and ADR 0052; spec
 // docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
-// §3.4, ADR 0053).
+// §3.4 and §4, ADRs 0053 and 0054).
 //
 //   selfhost tokens FILE...   prints each file's token dump, after a header
 //                             line `== FILE`, as `nova parse --dump-tokens`
@@ -11,12 +11,16 @@
 //   selfhost ast FILE...      prints each file's AST dump, its tree and its
 //                             errors, after the same header, as
 //                             `nova parse --dump-ast` does
-//   selfhost resolve --std DIR FILE...
+//   selfhost resolve --std DIR [--target native|wasm] [--test] FILE...
 //                             prints the resolution dump of each program
 //                             whose root is FILE, after the same header,
 //                             as `nova check --dump-resolution` does, with
-//                             std's modules read from DIR once
-//   selfhost resolve --std DIR --std-part
+//                             std's modules read from DIR once: a loose
+//                             program, or a module of the package whose
+//                             `src/` or `tests/` FILE is directly in; for
+//                             the WASM target, or under test mode (`nova
+//                             test`'s resolution)
+//   selfhost resolve --std DIR [--target native|wasm] [--test] --std-part
 //                             prints std's part, as `nova check
 //                             --dump-resolution --std` does
 //
@@ -33,6 +37,7 @@ import lexer
 import lexer_tests
 import loader
 import loader_tests
+import manifest
 import parser_tests
 import resolution_dump
 import resolver
@@ -72,33 +77,67 @@ async fn main() {
     if failed { exit(2) }
 }
 
-// `selfhost resolve --std DIR (--std-part | FILE...)`: std's modules are
-// read from DIR and parsed once, then std's part, or each program's part
-// after its header. Without `--std DIR`, or with neither `--std-part` nor
-// a file, or with both, nothing is printed and the exit code is 2, as S0's
-// `check --dump-resolution` gives.
+// `selfhost resolve --std DIR [--target native|wasm] [--test]
+// (--std-part | FILE...)`: std's modules are read from DIR and parsed
+// once, then std's part, or each program's part after its header, for
+// the target, natively by default, under test mode with `--test`. Each
+// option is taken once. Without `--std DIR`, with a target other than
+// `native` or `wasm`, or with neither `--std-part` nor a file, or with
+// both, nothing is printed and the exit code is 2, as S0's `check
+// --dump-resolution` gives; `--test` with `--target wasm` too, which S0
+// refuses with one line, as `nova test` has no target. A root whose
+// package's manifest N's reader refuses, or whose package graph would
+// give an M-code, S0's alone, stops the run: N says why on stderr and
+// exits 1, printing nothing of that root's part.
 async fn resolve_command(argv: Vec<String>) {
+    let usage = "usage: selfhost resolve --std DIR [--target native|wasm] [--test] (--std-part | FILE...)"
     let mut std_dir = ""
+    let mut target_name = ""
+    let mut test = false
     let mut std_part = false
+    let mut bad = false
     let mut files: Vec<String> = Vec::new()
     let mut i = 2
     while i < argv.len() {
         let a = argv.at(i)
-        if a == "--std" && i + 1 < argv.len() {
-            std_dir = argv.at(i + 1)
+        if (a == "--std" || a == "--target") && i + 1 < argv.len() {
+            let value = argv.at(i + 1)
+            if a == "--std" {
+                if std_dir != "" { bad = true }
+                std_dir = value
+            } else {
+                if target_name != "" { bad = true }
+                target_name = value
+            }
             i += 2
             continue
         }
-        if a == "--std-part" { std_part = true } else { files.push(a) }
+        if a == "--std-part" {
+            if std_part { bad = true }
+            std_part = true
+        } else if a == "--test" {
+            if test { bad = true }
+            test = true
+        } else if a == "--target" {
+            bad = true
+        } else {
+            files.push(a)
+        }
         i += 1
     }
-    if std_dir == "" || std_part == !files.is_empty() {
-        eprintln("usage: selfhost resolve --std DIR (--std-part | FILE...)")
+    let target = if target_name == "wasm" { CompileTargetWasm } else { CompileTargetNative }
+    if target_name != "" && target_name != "native" && target_name != "wasm" { bad = true }
+    if bad || std_dir == "" || std_part == !files.is_empty() {
+        eprintln(usage)
         exit(2)
         return
     }
-    let target = CompileTargetNative
-    let modules = match load_std(std_dir, target).await {
+    if test && target_name == "wasm" {
+        eprintln("error: selfhost resolve --test is native only, as nova test is")
+        exit(2)
+        return
+    }
+    let std_set = match load_std(std_dir, target, test).await {
         Ok(s) => s
         Err(message) => {
             eprintln(message)
@@ -106,34 +145,80 @@ async fn resolve_command(argv: Vec<String>) {
             return
         }
     }
-    // Natively the target's std modules are `STD_MODULES`.
-    let std_set = StdSet { modules: modules, natives: modules, builtins: builtin_table() }
     if std_part {
         let resolved = resolve_program_for(target, Vec::new(), std_set)
-        print(dump_std(target, resolved, std_set.builtins))
+        print(dump_std(target, test, resolved, std_set.builtins))
         return
     }
     let mut failed = false
     for path in files.iter() {
-        match dump_resolution(path, target, std_set).await {
-            Ok(out) => print("== ${path}\n${out}")
-            Err(e) => {
+        match dump_resolution(path, target, test, std_set).await {
+            DumpedText(out) => print("== ${path}\n${out}")
+            DumpedIoError(e) => {
                 print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
                 failed = true
+            }
+            DumpedRefused(why) => {
+                eprintln("error: selfhost resolve cannot dump ${path}: ${why}")
+                exit(1)
+                return
             }
         }
     }
     if failed { exit(2) }
 }
 
-// The target's std modules, each read from under `dir` and parsed once,
-// in order, labelled as the driver registers them (`<std/core>`).
-async fn load_std(dir: String, target: CompileTarget) -> Result<Vec<StdModule>, String> {
+// What `dump_resolution` gives for one root: its part; the error that
+// kept its root from being read, `IOERR`; or why N refuses its package.
+type Dumped = | DumpedText(String) | DumpedIoError(IoError) | DumpedRefused(String)
+
+// What every program's resolution reads for `target`, under test mode
+// when `test`: the target's std modules, each read from under `dir` and
+// parsed once, labelled as the driver registers them (`<std/core>`), with
+// `std/test` after them under test mode, as `nova test` registers it;
+// `STD_MODULES`, parsed, which the WASM target's `missing` reads (a file
+// both lists name is parsed once); and the builtin table.
+async fn load_std(dir: String, target: CompileTarget, test: Bool) -> Result<StdSet, String> {
+    let mut parsed: Map<String, StdModule> = Map::new()
+    let natives = read_std_modules(dir, STD_MODULES, parsed).await?
+    let mut modules = match target {
+        CompileTargetNative => natives
+        CompileTargetWasm => read_std_modules(dir, WASM_STD_MODULES, parsed).await?
+    }
+    if test {
+        let mut with_test: Vec<StdModule> = Vec::new()
+        for m in modules.iter() { with_test.push(m) }
+        for m in read_std_modules(dir, [STD_TEST_MODULE], parsed).await?.iter() {
+            with_test.push(m)
+        }
+        modules = with_test
+    }
+    Ok(StdSet { modules: modules, natives: natives, builtins: builtin_table() })
+}
+
+// The std modules `list` names, in order, each read from under `dir` and
+// parsed, or taken from `parsed`, where each is kept by its file.
+async fn read_std_modules(
+    dir: String,
+    list: [(String, String)],
+    mut parsed: Map<String, StdModule>,
+) -> Result<Vec<StdModule>, String> {
     let mut out: Vec<StdModule> = Vec::new()
-    for (name, rel) in std_modules(target).iter() {
+    for (name, rel) in list.iter() {
+        match parsed.get(rel) {
+            Some(m) => {
+                out.push(m)
+                continue
+            }
+            None => ()
+        }
         let path = "${dir}/${rel}"
         match read_to_string(path).await {
-            Ok(source) => out.push(std_module(name, std_label(name), source))
+            Ok(source) => {
+                let m = std_module(name, std_label(name), source)
+                let _ = parsed.insert(rel, m)
+                out.push(m)
+            }
             Err(e) => return Err("error: cannot read std's ${path}: ${io_kind_name(e.kind)}")
         }
     }
@@ -141,23 +226,42 @@ async fn load_std(dir: String, target: CompileTarget) -> Result<Vec<StdModule>, 
 }
 
 // The resolution dump of the program whose root is `path`
-// (nova-driver's `dump_resolution`): `check`'s pipeline up to the
-// resolver. It loads the program, stops there on any error, strips the
-// `@test` functions and resolves; the dump holds what was built and every
-// diagnostic so far. A root directly in a package's `src/` or `tests/` is
-// `UNSUPPORTED package`, 5.2b's. `Err` when the root cannot be read.
+// (nova-driver's `ResolutionDumps::dump`): `check`'s pipeline up to the
+// resolver, or under test mode `nova test`'s. A root directly in a
+// package's `src/` or `tests/` is a module of that package, whose graph
+// is read from the manifests first; any other root is a loose program.
+// It loads the program, stops there on any error, strips the `@test`
+// functions, but under test mode the root package's and a loose
+// program's, and resolves; under test mode a `tests/` file's tests are
+// named for it. The dump holds what was built and every diagnostic so
+// far.
 async fn dump_resolution(
     path: String,
     target: CompileTarget,
+    test: Bool,
     std_set: StdSet,
-) -> Result<String, IoError> {
-    if in_package(path).await { return Ok("UNSUPPORTED package\n") }
-    let load = load_program(path).await?
+) -> Dumped {
+    let mut graph: Option<Graph> = None
+    let mut kind = RootLoose
+    match package_of(path).await {
+        Some((dir, k)) => {
+            match read_graph(dir).await {
+                Ok(g) => graph = Some(g)
+                Err(why) => return DumpedRefused(why)
+            }
+            kind = k
+        }
+        None => ()
+    }
+    let load = match load_program(graph, path, kind).await {
+        Ok(l) => l
+        Err(e) => return DumpedIoError(e)
+    }
     let modules = load.modules
     let mut diagnostics = load.diagnostics
     let mut failed = false
     for d in diagnostics.iter() { if d.is_error() { failed = true } }
-    if !failed { strip_test_functions(modules) }
+    if !failed { strip_test_functions(modules, test) }
     let mut sources: Vec<ModuleSource> = Vec::new()
     for m in modules.iter() {
         sources.push(
@@ -167,15 +271,38 @@ async fn dump_resolution(
                 file: m.ast,
                 imports: m.imports,
                 text: Some(m.text),
-                package: -1,
+                package: m.package,
                 importable: m.importable,
             },
         )
     }
-    if failed { return Ok(dump_program(target, sources, None, diagnostics, std_set.builtins)) }
+    if failed {
+        return DumpedText(dump_program(target, test, sources, None, diagnostics, std_set.builtins))
+    }
     let resolved = resolve_program_for(target, sources, std_set)
+    name_tests(resolved.tests, resolved.definitions, modules)
     for d in resolved.diagnostics.iter() { diagnostics.push(d) }
-    Ok(dump_program(target, sources, Some(resolved), diagnostics, std_set.builtins))
+    DumpedText(dump_program(target, test, sources, Some(resolved), diagnostics, std_set.builtins))
+}
+
+// Name each test of a module of a package's `tests/`
+// `<file stem>::<function>` (the driver's `name_tests`), as `nova test`'s
+// inventory names it.
+fn name_tests(tests: Vec<TestFn>, definitions: Definitions, modules: Vec<Loaded>) {
+    for t in tests.iter() {
+        if t.def_id < 0 || t.def_id >= definitions.defs.len() { continue }
+        let item = match definitions.defs.at(t.def_id).kind {
+            DefKindFn(i) => i
+            _ => continue
+        }
+        let mid = definitions.item_module.at(item)
+        if mid >= modules.len() { continue }
+        let m = modules.at(mid)
+        if m.test_file {
+            let mut named = t
+            named.name = "${module_name(m.path)}::${t.name}"
+        }
+    }
 }
 
 // The kind's name, as S0's dump prints it.

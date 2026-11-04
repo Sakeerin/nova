@@ -1,0 +1,372 @@
+// N's minimal `nova.toml` reader (spec
+// docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
+// §4.1, ADR 0054 §5): it reads what the loader needs of a manifest and
+// nothing more, the package's name and where its `[package]` table is,
+// and each path entry of `[dependencies]` and `[dev-dependencies]` with
+// where its key is. S0 reads `nova.toml` through nova-pm (`toml_edit`),
+// whose diagnostics (the M-codes) stay S0's alone: no input of the
+// differential has one. So this reader accepts a small part of TOML, the
+// part every manifest of the corpus, the cases and the fuzzer is written
+// in, and refuses the rest with a message, which the driver prints on
+// stderr before it exits non-zero, never printing a partial dump:
+//
+// - comments, blank lines, and the tables `[package]`, `[dependencies]`
+//   and `[dev-dependencies]`, each once;
+// - in `[package]`, the keys nova-pm reads (`PACKAGE_KEYS`): `name`,
+//   `version` and `edition`, which must be there, `description`,
+//   `license` and `repository` as strings, `authors`, `keywords` and
+//   `categories` as arrays of strings on one line;
+// - in the dependency tables, `key = { path = "..." }` on one line;
+// - bare keys, and strings in `"..."` without an escape or in `'...'`.
+//
+// Anything else, among it what S0 would warn about (an unknown key,
+// M0006) or reject (a version entry, which needs the registry; a name or
+// a version nova-pm refuses; an edition other than 2026), is refused.
+
+import builtins
+import lexer
+import token
+
+/// A path entry of `[dependencies]` or `[dev-dependencies]`
+/// (nova-pm's `Dependency`): its key, its `path`, and where its key is.
+pub record Dependency { pub name: String, pub path: String, pub span: Span }
+
+/// What the loader reads of a `nova.toml` (nova-pm's `Manifest`): the
+/// package's name, where `[package]` is, from its header to its last
+/// value, as toml_edit spans a table, and its path entries in the order
+/// they are written.
+pub record Manifest {
+    pub name: String,
+    pub span: Span,
+    pub dependencies: Vec<Dependency>,
+    pub dev_dependencies: Vec<Dependency>,
+}
+
+/// The keys of `[package]` nova-pm reads (`PACKAGE_KEYS`).
+const PACKAGE_KEYS: [String] = [
+    "name",
+    "version",
+    "edition",
+    "description",
+    "license",
+    "repository",
+    "authors",
+    "keywords",
+    "categories",
+]
+
+/// Names Windows reserves for devices, which no package may take
+/// (nova-pm's `WINDOWS_DEVICES`).
+const WINDOWS_DEVICES: [String] = [
+    "con",
+    "prn",
+    "aux",
+    "nul",
+    "com1",
+    "com2",
+    "com3",
+    "com4",
+    "com5",
+    "com6",
+    "com7",
+    "com8",
+    "com9",
+    "lpt1",
+    "lpt2",
+    "lpt3",
+    "lpt4",
+    "lpt5",
+    "lpt6",
+    "lpt7",
+    "lpt8",
+    "lpt9",
+]
+
+// A value this reader accepts: a string, an array of strings, or an
+// inline table of strings by key, and where it ends.
+type Value = | ValueString(String) | ValueArray(Vec<String>) | ValueTable(Vec<(String, String)>)
+
+/// The manifest `text` holds, or why this reader refuses it.
+pub fn parse_manifest(text: String) -> Result<Manifest, String> {
+    let n = text.byte_len()
+    let mut table = ""
+    let mut tables: Vec<String> = Vec::new()
+    let mut keys: Vec<String> = Vec::new()
+    let mut name = ""
+    let mut version = ""
+    let mut edition = ""
+    let mut package_start = -1
+    let mut package_end = -1
+    let mut dependencies: Vec<Dependency> = Vec::new()
+    let mut dev_dependencies: Vec<Dependency> = Vec::new()
+    let mut line_start = 0
+    while line_start < n {
+        let mut line_end = line_start
+        while line_end < n && text.byte_at(line_end) != 10 { line_end += 1 }
+        let mut end = line_end
+        if end > line_start && text.byte_at(end - 1) == 13 { end -= 1 }
+        let i = skip_space(text, line_start, end)
+        if i < end && text.byte_at(i) != 35 {
+            if text.byte_at(i) == 91 {
+                // A table's header.
+                let k = skip_space(text, i + 1, end)
+                let k_end = bare_key_end(text, k, end)
+                let close = skip_space(text, k_end, end)
+                if k == k_end || close >= end || text.byte_at(close) != 93 {
+                    return Err("only a `[table]` header of one bare key is read")
+                }
+                if !line_ends(text, close + 1, end) {
+                    return Err("only a comment may follow a table's header")
+                }
+                table = text.byte_slice(k, k_end)
+                if table != "package" && table != "dependencies" && table != "dev-dependencies" {
+                    return Err("the table `${table}` is not read")
+                }
+                if contains(tables, table) { return Err("the table `${table}` is written twice") }
+                tables.push(table)
+                if table == "package" { package_start = i }
+            } else {
+                // A key and its value.
+                let k_end = bare_key_end(text, i, end)
+                let eq = skip_space(text, k_end, end)
+                if k_end == i || eq >= end || text.byte_at(eq) != 61 {
+                    return Err("only `key = value` with a bare key is read")
+                }
+                let key = text.byte_slice(i, k_end)
+                let (value, value_end) = parse_value(text, skip_space(text, eq + 1, end), end)?
+                if !line_ends(text, value_end, end) {
+                    return Err("only a comment may follow the value of `${key}`")
+                }
+                if table == "" { return Err("the key `${key}` is outside every table") }
+                if contains(keys, "${table}.${key}") {
+                    return Err("the key `${table}.${key}` is written twice")
+                }
+                keys.push("${table}.${key}")
+                if table == "package" {
+                    package_end = value_end
+                    if !holds(PACKAGE_KEYS, key) {
+                        return Err("the key `package.${key}` is not read")
+                    }
+                    let is_array = key == "authors" || key == "keywords" || key == "categories"
+                    match value {
+                        ValueString(s) => {
+                            if is_array {
+                                return Err("`package.${key}` must be an array of strings")
+                            }
+                            if key == "name" { name = s }
+                            if key == "version" { version = s }
+                            if key == "edition" { edition = s }
+                        }
+                        ValueArray(_) => {
+                            if !is_array { return Err("`package.${key}` must be a string") }
+                        }
+                        ValueTable(_) => return Err("`package.${key}` may not be a table")
+                    }
+                } else {
+                    let path = match value {
+                        ValueTable(fields) => path_of(key, fields)?
+                        _ => return Err("dependency `${key}` must be `{ path = \"...\" }`")
+                    }
+                    let d = Dependency {
+                        name: key,
+                        path: path,
+                        span: Span { start: i, end: k_end },
+                    }
+                    if table == "dependencies" {
+                        dependencies.push(d)
+                    } else {
+                        dev_dependencies.push(d)
+                    }
+                }
+            }
+        }
+        line_start = line_end + 1
+    }
+    if package_start < 0 { return Err("there is no `[package]` table") }
+    for key in ["name", "version", "edition"].iter() {
+        if !contains(keys, "package.${key}") { return Err("`[package]` has no `${key}`") }
+    }
+    check_name(name)?
+    if !is_version(version) { return Err("`${version}` is not a version this reader takes") }
+    if edition != "2026" { return Err("unknown edition `${edition}`") }
+    Ok(
+        Manifest {
+            name: name,
+            span: Span { start: package_start, end: package_end },
+            dependencies: dependencies,
+            dev_dependencies: dev_dependencies,
+        },
+    )
+}
+
+/// A package's import name, its name with each `-` as `_` (nova-pm's
+/// `import_name`).
+pub fn import_name(name: String) -> String {
+    let mut out = StringBuilder::new()
+    let mut i = 0
+    while i < name.byte_len() {
+        let c = name.byte_at(i)
+        if c == 45 { out.push("_") } else { out.push(name.byte_slice(i, i + 1)) }
+        i += 1
+    }
+    out.to_string()
+}
+
+/// Whether `name` is one of Nova's keywords, which no import name may be
+/// (nova-pm's `is_keyword`).
+pub fn is_keyword(name: String) -> Bool { holds(KEYWORDS, name) }
+
+// The `path` of the dependency `key`'s inline table, which must hold it
+// alone: a `version` needs the registry, and any other key is M0006.
+fn path_of(key: String, fields: Vec<(String, String)>) -> Result<String, String> {
+    if fields.len() != 1 { return Err("dependency `${key}` must be `{ path = \"...\" }` alone") }
+    let (field, path) = fields.at(0)
+    if field != "path" { return Err("dependency `${key}` must be `{ path = \"...\" }`") }
+    Ok(path)
+}
+
+// nova-pm's `check_name`: ASCII letters, digits, `-` and `_`, starting
+// with a letter, at most 64 characters, not a Windows device name, and
+// not a std module's name.
+fn check_name(name: String) -> Result<(), String> {
+    let n = name.byte_len()
+    if n == 0 || n > 64 || !is_letter(name.byte_at(0)) {
+        return Err("package name `${name}` is not one this reader takes")
+    }
+    let mut i = 0
+    while i < n {
+        let c = name.byte_at(i)
+        if !(is_letter(c) || is_digit(c) || c == 45 || c == 95) {
+            return Err("package name `${name}` is not one this reader takes")
+        }
+        i += 1
+    }
+    if holds(WINDOWS_DEVICES, name.to_lower()) || name == "dom" || name == "ui" {
+        return Err("package name `${name}` is not one this reader takes")
+    }
+    Ok(())
+}
+
+// Whether `text` is `MAJOR.MINOR.PATCH`, each a number without a leading
+// zero, which semver takes: this reader refuses the pre-release and the
+// build parts semver also takes, which no manifest it reads has.
+fn is_version(text: String) -> Bool {
+    let parts = text.split(".")
+    if parts.len() != 3 { return false }
+    for p in parts.iter() {
+        let n = p.byte_len()
+        if n == 0 || (n > 1 && p.byte_at(0) == 48) { return false }
+        let mut i = 0
+        while i < n {
+            if !is_digit(p.byte_at(i)) { return false }
+            i += 1
+        }
+    }
+    true
+}
+
+// The value starting at `i`, before `end`, and where it ends: a string,
+// an array of strings, or an inline table of strings.
+fn parse_value(text: String, i: Int, end: Int) -> Result<(Value, Int), String> {
+    if i >= end { return Err("a key has no value") }
+    let c = text.byte_at(i)
+    if c == 34 || c == 39 {
+        let (s, after) = parse_string(text, i, end)?
+        return Ok((ValueString(s), after))
+    }
+    if c == 91 {
+        let mut items: Vec<String> = Vec::new()
+        let mut j = skip_space(text, i + 1, end)
+        while j < end && text.byte_at(j) != 93 {
+            let (s, after) = parse_string(text, j, end)?
+            items.push(s)
+            j = skip_space(text, after, end)
+            if j < end && text.byte_at(j) == 44 {
+                j = skip_space(text, j + 1, end)
+            } else if j >= end || text.byte_at(j) != 93 {
+                return Err("only an array of strings on one line is read")
+            }
+        }
+        if j >= end { return Err("only an array of strings on one line is read") }
+        return Ok((ValueArray(items), j + 1))
+    }
+    if c == 123 {
+        let mut fields: Vec<(String, String)> = Vec::new()
+        let mut j = skip_space(text, i + 1, end)
+        if j < end && text.byte_at(j) == 125 { return Ok((ValueTable(fields), j + 1)) }
+        while true {
+            let k_end = bare_key_end(text, j, end)
+            let eq = skip_space(text, k_end, end)
+            if k_end == j || eq >= end || text.byte_at(eq) != 61 {
+                return Err("only an inline table of bare keys and strings is read")
+            }
+            let key = text.byte_slice(j, k_end)
+            for (k, _) in fields.iter() {
+                if k == key { return Err("the key `${key}` is written twice") }
+            }
+            let (s, after) = parse_string(text, skip_space(text, eq + 1, end), end)?
+            fields.push((key, s))
+            j = skip_space(text, after, end)
+            if j < end && text.byte_at(j) == 125 { return Ok((ValueTable(fields), j + 1)) }
+            if j >= end || text.byte_at(j) != 44 {
+                return Err("only an inline table on one line is read")
+            }
+            j = skip_space(text, j + 1, end)
+        }
+    }
+    Err("only strings, arrays of strings and inline tables are read")
+}
+
+// The string starting at `i`, a quote, and where it ends: `"..."` with no
+// escape, or `'...'`, on one line, holding no control character.
+fn parse_string(text: String, i: Int, end: Int) -> Result<(String, Int), String> {
+    if i >= end { return Err("a string is missing") }
+    let quote = text.byte_at(i)
+    if quote != 34 && quote != 39 { return Err("only a string is read here") }
+    if i + 2 < end && text.byte_at(i + 1) == quote && text.byte_at(i + 2) == quote {
+        return Err("a multi-line string is not read")
+    }
+    let mut j = i + 1
+    while j < end && text.byte_at(j) != quote {
+        let c = text.byte_at(j)
+        if (c < 32 && c != 9) || c == 127 { return Err("a string holds a control character") }
+        if c == 92 && quote == 34 { return Err("a string's escape is not read") }
+        j += 1
+    }
+    if j >= end { return Err("a string is not closed on its line") }
+    Ok((text.byte_slice(i + 1, j), j + 1))
+}
+
+// `i` moved past spaces and tabs, but not to `end`.
+fn skip_space(text: String, i: Int, end: Int) -> Int {
+    let mut j = i
+    while j < end && (text.byte_at(j) == 32 || text.byte_at(j) == 9) { j += 1 }
+    j
+}
+
+// Where the bare key starting at `i` ends: past ASCII letters, digits,
+// `-` and `_`.
+fn bare_key_end(text: String, i: Int, end: Int) -> Int {
+    let mut j = i
+    while j < end {
+        let c = text.byte_at(j)
+        if !(is_letter(c) || is_digit(c) || c == 45 || c == 95) { break }
+        j += 1
+    }
+    j
+}
+
+// Whether only spaces, and then a comment, if any, are left of the line.
+fn line_ends(text: String, i: Int, end: Int) -> Bool {
+    let j = skip_space(text, i, end)
+    j >= end || text.byte_at(j) == 35
+}
+
+fn is_letter(c: Int) -> Bool { (c >= 65 && c <= 90) || (c >= 97 && c <= 122) }
+
+fn is_digit(c: Int) -> Bool { c >= 48 && c <= 57 }
+
+fn contains(list: Vec<String>, name: String) -> Bool {
+    for n in list.iter() { if n == name { return true } }
+    false
+}

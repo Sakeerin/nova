@@ -1,39 +1,56 @@
-// The loader of a loose program: a port of
-// crates/nova-driver/src/program.rs's `load_program` and `Loader` on the
-// loose path, and of the driver's `strip_test_functions` and `package_of`
-// (spec
+// The loader: a port of crates/nova-driver/src/program.rs's
+// `load_program` and `Loader`, of nova-pm's package graph as far as the
+// loader reads it, and of the driver's `strip_test_functions`, `name_tests`
+// and `package_of` (spec
 // docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
-// §3.2, ADR 0053). From the root it reads, lexes and parses every module
-// it reaches, breadth first, finding each single-segment import as a file
-// beside the root; the order of the modules is the order of that search,
-// and each module's label is its file's stem, as in S0. Packages
-// (`nova.toml`, `src/`, `tests/`, a dependency) are 5.2b's.
+// §3.2 and §4.1, ADRs 0053 and 0054). From the root it reads, lexes and
+// parses every module it reaches, breadth first: a loose program's
+// imports are files beside the root; a package's module's are files beside
+// it in its package's `src/` or `tests/`, or its package's dependencies'
+// `src/lib.nova`, which its `nova.toml` names (manifest.nova reads it).
+// The order of the modules is the order of that search, and each module's
+// label is S0's: its file's stem, `tests/<stem>` in the root package's
+// `tests/`, or a dependency's import name for its library and
+// `<import name>/<stem>` for its other modules.
 //
 // The Rust's idioms, translated:
 //
-// - A loose `Place` is a directory and a stem, and every module of a loose
-//   program is in the root's directory, so a place is its stem.
+// - A `Place` is a package (-1 for a loose file), whether it is in its
+//   package's `tests/`, and a stem; every module of a loose program is in
+//   the root's directory, so a loose place needs no directory. It is
+//   kept in maps by its `key`.
 // - `VecDeque` is a `Vec` and the index of its head.
 // - A path is a `String` with `/` between its parts, as `Path::join` and
 //   `Path::parent` treat one on Linux and macOS: `Path::join` writes `\`
-//   on Windows, which the harness keeps out of what it compares (ADR 0053
-//   §5).
+//   on Windows, where the harness reads `\` as `/` in the two messages
+//   that print a path, E0004's and E0093's (ADR 0054).
+// - A package's identity, `real_path` of its directory in nova-pm, is its
+//   directory with `.` and `x/..` folded away, which no link changes in
+//   any input of the differential.
+// - The graph's diagnostics, the M-codes, are S0's alone (ADR 0054 §5):
+//   where nova-pm would give one, or where the manifest reader refuses a
+//   manifest, `read_graph` is `Err`, and the driver prints the message and
+//   exits non-zero.
 
 import ast
 import builtins
 import diagnostic
 import lexer
+import manifest
 import parser
 import token
 
 /// One module the loader read (`Loaded`): its label, path, tree and
-/// source, what each of its imports names by first segment, and what it
-/// could import.
+/// source, its package (-1 for a loose module), whether its tests are
+/// named for its file (a module of a package's `tests/`), what each of
+/// its imports names by first segment, and what it could import.
 pub record Loaded {
     pub name: String,
     pub path: String,
     pub ast: File,
     pub text: String,
+    pub package: Int,
+    pub test_file: Bool,
     pub imports: Map<String, ImportTarget>,
     pub importable: Vec<(String, Int)>,
 }
@@ -47,36 +64,264 @@ pub record Load { pub modules: Vec<Loaded>, pub diagnostics: Vec<Diagnostic> }
 /// decides it, so the loader builds without the resolver.
 pub type ImportTarget = | ImportTargetModule(Int) | ImportTargetReported
 
+/// Where a root is (`RootKind`): directly in its package's `src/` or
+/// `tests/`, or in no package.
+pub type RootKind = | RootSrc | RootTests | RootLoose
+
+/// A dependency that resolved (nova-pm's `Edge`): the name its dependent
+/// imports it by, its package, the entry in the declaring manifest, and
+/// the declaring package, whose manifest that span is in.
+pub record Edge { pub import_name: String, pub package: Int, pub span: Span, pub declarer: Int }
+
+/// One package of a `Graph` (nova-pm's `GraphPackage`): its name and
+/// import name, its directory as the root's path and the entries spell
+/// it, its identity, its manifest (its path, its label in the dump, its
+/// text and where `[package]` is in it), whether it has a library, what
+/// the manifest reader read of it, and its edges; the dev-dependencies are
+/// read for the root alone.
+pub record GraphPackage {
+    pub name: String,
+    pub import_name: String,
+    pub dir: String,
+    pub canonical: String,
+    pub manifest_path: String,
+    pub label: String,
+    pub text: String,
+    pub span: Span,
+    pub has_lib: Bool,
+    pub manifest: Manifest,
+    pub dependencies: Vec<Edge>,
+    pub dev_dependencies: Vec<Edge>,
+}
+
+/// The root package, and every package its dependencies reach, the root
+/// first (nova-pm's `Graph`).
+pub record Graph { pub packages: Vec<GraphPackage> }
+
+// A module's identity (`Place`): its package, -1 for a loose file;
+// whether it is in its package's `tests/`; and its stem.
+record Place { package: Int, tests: Bool, stem: String }
+
 // What an import names before every module is loaded (`Pending`).
-type Pending = | PendingPlace(String) | PendingReported
+type Pending = | PendingPlace(Place) | PendingReported
 
 // What `find` found for one import (`Found`): a module, by its place and
 // path; an error, reported here; or nothing, which the resolver reports.
-type Found = | FoundModule(String, String) | FoundReported(Diagnostic) | FoundNothing
+type Found = | FoundModule(Place, String) | FoundReported(Diagnostic) | FoundNothing
 
-// The loader's state (`Loader`): the root's directory, and each stem's
-// answer to `has`, from one listing of the directory read once.
-record Loader { dir: String, listing: Vec<String>, listed: Bool, known: Map<String, Bool> }
+// The loader's state (`Loader`): the graph, if the program is a package's;
+// the loose root's directory; each directory's listing, read once; and
+// each `has` answered, by directory and stem.
+record Loader {
+    graph: Option<Graph>,
+    dir: String,
+    listings: Map<String, Vec<String>>,
+    known: Map<String, Bool>,
+}
 
-/// Read, lex and parse every module the loose program whose root is
-/// `root` reaches, breadth first (`load_program`). A module that cannot be
-/// read is skipped, so an import of it is "cannot find module"; `Err` only
-/// when the root cannot be read.
-pub async fn load_program(root: String) -> Result<Load, IoError> {
+// ---------------------------------------------------------------------------
+// The package graph
+// ---------------------------------------------------------------------------
+
+/// Read the package whose `nova.toml` is in `root`, "" for the current
+/// directory, and every package its path dependencies reach, breadth
+/// first (nova-pm's `graph`, and its `check_root`, `expand`, `edge`,
+/// `admit` and `cycles`). `Err`, saying why, wherever nova-pm would give
+/// an M-code or the manifest reader refuses a manifest.
+pub async fn read_graph(root: String) -> Result<Graph, String> {
+    let first = read_package(root, true).await?
+    if !first.has_lib && !is_file(path_join(path_join(root, "src"), "main.nova")).await {
+        return Err("package `${first.name}` has neither src/lib.nova nor src/main.nova (M0013)")
+    }
+    if first.has_lib && is_keyword(first.import_name) {
+        return Err("library `${first.name}` would be imported as a keyword (M0012)")
+    }
+    let mut graph = Graph { packages: Vec::new() }
+    graph.packages.push(first)
+    let mut id = 0
+    while id < graph.packages.len() {
+        expand(graph, id).await?
+        id += 1
+    }
+    // A cycle of `[dependencies]` edges (M0010), found depth first from
+    // every package: 0 not visited, 1 on the path, 2 done.
+    let mut state: Vec<Int> = Vec::new()
+    for _ in graph.packages.iter() { state.push(0) }
+    id = 0
+    while id < graph.packages.len() {
+        if state.at(id) == 0 { visit(graph, id, state)? }
+        id += 1
+    }
+    Ok(graph)
+}
+
+// The package whose manifest is `dir/nova.toml`, with no edges yet
+// (nova-pm's `read`), its manifest labelled as the dump labels it:
+// `nova.toml` for the root, `<import name>/nova.toml` for a dependency.
+async fn read_package(dir: String, root: Bool) -> Result<GraphPackage, String> {
+    let path = path_join(dir, "nova.toml")
+    let text = match read_to_string(path).await {
+        Ok(t) => t
+        Err(_) => return Err("cannot read ${path} (M0001)")
+    }
+    let m = match parse_manifest(text) {
+        Ok(m) => m
+        Err(why) => return Err("${path}: ${why}")
+    }
+    let import_as = import_name(m.name)
+    Ok(
+        GraphPackage {
+            name: m.name,
+            import_name: import_as,
+            dir: dir,
+            canonical: normal_path(if dir == "" { "." } else { dir }),
+            manifest_path: path,
+            label: if root { "nova.toml" } else { "${import_as}/nova.toml" },
+            text: text,
+            span: m.span,
+            has_lib: is_file(path_join(path_join(dir, "src"), "lib.nova")).await,
+            manifest: m,
+            dependencies: Vec::new(),
+            dev_dependencies: Vec::new(),
+        },
+    )
+}
+
+// Resolve package `id`'s entries, and for the root its dev-dependencies,
+// reading each package named for the first time and adding it to the
+// graph, whose loop then expands it (nova-pm's `expand`, `names_ok`,
+// `edge` and `admit`).
+async fn expand(mut graph: Graph, id: Int) -> Result<(), String> {
+    let mut p = graph.packages.at(id)
+    let mut entries: Vec<(Dependency, Bool)> = Vec::new()
+    for d in p.manifest.dependencies.iter() { entries.push((d, false)) }
+    if id == 0 { for d in p.manifest.dev_dependencies.iter() { entries.push((d, true)) } }
+    // M0012: the entries' import names, together.
+    let mut seen: Vec<String> = Vec::new()
+    for (d, _) in entries.iter() {
+        let name = import_name(d.name)
+        if is_keyword(name) {
+            return Err("dependency `${d.name}` would be imported as a keyword (M0012)")
+        }
+        for s in seen.iter() {
+            if s == name { return Err("two entries are imported as `${name}` (M0012)") }
+        }
+        if id == 0 && name == p.import_name {
+            return Err(
+                "dependency `${d.name}` would be imported as this package's own name (M0012)",
+            )
+        }
+        seen.push(name)
+    }
+    for (d, dev) in entries.iter() {
+        let dir = path_join(p.dir, d.path)
+        if !is_file(path_join(dir, "nova.toml")).await {
+            return Err(
+                "dependency `${d.name}`: ${dir} is not a directory holding a nova.toml (M0007)",
+            )
+        }
+        let canonical = normal_path(dir)
+        if canonical == p.canonical {
+            return Err("dependency `${d.name}` is its own package (M0010)")
+        }
+        let mut target = -1
+        let mut i = 0
+        while i < graph.packages.len() {
+            if graph.packages.at(i).canonical == canonical { target = i }
+            i += 1
+        }
+        if target >= 0 {
+            let found = graph.packages.at(target)
+            if found.name != d.name {
+                return Err("dependency `${d.name}` is the package `${found.name}` (M0008)")
+            }
+            if !found.has_lib { return Err("dependency `${d.name}` is not a library (M0009)") }
+        } else {
+            let new = read_package(dir, false).await?
+            if new.name != d.name {
+                return Err("dependency `${d.name}` is the package `${new.name}` (M0008)")
+            }
+            if !new.has_lib { return Err("dependency `${d.name}` is not a library (M0009)") }
+            for other in graph.packages.iter() {
+                if other.name == new.name {
+                    return Err("two packages named `${new.name}` in one build (M0011)")
+                }
+            }
+            target = graph.packages.len()
+            graph.packages.push(new)
+        }
+        let edge = Edge {
+            import_name: import_name(d.name),
+            package: target,
+            span: d.span,
+            declarer: id,
+        }
+        if dev { p.dev_dependencies.push(edge) } else { p.dependencies.push(edge) }
+    }
+    Ok(())
+}
+
+// Visit package `id` depth first along its `[dependencies]` edges: `Err`
+// on an edge back to a package on the path (nova-pm's `visit`, M0010).
+fn visit(graph: Graph, id: Int, mut state: Vec<Int>) -> Result<(), String> {
+    state.set(id, 1)
+    for edge in graph.packages.at(id).dependencies.iter() {
+        let s = state.at(edge.package)
+        if s == 1 {
+            return Err("a dependency cycle through `${graph.packages.at(id).name}` (M0010)")
+        }
+        if s == 0 { visit(graph, edge.package, state)? }
+    }
+    state.set(id, 2)
+    Ok(())
+}
+
+// `path` with its `.` components dropped and each `x/..` folded, where
+// `x` is not `..`, as `real_path` names a directory when no link is on the
+// way; a leading `/` stays.
+fn normal_path(path: String) -> String {
+    let absolute = path.starts_with("/")
+    let mut parts: Vec<String> = Vec::new()
+    for part in path.split("/").iter() {
+        if part == "" || part == "." { continue }
+        if part == ".." && !parts.is_empty() && parts.last() != ".." {
+            let _ = parts.pop()
+            continue
+        }
+        parts.push(part)
+    }
+    let joined = "/".join(parts.to_array())
+    if absolute { "/${joined}" } else { joined }
+}
+
+// ---------------------------------------------------------------------------
+// The loader
+// ---------------------------------------------------------------------------
+
+/// Read, lex and parse every module the program whose root is `root`, of
+/// kind `kind`, reaches, breadth first (`load_program`), with `graph` when
+/// the root is a package's module. A module that cannot be read is skipped,
+/// so an import of it is "cannot find module"; `Err` only when the root
+/// cannot be read.
+pub async fn load_program(
+    graph: Option<Graph>,
+    root: String,
+    kind: RootKind,
+) -> Result<Load, IoError> {
     let mut loader = Loader {
+        graph: graph,
         dir: path_parent_or_empty(root),
-        listing: Vec::new(),
-        listed: false,
+        listings: Map::new(),
         known: Map::new(),
     }
     let mut modules: Vec<Loaded> = Vec::new()
     let mut diagnostics: Vec<Diagnostic> = Vec::new()
     let mut pending: Vec<Vec<(String, Pending)>> = Vec::new()
     let mut places: Map<String, Int> = Map::new()
-    let mut place_order: Vec<String> = Vec::new()
+    let mut place_order: Vec<Place> = Vec::new()
     let mut tried: Set<String> = Set::new()
-    let mut queue: Vec<(String, String)> = Vec::new()
-    queue.push((module_name(root), root))
+    let mut queue: Vec<(Place, String)> = Vec::new()
+    queue.push((loader.root_place(root, kind), root))
     let mut head = 0
     let mut is_entry = true
 
@@ -85,7 +330,7 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
         head += 1
         let entry = is_entry
         is_entry = false
-        if !tried.insert(place) { continue }
+        if !tried.insert(place_key(place)) { continue }
         let source = match read_to_string(path).await {
             Ok(s) => s
             Err(e) => {
@@ -93,7 +338,7 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
                 continue
             }
         }
-        let label = place
+        let label = loader.label(place)
         let (tokens, lex_errors) = lex(source)
         for e in lex_errors.iter() {
             diagnostics.push(error_at("L0001", "${e}", label, e.span(), "here"))
@@ -128,7 +373,7 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
                 _ => ()
             }
         }
-        let _ = places.insert(place, modules.len())
+        let _ = places.insert(place_key(place), modules.len())
         place_order.push(place)
         modules.push(
             Loaded {
@@ -136,6 +381,8 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
                 path: path,
                 ast: file,
                 text: source,
+                package: place.package,
+                test_file: place.tests,
                 imports: Map::new(),
                 importable: Vec::new(),
             },
@@ -149,7 +396,7 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
         for (name, target) in pending.at(i).iter() {
             match target {
                 PendingPlace(place) => {
-                    match places.get(place) {
+                    match places.get(place_key(place)) {
                         Some(index) => { let _ = m.imports.insert(name, ImportTargetModule(index)) }
                         // It could not be read.
                         None => ()
@@ -162,18 +409,30 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
     }
 
     // What each loaded module could import, by the name an import of it
-    // writes, through `find` itself: every module beside it, by stem.
-    let mut names: Vec<String> = Vec::new()
-    for p in place_order.iter() { names.push(p) }
-    names = sorted_dedup(names)
+    // writes, through `find` itself: every module beside it, by stem, and
+    // each dependency it sees, by its import name.
     i = 0
     while i < modules.len() {
         let from = place_order.at(i)
+        let mut names: Vec<String> = Vec::new()
+        for p in place_order.iter() {
+            if p.package == from.package && p.tests == from.tests { names.push(p.stem) }
+        }
+        match loader.graph {
+            Some(graph) => {
+                if from.package >= 0 {
+                    for e in visible_edges(graph, from.package, from.tests).iter() {
+                        names.push(e.import_name)
+                    }
+                }
+            }
+            None => ()
+        }
         let mut importable: Vec<(String, Int)> = Vec::new()
-        for name in names.iter() {
+        for name in sorted_dedup(names).iter() {
             match loader.find(from, name, Span::point(0)).await {
                 FoundModule(target, _) => {
-                    match places.get(target) {
+                    match places.get(place_key(target)) {
                         Some(j) => { if j != i { importable.push((name, j)) } }
                         None => ()
                     }
@@ -188,12 +447,36 @@ pub async fn load_program(root: String) -> Result<Load, IoError> {
     Ok(Load { modules: modules, diagnostics: diagnostics })
 }
 
+// A place's key in the loader's maps.
+fn place_key(p: Place) -> String { "${p.package} ${p.tests} ${p.stem}" }
+
 impl Loader {
+    // The root's place (`root_place`): a module of the root package for a
+    // root in its `src/` or `tests/`, else a loose file.
+    fn root_place(self, root: String, kind: RootKind) -> Place {
+        let stem = module_name(root)
+        match kind {
+            RootSrc => Place { package: 0, tests: false, stem: stem }
+            RootTests => Place { package: 0, tests: true, stem: stem }
+            RootLoose => Place { package: -1, tests: false, stem: stem }
+        }
+    }
+
+    // A module's label (`label`).
+    fn label(self, place: Place) -> String {
+        if place.package < 0 { return place.stem }
+        if place.package == 0 {
+            return if place.tests { "tests/${place.stem}" } else { place.stem }
+        }
+        let import_as = self.graph.unwrap().packages.at(place.package).import_name
+        if place.stem == "lib" { import_as } else { "${import_as}/${place.stem}" }
+    }
+
     // What `import name`, at `at` in the module `from`, names (`find`): a
-    // module under a std module's name is E0093; a std module's name that
-    // names no file is left to the resolver.
-    async fn find(mut self, from: String, name: String, at: Span) -> Found {
-        let found = self.find_place(from, name).await
+    // module or a dependency under a std module's name is E0093; a std
+    // module's name that names neither is left to the resolver.
+    async fn find(mut self, from: Place, name: String, at: Span) -> Found {
+        let found = self.find_place(from, name, at).await
         if !holds(RESERVED_MODULE_NAMES, name) { return found }
         let what = match found {
             FoundModule(_, path) => path
@@ -204,59 +487,180 @@ impl Loader {
             error_at(
                 "E0093",
                 "`${name}` is the name of a std module, so no module may take it: rename ${what}",
-                from,
+                self.label(from),
                 at,
                 "std's module, not this one",
             ),
         )
     }
 
-    // `find`, before std's names are checked (`find_place`): on the loose
-    // path, the file `name.nova` beside the root, or nothing.
-    async fn find_place(mut self, from: String, name: String) -> Found {
-        if !self.has(name).await { return FoundNothing }
-        FoundModule(name, path_join(self.dir, "${name}.nova"))
+    // `find`, before std's names are checked (`find_place`): for a loose
+    // module, the file `name.nova` beside the root, or nothing; for a
+    // package's module, a file beside it in its package's `src/` or
+    // `tests/`, or a dependency it sees, E0004 for both, E0001 with a note
+    // for its own package with no library or for a dev-dependency seen
+    // from `src/`.
+    async fn find_place(mut self, from: Place, name: String, at: Span) -> Found {
+        if from.package < 0 {
+            if !self.has(self.dir, name).await { return FoundNothing }
+            return FoundModule(
+                Place { package: -1, tests: false, stem: name },
+                path_join(self.dir, "${name}.nova"),
+            )
+        }
+        let graph = self.graph.unwrap()
+        let dir = module_dir(graph.packages.at(from.package), from.tests)
+        let mut edge: Option<Edge> = None
+        for e in visible_edges(graph, from.package, from.tests).iter() {
+            if edge.is_none() && e.import_name == name { edge = Some(e) }
+        }
+        let path = path_join(dir, "${name}.nova")
+        let file = self.has(dir, name).await
+        match edge {
+            Some(e) => {
+                if file { return FoundReported(clash(graph, name, path, e, self.label(from), at)) }
+                let target = graph.packages.at(e.package)
+                if !target.has_lib {
+                    // The package itself, seen from its own tests.
+                    let mut d = error_at(
+                        "E0001",
+                        "cannot find module `${name}`",
+                        self.label(from),
+                        at,
+                        "no such module",
+                    )
+                    d.add_note("`${target.name}` has no src/lib.nova")
+                    return FoundReported(d)
+                }
+                FoundModule(
+                    Place { package: e.package, tests: false, stem: "lib" },
+                    path_join(module_dir(target, false), "lib.nova"),
+                )
+            }
+            None => {
+                if file {
+                    return FoundModule(
+                        Place { package: from.package, tests: from.tests, stem: name },
+                        path,
+                    )
+                }
+                let mut dev = false
+                if !from.tests && from.package == 0 {
+                    for e in graph.packages.at(0).dev_dependencies.iter() {
+                        if e.import_name == name { dev = true }
+                    }
+                }
+                if !dev { return FoundNothing }
+                let mut d = error_at(
+                    "E0001",
+                    "cannot find module `${name}`",
+                    self.label(from),
+                    at,
+                    "no such module",
+                )
+                d.add_note("`${name}` is a dev-dependency, which only `tests/` files can import")
+                FoundReported(d)
+            }
+        }
     }
 
-    // Whether the root's directory holds `<stem>.nova` (`has`, `look`),
-    // answered once per load: its name exactly in the directory's listing,
-    // read once; not if only a name differing in case is; otherwise
-    // whether a file of that path reads.
-    async fn has(mut self, stem: String) -> Bool {
-        match self.known.get(stem) {
+    // Whether `dir` holds `<stem>.nova` (`has`, `look`), answered once per
+    // load: its name exactly in the directory's listing, read once; not if
+    // only a name differing in case is; otherwise whether a file of that
+    // path reads. An empty `dir` is the current directory.
+    async fn has(mut self, dir: String, stem: String) -> Bool {
+        let key = "${dir}\n${stem}"
+        match self.known.get(key) {
             Some(known) => return known
             None => ()
         }
-        if !self.listed {
-            let listed = if self.dir == "" { "." } else { self.dir }
-            match read_dir(listed).await {
-                Ok(entries) => { for e in entries.iter() { self.listing.push(e.name) } }
-                Err(_) => ()
+        let listing = match self.listings.get(dir) {
+            Some(l) => l
+            None => {
+                let mut l: Vec<String> = Vec::new()
+                let listed = if dir == "" { "." } else { dir }
+                match read_dir(listed).await {
+                    Ok(entries) => { for e in entries.iter() { l.push(e.name) } }
+                    Err(_) => ()
+                }
+                let _ = self.listings.insert(dir, l)
+                l
             }
-            self.listed = true
         }
         let name = "${stem}.nova"
         let mut found = false
         let mut folded = false
-        for n in self.listing.iter() {
+        for n in listing.iter() {
             if n == name { found = true }
             if eq_ignore_ascii_case(n, name) { folded = true }
         }
         if !found && !folded {
-            found = match read_to_string(path_join(self.dir, name)).await {
+            found = match read_to_string(path_join(dir, name)).await {
                 Ok(_) => true
                 Err(_) => false
             }
         }
-        let _ = self.known.insert(stem, found)
+        let _ = self.known.insert(key, found)
         found
     }
 }
 
-/// Remove every `@test` function, as the driver does before resolving
-/// under `check` (`strip_test_functions` with `keep_root_tests` false).
-pub fn strip_test_functions(modules: Vec<Loaded>) {
+// A package's `src/`, or `tests/` when `tests` (`module_dir`).
+fn module_dir(p: GraphPackage, tests: Bool) -> String {
+    path_join(p.dir, if tests { "tests" } else { "src" })
+}
+
+// The dependencies a module of package `id` sees (`visible_edges`): a test
+// module also sees the root's dev-dependencies, and the package itself by
+// its import name, its entry its `[package]` table.
+fn visible_edges(graph: Graph, id: Int, tests: Bool) -> Vec<Edge> {
+    let p = graph.packages.at(id)
+    let mut edges: Vec<Edge> = Vec::new()
+    for e in p.dependencies.iter() { edges.push(e) }
+    if tests {
+        for e in p.dev_dependencies.iter() { edges.push(e) }
+        edges.push(Edge { import_name: p.import_name, package: id, span: p.span, declarer: id })
+    }
+    edges
+}
+
+// E0004 (`clash`): `name` is both the file at `path` and the dependency
+// `edge`, imported at `at` in the module labelled `from`. The message
+// names the file and the entry's manifest and line, its secondary label
+// is the entry, in that manifest.
+fn clash(
+    graph: Graph,
+    name: String,
+    path: String,
+    edge: Edge,
+    from: String,
+    at: Span,
+) -> Diagnostic {
+    let declarer = graph.packages.at(edge.declarer)
+    let mut line = 1
+    let mut i = 0
+    while i < edge.span.start && i < declarer.text.byte_len() {
+        if declarer.text.byte_at(i) == 10 { line += 1 }
+        i += 1
+    }
+    let mut d = error_at(
+        "E0004",
+        "`${name}` is both a module of this package and a dependency: ${path}, and the entry at ${declarer.manifest_path}:${line}",
+        from,
+        at,
+        "this import is ambiguous",
+    )
+    d.add_secondary(declarer.label, edge.span, "the dependency")
+    d
+}
+
+/// Remove the `@test` functions before resolving (`strip_test_functions`):
+/// every one under `check` (`keep_root_tests` false); under `nova test`'s
+/// resolution, a dependency's, keeping the root package's and a loose
+/// program's.
+pub fn strip_test_functions(modules: Vec<Loaded>, keep_root_tests: Bool) {
     for loaded in modules.iter() {
+        let root = loaded.package <= 0
         let mut kept: Vec<Spanned<Item>> = Vec::new()
         for item in loaded.ast.items.iter() {
             let test = match item.value {
@@ -267,31 +671,38 @@ pub fn strip_test_functions(modules: Vec<Loaded>) {
                 }
                 _ => false
             }
-            if !test { kept.push(item) }
+            if !test || (keep_root_tests && root) { kept.push(item) }
         }
         let mut file = loaded.ast
         file.items = kept
     }
 }
 
-/// The package `path` is a module of, when it is directly in the `src/` or
-/// `tests/` of a directory holding a `nova.toml` (`package_of`): whether it
-/// is. The manifest is asked for by its path, as `package_of` asks
+/// The package `path` is a module of, and where in it, when `path` is
+/// directly in the `src/` or `tests/` of a directory holding a
+/// `nova.toml` (`package_of`): the package's directory and the root's
+/// kind. The manifest is asked for by its path, as `package_of` asks
 /// `root.join("nova.toml").is_file()`, not looked for in a listing, so a
 /// case-insensitive disk finds `Nova.toml` on both sides, and a directory
 /// that can be searched but not listed still holds its manifest.
-pub async fn in_package(path: String) -> Bool {
+pub async fn package_of(path: String) -> Option<(String, RootKind)> {
     let parent = match path_parent(path) {
         Some(p) => p
-        None => return false
+        None => return None
     }
     let dir_name = file_name(parent)
-    if dir_name != "src" && dir_name != "tests" { return false }
+    let kind = if dir_name == "src" {
+        RootSrc
+    } else if dir_name == "tests" {
+        RootTests
+    } else {
+        return None
+    }
     let root = match path_parent(parent) {
         Some(r) => r
-        None => return false
+        None => return None
     }
-    is_file(path_join(root, "nova.toml")).await
+    if is_file(path_join(root, "nova.toml")).await { Some((root, kind)) } else { None }
 }
 
 // Whether something that is not a directory is at `path`, a link followed
@@ -392,9 +803,10 @@ fn path_parent_or_empty(path: String) -> String {
 }
 
 /// `dir` joined with `name` (`Path::join`): `name` alone for an empty
-/// `dir`, and no second `/` after one `dir` ends with.
+/// `dir` or an absolute `name`, and no second `/` after one `dir` ends
+/// with.
 pub fn path_join(dir: String, name: String) -> String {
-    if dir == "" { return name }
+    if dir == "" || name.starts_with("/") { return name }
     if dir.ends_with("/") { "${dir}${name}" } else { "${dir}/${name}" }
 }
 

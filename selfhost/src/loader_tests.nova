@@ -2,8 +2,11 @@
 // first from its root, a missing sibling left to the resolver, a sibling
 // under a std module's name refused with E0093, what each module could
 // import, the `@test` functions `check` strips, and the paths and the sort
-// the loader leans on. Each expected value is what S0's driver gives for
-// the same files; the differential compares the corpus and the cases.
+// the loader leans on; and, from 5.2b (ADR 0054), a package's modules, its
+// dependencies' and their labels, E0004, E0001's two notes, the tests test
+// mode keeps, the manifest reader and the package graph, and what they
+// refuse. Each expected value is what S0's driver gives for the same
+// files; the differential compares the corpus and the cases.
 //
 // They live in `src/`, imported by `main.nova`, for the reason
 // lexer_tests.nova gives.
@@ -12,6 +15,7 @@ import ast
 import diagnostic
 import lexer
 import loader
+import manifest
 import parser
 import token
 
@@ -34,7 +38,7 @@ fn a_loose_program_loads_breadth_first_from_its_root() {
         ("ui.nova", "pub fn fu() {}\n"),
     ]
     for (name, text) in files.iter() { let _ = block_on(write_string("${dir}/${name}", text)) }
-    let load = match block_on(load_program("${dir}/main.nova")) {
+    let load = match block_on(load_program(None, "${dir}/main.nova", RootLoose)) {
         Ok(l) => l
         Err(_) => {
             assert(false, "unreachable")
@@ -69,7 +73,7 @@ fn a_loose_program_loads_breadth_first_from_its_root() {
     assert_eq(d.labels.at(0).span.start, 39)
     assert_eq(d.labels.at(0).span.end, 41)
     // A root that is not there is an error; a sibling that is not is not.
-    match block_on(load_program("${dir}/missing.nova")) {
+    match block_on(load_program(None, "${dir}/missing.nova", RootLoose)) {
         Ok(_) => assert(false, "unreachable")
         Err(e) => {
             match e.kind {
@@ -95,11 +99,13 @@ fn check_strips_test_functions_and_nothing_else() {
             path: "main.nova",
             ast: file,
             text: source,
+            package: -1,
+            test_file: false,
             imports: Map::new(),
             importable: Vec::new(),
         },
     )
-    strip_test_functions(modules)
+    strip_test_functions(modules, false)
     let items = modules.at(0).ast.items
     assert_eq(items.len(), 2)
     match items.at(0).value {
@@ -140,4 +146,275 @@ fn paths_split_and_join_as_rusts_do() {
     // Names sort in byte order, each once.
     let sorted = sorted_dedup(Vec::from_array(["b", "B", "a", "ab", "b", "_"]))
     assert_eq(lines(sorted.to_array()), lines(["B", "_", "a", "ab", "b"]))
+}
+
+// Write `files`, each a path under `dir` and its text, into a fresh `dir`.
+fn write_tree(dir: String, files: [(String, String)]) {
+    let _ = block_on(remove_dir_all(dir))
+    for (path, text) in files.iter() {
+        let full = "${dir}/${path}"
+        let _ = block_on(create_dir_all(path_parent(full).unwrap_or(dir)))
+        let _ = block_on(write_string(full, text))
+    }
+}
+
+// The manifest of the package `name`, and `more` after it.
+fn manifest_of(name: String, more: String) -> String {
+    "[package]\nname = \"${name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n${more}"
+}
+
+// The program whose root is `root`, a module of the package in `dir`, or
+// why its graph or its root could not be read. A helper is built with N,
+// where `assert` is not in scope, so it panics with the reason itself.
+fn load_package(dir: String, root: String, kind: RootKind) -> Load {
+    let graph = match block_on(read_graph(dir)) {
+        Ok(g) => g
+        Err(why) => panic("the graph of ${dir}: ${why}")
+    }
+    match block_on(load_program(Some(graph), "${dir}/${root}", kind)) {
+        Ok(l) => l
+        Err(_) => panic("${dir}/${root} cannot be read")
+    }
+}
+
+// Each module's label, package key and whether its tests are named for
+// its file, one to a line.
+fn module_lines(load: Load) -> String {
+    let mut out: Vec<String> = Vec::new()
+    for m in load.modules.iter() { out.push("${m.name} ${m.package} ${m.test_file}") }
+    lines(out.to_array())
+}
+
+@test
+fn a_package_loads_its_siblings_and_its_dependencies_libraries() {
+    // app/src/main imports util, a sibling, and geom, a path dependency,
+    // whose library imports its own `shapes`. Breadth first: main, util,
+    // geom, geom/shapes; the dependency's modules are labelled by its
+    // import name, its library by the name alone, and its package key is 1.
+    let dir = "${temp_dir()}/nova-selfhost-package-test"
+    write_tree(
+        dir,
+        [
+            (
+                "nova.toml",
+                manifest_of("app", "\n[dependencies]\ngeom = { path = \"pkgs/geom\" }\n"),
+            ),
+            ("src/main.nova", "import util\nimport geom\nfn main() {}\n"),
+            ("src/util.nova", "pub fn u() {}\n"),
+            ("tests/api.nova", "import util\nimport app\n"),
+            ("src/lib.nova", "pub fn l() {}\n"),
+            ("pkgs/geom/nova.toml", manifest_of("geom", "")),
+            ("pkgs/geom/src/lib.nova", "import shapes\npub fn g() {}\n"),
+            ("pkgs/geom/src/shapes.nova", "pub fn s() {}\n"),
+        ],
+    )
+    let load = load_package(dir, "src/main.nova", RootSrc)
+    assert_eq(load.diagnostics.len(), 0)
+    assert_eq(
+        module_lines(load),
+        lines(["main 0 false", "util 0 false", "geom 1 false", "geom/shapes 1 false"]),
+    )
+    let mut importable: Vec<String> = Vec::new()
+    for (name, index) in load.modules.at(0).importable.iter() {
+        importable.push("${name} ${index}")
+    }
+    assert_eq(lines(importable.to_array()), lines(["geom 2", "util 1"]))
+    match load.modules.at(0).imports.get("geom") {
+        Some(ImportTargetModule(t)) => assert_eq(t, 2)
+        _ => assert(false, "unreachable")
+    }
+    // A `tests/` module sees `src/`'s files only through the package's
+    // library, by its import name, which is the root package's module
+    // `lib`; `util` is no file of `tests/`.
+    let tests = load_package(dir, "tests/api.nova", RootTests)
+    assert_eq(module_lines(tests), lines(["tests/api 0 true", "lib 0 false"]))
+    assert(!tests.modules.at(0).imports.contains_key("util"), "util is src/'s")
+    let _ = block_on(remove_dir_all(dir))
+}
+
+@test
+fn e0004_and_e0001s_notes_are_the_loaders() {
+    // `shapes` is both a sibling and a dependency (E0004, its secondary
+    // label the entry, in the manifest labelled `nova.toml`); `helper` is
+    // a dev-dependency imported from src/ (E0001 and a note); from tests/,
+    // the package itself, which has no library, is E0001 with a note.
+    let dir = "${temp_dir()}/nova-selfhost-package-clash-test"
+    let toml = manifest_of(
+        "app",
+        "[dependencies]\nshapes = { path = \"shapes\" }\n[dev-dependencies]\nhelper = { path = \"helper\" }\n",
+    )
+    write_tree(
+        dir,
+        [
+            ("nova.toml", toml),
+            ("src/main.nova", "import shapes\nimport helper\nfn main() {}\n"),
+            ("src/shapes.nova", "pub fn a() {}\n"),
+            ("tests/api.nova", "import app\nimport helper\n"),
+            ("shapes/nova.toml", manifest_of("shapes", "")),
+            ("shapes/src/lib.nova", "pub fn b() {}\n"),
+            ("helper/nova.toml", manifest_of("helper", "")),
+            ("helper/src/lib.nova", "pub fn h() {}\n"),
+        ],
+    )
+    let load = load_package(dir, "src/main.nova", RootSrc)
+    assert_eq(load.diagnostics.len(), 2)
+    let clash = load.diagnostics.at(0)
+    assert_eq(clash.code, "E0004")
+    assert_eq(
+        clash.message,
+        "`shapes` is both a module of this package and a dependency: ${dir}/src/shapes.nova, and the entry at ${dir}/nova.toml:6",
+    )
+    assert_eq(clash.labels.at(1).file, "nova.toml")
+    assert_eq(clash.labels.at(1).span.start, 73)
+    assert_eq(clash.labels.at(1).span.end, 79)
+    let dev = load.diagnostics.at(1)
+    assert_eq(dev.code, "E0001")
+    assert_eq(dev.notes.at(0), "`helper` is a dev-dependency, which only `tests/` files can import")
+    let tests = load_package(dir, "tests/api.nova", RootTests)
+    assert_eq(tests.diagnostics.len(), 1)
+    assert_eq(tests.diagnostics.at(0).notes.at(0), "`app` has no src/lib.nova")
+    assert_eq(module_lines(tests), lines(["tests/api 0 true", "helper 2 false"]))
+    let _ = block_on(remove_dir_all(dir))
+}
+
+@test
+fn test_mode_keeps_the_root_packages_tests_and_strips_a_dependencys() {
+    let source = "@test\nfn t() {}\nfn main() {}\n"
+    let mut modules: Vec<Loaded> = Vec::new()
+    for key in [-1, 0, 1].iter() {
+        let (tokens, _) = lex(source)
+        let (file, _) = parse(tokens)
+        modules.push(
+            Loaded {
+                name: "m",
+                path: "m.nova",
+                ast: file,
+                text: source,
+                package: key,
+                test_file: false,
+                imports: Map::new(),
+                importable: Vec::new(),
+            },
+        )
+    }
+    strip_test_functions(modules, true)
+    assert_eq(modules.at(0).ast.items.len(), 2)
+    assert_eq(modules.at(1).ast.items.len(), 2)
+    assert_eq(modules.at(2).ast.items.len(), 1)
+}
+
+@test
+fn the_manifest_reader_reads_what_the_loader_needs_and_refuses_the_rest() {
+    let text = "# app\n[package]\nname = \"json-api\"   # a name\nversion = \"1.2.3\"\nedition = '2026'\nauthors = [\"a\", \"b\",]\n\n[dependencies]\ngeom = { path = \"../geom\" }\n[dev-dependencies]\nhelper = {path=\"h\"}\n"
+    match parse_manifest(text) {
+        Ok(m) => {
+            assert_eq(m.name, "json-api")
+            assert_eq(import_name(m.name), "json_api")
+            // From `[package]`'s `[` to its last value's end.
+            assert_eq(m.span.start, 6)
+            assert_eq(m.span.end, 101)
+            assert_eq(m.dependencies.len(), 1)
+            assert_eq(m.dependencies.at(0).path, "../geom")
+            assert_eq(m.dependencies.at(0).span.start, 118)
+            assert_eq(m.dependencies.at(0).span.end, 122)
+            assert_eq(m.dev_dependencies.at(0).name, "helper")
+        }
+        Err(why) => assert(false, why)
+    }
+    // A line break may be `\r\n`; spans count the `\r`s.
+    match parse_manifest(
+        "[package]\r\nname = \"a\"\r\nversion = \"0.1.0\"\r\nedition = \"2026\"\r\n",
+    ) {
+        Ok(m) => assert_eq(m.span.end, 58)
+        Err(why) => assert(false, why)
+    }
+    let refused = [
+        manifest_of("app", "color = \"red\"\n"),
+        manifest_of("app", "[dependencies]\njson = \"1.0\"\n"),
+        manifest_of("app", "[dependencies]\njson = { version = \"1.0\", path = \"j\" }\n"),
+        manifest_of("app", "[dependencies.geom]\npath = \"geom\"\n"),
+        manifest_of("app", "[package]\n"),
+        manifest_of("app", "[tool]\n"),
+        manifest_of("app", "description = \"a\\tb\"\n"),
+        manifest_of("app", "description = \"\"\"x\"\"\"\n"),
+        manifest_of("ui", ""),
+        manifest_of("1app", ""),
+        manifest_of("con", ""),
+        "[package]\nname = \"app\"\nversion = \"01.0.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2027\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+        "name = \"app\"\n",
+    ]
+    for text in refused.iter() {
+        match parse_manifest(text) {
+            Ok(_) => assert(false, "refused: ${text}")
+            Err(_) => ()
+        }
+    }
+}
+
+@test
+fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
+    // Each would be an M-code in S0's graph, which N does not give, so
+    // N's graph refuses it: a dependency's directory with no manifest
+    // (M0007), an entry whose key is not the package's name (M0008), a
+    // dependency with no library (M0009), a cycle (M0010), and an import
+    // name taken twice (M0012).
+    let dir = "${temp_dir()}/nova-selfhost-graph-test"
+    let cases = [
+        ("missing", "[dependencies]\ngeom = { path = \"nowhere\" }\n"),
+        ("renamed", "[dependencies]\nother = { path = \"geom\" }\n"),
+        ("nolib", "[dependencies]\nbare = { path = \"bare\" }\n"),
+        ("cycle", "[dependencies]\nloop = { path = \"loop\" }\n"),
+        (
+            "twice",
+            "[dependencies]\ngeom = { path = \"geom\" }\n[dev-dependencies]\ngeom = { path = \"geom\" }\n",
+        ),
+    ]
+    for (name, deps) in cases.iter() {
+        let root = "${dir}/${name}"
+        write_tree(
+            root,
+            [
+                ("nova.toml", manifest_of("app", deps)),
+                ("src/lib.nova", "pub fn a() {}\n"),
+                ("geom/nova.toml", manifest_of("geom", "")),
+                ("geom/src/lib.nova", "pub fn g() {}\n"),
+                ("bare/nova.toml", manifest_of("bare", "")),
+                ("bare/src/main.nova", "fn main() {}\n"),
+                (
+                    "loop/nova.toml",
+                    manifest_of("loop", "[dependencies]\nback = { path = \"back\" }\n"),
+                ),
+                ("loop/src/lib.nova", "pub fn l() {}\n"),
+                (
+                    "loop/back/nova.toml",
+                    manifest_of("back", "[dependencies]\nloop = { path = \"..\" }\n"),
+                ),
+                ("loop/back/src/lib.nova", "pub fn b() {}\n"),
+            ],
+        )
+        match block_on(read_graph(root)) {
+            Ok(_) => assert(false, "refused: ${name}")
+            Err(_) => ()
+        }
+    }
+    let _ = block_on(remove_dir_all(dir))
+}
+
+@test
+fn a_root_is_a_packages_module_directly_in_its_src_or_tests() {
+    let dir = "${temp_dir()}/nova-selfhost-package-of-test"
+    write_tree(dir, [("nova.toml", manifest_of("app", "")), ("src/main.nova", "fn main() {}\n")])
+    match block_on(package_of("${dir}/src/main.nova")) {
+        Some((root, RootSrc)) => assert_eq(root, dir)
+        _ => assert(false, "unreachable")
+    }
+    match block_on(package_of("${dir}/tests/x.nova")) {
+        Some((_, RootTests)) => ()
+        _ => assert(false, "unreachable")
+    }
+    assert(block_on(package_of("${dir}/src/sub/x.nova")).is_none(), "not directly in src/")
+    assert(block_on(package_of("${dir}/main.nova")).is_none(), "not in src/")
+    let _ = block_on(remove_dir_all(dir))
 }

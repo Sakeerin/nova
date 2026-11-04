@@ -46,8 +46,12 @@
 //! with tests, the cases of each mode (`cases/resolve-wasm/`,
 //! `cases/resolve-test/`) and the name fuzzer's package, WASM and
 //! test-mode inputs go through it, among which every one of the resolver's
-//! 11 codes, E0004 and E0001's two notes occur. Part A runs them through
-//! S0 alone; part B adds N's side of each.
+//! 11 codes, E0004 and E0001's two notes occur. N's `selfhost resolve`
+//! takes the same roots, `--target wasm` and `--test`, and must print the
+//! same dump of each, byte for byte, with `\` read as `/` in the paths of
+//! E0004's and E0093's messages on Windows; a manifest N's minimal reader
+//! refuses stops it, with a message, and no input of the differential has
+//! one.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -70,7 +74,7 @@ use std::sync::OnceLock;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use compare::{first_difference, report, Dump, AST, TOKENS};
+use compare::{first_difference, report, settle_paths, Dump, AST, TOKENS};
 use fuzz::SplitMix64;
 
 /// How many files one process lexes.
@@ -523,6 +527,8 @@ fn run(program: &Path, args: &[&str], dir: &Path, files: &[String]) -> Result<Ru
 /// report gives both exit codes and the start of anything either side
 /// wrote to stderr, so a side that crashed or printed nothing says so; a
 /// side that runs past the limit is killed and reported with the batch.
+/// A resolution dump's paths in E0004's and E0093's messages are compared
+/// with `\` read as `/` on Windows ([`settle_paths`], ADR 0054 §5).
 fn compare_batch(
     dump: &Dump,
     dir: &Path,
@@ -537,7 +543,11 @@ fn compare_batch(
         let n = run(selfhost, dump.n, dir, files);
         (s0.join().expect("S0's thread"), n)
     });
-    let (s0, n) = (s0?, n?);
+    let (mut s0, mut n) = (s0?, n?);
+    if dump.s0.starts_with(RESOLUTION_S0) {
+        s0.stdout = settle_paths(&s0.stdout, cfg!(windows));
+        n.stdout = settle_paths(&n.stdout, cfg!(windows));
+    }
     let mismatch = first_difference(&s0.stdout, &n.stdout);
     if mismatch.is_none() && s0.code == Some(code) && n.code == Some(code) {
         return Ok(String::from_utf8_lossy(&s0.stdout).into_owned());
@@ -859,13 +869,94 @@ fn unreadable_files_are_reported_alike() {
 }
 
 /// No file at all: both sides refuse it, print nothing on stdout and exit
-/// 2, for each dump: a resolution dump needs a root (or std's part).
+/// 2, for each dump: a resolution dump needs a root (or std's part), under
+/// every mode. Test mode for the WASM target is refused alike, with a root
+/// or std's part (5.2b, ADR 0054): `nova test` has no target.
 #[test]
 fn both_sides_refuse_no_file() {
-    for dump in [&TOKENS, &AST, resolution()] {
+    let wasm_test = Dump {
+        s0: leak_args(&[RESOLUTION_S0, &["--test", "--target", "wasm"]].concat()),
+        n: leak_args(&["resolve", "--std", &std_dir(), "--test", "--target", "wasm"]),
+    };
+    let wasm_test_std = Dump {
+        s0: leak_args(&[wasm_test.s0, &["--std"]].concat()),
+        n: leak_args(&[wasm_test.n, &["--std-part"]].concat()),
+    };
+    for dump in [
+        &TOKENS,
+        &AST,
+        resolution(),
+        resolution_in(Mode::Wasm),
+        resolution_in(Mode::Test),
+    ] {
         let out = compare_batch(dump, &root(), &[], 2, &nova(), selfhost());
         assert_eq!(out, Ok(String::new()));
     }
+    let main = ["tests/runtime/array_helpers.nova".to_string()];
+    assert!(root().join(&main[0]).is_file());
+    for (dump, files) in [(&wasm_test, &main[..]), (&wasm_test_std, &[])] {
+        let out = compare_batch(dump, &root(), files, 2, &nova(), selfhost());
+        assert_eq!(out, Ok(String::new()));
+    }
+}
+
+/// A root whose package's manifest N's minimal reader refuses (ADR 0054
+/// §5): S0 dumps it with the package graph's M-code, and N, which gives no
+/// M-code, prints nothing of it, says why on stderr, naming the manifest,
+/// and exits 1. No input of the differential has such a manifest; this
+/// pins what N does instead of printing a partial dump.
+#[test]
+fn a_manifest_n_cannot_read_stops_n_with_a_message() {
+    let dir = fresh_dir("resolution-refused");
+    for (name, extra) in [
+        ("unknown", "color = \"red\"\n"),
+        ("registry", "[dependencies]\njson = \"1.0\"\n"),
+    ] {
+        let pkg = dir.join(name);
+        std::fs::create_dir_all(pkg.join("src")).expect("create src/");
+        std::fs::write(pkg.join("nova.toml"), format!("{MANIFEST}{extra}")).expect("write nova.toml");
+        std::fs::write(pkg.join("src").join("main.nova"), "fn main() {}\n").expect("write main.nova");
+        let root = format!("{name}/src/main.nova");
+        let s0 = Command::new(nova())
+            .current_dir(&dir)
+            .args(RESOLUTION_S0)
+            .arg(&root)
+            .output()
+            .expect("run nova check --dump-resolution");
+        let stdout = String::from_utf8_lossy(&s0.stdout);
+        assert_eq!(s0.status.code(), Some(0), "{name}: {stdout}");
+        assert!(stdout.contains("\"M00"), "{name}: {stdout}");
+        let n = Command::new(selfhost())
+            .current_dir(&dir)
+            .args(resolution().n)
+            .arg(&root)
+            .output()
+            .expect("run selfhost resolve");
+        let stderr = String::from_utf8_lossy(&n.stderr);
+        assert_eq!(n.status.code(), Some(1), "{name}: {stderr}");
+        assert!(n.stdout.is_empty(), "{name}");
+        assert!(
+            stderr.starts_with(&format!(
+                "error: selfhost resolve cannot dump {root}: {name}/nova.toml: "
+            )),
+            "{name}: {stderr}"
+        );
+    }
+}
+
+/// On Windows a resolution dump's E0004 and E0093 messages are compared
+/// with `\` read as `/` ([`settle_paths`], ADR 0054 §5), and nothing else
+/// is; elsewhere nothing is changed.
+#[test]
+fn the_paths_of_e0004_and_e0093_are_settled_on_windows_alone() {
+    let dump = "(Diagnostics\n  (Error \"E0004\" \"`a` is both: app\\x5csrc\\x5ca.nova, and the entry at \
+                app\\x5cnova.toml:6\"\n    (Primary \"a\\x5cb\":0..1 \"x\"))\n  \
+                (Error \"E0093\" \"rename sub\\x5cui.nova\"\n  (Error \"E0001\" \"a\\x5cb\"\n";
+    let settled = "(Diagnostics\n  (Error \"E0004\" \"`a` is both: app/src/a.nova, and the entry at \
+                   app/nova.toml:6\"\n    (Primary \"a\\x5cb\":0..1 \"x\"))\n  \
+                   (Error \"E0093\" \"rename sub/ui.nova\"\n  (Error \"E0001\" \"a\\x5cb\"\n";
+    assert_eq!(settle_paths(dump.as_bytes(), true), settled.as_bytes());
+    assert_eq!(settle_paths(dump.as_bytes(), false), dump.as_bytes());
 }
 
 #[test]
@@ -1468,55 +1559,15 @@ enum Mode {
 }
 
 impl Mode {
-    /// S0's arguments after [`RESOLUTION_S0`].
-    fn s0_flags(self) -> &'static [&'static str] {
+    /// The arguments for the mode after [`RESOLUTION_S0`] on S0's side, and
+    /// after `resolve --std DIR` on N's: the same on both.
+    fn flags(self) -> &'static [&'static str] {
         match self {
             Mode::Check => &[],
             Mode::Wasm => &["--target", "wasm"],
             Mode::Test => &["--test"],
         }
     }
-}
-
-/// S0's resolution dump under `mode` alone, of `files`, relative to `dir`,
-/// [`BATCH`] roots to a process and the batches side by side, each exiting
-/// with `code`: what 5.2b adds (packages, the WASM target and test mode),
-/// which N prints in part B, when each call here becomes a comparison of
-/// both sides. Returns S0's output.
-fn s0_resolution(mode: Mode, dir: &Path, files: &[String], code: i32) -> String {
-    let nova = nova();
-    let outs: Vec<Result<Run, String>> = std::thread::scope(|scope| {
-        let runs: Vec<_> = files
-            .chunks(BATCH)
-            .map(|chunk| {
-                let nova = &nova;
-                scope.spawn(move || {
-                    let args: Vec<&str> = RESOLUTION_S0
-                        .iter()
-                        .chain(mode.s0_flags())
-                        .copied()
-                        .collect();
-                    run(nova, &args, dir, chunk)
-                })
-            })
-            .collect();
-        runs.into_iter()
-            .map(|r| r.join().expect("a batch's thread"))
-            .collect()
-    });
-    let mut all = String::new();
-    for (out, chunk) in outs.into_iter().zip(files.chunks(BATCH)) {
-        let out = out.unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(
-            out.code,
-            Some(code),
-            "S0 {mode:?} on the batch from {:?}: {}",
-            chunk.first(),
-            out.stderr
-        );
-        all.push_str(&String::from_utf8_lossy(&out.stdout));
-    }
-    all
 }
 
 /// The error cases of the resolver (spec §3.5, §4): the inline sources of
@@ -1618,28 +1669,24 @@ fn case_roots(cases: &Path) -> CaseRoots {
     roots
 }
 
-/// [`agree_on_resolution`] the resolver's cases in `cases` under `mode`
+/// [`agree_on_resolution_in`] `mode` on the resolver's cases in `cases`
 /// ([`mode_cases_dir`], or a copy of it), from `cases` ([`case_roots`]),
-/// [`BATCH`] roots to a process. 5.2b part A: a package's roots, and every
-/// case under the WASM target and test mode, are S0's alone
-/// ([`s0_resolution`]) until N prints them in part B. Returns S0's output
-/// and how many programs it holds.
+/// [`BATCH`] roots to a process: the loose programs, those apart, and the
+/// packages' roots. Returns S0's output, which is N's, and how many
+/// programs it holds.
 fn agree_on_resolve_cases(mode: Mode, cases: &Path) -> (String, usize) {
     let roots = case_roots(cases);
     let count = roots.loose.len() + roots.apart.len() + roots.packages.len();
-    let mut all = String::new();
-    if mode == Mode::Check {
-        all.push_str(&agree_on_resolution(cases, &roots.loose, 0));
-        for dir in &roots.apart {
-            all.push_str(&agree_on_resolution(dir, &["main.nova".to_string()], 0));
-        }
-    } else {
-        all.push_str(&s0_resolution(mode, cases, &roots.loose, 0));
-        for dir in &roots.apart {
-            all.push_str(&s0_resolution(mode, dir, &["main.nova".to_string()], 0));
-        }
+    let mut all = agree_on_resolution_in(mode, cases, &roots.loose, 0);
+    for dir in &roots.apart {
+        all.push_str(&agree_on_resolution_in(
+            mode,
+            dir,
+            &["main.nova".to_string()],
+            0,
+        ));
     }
-    all.push_str(&s0_resolution(mode, cases, &roots.packages, 0));
+    all.push_str(&agree_on_resolution_in(mode, cases, &roots.packages, 0));
     (all, count)
 }
 
@@ -1691,25 +1738,46 @@ fn test_corpus() -> Vec<String> {
         .collect()
 }
 
-/// The resolution dump through both sides (ADR 0053): S0's `check
-/// --dump-resolution`, and N's `resolve --std DIR`, DIR the repository's
-/// `std/`, each followed by the roots.
+/// The resolution dump through both sides under `check` (ADR 0053):
+/// [`resolution_in`] [`Mode::Check`].
 fn resolution() -> &'static Dump {
-    static DUMP: OnceLock<Dump> = OnceLock::new();
-    DUMP.get_or_init(|| Dump {
-        s0: RESOLUTION_S0,
-        n: leak_args(&["resolve", "--std", &std_dir()]),
-    })
+    resolution_in(Mode::Check)
 }
 
-/// std's part through both sides: S0's `check --dump-resolution --std`,
-/// and N's `resolve --std DIR --std-part`.
-fn std_resolution() -> &'static Dump {
-    static DUMP: OnceLock<Dump> = OnceLock::new();
-    DUMP.get_or_init(|| Dump {
-        s0: &["check", "--dump-resolution", "--std"],
-        n: leak_args(&["resolve", "--std", &std_dir(), "--std-part"]),
-    })
+/// The resolution dump through both sides under `mode` (ADR 0053, ADR
+/// 0054): S0's `check --dump-resolution`, and N's `resolve --std DIR`, DIR
+/// the repository's `std/`, each with the mode's flags and followed by the
+/// roots.
+fn resolution_in(mode: Mode) -> &'static Dump {
+    static DUMPS: [OnceLock<Dump>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    DUMPS[mode as usize].get_or_init(|| dump_with(mode, &[]))
+}
+
+/// std's part through both sides under `mode`: S0's `check
+/// --dump-resolution --std`, and N's `resolve --std DIR --std-part`, each
+/// with the mode's flags.
+fn std_resolution(mode: Mode) -> &'static Dump {
+    static DUMPS: [OnceLock<Dump>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    DUMPS[mode as usize].get_or_init(|| dump_with(mode, &["--std"]))
+}
+
+/// The resolution dump under `mode`, with `extra` after S0's flags: `--std`
+/// is N's `--std-part`, and any other is passed to both as it is.
+fn dump_with(mode: Mode, extra: &[&str]) -> Dump {
+    let s0: Vec<&str> = RESOLUTION_S0
+        .iter()
+        .chain(mode.flags())
+        .chain(extra)
+        .copied()
+        .collect();
+    let std_dir = std_dir();
+    let mut n = vec!["resolve", "--std", std_dir.as_str()];
+    n.extend(mode.flags());
+    n.extend(extra.iter().map(|a| if *a == "--std" { "--std-part" } else { a }));
+    Dump {
+        s0: leak_args(&s0),
+        n: leak_args(&n),
+    }
 }
 
 /// The repository's `std/`, which N reads its std modules from.
@@ -1726,21 +1794,29 @@ fn leak_args(args: &[&str]) -> &'static [&'static str] {
     Box::leak(owned.into_boxed_slice())
 }
 
-/// [`agree_on`] the resolution dump: `files`, relative to `dir`, each a
-/// program's root, through both sides, [`BATCH`] roots to a process and
-/// the batches side by side, each side exiting with `code`; fail with the
-/// report of the first difference. Returns S0's output, which is N's.
-/// S0 parses std again for each program (about 0.065 s, debug) and N once
-/// per process (about 0.4 s with the debug runtime), so the batches run at
-/// once.
+/// [`agree_on_resolution_in`] [`Mode::Check`].
 fn agree_on_resolution(dir: &Path, files: &[String], code: i32) -> String {
+    agree_on_resolution_in(Mode::Check, dir, files, code)
+}
+
+/// [`agree_on`] the resolution dump under `mode`: `files`, relative to
+/// `dir`, each a program's root, through both sides, [`BATCH`] roots to a
+/// process and the batches side by side, each side exiting with `code`;
+/// fail with the report of the first difference. Returns S0's output,
+/// which is N's. S0 parses std again for each program (about 0.065 s,
+/// debug) and N once per process (about 0.4 s with the debug runtime, 0.7 s
+/// for the WASM target, which also parses `STD_MODULES` for `missing`), so
+/// the batches run at once.
+fn agree_on_resolution_in(mode: Mode, dir: &Path, files: &[String], code: i32) -> String {
     let (nova, selfhost) = (nova(), selfhost());
     let outs: Vec<Result<String, String>> = std::thread::scope(|scope| {
         let runs: Vec<_> = files
             .chunks(BATCH)
             .map(|chunk| {
                 let nova = &nova;
-                scope.spawn(move || compare_batch(resolution(), dir, chunk, code, nova, selfhost))
+                scope.spawn(move || {
+                    compare_batch(resolution_in(mode), dir, chunk, code, nova, selfhost)
+                })
             })
             .collect();
         runs.into_iter()
@@ -1902,9 +1978,10 @@ fn the_resolution_dump_flags_are_hidden_and_refused_as_before() {
 
 /// Each root's part follows a header with its path as given; a root that
 /// cannot be read is `IOERR` and its kind, the rest are dumped, and the
-/// exit code is 2; a root in a package is `UNSUPPORTED package`; a program
-/// that fails to load holds the diagnostics so far; `--std` prints std's
-/// part for the target. N prints the same for the same roots.
+/// exit code is 2; a root in a package is a module of the package (ADR
+/// 0054); a program that fails to load holds the diagnostics so far;
+/// `--std` prints std's part for the target and mode. N prints the same
+/// for the same roots.
 #[test]
 fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
     let dir = fresh_dir("resolution-headers");
@@ -1952,10 +2029,9 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
         ),
         "{stdout}"
     );
-    // N prints the same, a file that is not UTF-8 included, and a root
-    // beside a `nova.toml` that is a directory, which makes no package.
-    // (5.2b part A: N prints a package's root in part B, so the package's
-    // root is S0's alone above.)
+    // N prints the same, a package's root, a file that is not UTF-8 and a
+    // root beside a `nova.toml` that is a directory, which makes no package,
+    // included.
     std::fs::write(dir.join("latin1.nova"), b"fn \xe9() {}\n").expect("write latin1.nova");
     std::fs::create_dir_all(dir.join("dirpkg").join("nova.toml")).expect("create nova.toml/");
     std::fs::create_dir_all(dir.join("dirpkg").join("src")).expect("create dirpkg/src");
@@ -1967,6 +2043,7 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
     let files = [
         "a.nova",
         "missing.nova",
+        "pkg/src/main.nova",
         "b.nova",
         "dirpkg/src/main.nova",
         "latin1.nova",
@@ -2035,29 +2112,33 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
 /// std's part, every loose corpus program and every resolver case give the
 /// same resolution dump on both sides, byte for byte (spec §3.5, §3.7):
 /// std's part once, then the programs, [`BATCH`] to a process. 5.2b (spec
-/// §4, ADR 0054) adds std's WASM and test-mode parts, the corpus's
-/// packages, its WASM programs (`tests/dom/`, `tests/wasm/`) and its files
-/// with tests under test mode, and the cases of every mode, all S0's alone
-/// in part A ([`s0_resolution`]) until N prints them in part B. Every form
-/// of the dump's `KINDS` appears in these dumps, every form they print is
-/// listed, and no form of `LATER_KINDS` appears; E0084 and E0085 occur
+/// §4, §4.5; ADR 0054) adds std's WASM and test-mode parts, the corpus's
+/// packages' files natively, its WASM programs (`tests/dom/`,
+/// `tests/wasm/`) for the WASM target and its files with tests under test
+/// mode, and the cases of every mode, each compared on both sides. Every
+/// form of the dump's `KINDS` appears in these dumps, every form they print
+/// is listed, and no form of `LATER_KINDS` appears; E0084 and E0085 occur
 /// only under test mode, which keeps `@test` functions, and E0090 only for
-/// the WASM target. Under part B the dumps are S0's and N's alike, so each
-/// holds them.
+/// the WASM target. The dumps are S0's and N's alike, so each holds them.
 #[test]
 fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
     let root = root();
-    let std = compare_batch(std_resolution(), &root, &[], 0, &nova(), selfhost())
-        .unwrap_or_else(|report| panic!("{report}"));
-    assert!(
-        std.starts_with("(Std target=native modules=21 "),
-        "{}",
-        &std[..80]
-    );
-    let std_parts: Vec<String> = [Mode::Wasm, Mode::Test]
+    let std_parts: Vec<String> = [Mode::Check, Mode::Wasm, Mode::Test]
         .into_iter()
-        .map(s0_std_resolution)
+        .map(|mode| {
+            let part = compare_batch(std_resolution(mode), &root, &[], 0, &nova(), selfhost())
+                .unwrap_or_else(|report| panic!("{mode:?}: {report}"));
+            assert!(part.ends_with("))\n(Diagnostics)\n"), "{mode:?}");
+            part
+        })
         .collect();
+    for (part, head) in std_parts.iter().zip([
+        "(Std target=native modules=21 ",
+        "(Std target=wasm modules=16 ",
+        "(Std target=native mode=test modules=22 ",
+    ]) {
+        assert!(part.starts_with(head), "{}", &part[..80]);
+    }
     let loose = loose_corpus();
     // 251 loose programs at 5.2a.
     assert!(loose.len() >= 240, "only {} loose programs", loose.len());
@@ -2098,9 +2179,10 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
             .into_iter()
             .map(|mode| scope.spawn(move || agree_on_resolve_cases(mode, &mode_cases_dir(mode))))
             .collect();
-        let package_dumps = scope.spawn(|| s0_resolution(Mode::Check, &root, &packages, 0));
-        let wasm_dumps = scope.spawn(|| s0_resolution(Mode::Wasm, &root, &wasm, 0));
-        let test_dumps = scope.spawn(|| s0_resolution(Mode::Test, &root, &tests, 0));
+        let package_dumps =
+            scope.spawn(|| agree_on_resolution_in(Mode::Check, &root, &packages, 0));
+        let wasm_dumps = scope.spawn(|| agree_on_resolution_in(Mode::Wasm, &root, &wasm, 0));
+        let test_dumps = scope.spawn(|| agree_on_resolution_in(Mode::Test, &root, &tests, 0));
         let mut check = agree_on_resolution(&root, &loose, 0);
         check.push_str(&package_dumps.join().expect("the packages' thread"));
         let mut wasm_dumps = wasm_dumps.join().expect("the WASM programs' thread");
@@ -2156,7 +2238,7 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
     );
     assert!(codes_in(&wasm_dumps).contains_key("E0090"));
     let mut found = std::collections::HashSet::new();
-    for dumps in [&check, &wasm_dumps, &test_dumps, &std]
+    for dumps in [&check, &wasm_dumps, &test_dumps]
         .into_iter()
         .chain(&std_parts)
     {
@@ -2184,28 +2266,6 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
         later.is_empty(),
         "{later:?} appear, which LATER_KINDS says no program prints"
     );
-}
-
-/// S0's std's part under `mode` (5.2b part A; N prints it in part B):
-/// `check --dump-resolution --std` with the mode's flags, which must exit
-/// 0 and print one part with no diagnostic.
-fn s0_std_resolution(mode: Mode) -> String {
-    let out = run(
-        &nova(),
-        &RESOLUTION_S0
-            .iter()
-            .chain(&["--std"])
-            .chain(mode.s0_flags())
-            .copied()
-            .collect::<Vec<&str>>(),
-        &root(),
-        &[],
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(out.code, Some(0), "{mode:?}: {}", out.stderr);
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(text.ends_with("))\n(Diagnostics)\n"), "{mode:?}");
-    text
 }
 
 /// The resolver's cases of every mode as a Windows checkout has them
@@ -2323,8 +2383,8 @@ fn a_root_spelled_any_way_names_its_siblings_alike() {
 /// directory named `ui.nova` beside `main.nova` is E0093's, though it
 /// cannot be read, and a root directly in a package's `src/` or `tests/`,
 /// named from the package's directory, is a module of the package, as one
-/// named from outside it is (ADR 0054; S0's alone until part B). An empty
-/// root is a file that is not there.
+/// named from outside it is (ADR 0054). An empty root is a file that is
+/// not there.
 #[test]
 fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
     let dir = fresh_dir("resolution-roots");
@@ -2343,7 +2403,7 @@ fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
     }
     std::fs::write(pkg.join("nova.toml"), MANIFEST).expect("write nova.toml");
     let roots = ["src/main.nova", "tests/main.nova"].map(String::from);
-    let out = s0_resolution(Mode::Check, &pkg, &roots, 0);
+    let out = agree_on_resolution(&pkg, &roots, 0);
     for (root, label) in [("src/main.nova", "main"), ("tests/main.nova", "tests/main")] {
         assert!(
             out.contains(&format!(
@@ -2354,7 +2414,7 @@ fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
         );
     }
     let roots = ["pkg/tests/main.nova", ""].map(String::from);
-    let out = s0_resolution(Mode::Check, &dir, &roots, 2);
+    let out = agree_on_resolution(&dir, &roots, 2);
     assert!(
         out.starts_with(
             "== pkg/tests/main.nova\n(Program target=native resolved=true\n  \
@@ -2365,9 +2425,8 @@ fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
     assert!(out.ends_with("\n== \nIOERR NotFound\n"), "{out}");
 }
 
-/// A root's package is found as S0's `package_of` finds it (ADR 0053 §3;
-/// S0's alone until 5.2b's part B, when N prints a package's dump):
-/// by asking whether the path `<dir>/nova.toml` is a file, or a link to
+/// A root's package is found as S0's `package_of` finds it (ADR 0053 §3,
+/// ADR 0054), on both sides: by asking whether the path `<dir>/nova.toml` is a file, or a link to
 /// one, not by looking for that exact name in a listing of `<dir>`. So a
 /// `Nova.toml` makes a package on a case-insensitive disk (macOS's and
 /// Windows' by default) on both sides, and on a case-sensitive one on
@@ -2417,7 +2476,7 @@ fn a_package_is_found_by_its_manifests_path_on_both_sides() {
         .iter()
         .map(|(name, _)| format!("{name}/src/main.nova"))
         .collect();
-    let out = s0_resolution(Mode::Check, &dir, &roots, 0);
+    let out = agree_on_resolution(&dir, &roots, 0);
     for (root, (_, package)) in roots.iter().zip(&cases) {
         let part = if *package {
             "(Program target=native resolved=true\n  (Module 0 \"main\" package=0)\n"
@@ -2664,8 +2723,8 @@ fn parts_of(dump: &str) -> Vec<&str> {
 /// Both sides give the same resolution dump of each of the name fuzzer's
 /// inputs from the fixed seeds, and every input reaches the resolver; and,
 /// from 5.2b, its inputs under test mode, its WASM sibling's for the WASM
-/// target and its package sibling's (S0's alone in part A). A package's input reaches the resolver, or the loader
-/// stops it with E0004 or a noted E0001. Among them every one of the
+/// target and its package sibling's. A package's input reaches the
+/// resolver, or the loader stops it with E0004 or a noted E0001. Among them every one of the
 /// resolver's 11 codes, E0004 and E0001's two notes occur twice or more;
 /// E0084 and E0085 only under test mode, E0090 only for the WASM target.
 #[test]
@@ -2702,21 +2761,21 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
             "seed {seed}: an input did not reach the resolver"
         );
         add(&dump, Mode::Check, &format!("seed {seed}"));
-        let test = s0_resolution(Mode::Test, &dir, &files, 0);
+        let test = agree_on_resolution_in(Mode::Test, &dir, &files, 0);
         assert_eq!(test.matches("resolved=true").count(), inputs.len());
         add(&test, Mode::Test, &format!("seed {seed} under test mode"));
     }
     for seed in WASM_NAME_SEEDS {
         let inputs = wasm_names_of(&root, &loose_wasm, seed, WASM_NAME_COUNT);
         let (dir, files) = write_name_inputs(&format!("wasm-names-{seed}"), &inputs);
-        let dump = s0_resolution(Mode::Wasm, &dir, &files, 0);
+        let dump = agree_on_resolution_in(Mode::Wasm, &dir, &files, 0);
         assert_eq!(dump.matches("resolved=true").count(), inputs.len());
         add(&dump, Mode::Wasm, &format!("WASM seed {seed}"));
     }
     for seed in PACKAGE_NAME_SEEDS {
         let inputs = package_names_of(&root, &loose, seed, PACKAGE_NAME_COUNT);
         let (app, roots) = write_package_inputs(&format!("package-names-{seed}"), &inputs);
-        let dump = s0_resolution(Mode::Check, &app, &roots, 0);
+        let dump = agree_on_resolution(&app, &roots, 0);
         let parts = parts_of(&dump);
         assert_eq!(parts.len(), inputs.len());
         for part in parts {
