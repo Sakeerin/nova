@@ -1,0 +1,450 @@
+// The loader of a loose program: a port of
+// crates/nova-driver/src/program.rs's `load_program` and `Loader` on the
+// loose path, and of the driver's `strip_test_functions` and `package_of`
+// (spec
+// docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
+// §3.2, ADR 0053). From the root it reads, lexes and parses every module
+// it reaches, breadth first, finding each single-segment import as a file
+// beside the root; the order of the modules is the order of that search,
+// and each module's label is its file's stem, as in S0. Packages
+// (`nova.toml`, `src/`, `tests/`, a dependency) are 5.2b's.
+//
+// The Rust's idioms, translated:
+//
+// - A loose `Place` is a directory and a stem, and every module of a loose
+//   program is in the root's directory, so a place is its stem.
+// - `VecDeque` is a `Vec` and the index of its head.
+// - A path is a `String` with `/` between its parts, as `Path::join` and
+//   `Path::parent` treat one on Linux and macOS: `Path::join` writes `\`
+//   on Windows, which the harness keeps out of what it compares (ADR 0053
+//   §5).
+
+import ast
+import builtins
+import diagnostic
+import lexer
+import parser
+import token
+
+/// One module the loader read (`Loaded`): its label, path, tree and
+/// source, what each of its imports names by first segment, and what it
+/// could import.
+pub record Loaded {
+    pub name: String,
+    pub path: String,
+    pub ast: File,
+    pub text: String,
+    pub imports: Map<String, ImportTarget>,
+    pub importable: Vec<(String, Int)>,
+}
+
+/// What `load_program` found (`Load`): the modules in load order, and the
+/// lex, parse and import diagnostics in load order.
+pub record Load { pub modules: Vec<Loaded>, pub diagnostics: Vec<Diagnostic> }
+
+/// What a module's import names, as the loader decided (`ImportTarget`,
+/// which S0 keeps in `nova-resolver`): kept here, with the loader that
+/// decides it, so the loader builds without the resolver.
+pub type ImportTarget = | ImportTargetModule(Int) | ImportTargetReported
+
+// What an import names before every module is loaded (`Pending`).
+type Pending = | PendingPlace(String) | PendingReported
+
+// What `find` found for one import (`Found`): a module, by its place and
+// path; an error, reported here; or nothing, which the resolver reports.
+type Found = | FoundModule(String, String) | FoundReported(Diagnostic) | FoundNothing
+
+// The loader's state (`Loader`): the root's directory, and each stem's
+// answer to `has`, from one listing of the directory read once.
+record Loader { dir: String, listing: Vec<String>, listed: Bool, known: Map<String, Bool> }
+
+/// Read, lex and parse every module the loose program whose root is
+/// `root` reaches, breadth first (`load_program`). A module that cannot be
+/// read is skipped, so an import of it is "cannot find module"; `Err` only
+/// when the root cannot be read.
+pub async fn load_program(root: String) -> Result<Load, IoError> {
+    let mut loader = Loader {
+        dir: path_parent_or_empty(root),
+        listing: Vec::new(),
+        listed: false,
+        known: Map::new(),
+    }
+    let mut modules: Vec<Loaded> = Vec::new()
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    let mut pending: Vec<Vec<(String, Pending)>> = Vec::new()
+    let mut places: Map<String, Int> = Map::new()
+    let mut place_order: Vec<String> = Vec::new()
+    let mut tried: Set<String> = Set::new()
+    let mut queue: Vec<(String, String)> = Vec::new()
+    queue.push((module_name(root), root))
+    let mut head = 0
+    let mut is_entry = true
+
+    while head < queue.len() {
+        let (place, path) = queue.at(head)
+        head += 1
+        let entry = is_entry
+        is_entry = false
+        if !tried.insert(place) { continue }
+        let source = match read_to_string(path).await {
+            Ok(s) => s
+            Err(e) => {
+                if entry { return Err(e) }
+                continue
+            }
+        }
+        let label = place
+        let (tokens, lex_errors) = lex(source)
+        for e in lex_errors.iter() {
+            diagnostics.push(error_at("L0001", "${e}", label, e.span(), "here"))
+        }
+        let (file, parse_errors) = parse(tokens)
+        for e in parse_errors.iter() {
+            let mut d = error_at(e.code(), "${e}", label, e.span(), "here")
+            for n in e.notes().iter() { d.add_note(n) }
+            diagnostics.push(d)
+        }
+
+        // Only a single-segment import names a module; the resolver
+        // rejects the others.
+        let mut imports: Vec<(String, Pending)> = Vec::new()
+        for item in file.items.iter() {
+            match item.value {
+                ItemImport(imp) => {
+                    if imp.path.value.segments.len() != 1 { continue }
+                    let name = imp.path.value.segments.at(0).value
+                    match loader.find(place, name, imp.path.span).await {
+                        FoundModule(target, target_path) => {
+                            queue.push((target, target_path))
+                            imports.push((name, PendingPlace(target)))
+                        }
+                        FoundReported(diagnostic) => {
+                            diagnostics.push(diagnostic)
+                            imports.push((name, PendingReported))
+                        }
+                        FoundNothing => ()
+                    }
+                }
+                _ => ()
+            }
+        }
+        let _ = places.insert(place, modules.len())
+        place_order.push(place)
+        modules.push(
+            Loaded {
+                name: label,
+                path: path,
+                ast: file,
+                text: source,
+                imports: Map::new(),
+                importable: Vec::new(),
+            },
+        )
+        pending.push(imports)
+    }
+
+    let mut i = 0
+    while i < modules.len() {
+        let mut m = modules.at(i)
+        for (name, target) in pending.at(i).iter() {
+            match target {
+                PendingPlace(place) => {
+                    match places.get(place) {
+                        Some(index) => { let _ = m.imports.insert(name, ImportTargetModule(index)) }
+                        // It could not be read.
+                        None => ()
+                    }
+                }
+                PendingReported => { let _ = m.imports.insert(name, ImportTargetReported) }
+            }
+        }
+        i += 1
+    }
+
+    // What each loaded module could import, by the name an import of it
+    // writes, through `find` itself: every module beside it, by stem.
+    let mut names: Vec<String> = Vec::new()
+    for p in place_order.iter() { names.push(p) }
+    names = sorted_dedup(names)
+    i = 0
+    while i < modules.len() {
+        let from = place_order.at(i)
+        let mut importable: Vec<(String, Int)> = Vec::new()
+        for name in names.iter() {
+            match loader.find(from, name, Span::point(0)).await {
+                FoundModule(target, _) => {
+                    match places.get(target) {
+                        Some(j) => { if j != i { importable.push((name, j)) } }
+                        None => ()
+                    }
+                }
+                _ => ()
+            }
+        }
+        let mut m = modules.at(i)
+        m.importable = importable
+        i += 1
+    }
+    Ok(Load { modules: modules, diagnostics: diagnostics })
+}
+
+impl Loader {
+    // What `import name`, at `at` in the module `from`, names (`find`): a
+    // module under a std module's name is E0093; a std module's name that
+    // names no file is left to the resolver.
+    async fn find(mut self, from: String, name: String, at: Span) -> Found {
+        let found = self.find_place(from, name).await
+        if !holds(RESERVED_MODULE_NAMES, name) { return found }
+        let what = match found {
+            FoundModule(_, path) => path
+            FoundReported(_) => "this module or dependency"
+            FoundNothing => return found
+        }
+        FoundReported(
+            error_at(
+                "E0093",
+                "`${name}` is the name of a std module, so no module may take it: rename ${what}",
+                from,
+                at,
+                "std's module, not this one",
+            ),
+        )
+    }
+
+    // `find`, before std's names are checked (`find_place`): on the loose
+    // path, the file `name.nova` beside the root, or nothing.
+    async fn find_place(mut self, from: String, name: String) -> Found {
+        if !self.has(name).await { return FoundNothing }
+        FoundModule(name, path_join(self.dir, "${name}.nova"))
+    }
+
+    // Whether the root's directory holds `<stem>.nova` (`has`, `look`),
+    // answered once per load: its name exactly in the directory's listing,
+    // read once; not if only a name differing in case is; otherwise
+    // whether a file of that path reads.
+    async fn has(mut self, stem: String) -> Bool {
+        match self.known.get(stem) {
+            Some(known) => return known
+            None => ()
+        }
+        if !self.listed {
+            let listed = if self.dir == "" { "." } else { self.dir }
+            match read_dir(listed).await {
+                Ok(entries) => { for e in entries.iter() { self.listing.push(e.name) } }
+                Err(_) => ()
+            }
+            self.listed = true
+        }
+        let name = "${stem}.nova"
+        let mut found = false
+        let mut folded = false
+        for n in self.listing.iter() {
+            if n == name { found = true }
+            if eq_ignore_ascii_case(n, name) { folded = true }
+        }
+        if !found && !folded {
+            found = match read_to_string(path_join(self.dir, name)).await {
+                Ok(_) => true
+                Err(_) => false
+            }
+        }
+        let _ = self.known.insert(stem, found)
+        found
+    }
+}
+
+/// Remove every `@test` function, as the driver does before resolving
+/// under `check` (`strip_test_functions` with `keep_root_tests` false).
+pub fn strip_test_functions(modules: Vec<Loaded>) {
+    for loaded in modules.iter() {
+        let mut kept: Vec<Spanned<Item>> = Vec::new()
+        for item in loaded.ast.items.iter() {
+            let test = match item.value {
+                ItemFunction(f) => {
+                    let mut any = false
+                    for a in f.attrs.iter() { if a.name.value == "test" { any = true } }
+                    any
+                }
+                _ => false
+            }
+            if !test { kept.push(item) }
+        }
+        let mut file = loaded.ast
+        file.items = kept
+    }
+}
+
+/// The package `path` is a module of, when it is directly in the `src/` or
+/// `tests/` of a directory holding a `nova.toml` (`package_of`): whether it
+/// is.
+pub async fn in_package(path: String) -> Bool {
+    let parent = match path_parent(path) {
+        Some(p) => p
+        None => return false
+    }
+    let dir_name = file_name(parent)
+    if dir_name != "src" && dir_name != "tests" { return false }
+    let root = match path_parent(parent) {
+        Some(r) => r
+        None => return false
+    }
+    let listed = if root == "" { "." } else { root }
+    match read_dir(listed).await {
+        Ok(entries) => {
+            for e in entries.iter() { if e.name == "nova.toml" && e.is_file { return true } }
+            false
+        }
+        Err(_) => false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Paths
+// ---------------------------------------------------------------------------
+
+/// A module's name from its path, its file's stem, or `main` when it has
+/// none (`FrontendContext::module_name`).
+pub fn module_name(path: String) -> String {
+    let name = file_name(path)
+    if name == "" || name == ".." { return "main" }
+    let n = name.byte_len()
+    let mut dot = -1
+    let mut i = n - 1
+    while i > 0 {
+        if name.byte_at(i) == 46 {
+            dot = i
+            break
+        }
+        i -= 1
+    }
+    if dot <= 0 { name } else { name.byte_slice(0, dot) }
+}
+
+// The last part of `path` (`Path::file_name`), "" for none: a path's
+// last component, past any `/` or `.` component that ends it, unless it is
+// `..`.
+fn file_name(path: String) -> String {
+    let lo = before_body(path)
+    let end = trim_back(path, lo, path.byte_len())
+    if end == lo { return "" }
+    let mut i = end
+    while i > lo && path.byte_at(i - 1) != 47 { i -= 1 }
+    let name = path.byte_slice(i, end)
+    if name == ".." { "" } else { name }
+}
+
+/// The directory `path` is in (`Path::parent`): `None` for "", "/" and
+/// "/."; "" for a path of one part, "." and "./"; otherwise `path` up to
+/// its last component's start, less the `/`s and `.` components that end
+/// it, as `Components::as_path` trims them, but never a leading `/` or
+/// `./`: `sub/./main.nova` is in `sub`, `./main.nova` in `.`.
+pub fn path_parent(path: String) -> Option<String> {
+    let lo = before_body(path)
+    let end = trim_back(path, lo, path.byte_len())
+    if end == lo {
+        // No component past the root or the leading `.`.
+        if lo == 1 && path.byte_at(0) == 46 { return Some("") }
+        return None
+    }
+    let mut i = end
+    while i > lo && path.byte_at(i - 1) != 47 { i -= 1 }
+    Some(path.byte_slice(0, trim_back(path, lo, i)))
+}
+
+// How much of `path` comes before its first component, which `Path` never
+// trims: a root `/`, or the `.` of a leading `./` (or of `.` alone).
+fn before_body(path: String) -> Int {
+    let n = path.byte_len()
+    if n == 0 { return 0 }
+    if path.byte_at(0) == 47 { return 1 }
+    if path.byte_at(0) == 46 && (n == 1 || path.byte_at(1) == 47) { return 1 }
+    0
+}
+
+// `end`, moved back past the `/`s and `.` components that end
+// `path.byte_slice(0, end)`, but not below `lo`.
+fn trim_back(path: String, lo: Int, end: Int) -> Int {
+    let mut e = end
+    let mut more = true
+    while more {
+        while e > lo && path.byte_at(e - 1) == 47 { e -= 1 }
+        more = e > lo && path.byte_at(e - 1) == 46 && (e - 1 == lo || path.byte_at(e - 2) == 47)
+        if more { e -= 1 }
+    }
+    e
+}
+
+// `path_parent`, or "" (`root.path.parent().unwrap_or_default()`).
+fn path_parent_or_empty(path: String) -> String {
+    match path_parent(path) {
+        Some(p) => p
+        None => ""
+    }
+}
+
+/// `dir` joined with `name` (`Path::join`): `name` alone for an empty
+/// `dir`, and no second `/` after one `dir` ends with.
+pub fn path_join(dir: String, name: String) -> String {
+    if dir == "" { return name }
+    if dir.ends_with("/") { "${dir}${name}" } else { "${dir}/${name}" }
+}
+
+// Whether `a` and `b` are equal but for the case of ASCII letters.
+fn eq_ignore_ascii_case(a: String, b: String) -> Bool {
+    let n = a.byte_len()
+    if n != b.byte_len() { return false }
+    let mut i = 0
+    while i < n {
+        let x = a.byte_at(i)
+        let y = b.byte_at(i)
+        let fx = if x >= 65 && x <= 90 { x + 32 } else { x }
+        let fy = if y >= 65 && y <= 90 { y + 32 } else { y }
+        if fx != fy { return false }
+        i += 1
+    }
+    true
+}
+
+/// `names` sorted in byte order, each once (`sort`, then `dedup`): a merge
+/// sort.
+pub fn sorted_dedup(names: Vec<String>) -> Vec<String> {
+    let sorted = sort_strings(names)
+    let mut out: Vec<String> = Vec::new()
+    for n in sorted.iter() { if out.is_empty() || out.last() != n { out.push(n) } }
+    out
+}
+
+/// `names` sorted in byte order, stably: a merge sort.
+pub fn sort_strings(names: Vec<String>) -> Vec<String> {
+    let n = names.len()
+    let mut a = names.to_array()
+    if n < 2 { return Vec::from_array(a) }
+    let mut b = [""; n]
+    let mut width = 1
+    while width < n {
+        let mut lo = 0
+        while lo < n {
+            let mid = if lo + width < n { lo + width } else { n }
+            let hi = if lo + 2 * width < n { lo + 2 * width } else { n }
+            let mut i = lo
+            let mut j = mid
+            let mut k = lo
+            while k < hi {
+                if i < mid && (j >= hi || !less(a[j], a[i])) {
+                    b[k] = a[i]
+                    i += 1
+                } else {
+                    b[k] = a[j]
+                    j += 1
+                }
+                k += 1
+            }
+            lo = hi
+        }
+        let t = a
+        a = b
+        b = t
+        width = width * 2
+    }
+    Vec::from_array(a)
+}
