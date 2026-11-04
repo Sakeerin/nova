@@ -724,6 +724,24 @@ fn the_mutations_are_the_same_with_windows_line_endings() {
             "seed {seed} name-mutates the Windows checkout otherwise"
         );
     }
+    // And its WASM and package siblings' (5.2b).
+    for seed in PACKAGE_NAME_SEEDS {
+        assert!(
+            package_names_of(&dir, &reversed, seed, PACKAGE_NAME_COUNT)
+                == package_names_of(&root(), &loose, seed, PACKAGE_NAME_COUNT),
+            "package seed {seed} name-mutates the Windows checkout otherwise"
+        );
+    }
+    let wasm = loose_wasm_corpus();
+    let mut reversed = wasm.clone();
+    reversed.reverse();
+    for seed in WASM_NAME_SEEDS {
+        assert!(
+            wasm_names_of(&dir, &reversed, seed, WASM_NAME_COUNT)
+                == wasm_names_of(&root(), &wasm, seed, WASM_NAME_COUNT),
+            "WASM seed {seed} name-mutates the Windows checkout otherwise"
+        );
+    }
 }
 
 #[test]
@@ -2487,18 +2505,36 @@ fn a_root_whose_path_is_not_utf8_is_dumped_by_s0_and_not_found_by_n() {
     }
 }
 
-/// The name fuzzer's fixed seeds and counts every run checks (spec §3.5).
+/// The name fuzzer's fixed seeds and counts every run checks (spec §3.5),
+/// and, from 5.2b (spec §4.5, ADR 0054), its WASM and package siblings'.
+/// The loose inputs are also resolved under test mode, which keeps their
+/// `@test` functions; the package's are resolved under `check`: test mode
+/// on a package is the cases' (`cases/resolve-test/`), and the fuzzer's
+/// time is kept in proportion (ADR 0054).
 const NAME_SEEDS: [u64; 3] = [301, 302, 303];
 const NAME_COUNT: usize = 50;
+const WASM_NAME_SEEDS: [u64; 3] = [311, 312, 313];
+const WASM_NAME_COUNT: usize = 20;
+const PACKAGE_NAME_SEEDS: [u64; 3] = [321, 322, 323];
+const PACKAGE_NAME_COUNT: usize = 30;
 
-/// The resolver's codes that `check`'s pipeline gives a loose program on
-/// the native target. Of its 11, E0084 and E0085 are a `@test` function's,
-/// which `check` strips before resolving, and E0090 is WASM's: they come
-/// with 5.2b's test mode and target.
-const NATIVE_RESOLVER_CODES: [&str; 8] = [
-    "E0001", "E0002", "E0082", "E0083", "E0089", "E0092", "E0102", "E0900",
+/// The resolver's 11 codes (spec §2). `check` gives a loose native program
+/// 8 of them; E0084 and E0085 are a `@test` function's, which only test
+/// mode keeps, and E0090 is the WASM target's (decision 8).
+const RESOLVER_CODES: [&str; 11] = [
+    "E0001", "E0002", "E0082", "E0083", "E0084", "E0085", "E0089", "E0090", "E0092", "E0102",
+    "E0900",
 ];
-const LATER_RESOLVER_CODES: [&str; 3] = ["E0084", "E0085", "E0090"];
+const TEST_MODE_CODES: [&str; 2] = ["E0084", "E0085"];
+const WASM_CODES: [&str; 1] = ["E0090"];
+
+/// The two notes the loader puts on E0001 in a package (spec §4.1): a
+/// package with no library imported from its own `tests/`, and a
+/// dev-dependency imported from `src/`.
+const E0001_NOTES: [&str; 2] = [
+    " has no src/lib.nova\")",
+    " is a dev-dependency, which only `tests/` files can import\")",
+];
 
 /// `count` name-mutated programs from `seed` ([`fuzz::name_mutate`]), each
 /// one of `files`, under `root`, that the seed picks and that parses. As
@@ -2507,6 +2543,18 @@ const LATER_RESOLVER_CODES: [&str; 3] = ["E0084", "E0085", "E0090"];
 /// system. Input `i` is written as `f{i:05}.nova`, which a self-import
 /// names.
 fn names_of(root: &Path, files: &[String], seed: u64, count: usize) -> Vec<String> {
+    names_of_with(root, files, seed, count, fuzz::name_mutate)
+}
+
+/// [`names_of`], each input made by `mutate`, which takes the rng, the
+/// source and the input's stem.
+fn names_of_with<T>(
+    root: &Path,
+    files: &[String],
+    seed: u64,
+    count: usize,
+    mutate: impl Fn(&mut SplitMix64, &str, &str) -> T,
+) -> Vec<T> {
     let mut files = files.to_vec();
     files.sort();
     let mut rng = SplitMix64::new(seed);
@@ -2517,7 +2565,7 @@ fn names_of(root: &Path, files: &[String], seed: u64, count: usize) -> Vec<Strin
                 .expect("read a corpus file")
                 .replace("\r\n", "\n");
             if fuzz::parses(&source) {
-                break fuzz::name_mutate(&mut rng, &source, &format!("f{i:05}"));
+                break mutate(&mut rng, &source, &format!("f{i:05}"));
             }
         })
         .collect()
@@ -2526,6 +2574,26 @@ fn names_of(root: &Path, files: &[String], seed: u64, count: usize) -> Vec<Strin
 /// The name-mutated loose corpus: [`names_of`] it.
 fn names(seed: u64, count: usize) -> Vec<String> {
     names_of(&root(), &loose_corpus(), seed, count)
+}
+
+/// The loose WASM programs of the corpus, which [`wasm_names`] mutates.
+fn loose_wasm_corpus() -> Vec<String> {
+    wasm_corpus()
+        .into_iter()
+        .filter(|f| !in_package(f))
+        .collect()
+}
+
+/// The name-mutated loose WASM programs ([`fuzz::wasm_name_mutate`]).
+fn wasm_names_of(root: &Path, files: &[String], seed: u64, count: usize) -> Vec<String> {
+    names_of_with(root, files, seed, count, fuzz::wasm_name_mutate)
+}
+
+/// The name-mutated loose corpus as modules of [`fuzz::PACKAGE_FILES`]'
+/// package ([`fuzz::package_name_mutate`]): whether each is in `tests/`,
+/// and its text.
+fn package_names_of(root: &Path, files: &[String], seed: u64, count: usize) -> Vec<(bool, String)> {
+    names_of_with(root, files, seed, count, fuzz::package_name_mutate)
 }
 
 /// Write `inputs` to a fixed directory named after `name`, as
@@ -2545,6 +2613,35 @@ fn write_name_inputs(name: &str, inputs: &[String]) -> (PathBuf, Vec<String>) {
     (dir, files)
 }
 
+/// Write [`fuzz::PACKAGE_FILES`] to a fixed directory named after `name`,
+/// [`fuzz::NAME_SIBLINGS`] in its `app/src/` and `app/tests/`, and input
+/// `i` as `f{i:05}.nova` in `app/tests/` or `app/src/`: `app`'s directory,
+/// and the inputs' roots, relative to it. The roots are named from inside
+/// the package, so that E0004's paths begin at its `src/` (ADR 0054).
+fn write_package_inputs(name: &str, inputs: &[(bool, String)]) -> (PathBuf, Vec<String>) {
+    let dir = fresh_dir(name);
+    for (path, text) in fuzz::PACKAGE_FILES {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
+        std::fs::write(path, text).expect("write a package's file");
+    }
+    let app = dir.join("app");
+    for sub in ["src", "tests"] {
+        std::fs::create_dir_all(app.join(sub)).expect("create a package's directory");
+        for (stem, source) in fuzz::NAME_SIBLINGS {
+            std::fs::write(app.join(sub).join(format!("{stem}.nova")), source)
+                .expect("write a sibling");
+        }
+    }
+    let mut roots = Vec::with_capacity(inputs.len());
+    for (i, (tests, input)) in inputs.iter().enumerate() {
+        let root = format!("{}/f{i:05}.nova", if *tests { "tests" } else { "src" });
+        std::fs::write(app.join(&root), input).expect("write a name-fuzz input");
+        roots.push(root);
+    }
+    (app, roots)
+}
+
 /// How many diagnostics of each code `dump`, a resolution dump, holds.
 fn codes_in(dump: &str) -> std::collections::BTreeMap<String, usize> {
     let mut codes = std::collections::BTreeMap::new();
@@ -2559,34 +2656,85 @@ fn codes_in(dump: &str) -> std::collections::BTreeMap<String, usize> {
     codes
 }
 
+/// Each program's part of `dump`, by its root's header.
+fn parts_of(dump: &str) -> Vec<&str> {
+    dump.split("== ").filter(|p| !p.is_empty()).collect()
+}
+
 /// Both sides give the same resolution dump of each of the name fuzzer's
-/// inputs from the fixed seeds, every input reaches the resolver, and among
-/// them every resolver code `check` gives a loose native program occurs
-/// twice or more, and none of the three only test mode and WASM give.
+/// inputs from the fixed seeds, and every input reaches the resolver; and,
+/// from 5.2b, its inputs under test mode, its WASM sibling's for the WASM
+/// target and its package sibling's (S0's alone in part A). A package's input reaches the resolver, or the loader
+/// stops it with E0004 or a noted E0001. Among them every one of the
+/// resolver's 11 codes, E0004 and E0001's two notes occur twice or more;
+/// E0084 and E0085 only under test mode, E0090 only for the WASM target.
 #[test]
-fn the_name_fuzzer_agrees_and_gives_every_native_resolver_code() {
+fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
+    let root = root();
     let mut all = std::collections::BTreeMap::new();
+    let mut add = |dump: &str, mode: Mode, what: &str| {
+        let codes = codes_in(dump);
+        let absent: &[&str] = match mode {
+            Mode::Check => &["E0084", "E0085", "E0090"],
+            Mode::Wasm => &TEST_MODE_CODES,
+            Mode::Test => &WASM_CODES,
+        };
+        for code in absent {
+            assert!(!codes.contains_key(*code), "{what}: {code} in {codes:?}");
+        }
+        for (code, n) in codes {
+            *all.entry(code).or_insert(0) += n;
+        }
+        for note in E0001_NOTES {
+            *all.entry(note.to_string()).or_insert(0) += dump.matches(note).count();
+        }
+    };
+    let loose = loose_corpus();
+    let loose_wasm = loose_wasm_corpus();
     for seed in NAME_SEEDS {
         let inputs = names(seed, NAME_COUNT);
-        let dump = agree_on_inputs(&format!("names-{seed}"), &inputs, Dumps::Resolution);
+        let (dir, files) = write_name_inputs(&format!("names-{seed}"), &inputs);
+        let dump = agree_on_resolution(&dir, &files, 0);
         let resolved = dump.matches("resolved=true").count();
         assert_eq!(
             resolved,
             inputs.len(),
             "seed {seed}: an input did not reach the resolver"
         );
-        for (code, n) in codes_in(&dump) {
-            *all.entry(code).or_insert(0) += n;
+        add(&dump, Mode::Check, &format!("seed {seed}"));
+        let test = s0_resolution(Mode::Test, &dir, &files, 0);
+        assert_eq!(test.matches("resolved=true").count(), inputs.len());
+        add(&test, Mode::Test, &format!("seed {seed} under test mode"));
+    }
+    for seed in WASM_NAME_SEEDS {
+        let inputs = wasm_names_of(&root, &loose_wasm, seed, WASM_NAME_COUNT);
+        let (dir, files) = write_name_inputs(&format!("wasm-names-{seed}"), &inputs);
+        let dump = s0_resolution(Mode::Wasm, &dir, &files, 0);
+        assert_eq!(dump.matches("resolved=true").count(), inputs.len());
+        add(&dump, Mode::Wasm, &format!("WASM seed {seed}"));
+    }
+    for seed in PACKAGE_NAME_SEEDS {
+        let inputs = package_names_of(&root, &loose, seed, PACKAGE_NAME_COUNT);
+        let (app, roots) = write_package_inputs(&format!("package-names-{seed}"), &inputs);
+        let dump = s0_resolution(Mode::Check, &app, &roots, 0);
+        let parts = parts_of(&dump);
+        assert_eq!(parts.len(), inputs.len());
+        for part in parts {
+            let stopped_by_the_loader = part.contains("\n  (Error \"E0004\"")
+                || E0001_NOTES.iter().any(|n| part.contains(n));
+            assert!(
+                part.contains(" resolved=true\n") || stopped_by_the_loader,
+                "package seed {seed}: an input did not reach the resolver: {part}"
+            );
+            assert!(part.contains(" package=0"), "{part}");
         }
+        add(&dump, Mode::Check, &format!("package seed {seed}"));
     }
-    eprintln!("codes over seeds {NAME_SEEDS:?}: {all:?}");
-    // At 5.2a: E0001 46, E0002 63, E0082 14, E0083 8, E0089 10, E0092 13,
-    // E0102 50, E0900 18.
-    for code in NATIVE_RESOLVER_CODES {
-        let n = all.get(code).copied().unwrap_or(0);
+    eprintln!(
+        "codes over seeds {NAME_SEEDS:?}, {WASM_NAME_SEEDS:?} and {PACKAGE_NAME_SEEDS:?}: {all:?}"
+    );
+    for code in RESOLVER_CODES.iter().chain(&["E0004"]).chain(&E0001_NOTES) {
+        let n = all.get(*code).copied().unwrap_or(0);
         assert!(n >= 2, "{code} occurs {n} times, under 2, in {all:?}");
-    }
-    for code in LATER_RESOLVER_CODES {
-        assert!(!all.contains_key(code), "{code} in {all:?}");
     }
 }
