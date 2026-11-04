@@ -1,0 +1,2 @@
+type String = | A | B
+fn main() { }

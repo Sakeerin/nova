@@ -1,0 +1,2 @@
+trait It { type Item }
+fn main() { }

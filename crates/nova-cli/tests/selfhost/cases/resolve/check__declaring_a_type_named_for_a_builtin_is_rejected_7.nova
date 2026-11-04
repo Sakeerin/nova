@@ -1,0 +1,2 @@
+record Char { v: Bool }
+fn main() { }

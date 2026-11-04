@@ -1,0 +1,2 @@
+type Float = | A | B
+fn main() { }

@@ -1,0 +1,6 @@
+record P { v: Int }
+trait Show { fn name(self) -> String
+ fn shout(self) -> String { self.name() } }
+impl Show for P { fn name(self) -> String { "p" } }
+impl P { fn get(self) -> Int { self.v } }
+fn main() { }

@@ -1,0 +1,5 @@
+type Mine =
+    | Some(Int)
+    | None
+    | NotFound
+fn main() {}

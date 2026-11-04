@@ -1,0 +1,4 @@
+import left
+import main
+
+pub fn r() {}

@@ -1,0 +1,7 @@
+trait Tr {}
+record R { x: Int }
+
+@test
+impl Tr for R {}
+
+fn main() {}

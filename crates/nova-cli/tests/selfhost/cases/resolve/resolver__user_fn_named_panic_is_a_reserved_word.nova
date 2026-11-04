@@ -1,0 +1,2 @@
+fn panic(msg: String) { }
+fn main() { }

@@ -1,0 +1,4 @@
+import broken
+import lexbad
+
+fn main() {}

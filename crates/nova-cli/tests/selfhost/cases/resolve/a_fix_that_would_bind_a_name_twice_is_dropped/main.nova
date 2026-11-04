@@ -1,0 +1,4 @@
+import lib::{secret}
+import other
+
+fn main() {}

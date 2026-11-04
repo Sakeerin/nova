@@ -1,0 +1,2 @@
+import ui::router::{link}
+fn main() { }

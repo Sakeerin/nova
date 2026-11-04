@@ -1,0 +1,2 @@
+type Bool = | A | B
+fn main() { }

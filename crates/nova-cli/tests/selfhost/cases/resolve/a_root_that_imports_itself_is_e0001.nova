@@ -1,0 +1,3 @@
+import a_root_that_imports_itself_is_e0001
+
+fn main() {}

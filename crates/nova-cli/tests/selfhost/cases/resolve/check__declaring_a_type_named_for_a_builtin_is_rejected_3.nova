@@ -1,0 +1,2 @@
+record Float { v: Bool }
+fn main() { }

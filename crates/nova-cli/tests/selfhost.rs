@@ -28,9 +28,13 @@
 //!
 //! 5.2a (spec
 //! `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
-//! §3.4; ADR 0053): S0's hidden `nova check --dump-resolution FILE…` and
-//! `--std`, absent from `--help`, with every other `check` command line
-//! parsed as before, a header per root and std's part its own.
+//! §3.4–§3.5; ADR 0053): S0's hidden `nova check --dump-resolution FILE…`
+//! and `--std`, absent from `--help`, with every other `check` command
+//! line parsed as before; every form of its dump in its dumps of std's part, every loose corpus
+//! program and the resolver's error cases in
+//! `tests/selfhost/cases/resolve/`; and the name-level fuzzer's inputs
+//! from fixed seeds, among which every resolver code `check` can give
+//! natively occurs.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -514,8 +518,13 @@ fn compare_batch(
     nova: &Path,
     selfhost: &Path,
 ) -> Result<String, String> {
-    let s0 = run(nova, dump.s0, dir, files)?;
-    let n = run(selfhost, dump.n, dir, files)?;
+    // The two sides run at once.
+    let (s0, n) = std::thread::scope(|scope| {
+        let s0 = scope.spawn(|| run(nova, dump.s0, dir, files));
+        let n = run(selfhost, dump.n, dir, files);
+        (s0.join().expect("S0's thread"), n)
+    });
+    let (s0, n) = (s0?, n?);
     let mismatch = first_difference(&s0.stdout, &n.stdout);
     if mismatch.is_none() && s0.code == Some(code) && n.code == Some(code) {
         return Ok(String::from_utf8_lossy(&s0.stdout).into_owned());
@@ -563,12 +572,21 @@ fn agree(dir: &Path, files: &[String], batch: usize, code: i32) -> String {
     tokens + &ast
 }
 
+/// Which dumps an input set goes through.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dumps {
+    /// 5.1a's token dump.
+    Tokens,
+    /// The token dump, then 5.1b's AST dump.
+    TokensAndAst,
+}
+
 /// Write `inputs` to a fixed directory named after `name`, as
-/// `f00000.nova` and on, and check that both sides agree on them, in the
-/// token dump, and in the AST dump too if `ast`. Returns S0's output, its
-/// token dump and, if `ast`, its AST dump after it. The fuzzer's generators all come through here, 5.1b's deep nesting
-/// included.
-fn agree_on_inputs(name: &str, inputs: &[String], ast: bool) -> String {
+/// `f00000.nova` and on, and check that both sides agree on them through
+/// `dumps`. Returns S0's output: its token dump and, with the AST dump, its
+/// AST dump after it. The fuzzer's generators all come through here,
+/// 5.1b's deep nesting included.
+fn agree_on_inputs(name: &str, inputs: &[String], dumps: Dumps) -> String {
     let dir = fresh_dir(name);
     let mut files = Vec::with_capacity(inputs.len());
     for (i, input) in inputs.iter().enumerate() {
@@ -576,10 +594,9 @@ fn agree_on_inputs(name: &str, inputs: &[String], ast: bool) -> String {
         std::fs::write(dir.join(&file), input).expect("write a fuzz input");
         files.push(file);
     }
-    if ast {
-        agree(&dir, &files, 100, 0)
-    } else {
-        agree_on(&TOKENS, &dir, &files, 100, 0)
+    match dumps {
+        Dumps::TokensAndAst => agree(&dir, &files, 100, 0),
+        _ => agree_on(&TOKENS, &dir, &files, 100, 0),
     }
 }
 
@@ -619,23 +636,27 @@ fn windows_corpus(name: &str) -> (PathBuf, Vec<String>) {
     let files = corpus();
     for file in &files {
         let text = std::fs::read(root.join(file)).expect("read a corpus file");
-        let crlf = if text.contains(&b'\r') {
-            text
-        } else {
-            let mut out = Vec::with_capacity(text.len() + text.len() / 16);
-            for &b in &text {
-                if b == b'\n' {
-                    out.push(b'\r');
-                }
-                out.push(b);
-            }
-            out
-        };
         let path = dir.join(file);
         std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
-        std::fs::write(&path, crlf).expect("write a corpus file");
+        std::fs::write(&path, crlf(text)).expect("write a corpus file");
     }
     (dir, files)
+}
+
+/// `text` as git's `core.autocrlf` checks it out ([`windows_corpus`]):
+/// each `\n` as `\r\n`, unless it already holds a `\r`.
+fn crlf(text: Vec<u8>) -> Vec<u8> {
+    if text.contains(&b'\r') {
+        return text;
+    }
+    let mut out = Vec::with_capacity(text.len() + text.len() / 16);
+    for &b in &text {
+        if b == b'\n' {
+            out.push(b'\r');
+        }
+        out.push(b);
+    }
+    out
 }
 
 #[test]
@@ -673,6 +694,16 @@ fn the_mutations_are_the_same_with_windows_line_endings() {
             "seed {seed} mutates the Windows checkout otherwise"
         );
     }
+    // The name fuzzer's too, from the loose programs (5.2a).
+    let loose = loose_corpus();
+    let mut reversed = loose.clone();
+    reversed.reverse();
+    for seed in NAME_SEEDS {
+        assert!(
+            names_of(&dir, &reversed, seed, 50) == names_of(&root(), &loose, seed, 50),
+            "seed {seed} name-mutates the Windows checkout otherwise"
+        );
+    }
 }
 
 #[test]
@@ -686,7 +717,7 @@ fn the_fixed_cases_agree() {
 
 #[test]
 fn the_edge_inputs_agree() {
-    agree_on_inputs("edges", &fuzz::edges(), true);
+    agree_on_inputs("edges", &fuzz::edges(), Dumps::TokensAndAst);
 }
 
 #[test]
@@ -696,7 +727,11 @@ fn the_soup_agrees_and_holds_every_lex_error() {
         dumps.push_str(&agree_on_inputs(
             &format!("soup-{seed}"),
             &fuzz::soups(seed, SOUP_COUNT),
-            seed == AST_SOUP_SEED,
+            if seed == AST_SOUP_SEED {
+                Dumps::TokensAndAst
+            } else {
+                Dumps::Tokens
+            },
         ));
     }
     // One seed's trees were compared too.
@@ -719,7 +754,7 @@ fn the_mutated_corpus_agrees() {
         let out = agree_on_inputs(
             &format!("mutated-{seed}"),
             &mutations(seed, MUTATION_COUNT),
-            true,
+            Dumps::TokensAndAst,
         );
         // Their trees were compared too.
         assert!(out.contains("\n(File"), "seed {seed}");
@@ -737,7 +772,11 @@ fn a_longer_search_from_the_environment() {
         .split_once(':')
         .and_then(|(s, c)| Some((s.parse::<u64>().ok()?, c.parse::<usize>().ok()?)))
         .expect("NOVA_SELFHOST_FUZZ is SEED:COUNT");
-    agree_on_inputs("search-soup", &fuzz::soups(seed, count), true);
+    agree_on_inputs(
+        "search-soup",
+        &fuzz::soups(seed, count),
+        Dumps::TokensAndAst,
+    );
     // Mutations go in batches of 500, each from a seed of its own, so a long
     // search keeps few inputs on disk at a time.
     let mut done = 0;
@@ -746,7 +785,7 @@ fn a_longer_search_from_the_environment() {
         agree_on_inputs(
             "search-mutated",
             &mutations(seed.wrapping_add(done as u64), n),
-            true,
+            Dumps::TokensAndAst,
         );
         done += n;
     }
@@ -1107,7 +1146,7 @@ fn the_deep_inputs_agree() {
             .into_iter()
             .map(|(_, _, src)| src)
             .collect();
-        let out = agree_on_inputs(&format!("deep-{seed}"), &inputs, true);
+        let out = agree_on_inputs(&format!("deep-{seed}"), &inputs, Dumps::TokensAndAst);
         // The AST dumps were compared too: past the limit, P0002.
         assert!(out.contains(" this is nested too deeply"), "seed {seed}");
     }
@@ -1370,6 +1409,88 @@ fn nova_run_runs_the_program_on_the_main_thread() {
 /// program's root.
 const RESOLUTION_S0: &[&str] = &["check", "--dump-resolution"];
 
+/// The error cases of the resolver (spec §3.5): the inline sources of
+/// `nova-resolver`'s tests and of the type checker's tests that reach the
+/// resolver, each a file, or a directory whose `main.nova` is the root of
+/// a program of several modules.
+fn resolve_cases_dir() -> PathBuf {
+    cases_dir().join("resolve")
+}
+
+/// The roots of the resolver's error cases, relative to the repository:
+/// each file directly in [`resolve_cases_dir`], and each directory's
+/// `main.nova`, sorted.
+fn resolve_cases() -> Vec<String> {
+    let root = root();
+    let mut entries: Vec<_> = std::fs::read_dir(resolve_cases_dir())
+        .expect("read the resolver's cases")
+        .map(|e| e.expect("a directory entry").path())
+        .collect();
+    entries.sort();
+    let mut roots = Vec::new();
+    for path in entries {
+        let file = if path.is_dir() {
+            path.join("main.nova")
+        } else if path.extension().is_some_and(|e| e == "nova") {
+            path.clone()
+        } else {
+            continue;
+        };
+        assert!(file.is_file(), "{} has no main.nova", path.display());
+        let rel = file.strip_prefix(&root).expect("under the root");
+        let parts: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        roots.push(parts.join("/"));
+    }
+    roots
+}
+
+/// The programs of the corpus that the resolution dump compares in 5.2a:
+/// every corpus file but those directly in a package's `src/` or
+/// `tests/`, which are 5.2b's.
+fn loose_corpus() -> Vec<String> {
+    let root = root();
+    corpus()
+        .into_iter()
+        .filter(|f| {
+            let path = root.join(f);
+            let parent = path.parent().expect("a parent");
+            let in_package = matches!(
+                parent.file_name().and_then(|n| n.to_str()),
+                Some("src" | "tests")
+            ) && parent
+                .parent()
+                .is_some_and(|p| p.join("nova.toml").is_file());
+            !in_package
+        })
+        .collect()
+}
+
+/// S0's resolution dump of `files`, relative to `dir`, [`BATCH`] files to
+/// a process, the processes at once, each exiting with `code`. N's is
+/// compared with it from Task 6 on.
+fn s0_resolution(dir: &Path, files: &[String], code: i32) -> String {
+    let nova = nova();
+    let outs: Vec<Result<Run, String>> = std::thread::scope(|scope| {
+        let runs: Vec<_> = files
+            .chunks(BATCH)
+            .map(|chunk| scope.spawn(|| run(&nova, RESOLUTION_S0, dir, chunk)))
+            .collect();
+        runs.into_iter()
+            .map(|r| r.join().expect("a batch's thread"))
+            .collect()
+    });
+    let mut all = String::new();
+    for out in outs {
+        let out = out.unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(out.code, Some(code), "{}", out.stderr);
+        all.push_str(&String::from_utf8_lossy(&out.stdout));
+    }
+    all
+}
+
 /// `nova check`'s help names neither hidden flag, and every `nova check`
 /// command line whose first argument after `check` is not
 /// `--dump-resolution` is parsed as before the flags (ADR 0053 §1): each
@@ -1592,5 +1713,171 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
             !stdout.contains(" u"),
             "{target}: std's part names a user definition"
         );
+    }
+}
+
+/// Every form of the resolution dump's `KINDS` appears in S0's dump of
+/// std's part, or of some loose corpus program or resolver case (spec
+/// §3.5), every form they print is listed, and no form of `LATER_KINDS`
+/// appears, nor any of the three codes 5.2b's test mode and WASM target
+/// give; N's dumps are compared with these from Task 6 on.
+#[test]
+fn every_resolution_form_appears_in_the_corpus_and_the_cases() {
+    let root = root();
+    let loose = loose_corpus();
+    // 251 loose programs at 5.2a.
+    assert!(loose.len() >= 240, "only {} loose programs", loose.len());
+    let cases = resolve_cases();
+    // 103 cases at 5.2a.
+    assert!(cases.len() >= 90, "only {} resolver cases", cases.len());
+    let mut files = loose;
+    files.extend(cases);
+    let mut dumps = s0_resolution(&root, &files, 0);
+    let parts = dumps.lines().filter(|l| l.starts_with("(Program ")).count();
+    assert_eq!(parts, files.len());
+    // None of the codes that only 5.2b's test mode and WASM target give
+    // (decision 8), though cases hold the programs that would give them.
+    let codes = codes_in(&dumps);
+    for code in LATER_RESOLVER_CODES {
+        assert!(!codes.contains_key(code), "{code} in {codes:?}");
+    }
+    let std = run(
+        &nova(),
+        &["check", "--dump-resolution", "--std"],
+        &root,
+        &[],
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(std.code, Some(0), "{}", std.stderr);
+    dumps.push_str(&String::from_utf8_lossy(&std.stdout));
+    let mut found = std::collections::HashSet::new();
+    for line in dumps.lines() {
+        found.extend(nova_driver::resolution_dump::forms_on(line));
+    }
+    let missing: Vec<&str> = nova_driver::resolution_dump::KINDS
+        .iter()
+        .copied()
+        .filter(|k| !found.contains(*k))
+        .collect();
+    assert!(missing.is_empty(), "no S0 dump holds {missing:?}");
+    let unlisted: Vec<&String> = found
+        .iter()
+        .filter(|f| !nova_driver::resolution_dump::listed(f))
+        .collect();
+    assert!(unlisted.is_empty(), "{unlisted:?} are in no list");
+    let later: Vec<&str> = nova_driver::resolution_dump::LATER_KINDS
+        .iter()
+        .copied()
+        .filter(|k| found.contains(*k))
+        .collect();
+    assert!(
+        later.is_empty(),
+        "{later:?} appear, which LATER_KINDS says 5.2a's programs never print"
+    );
+}
+
+/// The name fuzzer's fixed seeds and counts every run checks (spec §3.5).
+const NAME_SEEDS: [u64; 3] = [301, 302, 303];
+const NAME_COUNT: usize = 50;
+
+/// The resolver's codes that `check`'s pipeline gives a loose program on
+/// the native target. Of its 11, E0084 and E0085 are a `@test` function's,
+/// which `check` strips before resolving, and E0090 is WASM's: they come
+/// with 5.2b's test mode and target.
+const NATIVE_RESOLVER_CODES: [&str; 8] = [
+    "E0001", "E0002", "E0082", "E0083", "E0089", "E0092", "E0102", "E0900",
+];
+const LATER_RESOLVER_CODES: [&str; 3] = ["E0084", "E0085", "E0090"];
+
+/// `count` name-mutated programs from `seed` ([`fuzz::name_mutate`]), each
+/// one of `files`, under `root`, that the seed picks and that parses. As
+/// for [`mutations_of`], the files are picked from their sorted list and
+/// read with each `\r\n` as `\n`, so a seed gives the same inputs on every
+/// system. Input `i` is written as `f{i:05}.nova`, which a self-import
+/// names.
+fn names_of(root: &Path, files: &[String], seed: u64, count: usize) -> Vec<String> {
+    let mut files = files.to_vec();
+    files.sort();
+    let mut rng = SplitMix64::new(seed);
+    (0..count)
+        .map(|i| loop {
+            let file = rng.pick(&files);
+            let source = std::fs::read_to_string(root.join(file))
+                .expect("read a corpus file")
+                .replace("\r\n", "\n");
+            if fuzz::parses(&source) {
+                break fuzz::name_mutate(&mut rng, &source, &format!("f{i:05}"));
+            }
+        })
+        .collect()
+}
+
+/// The name-mutated loose corpus: [`names_of`] it.
+fn names(seed: u64, count: usize) -> Vec<String> {
+    names_of(&root(), &loose_corpus(), seed, count)
+}
+
+/// Write `inputs` to a fixed directory named after `name`, as
+/// `f00000.nova` and on, beside [`fuzz::NAME_SIBLINGS`]: the directory, and
+/// the inputs' files, each a program's root.
+fn write_name_inputs(name: &str, inputs: &[String]) -> (PathBuf, Vec<String>) {
+    let dir = fresh_dir(name);
+    for (stem, source) in fuzz::NAME_SIBLINGS {
+        std::fs::write(dir.join(format!("{stem}.nova")), source).expect("write a sibling");
+    }
+    let mut files = Vec::with_capacity(inputs.len());
+    for (i, input) in inputs.iter().enumerate() {
+        let file = format!("f{i:05}.nova");
+        std::fs::write(dir.join(&file), input).expect("write a name-fuzz input");
+        files.push(file);
+    }
+    (dir, files)
+}
+
+/// How many diagnostics of each code `dump`, a resolution dump, holds.
+fn codes_in(dump: &str) -> std::collections::BTreeMap<String, usize> {
+    let mut codes = std::collections::BTreeMap::new();
+    for line in dump.lines() {
+        for kind in ["  (Error \"", "  (Warning \""] {
+            if let Some(rest) = line.strip_prefix(kind) {
+                let code = rest.split('"').next().unwrap_or("").to_string();
+                *codes.entry(code).or_insert(0) += 1;
+            }
+        }
+    }
+    codes
+}
+
+/// S0's resolution dump of each of the name fuzzer's inputs from the fixed
+/// seeds: every input reaches the resolver, and among them every resolver
+/// code `check` gives a loose native program occurs twice or more, and
+/// none of the three only test mode and WASM give. N's dumps are compared
+/// with these from Task 6 on.
+#[test]
+fn the_name_fuzzer_gives_every_native_resolver_code() {
+    let mut all = std::collections::BTreeMap::new();
+    for seed in NAME_SEEDS {
+        let inputs = names(seed, NAME_COUNT);
+        let (dir, files) = write_name_inputs(&format!("names-{seed}"), &inputs);
+        let dump = s0_resolution(&dir, &files, 0);
+        let resolved = dump.matches("resolved=true").count();
+        assert_eq!(
+            resolved,
+            files.len(),
+            "seed {seed}: an input did not reach the resolver"
+        );
+        for (code, n) in codes_in(&dump) {
+            *all.entry(code).or_insert(0) += n;
+        }
+    }
+    eprintln!("codes over seeds {NAME_SEEDS:?}: {all:?}");
+    // At 5.2a: E0001 46, E0002 63, E0082 14, E0083 8, E0089 10, E0092 13,
+    // E0102 50, E0900 18.
+    for code in NATIVE_RESOLVER_CODES {
+        let n = all.get(code).copied().unwrap_or(0);
+        assert!(n >= 2, "{code} occurs {n} times, under 2, in {all:?}");
+    }
+    for code in LATER_RESOLVER_CODES {
+        assert!(!all.contains_key(code), "{code} in {all:?}");
     }
 }

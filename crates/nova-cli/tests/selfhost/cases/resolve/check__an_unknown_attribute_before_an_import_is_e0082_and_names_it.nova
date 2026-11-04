@@ -1,0 +1,3 @@
+@tset
+import core
+fn main() { }

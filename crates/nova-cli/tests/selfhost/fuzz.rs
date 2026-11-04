@@ -20,6 +20,12 @@
 //!    3, §4.4; ADR 0052): well typed up to the limit, so that `nova check`
 //!    goes through every stage on it, and P0002 past it.
 //!
+//! 4. [`name_mutate`] (5.2a, spec
+//!    `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+//!    §3.5): a loose corpus program that parses, mutated at the level of
+//!    names, beside four sibling modules ([`NAME_SIBLINGS`]), so that the
+//!    resolver's codes occur among the fixed seeds' inputs.
+//!
 //! Beside them, [`edges`]: fixed inputs that no file under `cases/` can
 //! hold as it is, such as a lone `\r` or a NUL.
 
@@ -573,4 +579,283 @@ pub fn deeps(seed: u64, mixed: usize) -> Vec<(String, usize, String)> {
         out.push(("mixed".to_string(), depth, deep(&mut rng, "mixed", depth)));
     }
     out
+}
+
+// --- 5.2a: the name-level fuzzer (spec
+// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+// §3.5; ADR 0053) ---
+
+/// The modules every name-mutated input sits beside, `(stem, source)`, so
+/// that an import of a sibling finds one: `shapes` exports one item of
+/// each kind and keeps one private, and `helpers` exports a `main`, which
+/// clashes with a program's own when imported whole, and a variant that
+/// hides std's `Some` (E0102). `vault` keeps one private item of each kind
+/// that a fix can make public, and `hidden` twice, the second with its
+/// keyword on a line of its own, so no fix is offered for it; `keeper`
+/// imports `vault` whole and declares a record named as `vault`'s private
+/// function `Kept`, so the fix that would make `Kept` public is dropped.
+pub const NAME_SIBLINGS: [(&str, &str); 4] = [
+    (
+        "shapes",
+        "pub fn area() -> Int { 1 }\nfn secret() -> Int { 2 }\npub record Box { w: Int }\n\
+         pub type Tint = | Light | Dark\npub trait Shade {}\npub const LIMIT: Int = 3\n",
+    ),
+    (
+        "helpers",
+        "pub fn main() {}\npub fn helper() -> Int { 0 }\npub type Signal = | Some(Int) | Quiet\n",
+    ),
+    (
+        "vault",
+        "fn hidden() -> Int { 1 }\nconst\n    hidden: Int = 2\nconst SEALED: Int = 3\n\
+         record Cell { n: Int }\ntype Hue = | Pale\ntrait Veiled {}\nfn Kept() -> Int { 4 }\n",
+    ),
+    ("keeper", "import vault\nrecord Kept { n: Int }\n"),
+];
+
+/// A name a renamed definition can take, to collide with a builtin.
+const BUILTIN_NAMES: [&str; 5] = ["println", "print", "eprint", "eprintln", "panic"];
+
+/// Names std brings into every module: types, variants, traits and
+/// functions, which a program's own definition shadows, or, for a
+/// variant, hides with E0102.
+const STD_NAMES: [&str; 11] = [
+    "Option",
+    "Vec",
+    "Map",
+    "Some",
+    "None",
+    "Ok",
+    "Err",
+    "Display",
+    "Iterator",
+    "read_to_string",
+    "sleep",
+];
+
+/// The built-in type names (`nova_resolver::RESERVED_TYPE_NAMES`): a
+/// record or a sum under one is E0089.
+const RESERVED_NAMES: [&str; 7] = ["Int", "Float", "Bool", "Char", "String", "Future", "Bytes"];
+
+/// Names only std's modules see (`Builtin::STD_ONLY`), which a program may
+/// define freely.
+const STD_ONLY_NAMES: [&str; 5] = [
+    "str_cmp",
+    "str_hash",
+    "char_to_int",
+    "fs_read",
+    "task_spawn",
+];
+
+/// The imports a mutation adds at the top of a file: a module that is not
+/// there, a sibling whole or by a list (a private name, a missing one),
+/// std's imported modules (`dom` is not native's, E0092), a nested path
+/// under one and elsewhere, an alias (E0900), `{self}`, the input's own
+/// stem, a self-import, and `vault`'s private items, with `keeper`, which
+/// a fix for `Kept` would bind twice.
+const NAME_IMPORTS: [&str; 18] = [
+    "import nosuch",
+    "import shapes",
+    "import shapes::{secret}",
+    "import shapes::{area, nothing}",
+    "import shapes::{Box, Shade, LIMIT, Tint, Light}",
+    "import helpers",
+    "import helpers::{main}",
+    "import dom",
+    "import ui",
+    "import ui::nope",
+    "import ui::html::{div}",
+    "import a::b",
+    "import shapes as s",
+    "import {self}",
+    "import helpers::{Signal, Some}",
+    "import vault::{hidden}",
+    "import vault::{SEALED, Cell, Hue, Veiled}",
+    "import vault::{Kept}\nimport keeper",
+];
+
+/// The attributes a mutation puts on an item: unknown ones (E0082, with a
+/// fix on a function when the name is close to `test`), `@test` (E0083 on
+/// anything but a function; a function with one is stripped under
+/// `check`), and malformed `@test`s.
+const NAME_ATTRIBUTES: [&str; 6] = [
+    "@tset",
+    "@inline",
+    "@test",
+    "@test(bogus)",
+    "@test(should_panic, nope)",
+    "@deprecated(soon)",
+];
+
+/// The items a mutation adds at the end of a file: a type alias (E0900), a
+/// sum whose variants hide std's (E0102), a trait twice (E0002), an
+/// `extern` block, a function under a std-only name, a record under a
+/// built-in type's name (E0089), a second `main`, a `@test` record and
+/// impl block (E0083), a trait with a misspelt one (E0082), and impls for
+/// types that name their methods `anon`.
+const NAME_ITEMS: [&str; 11] = [
+    "type Alias = Int\n",
+    "type Mine = | Some(Int) | Nope | Err\n",
+    "trait Twice {}\ntrait Twice {}\n",
+    "extern \"C\" {\n    fn abs(x: Int) -> Int\n}\n",
+    "fn str_cmp(a: Int) -> Int { a }\n",
+    "record Bytes { n: Int }\n",
+    "pub fn main() {}\n",
+    "@test\nrecord Probe { n: Int }\n",
+    "@tset\ntrait Probing {}\n",
+    "record Held { n: Int }\n@test\nimpl Held {}\n",
+    "trait Marked {}\nimpl Marked for () { fn mark(self) {} }\nimpl Marked for fn(Int) -> Int { fn mark(self) {} }\n",
+];
+
+/// One top-level item, as the name fuzzer edits it: its span, and its
+/// name's span, its name and whether it is `pub` when it has one, with
+/// whether it introduces a type name (a record or a sum) and whether it is
+/// a function.
+struct NamedItem {
+    span: (usize, usize),
+    name: Option<(usize, usize, String)>,
+    is_pub: bool,
+    is_type: bool,
+    is_fn: bool,
+}
+
+/// `source`'s items, if it lexes and parses without an error.
+fn named_items(source: &str) -> Option<Vec<NamedItem>> {
+    use nova_ast::item::Visibility;
+    use nova_ast::Item;
+    let (tokens, lex_errors) = nova_lexer::lex(source, FileId::DUMMY);
+    if !lex_errors.is_empty() {
+        return None;
+    }
+    let parsed = nova_parser::parse_recovering(&tokens, FileId::DUMMY);
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    let items = parsed
+        .file
+        .items
+        .iter()
+        .map(|item| {
+            let (name, vis, is_type) = match &item.value {
+                Item::Function(f) => (Some(&f.name), Some(f.vis), false),
+                Item::Record(r) => (Some(&r.name), Some(r.vis), true),
+                Item::Type(t) => (Some(&t.name), Some(t.vis), true),
+                Item::Trait(t) => (Some(&t.name), Some(t.vis), false),
+                Item::Const(c) => (Some(&c.name), Some(c.vis), false),
+                _ => (None, None, false),
+            };
+            NamedItem {
+                span: (item.span.start as usize, item.span.end as usize),
+                name: name.map(|n| (n.span.start as usize, n.span.end as usize, n.value.clone())),
+                is_pub: vis == Some(Visibility::Pub),
+                is_type,
+                is_fn: matches!(item.value, Item::Function(_)),
+            }
+        })
+        .collect();
+    Some(items)
+}
+
+/// Where the line holding byte `at` starts.
+fn line_start(source: &str, at: usize) -> usize {
+    source[..at].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// `source`, a program that parses, mutated one to three times at the
+/// level of names: a definition renamed to collide with another, with a
+/// builtin, with a std name, a built-in type's or a std-only builtin's; an
+/// item duplicated or deleted; `pub` toggled; an import, an attribute or
+/// an item from the tables above added. `stem` is the input's own file
+/// stem, which a self-import names. A mutation that would leave the
+/// program unparsable is skipped, so every input reaches the resolver.
+pub fn name_mutate(rng: &mut SplitMix64, source: &str, stem: &str) -> String {
+    let mut text = source.to_string();
+    for _ in 0..1 + rng.below(3) {
+        let Some(items) = named_items(&text) else {
+            break;
+        };
+        let named: Vec<&NamedItem> = items.iter().filter(|i| i.name.is_some()).collect();
+        let edited = match rng.below(28) {
+            // Renames: 0-2 to another item's name, 3-4 a builtin's, 5-6 a
+            // std name, 7-8 a built-in type's (on a type), 9 a std-only
+            // builtin's.
+            k @ 0..=9 if !named.is_empty() => {
+                let types: Vec<&NamedItem> = named.iter().copied().filter(|i| i.is_type).collect();
+                let item = if matches!(k, 7 | 8) && !types.is_empty() {
+                    *rng.pick(&types)
+                } else {
+                    *rng.pick(&named)
+                };
+                let (start, end, _) = item.name.clone().expect("a named item");
+                let to = match k {
+                    0..=2 => rng.pick(&named).name.clone().expect("a named item").2,
+                    3 | 4 => rng.pick(&BUILTIN_NAMES).to_string(),
+                    5 | 6 => rng.pick(&STD_NAMES).to_string(),
+                    7 | 8 => rng.pick(&RESERVED_NAMES).to_string(),
+                    _ => rng.pick(&STD_ONLY_NAMES).to_string(),
+                };
+                Some(format!("{}{to}{}", &text[..start], &text[end..]))
+            }
+            // An item duplicated at the end of the file, or deleted.
+            10..=12 if !items.is_empty() => {
+                let item = rng.pick(&items);
+                let copy = &text[item.span.0..item.span.1];
+                Some(format!("{}\n{copy}\n", text.trim_end_matches('\n')))
+            }
+            13 | 14 if !items.is_empty() => {
+                let item = rng.pick(&items);
+                Some(format!("{}{}", &text[..item.span.0], &text[item.span.1..]))
+            }
+            // `pub` toggled.
+            15 | 16 if !named.is_empty() => {
+                let item = rng.pick(&named);
+                let (start, _, _) = item.name.clone().expect("a named item");
+                let keyword = nova_diagnostics::lines::keyword_start(&text, start);
+                match (item.is_pub, keyword) {
+                    (false, Some(at)) => Some(format!("{}pub {}", &text[..at], &text[at..])),
+                    (true, Some(at)) => text[..at]
+                        .rfind("pub ")
+                        .filter(|&p| p >= item.span.0)
+                        .map(|p| format!("{}{}", &text[..p], &text[p + 4..])),
+                    _ => None,
+                }
+            }
+            // An import at the top.
+            17..=21 => {
+                let import = rng.pick(&NAME_IMPORTS).replace("{self}", stem);
+                Some(format!("{import}\n{text}"))
+            }
+            // An attribute on an item's line: a `@test` on an item that is
+            // not a function half the time, since one on a function is
+            // stripped.
+            22..=24 if !named.is_empty() => {
+                let attr = rng.pick(&NAME_ATTRIBUTES);
+                let others: Vec<&NamedItem> = named.iter().copied().filter(|i| !i.is_fn).collect();
+                let item = if attr.starts_with("@test") && !others.is_empty() && rng.one_in(2) {
+                    *rng.pick(&others)
+                } else {
+                    *rng.pick(&named)
+                };
+                let (start, _, _) = item.name.clone().expect("a named item");
+                let at = line_start(&text, start);
+                Some(format!("{}{attr}\n{}", &text[..at], &text[at..]))
+            }
+            // An item at the end.
+            _ => {
+                let item = rng.pick(&NAME_ITEMS);
+                Some(format!("{}\n{item}", text.trim_end_matches('\n')))
+            }
+        };
+        if let Some(next) = edited {
+            if named_items(&next).is_some() {
+                text = next;
+            }
+        }
+    }
+    text
+}
+
+/// Whether `source` lexes and parses without an error: what the name
+/// fuzzer starts from.
+pub fn parses(source: &str) -> bool {
+    named_items(source).is_some()
 }

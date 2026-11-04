@@ -1,0 +1,6 @@
+type Tri = | Some(Int) | None | Third
+record R { n: Int }
+trait It3 { fn next(mut self) -> Tri }
+impl It3 for R { fn next(mut self) -> Tri { Third } }
+fn main() { let r = R { n: 0 }
+ for x in r { println("${x}") } }

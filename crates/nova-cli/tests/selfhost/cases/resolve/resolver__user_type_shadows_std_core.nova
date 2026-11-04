@@ -1,0 +1,2 @@
+type Option<T> = | Present(T) | Absent
+fn main() { }

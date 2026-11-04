@@ -1,0 +1,3 @@
+pub type Tok =
+  | Eof
+  | Num(Int)

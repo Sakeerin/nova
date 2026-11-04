@@ -1,0 +1,2 @@
+import ui::ssr::{page}
+fn main() { }

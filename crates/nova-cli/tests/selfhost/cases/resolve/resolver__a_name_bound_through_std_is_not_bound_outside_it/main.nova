@@ -1,0 +1,2 @@
+record Option { x: Int }
+fn main() {}

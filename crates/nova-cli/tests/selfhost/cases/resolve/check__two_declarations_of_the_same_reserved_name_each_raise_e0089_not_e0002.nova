@@ -1,0 +1,3 @@
+record Bool { v: Int }
+record Bool { w: Int }
+fn main() { }
