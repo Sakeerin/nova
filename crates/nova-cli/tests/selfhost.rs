@@ -2008,6 +2008,89 @@ fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
     );
 }
 
+/// A root's package is found as S0's `package_of` finds it (ADR 0053 §3):
+/// by asking whether the path `<dir>/nova.toml` is a file, or a link to
+/// one, not by looking for that exact name in a listing of `<dir>`. So a
+/// `Nova.toml` makes a package on a case-insensitive disk (macOS's and
+/// Windows' by default) on both sides, and on a case-sensitive one on
+/// neither; and, but on Windows, a link to a file makes one, a dangling
+/// link none, and a directory that can be searched but not listed still
+/// holds its `nova.toml` for both (as root, which lists it anyway, that
+/// part is any other package). The test asks the disk whether it folds case.
+#[test]
+fn a_package_is_found_by_its_manifests_path_on_both_sides() {
+    #[cfg(unix)]
+    let _ = restore_listing(
+        &std::env::temp_dir()
+            .join("nova-selfhost-resolution-manifests")
+            .join("locked"),
+    );
+    let dir = fresh_dir("resolution-manifests");
+    let package = |name: &str| {
+        std::fs::create_dir_all(dir.join(name).join("src")).expect("create a package's src/");
+        std::fs::write(
+            dir.join(name).join("src").join("main.nova"),
+            "fn main() {}\n",
+        )
+        .expect("write main.nova");
+        dir.join(name)
+    };
+    std::fs::write(package("cased").join("Nova.toml"), "").expect("write Nova.toml");
+    let folds = dir.join("cased").join("nova.toml").is_file();
+    #[cfg(unix)]
+    let (more, _relisted) = {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        std::fs::write(dir.join("real.toml"), "").expect("write real.toml");
+        symlink("../real.toml", package("linked").join("nova.toml")).expect("link nova.toml");
+        symlink("missing.toml", package("dangling").join("nova.toml")).expect("link nova.toml");
+        std::fs::write(package("locked").join("nova.toml"), "").expect("write nova.toml");
+        let relisted = Relisted(dir.join("locked"));
+        std::fs::set_permissions(dir.join("locked"), std::fs::Permissions::from_mode(0o311))
+            .expect("make locked/ unlistable");
+        (
+            vec![("linked", true), ("dangling", false), ("locked", true)],
+            relisted,
+        )
+    };
+    #[cfg(not(unix))]
+    let more = Vec::new();
+    let cases: Vec<(&str, bool)> = [("cased", folds)].into_iter().chain(more).collect();
+    let roots: Vec<String> = cases
+        .iter()
+        .map(|(name, _)| format!("{name}/src/main.nova"))
+        .collect();
+    let out = agree_on_resolution(&dir, &roots, 0);
+    for (root, (_, package)) in roots.iter().zip(&cases) {
+        let part = if *package {
+            "UNSUPPORTED package\n"
+        } else {
+            "(Program target=native resolved=true\n"
+        };
+        assert!(
+            out.contains(&format!("== {root}\n{part}")),
+            "{root} (a case-folding disk: {folds}): {out}"
+        );
+    }
+}
+
+/// A directory made listable again when dropped, so that `fresh_dir` can
+/// remove it next time, whether the test that locked it passed or failed.
+#[cfg(unix)]
+struct Relisted(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Relisted {
+    fn drop(&mut self) {
+        let _ = restore_listing(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn restore_listing(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+}
+
 /// A module's label is its file's stem, which may hold what the dump's
 /// strings escape: a root named `q"uo\te.nova` is the module
 /// `"q\x22uo\x5cte"` on both sides. Windows refuses `"` in a file name.

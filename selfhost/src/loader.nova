@@ -276,7 +276,10 @@ pub fn strip_test_functions(modules: Vec<Loaded>) {
 
 /// The package `path` is a module of, when it is directly in the `src/` or
 /// `tests/` of a directory holding a `nova.toml` (`package_of`): whether it
-/// is.
+/// is. The manifest is asked for by its path, as `package_of` asks
+/// `root.join("nova.toml").is_file()`, not looked for in a listing, so a
+/// case-insensitive disk finds `Nova.toml` on both sides, and a directory
+/// that can be searched but not listed still holds its manifest.
 pub async fn in_package(path: String) -> Bool {
     let parent = match path_parent(path) {
         Some(p) => p
@@ -288,13 +291,19 @@ pub async fn in_package(path: String) -> Bool {
         Some(r) => r
         None => return false
     }
-    let listed = if root == "" { "." } else { root }
-    match read_dir(listed).await {
-        Ok(entries) => {
-            for e in entries.iter() { if e.name == "nova.toml" && e.is_file { return true } }
-            false
-        }
-        Err(_) => false
+    is_file(path_join(root, "nova.toml")).await
+}
+
+// Whether something that is not a directory is at `path`, a link followed
+// (`Path::is_file`): it exists, and does not list as a directory. Nova's
+// std has no query of a path's kind but `exists` and `read_dir`; as the
+// listing's `DirEntry.is_file` did, it takes a pipe for a file, and it
+// takes a directory it may not list for one too.
+async fn is_file(path: String) -> Bool {
+    if !exists(path).await { return false }
+    match read_dir(path).await {
+        Ok(_) => false
+        Err(_) => true
     }
 }
 
