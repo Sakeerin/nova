@@ -13,6 +13,9 @@ mod runtime_cache;
 
 pub use analyze::{analyze, analyze_program, Analysis, DiskSources, Options, Probe, Sources};
 pub use nova_codegen_cranelift::CompiledProgram;
+/// The resolution dump's forms, for the self-hosted resolver's differential
+/// test (spec 5.2 §3.4).
+pub use nova_resolver::dump as resolution_dump;
 pub use nova_resolver::CompileTarget as Target;
 pub use program::{package_of, Program, Root, RootKind, Roots};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
@@ -108,6 +111,100 @@ pub fn check_program_counted_for(program: Program, target: Target) -> Result<Che
         errors: ctx.errors,
         warnings: ctx.warnings,
     })
+}
+
+/// The resolution dumps of programs for one target (`nova_resolver::dump`;
+/// spec
+/// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+/// §3.4, ADR 0053), with std's modules lexed and parsed once for them all,
+/// as the self-hosted resolver parses them: each program's own file
+/// database registers std's modules first, so their ids, and the parsed
+/// trees' spans, are the same in every program.
+pub struct ResolutionDumps {
+    target: Target,
+    std: nova_resolver::ParsedStd,
+}
+
+impl ResolutionDumps {
+    /// std's modules for `target`, parsed.
+    pub fn new(target: Target) -> ResolutionDumps {
+        let mut db = FileDb::new();
+        let (std_files, _) = register_std(&mut db, target);
+        ResolutionDumps {
+            target,
+            std: nova_resolver::parse_std(target, &std_files, None),
+        }
+    }
+
+    /// The resolution dump of the program whose root is `path`: `check`'s
+    /// pipeline up to the resolver, rendering nothing. It loads the
+    /// program, stops there on any error, as `check` does, strips the
+    /// `@test` functions, and resolves; the dump holds what was built and
+    /// every diagnostic so far. A root directly in a package's `src/` or
+    /// `tests/` is `UNSUPPORTED package`: 5.2a dumps loose programs alone.
+    /// `Err` when the root cannot be read.
+    pub fn dump(&self, path: &Path) -> std::io::Result<String> {
+        if package_of(path).is_some() {
+            return Ok("UNSUPPORTED package\n".to_string());
+        }
+        let Program { mut db, roots, .. } = Program::loose(path);
+        let (_, mut labels) = register_std(&mut db, self.target);
+        let load = program::load_program(None, &roots, &DiskSources, &mut db)?;
+        let mut modules = load.modules;
+        let mut diagnostics = load.diagnostics;
+        let failed = diagnostics.iter().any(|d| d.severity == Severity::Error);
+        if !failed {
+            strip_test_functions(&mut modules, false);
+        }
+        labels.extend(modules.iter().map(|m| (m.file, m.name.clone())));
+        let sources: Vec<ModuleSource> = modules
+            .iter()
+            .map(|m| ModuleSource {
+                name: m.name.clone(),
+                file: &m.ast,
+                imports: m.imports.clone(),
+                text: db.get_source(m.file),
+                package: m.package.map(|p| p.0),
+                importable: m.importable.clone(),
+            })
+            .collect();
+        let resolved = (!failed)
+            .then(|| nova_resolver::resolve_program_with_std(self.target, &sources, &self.std));
+        if let Some(resolved) = &resolved {
+            diagnostics.extend(resolved.diagnostics.iter().cloned());
+        }
+        Ok(nova_resolver::dump::dump_program(
+            self.target,
+            &sources,
+            &labels,
+            resolved.as_ref(),
+            &diagnostics,
+        ))
+    }
+}
+
+/// std's part of the resolution dump for `target`: the resolution of a
+/// program of no module of its own, which is std's in every program.
+pub fn dump_std_resolution(target: Target) -> String {
+    let mut db = FileDb::new();
+    let (std_files, labels) = register_std(&mut db, target);
+    let resolved = nova_resolver::resolve_program_for(target, &[], &std_files, None);
+    nova_resolver::dump::dump_std(target, &labels, &resolved)
+}
+
+/// Register each of `target`'s std modules in `db` as `check` does, as
+/// `<std/core>`: their ids, in order, and each id with that name.
+fn register_std(db: &mut FileDb, target: Target) -> (Vec<FileId>, Vec<(FileId, String)>) {
+    let mut ids = Vec::new();
+    let mut labels = Vec::new();
+    for &(name, src) in target.std_modules() {
+        let short = name.strip_prefix("$std.").unwrap_or(name);
+        let label = format!("<std/{short}>");
+        let id = db.add(label.clone(), src);
+        ids.push(id);
+        labels.push((id, label));
+    }
+    (ids, labels)
 }
 
 /// The stack of the threads the pipeline runs on: every command's (`nova`'s
@@ -889,15 +986,7 @@ impl<'a> FrontendContext<'a> {
         // `FileId::DUMMY`. One id per entry of the target's std modules
         // (`CompileTarget::std_modules`), in order — e.g. `$std.core` names
         // `<std/core>`.
-        let std_files: Vec<FileId> = self
-            .target
-            .std_modules()
-            .iter()
-            .map(|&(name, src)| {
-                let short = name.strip_prefix("$std.").unwrap_or(name);
-                self.db.add(format!("<std/{short}>"), src)
-            })
-            .collect();
+        let (std_files, _) = register_std(&mut self.db, self.target);
         // `std/test`, registered the same way but only under `nova test`
         // (`with_test_module`): one more `FileId` allocated *conditionally*,
         // which is fine precisely because it rides alongside `STD_MODULES`

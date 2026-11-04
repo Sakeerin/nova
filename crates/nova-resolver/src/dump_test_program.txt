@@ -1,0 +1,100 @@
+(Program target=native resolved=true
+  (Module 0 "main" package=None
+    (Import "lib" 1)
+    (Importable "lib" 1))
+  (Module 1 "lib" package=None
+    (Import "lib" 1)
+    (Importable "main" 0))
+  (StdStart module=2 def=18 item=25)
+  (Def.Fn u0 "main" "main":135..139 item=8)
+  (Def.Record u1 "R" "main":200..201 item=9)
+  (Def.Const u2 "K" "main":222..223 item=10)
+  (Def.Sum u3 "Shade" "main":242..247 item=11
+    (Variant "Red" "main":252..255 arity=0)
+    (Variant "Ok" "main":258..260 arity=1))
+  (Def.Trait u4 "Show" "main":272..276 item=12)
+  (Def.AssocType u5 "Item" "main":288..292 trait=u4)
+  (Def.Method u6 "Show::twice$default" "main":300..305 item=12 method=1 owner=TraitDefault)
+  (Def.Method u7 "R.Show.twice" "main":342..347 item=13 method=0 owner=Impl)
+  (Def.ExternFn u8 "abs" "main":379..382 item=14 fn=0)
+  (Def.Fn u9 "println" "main":403..410 item=15)
+  (Def.Fn u10 "dup" "main":419..422 item=16)
+  (Def.Fn u11 "dup" "main":431..434 item=17)
+  (Def.Fn u12 "alpha" "main":443..448 item=18)
+  (Def.Fn u13 "back" "main":467..471 item=19)
+  (Def.Fn u14 "alpha" "lib":18..23 item=21)
+  (Def.Fn u15 "secret" "lib":42..48 item=22)
+  (Def.Record u16 "P" "lib":75..76 item=23)
+  (Def.Trait u17 "T" "lib":90..91 item=24)
+  (Scope 0
+    (Value.Def "K" u2)
+    (Value.Variant "Ok" u3 1)
+    (Value.Variant "Red" u3 0)
+    (Value.Def "abs" u8)
+    (Value.Def "alpha" u12)
+    (Value.Def "back" u13)
+    (Value.Def "dup" u10)
+    (Value.Def "main" u0)
+    (Type "P" u16)
+    (Type "R" u1)
+    (Type "Shade" u3)
+    (Trait "Show" u4)
+    (Trait "T" u17)
+  (Scope 1
+    (Value.Def "alpha" u14)
+    (Value.Def "secret" u15)
+    (Type "P" u16)
+    (Trait "T" u17)
+  (Exports 0
+    (Value.Def "K" u2)
+    (Value.Variant "Red" u3 0)
+    (Value.Variant "Ok" u3 1)
+    (Type "Shade" u3))
+  (Exports 1
+    (Value.Def "alpha" u14)
+    (Type "P" u16)
+    (Trait "T" u17))
+  (Items 0..20 0)
+  (Items 20..25 1)
+  (Split "main":154..155 kind=Call)
+  (Split "main":168..169 kind=Index)
+  (Split "main":182..183 kind=Minus)
+  (Split "main":498..499 kind=Value))
+(Diagnostics
+  (Error "E0900" "type aliases are not supported yet in the Phase 1 compiler"
+    (Primary "main":90..94 "not supported yet"))
+  (Error "E0089" "`Int` is already a built-in type; a type declared under this name could never be referred to in a type annotation, since `Int` in a type position never resolves to a declaration under this name"
+    (Primary "main":111..114 "redeclares a built-in type name"))
+  (Error "E0082" "unknown attribute `@tset`; known attributes are: test"
+    (Primary "main":127..131 "unknown attribute")
+    (Fix "change `tset` to `test`"
+      (Edit "main":127..131 "test")))
+  (Error "E0083" "`@test` can only be applied to a function, not a record"
+    (Primary "main":188..192 "not a function"))
+  (Error "E0082" "unknown attribute `@bogus`; known attributes are: test"
+    (Primary "main":206..211 "unknown attribute"))
+  (Error "E0002" "duplicate definition of `println`"
+    (Primary "main":403..410 "redefined here")
+    (Note "`println` is a compiler builtin"))
+  (Error "E0002" "duplicate definition of `dup`"
+    (Primary "main":431..434 "redefined here")
+    (Secondary "main":419..422 "first defined here"))
+  (Error "E0002" "`alpha` is already defined or imported in this module"
+    (Primary "main":7..10 "conflicting import"))
+  (Error "E0001" "`secret` is not a public item of module `lib`"
+    (Primary "main":24..30 "not found or not `pub`")
+    (Fix "make `secret` public in `lib`"
+      (Edit "lib":39..39 "pub ")))
+  (Error "E0001" "cannot find module `nosuch`"
+    (Primary "main":39..45 "no such module"))
+  (Error "E0092" "`dom` is a std module, which target native does not have"
+    (Primary "main":53..56 "not on target native"))
+  (Error "E0900" "`import ... as` aliases are not supported yet"
+    (Primary "main":64..67 "not supported yet"))
+  (Error "E0900" "qualified or nested import paths (`a::b`) are not supported yet; import a top-level module by its name"
+    (Primary "main":80..84 "not supported yet"))
+  (Error "E0001" "module `lib` imports itself"
+    (Primary "lib":7..10 "self-import"))
+  (Warning "E0102" "variant `Ok` hides std's `Result::Ok`"
+    (Primary "main":258..260 "this variant")
+    (Note "in this module the bare name `Ok` now means this variant; std's is `Result::Ok`")))

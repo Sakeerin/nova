@@ -17,6 +17,7 @@ use nova_ast::{File, Function, Item, Type};
 use nova_diagnostics::{suggest, Diagnostic, Edit, FileId, Fix, Span};
 use rustc_hash::FxHashMap;
 
+pub mod dump;
 pub mod index;
 pub use index::{Index, LocalFlags, Occurrence, Role, Target};
 
@@ -2015,12 +2016,29 @@ pub fn resolve_program_for(
     std_files: &[FileId],
     extra_std: Option<((&str, &str), FileId)>,
 ) -> ProgramResolution {
-    let mut definitions = Definitions::default();
-    let mut diagnostics = Vec::new();
-    let mut merged = Vec::new();
-    let mut tests = Vec::new();
-    let mut imports: Vec<Occurrence> = Vec::new();
+    resolve_program_with_std(target, modules, &parse_std(target, std_files, extra_std))
+}
 
+/// std's modules for one target, lexed and parsed by [`parse_std`]: each
+/// module's name and tree, `None` for one that failed to parse, in order,
+/// and the diagnostics of parsing them. A caller that resolves many
+/// programs parses std once and hands each [`resolve_program_with_std`]
+/// the same `ParsedStd`, as the resolution dump does (spec
+/// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+/// §3.5, ADR 0053); its spans name the `std_files` it was parsed with.
+pub struct ParsedStd {
+    modules: Vec<(String, Option<File>)>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+/// Lex and parse `target`'s std modules, and `extra_std` after them, each
+/// under its id in `std_files` ([`resolve_program`] says what the ids and
+/// `extra_std` are).
+pub fn parse_std(
+    target: CompileTarget,
+    std_files: &[FileId],
+    extra_std: Option<((&str, &str), FileId)>,
+) -> ParsedStd {
     // Every `STD_MODULES` entry plus, only when the caller passed one, the
     // extra std module — combined here so the rest of this function has one
     // uniform list to iterate instead of a special case for the extra entry.
@@ -2043,15 +2061,34 @@ pub fn resolve_program_for(
     // reported against a real file so it is debuggable, and a module that
     // fails to parse outright is skipped entirely (`None`) rather than
     // silently merged in as empty.
-    let std_modules: Vec<Option<File>> = std_entries
+    let mut diagnostics = Vec::new();
+    let modules = std_entries
         .iter()
         .zip(std_file_ids.iter())
-        .map(|(&(_, src), &file_id)| {
+        .map(|(&(name, src), &file_id)| {
             let (ast, diags) = std_module(src, file_id);
             diagnostics.extend(diags);
-            ast
+            (name.to_string(), ast)
         })
         .collect();
+    ParsedStd {
+        modules,
+        diagnostics,
+    }
+}
+
+/// [`resolve_program_for`] with std's modules already parsed, by
+/// [`parse_std`] for the same `target`.
+pub fn resolve_program_with_std(
+    target: CompileTarget,
+    modules: &[ModuleSource],
+    std: &ParsedStd,
+) -> ProgramResolution {
+    let mut definitions = Definitions::default();
+    let mut diagnostics = std.diagnostics.clone();
+    let mut merged = Vec::new();
+    let mut tests = Vec::new();
+    let mut imports: Vec<Occurrence> = Vec::new();
 
     // They go *after* all user modules, so user module indices are
     // unaffected — module 0 stays the first user module.
@@ -2066,15 +2103,10 @@ pub fn resolve_program_for(
             package: m.package,
             importable: m.importable.clone(),
         })
-        .chain(
-            std_entries
-                .iter()
-                .zip(std_modules.iter())
-                .filter_map(|(&(name, _), file)| {
-                    file.as_ref()
-                        .map(|file| ModuleSource::new(name.to_string(), file))
-                }),
-        )
+        .chain(std.modules.iter().filter_map(|(name, file)| {
+            file.as_ref()
+                .map(|file| ModuleSource::new(name.clone(), file))
+        }))
         .collect();
 
     // The std modules that parsed successfully are exactly the contiguous
