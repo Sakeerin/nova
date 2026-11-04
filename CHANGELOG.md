@@ -16,7 +16,10 @@ patterns (§4; ADR 0049), and 5.0c, std (§5; ADR 0050). Phase 5.1a, the
 self-hosted lexer and the differential (spec
 `docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md`
 §3; ADR 0051), and 5.1b, the self-hosted parser, the AST dump and the
-depth limit (§4; ADR 0052).
+depth limit (§4; ADR 0052). Phase 5.2a, the self-hosted loader and
+resolver for loose programs and the resolution dump (spec
+`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+§3; ADR 0053).
 
 ### Added
 
@@ -185,6 +188,36 @@ depth limit (§4; ADR 0052).
   on a 1 MB main thread. A change to the grammar now changes both parsers
   in one pull request. N lexes, parses and dumps all of std about 6× as
   slowly as release S0 with a release runtime (ADR 0052).
+- **`nova check --dump-resolution FILE…` and `--std`, hidden:** what the
+  loader and the resolver built for each program whose root is FILE, as
+  an indented S-expression after a header `== FILE`: its modules, their
+  imports, its definitions with their ids and mangled names, each
+  module's namespaces sorted by name, its exports, its items and newline
+  splits, then every diagnostic with its labels, notes and fixes. std's
+  part, the same in every native program, is printed once by `--std`, and
+  a program's part names std's definitions by std-relative ids. A root
+  that cannot be read is `IOERR` and its kind, and the exit code 2; a root
+  in a package's `src/` or `tests/` is `UNSUPPORTED package` until 5.2b.
+  std is parsed once for all the roots. It is absent from `--help` and
+  carries no stability promise. It is taken only when `--dump-resolution`
+  comes first after `check`, and parsed apart, so every other `nova check`
+  command line is parsed, refused and helped exactly as before (ADR 0053).
+- **The self-hosted loader and resolver, in `selfhost/`:** N loads a loose
+  program, its root and the files beside it that it imports, breadth
+  first as the driver does, and resolves it with all of std, read from
+  `--std DIR`, as `nova-resolver` does, function for function: the
+  definitions and their ids, mangled method names, the three namespaces
+  with the builtins, std's glob and std-only names, the exports, and
+  every diagnostic in S0's order, word for word. `selfhost resolve --std
+  DIR FILE…` prints the same dump as `nova check --dump-resolution`, and
+  `--std-part` std's. The differential compares the two on std's part,
+  every loose program of the corpus, the resolver's error cases (the
+  inline sources of the resolver's and the type checker's tests) and a
+  name-level fuzzer's mutated programs, among which every resolver code
+  `check` gives natively occurs. A change to how names resolve now
+  changes both compilers in one pull request. With the debug runtime N
+  resolves and dumps the corpus's loose programs 1.5 to 2.0× as slowly as
+  S0's debug build (ADR 0053).
 
 ### Changed
 
@@ -345,6 +378,13 @@ depth limit (§4; ADR 0052).
 - **`release_golden_suite` sets environment variables on a program** its
   `RELEASE_GOLDEN_ENV` table names, as it gives standard input:
   `process_env` reads one.
+- **A glob import's E0002s come out in declaration order.** When `import
+  m` brings in names the importing module already has, the "is already
+  defined or imported in this module" errors follow the order `m`
+  declared those names in, its values first, then its types, then its
+  traits, where they followed a hash map's order before (spec
+  `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+  §3.1). The errors themselves are unchanged.
 
 ### Fixed
 

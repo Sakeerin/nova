@@ -30,6 +30,18 @@ AST → [Resolver] → resolved AST → [TypeCheck] → typed AST (HIR)
 - Reports `unresolved name`, `duplicate definition`, `private item access`
 - Outputs: `ResolvedAst` where every `Path` is fully qualified
 
+**Amended 2026-11-02 (branch `claude/loving-archimedes-frtf5q-52a`):**
+what the resolver builds is item-level only: one merged item list, the
+definitions with their ids (methods named `Type.Trait.method`), each
+module's three namespaces (values, types, traits) with the builtins
+seeded and std's exports globbed in last, the exports and the tests.
+Paths, locals and types are resolved inside the type checker, which
+reports "cannot find `x`", and HIR is the type checker's output. The
+self-hosted compiler ports the loader and this resolver first (Phase
+5.2,
+`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`;
+ADR 0053) and HIR with the type checker (5.3).
+
 **TypeChecker** (`nova-typeck`):
 - Walks ResolvedAst
 - Generates type variables and constraints

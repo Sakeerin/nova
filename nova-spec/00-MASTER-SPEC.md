@@ -784,6 +784,19 @@ levels with P0002, and S0 runs its pipeline on a 64 MB thread. N lexes and
 parses std about 6× as slowly as release S0 with a release runtime. From
 here a change to the grammar changes both compilers in one pull request.
 
+**Amended 2026-11-02 (branch `claude/loving-archimedes-frtf5q-52a`):**
+step 3 is split: the loader and the item-level resolver are ported
+first, as 5.2
+(`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`),
+and HIR, which the type checker builds, moves to step 4's 5.3. 5.2a (ADR
+0053): `selfhost/` loads a loose program and resolves it with all of
+std, read from disk, and `selfhost resolve` prints the resolution dump
+S0's hidden `nova check --dump-resolution` prints, which the
+differential compares on std's part, every loose corpus program, the
+resolver's error cases and a name-level fuzzer's programs. From here a
+change to how names resolve changes both compilers in one pull request.
+5.2b adds packages, the WASM target and test mode.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)
