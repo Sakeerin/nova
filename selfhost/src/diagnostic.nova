@@ -1,0 +1,280 @@
+// A diagnostic, as S0's nova-diagnostics holds one: a port of
+// crates/nova-diagnostics/src/lib.rs's `Diagnostic`, `Label`, `Fix` and
+// `Edit`, of suggest.rs (the nearest name, for a fix) and of lines.rs's
+// `keyword_start` (where `pub` goes, for a fix), function by function
+// (spec
+// docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
+// §3.3, ADR 0053).
+//
+// - A span in S0 carries its file's `FileId`; N's spans do not (ADR 0052),
+//   so a label and an edit carry their file's label beside the span, the
+//   label the resolution dump prints: a loose module's stem, or a std
+//   module's `<std/core>`.
+// - S0's builders (`Diagnostic::error(…).with_primary_label(…)`) mutate a
+//   temporary, which a `mut self` method may not (E0060), so a diagnostic
+//   is made by `Diagnostic::error` or `error_at` and added to through a
+//   variable: `let mut d = …; d.add_note(…)`.
+
+import token
+
+/// How severe a diagnostic is (`Severity`).
+pub type Severity = | SeverityError | SeverityWarning | SeverityNote | SeverityHelp
+
+/// A span of a file, with a message (`Label`).
+pub record Label { pub file: String, pub span: Span, pub message: String, pub primary: Bool }
+
+/// One edit of a fix: the text that replaces a span of a file (`Edit`).
+pub record Edit { pub file: String, pub span: Span, pub text: String }
+
+impl Edit {
+    /// `text` inserted at `at` (`Edit::insert`).
+    pub fn insert(at: Int, file: String, text: String) -> Edit {
+        Edit { file: file, span: Span::point(at), text: text }
+    }
+
+    /// `text` in place of `span` (`Edit::replace`).
+    pub fn replace(file: String, span: Span, text: String) -> Edit {
+        Edit { file: file, span: span, text: text }
+    }
+}
+
+/// A fix: a title and its edits (`Fix`).
+pub record Fix { pub title: String, pub edits: Vec<Edit> }
+
+/// A diagnostic (`Diagnostic`): severity, code, message, labels in order,
+/// notes and fixes.
+pub record Diagnostic {
+    pub severity: Severity,
+    pub code: String,
+    pub message: String,
+    pub labels: Vec<Label>,
+    pub notes: Vec<String>,
+    pub fixes: Vec<Fix>,
+}
+
+impl Diagnostic {
+    /// An error with no label yet (`Diagnostic::error`).
+    pub fn error(code: String, message: String) -> Diagnostic {
+        Diagnostic {
+            severity: SeverityError,
+            code: code,
+            message: message,
+            labels: Vec::new(),
+            notes: Vec::new(),
+            fixes: Vec::new(),
+        }
+    }
+
+    /// A warning with no label yet (`Diagnostic::warning`).
+    pub fn warning(code: String, message: String) -> Diagnostic {
+        let mut d = Diagnostic::error(code, message)
+        d.severity = SeverityWarning
+        d
+    }
+
+    /// `with_primary_label`.
+    pub fn add_primary(mut self, file: String, span: Span, message: String) {
+        self.labels.push(Label { file: file, span: span, message: message, primary: true })
+    }
+
+    /// `with_secondary_label`.
+    pub fn add_secondary(mut self, file: String, span: Span, message: String) {
+        self.labels.push(Label { file: file, span: span, message: message, primary: false })
+    }
+
+    /// `with_note`.
+    pub fn add_note(mut self, note: String) { self.notes.push(note) }
+
+    /// `with_fix`.
+    pub fn add_fix(mut self, fix: Fix) { self.fixes.push(fix) }
+
+    /// Whether it is an error.
+    pub fn is_error(self) -> Bool {
+        match self.severity {
+            SeverityError => true
+            _ => false
+        }
+    }
+}
+
+/// An error with its primary label: `Diagnostic::error(code,
+/// message).with_primary_label(span, label)`.
+pub fn error_at(
+    code: String,
+    message: String,
+    file: String,
+    span: Span,
+    label: String,
+) -> Diagnostic {
+    let mut d = Diagnostic::error(code, message)
+    d.add_primary(file, span, label)
+    d
+}
+
+// ---------------------------------------------------------------------------
+// suggest.rs
+// ---------------------------------------------------------------------------
+
+/// The Damerau-Levenshtein distance between `a` and `b`, in characters,
+/// a swap of two neighbours one edit (`suggest::distance`).
+pub fn distance(a: String, b: String) -> Int {
+    let a = a.chars()
+    let b = b.chars()
+    let width = b.len() + 1
+    let mut d = [0; (a.len() + 1) * width]
+    let mut i = 0
+    while i <= a.len() {
+        d[i * width] = i
+        i += 1
+    }
+    let mut j = 0
+    while j <= b.len() {
+        d[j] = j
+        j += 1
+    }
+    i = 1
+    while i <= a.len() {
+        j = 1
+        while j <= b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 }
+            let mut best = min(
+                min(d[(i - 1) * width + j] + 1, d[i * width + j - 1] + 1),
+                d[(i - 1) * width + j - 1] + cost,
+            )
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = min(best, d[(i - 2) * width + j - 2] + 1)
+            }
+            d[i * width + j] = best
+            j += 1
+        }
+        i += 1
+    }
+    d[a.len() * width + b.len()]
+}
+
+/// The candidate nearest `name`, other than itself, within a third of its
+/// length (at least one edit), as `suggest::closest` picks it: one equal
+/// to it ignoring ASCII case first, at any distance; then the least
+/// distance; then the least in byte order. `None` when none is near.
+pub fn closest(name: String, candidates: [String]) -> Option<String> {
+    let len = name.len()
+    let bound = max(len, 3) / 3
+    // The best so far: (far, distance, candidate), compared in that order;
+    // `far` is false for a name equal ignoring case.
+    let mut found = false
+    let mut best_far = false
+    let mut best_d = 0
+    let mut best = ""
+    for c in candidates.iter() {
+        if c == name { continue }
+        let mut far = true
+        let mut d = 0
+        if ascii_case_only(c, name) {
+            far = false
+        } else {
+            if abs(c.len() - len) > bound { continue }
+            d = distance(name, c)
+            if d > bound { continue }
+        }
+        let better = if !found {
+            true
+        } else if far != best_far {
+            !far
+        } else if d != best_d {
+            d < best_d
+        } else {
+            less(c, best)
+        }
+        if better {
+            found = true
+            best_far = far
+            best_d = d
+            best = c
+        }
+    }
+    if found { Some(best) } else { None }
+}
+
+// Whether `a` and `b` are equal but for the case of ASCII letters
+// (`eq_ignore_ascii_case`), byte by byte.
+fn ascii_case_only(a: String, b: String) -> Bool {
+    let n = a.byte_len()
+    if n != b.byte_len() { return false }
+    let mut i = 0
+    while i < n {
+        if fold(a.byte_at(i)) != fold(b.byte_at(i)) { return false }
+        i += 1
+    }
+    true
+}
+
+fn fold(b: Int) -> Int { if b >= 65 && b <= 90 { b + 32 } else { b } }
+
+/// A fix that changes `name` to the candidate nearest it, if one is near
+/// (`suggest::change_to`).
+pub fn change_to(file: String, name: Spanned<String>, candidates: [String]) -> Option<Fix> {
+    let to = closest(name.value, candidates)?
+    let mut edits: Vec<Edit> = Vec::new()
+    edits.push(Edit::replace(file, name.span, to))
+    Some(Fix { title: "change `${name.value}` to `${to}`", edits: edits })
+}
+
+// ---------------------------------------------------------------------------
+// lines.rs
+// ---------------------------------------------------------------------------
+
+/// Where the keyword before the name at byte `name_start` of `text`
+/// begins, when it is `fn` (or `async fn`, then `async`), `record`,
+/// `type`, `trait`, `const` or `component`: where `pub` goes
+/// (`lines::keyword_start`).
+pub fn keyword_start(text: String, name_start: Int) -> Option<Int> {
+    let end = back_over_space(text, name_start)
+    let start = back_over_word(text, end)
+    let keyword = text.byte_slice(start, end)
+    if keyword != "fn"
+        && keyword != "record"
+        && keyword != "type"
+        && keyword != "trait"
+        && keyword != "const"
+        && keyword != "component" {
+        return None
+    }
+    if keyword == "fn" {
+        let end = back_over_space(text, start)
+        let word = back_over_word(text, end)
+        if text.byte_slice(word, end) == "async" { return Some(word) }
+    }
+    Some(start)
+}
+
+fn back_over_space(text: String, from: Int) -> Int {
+    let mut i = from
+    while i > 0 && (text.byte_at(i - 1) == 32 || text.byte_at(i - 1) == 9) { i -= 1 }
+    i
+}
+
+fn back_over_word(text: String, from: Int) -> Int {
+    let mut i = from
+    while i > 0 && is_ascii_alphabetic(text.byte_at(i - 1)) { i -= 1 }
+    i
+}
+
+fn is_ascii_alphabetic(b: Int) -> Bool { (b >= 65 && b <= 90) || (b >= 97 && b <= 122) }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Whether `a` comes before `b` in byte order (`String`'s `Ord`).
+pub fn less(a: String, b: String) -> Bool {
+    match a.cmp(b) {
+        Less => true
+        _ => false
+    }
+}
+
+fn min(a: Int, b: Int) -> Int { if a < b { a } else { b } }
+
+fn max(a: Int, b: Int) -> Int { if a > b { a } else { b } }
+
+fn abs(a: Int) -> Int { if a < 0 { -a } else { a } }

@@ -17,6 +17,7 @@ import ast_dump
 import dump
 import lexer
 import lexer_tests
+import loader_tests
 import parser_tests
 import token
 

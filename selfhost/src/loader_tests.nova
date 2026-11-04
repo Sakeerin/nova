@@ -1,0 +1,143 @@
+// N's own tests of the loader's edges: a loose program loaded breadth
+// first from its root, a missing sibling left to the resolver, a sibling
+// under a std module's name refused with E0093, what each module could
+// import, the `@test` functions `check` strips, and the paths and the sort
+// the loader leans on. Each expected value is what S0's driver gives for
+// the same files; the differential compares the corpus and the cases.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import ast
+import diagnostic
+import lexer
+import loader
+import parser
+import token
+
+// The texts, one to a line, to compare.
+fn lines(texts: [String]) -> String { "\n".join(texts) }
+
+@test
+fn a_loose_program_loads_breadth_first_from_its_root() {
+    // main imports b, then a, then nosuch (no file: the resolver's), then
+    // ui (a file under a std module's name: E0093, and the import is
+    // reported); a imports c. Breadth first: main, b, a, c.
+    let dir = "${temp_dir()}/nova-selfhost-loader-test"
+    let _ = block_on(remove_dir_all(dir))
+    let _ = block_on(create_dir_all(dir))
+    let files = [
+        ("main.nova", "import b\nimport a\nimport nosuch\nimport ui\nfn main() {}\n"),
+        ("a.nova", "import c\npub fn fa() {}\n"),
+        ("b.nova", "pub fn fb() {}\n"),
+        ("c.nova", "pub fn fc() {}\n"),
+        ("ui.nova", "pub fn fu() {}\n"),
+    ]
+    for (name, text) in files.iter() { let _ = block_on(write_string("${dir}/${name}", text)) }
+    let load = match block_on(load_program("${dir}/main.nova")) {
+        Ok(l) => l
+        Err(_) => {
+            assert(false, "unreachable")
+            return
+        }
+    }
+    let mut names: Vec<String> = Vec::new()
+    for m in load.modules.iter() { names.push(m.name) }
+    assert_eq(lines(names.to_array()), lines(["main", "b", "a", "c"]))
+    let main = load.modules.at(0)
+    match main.imports.get("a") {
+        Some(ImportTargetModule(t)) => assert_eq(t, 2)
+        _ => assert(false, "unreachable")
+    }
+    match main.imports.get("ui") {
+        Some(ImportTargetReported) => ()
+        _ => assert(false, "unreachable")
+    }
+    assert(!main.imports.contains_key("nosuch"), "nosuch names nothing")
+    // What each could import: every other module, by stem, in byte order.
+    let mut importable: Vec<String> = Vec::new()
+    for (name, index) in main.importable.iter() { importable.push("${name} ${index}") }
+    assert_eq(lines(importable.to_array()), lines(["a 2", "b 1", "c 3"]))
+    assert_eq(load.diagnostics.len(), 1)
+    let d = load.diagnostics.at(0)
+    assert_eq(d.code, "E0093")
+    assert_eq(
+        d.message,
+        "`ui` is the name of a std module, so no module may take it: rename ${dir}/ui.nova",
+    )
+    assert_eq(d.labels.at(0).file, "main")
+    assert_eq(d.labels.at(0).span.start, 39)
+    assert_eq(d.labels.at(0).span.end, 41)
+    // A root that is not there is an error; a sibling that is not is not.
+    match block_on(load_program("${dir}/missing.nova")) {
+        Ok(_) => assert(false, "unreachable")
+        Err(e) => {
+            match e.kind {
+                NotFound => ()
+                _ => assert(false, "unreachable")
+            }
+        }
+    }
+    let _ = block_on(remove_dir_all(dir))
+}
+
+@test
+fn check_strips_test_functions_and_nothing_else() {
+    // `strip_test_functions`: a function with `@test` goes, whatever its
+    // arguments; `@test` on anything else stays, for the resolver's E0083.
+    let source = "@test\nfn t() {}\n@test(should_panic)\nfn u() {}\nfn main() {}\n@test\nrecord R {}\n"
+    let (tokens, _) = lex(source)
+    let (file, _) = parse(tokens)
+    let mut modules: Vec<Loaded> = Vec::new()
+    modules.push(
+        Loaded {
+            name: "main",
+            path: "main.nova",
+            ast: file,
+            text: source,
+            imports: Map::new(),
+            importable: Vec::new(),
+        },
+    )
+    strip_test_functions(modules)
+    let items = modules.at(0).ast.items
+    assert_eq(items.len(), 2)
+    match items.at(0).value {
+        ItemFunction(f) => assert_eq(f.name.value, "main")
+        _ => assert(false, "unreachable")
+    }
+}
+
+@test
+fn paths_split_and_join_as_rusts_do() {
+    // A module's name is its file's stem; `Path::parent` and `Path::join`
+    // on Linux and macOS.
+    assert_eq(module_name("tests/runtime/modules/main.nova"), "main")
+    assert_eq(module_name("a.b.nova"), "a.b")
+    assert_eq(module_name(".nova"), ".nova")
+    assert_eq(module_name("noext"), "noext")
+    assert_eq(path_parent("main.nova").unwrap_or("-"), "")
+    assert_eq(path_parent("a/b/c.nova").unwrap_or("-"), "a/b")
+    assert_eq(path_parent("/c.nova").unwrap_or("-"), "/")
+    assert_eq(path_parent("").unwrap_or("-"), "-")
+    // A `.` component or `/`s before the last part go, but not a leading
+    // `./` or root.
+    assert_eq(path_parent("sub/./main.nova").unwrap_or("-"), "sub")
+    assert_eq(path_parent("./sub/.//main.nova").unwrap_or("-"), "./sub")
+    assert_eq(path_parent("./main.nova").unwrap_or("-"), ".")
+    assert_eq(path_parent("a//b//c.nova").unwrap_or("-"), "a//b")
+    assert_eq(path_parent("a/b/.//").unwrap_or("-"), "a")
+    assert_eq(path_parent("/./a").unwrap_or("-"), "/")
+    assert_eq(path_parent("a/.").unwrap_or("-"), "")
+    assert_eq(path_parent("./.").unwrap_or("-"), "")
+    assert_eq(path_parent("/.").unwrap_or("-"), "-")
+    assert_eq(path_parent("//").unwrap_or("-"), "-")
+    assert_eq(module_name("a/."), "a")
+    assert_eq(module_name("a/.."), "main")
+    assert_eq(path_join("", "x.nova"), "x.nova")
+    assert_eq(path_join("a/", "x.nova"), "a/x.nova")
+    assert_eq(path_join("a", "x.nova"), "a/x.nova")
+    // Names sort in byte order, each once.
+    let sorted = sorted_dedup(Vec::from_array(["b", "B", "a", "ab", "b", "_"]))
+    assert_eq(lines(sorted.to_array()), lines(["B", "_", "a", "ab", "b"]))
+}
