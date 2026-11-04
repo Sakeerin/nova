@@ -56,8 +56,9 @@ it is; this mechanism does not reach `parse`.
 
 **What runs.** `check`'s pipeline for a loose program: the loader
 (`load_program`, breadth first from the root, sibling files), then, if no
-error so far, the `@test` functions stripped, then `resolve_program_for`
-with the target's std. The type checker does not run. A program the
+error so far, the `@test` functions stripped, then
+`resolve_program_with_std` with the target's std, parsed once for all the
+roots (§9). The type checker does not run. A program the
 loader stops leaves the dump with its modules and the diagnostics so far
 (`resolved=false`). A root directly in a package's `src/` or `tests/`
 prints the one line `UNSUPPORTED package`: packages are 5.2b's.
@@ -354,10 +355,18 @@ the root less its last component, less the `/`s and `.` components that
 end what is left, but not a leading `/` or `./` (`sub/./main.nova` is in
 `sub`, `./main.nova` in `.`), and a sibling's path is that directory
 joined with its file name, which E0093 prints. A root with no directory
-part has the directory `""`, which both sides list as `.`; so does
-`package_of` (`in_package`) for `src/main.nova`, whose package's
-directory is `""`: a root is in a package when its directory is named
-`src` or `tests` and the directory above holds a file `nova.toml`. A
+part has the directory `""`, which both sides list as `.`. A root is in
+a package (`package_of`, N's `in_package`) when its directory is named
+`src` or `tests` and the path `nova.toml` in the directory above is a
+file or a link to one, asked of the path as `Path::is_file` asks, not
+looked for in a listing: so on a case-insensitive disk (macOS's and
+Windows' by default) a `Nova.toml` makes a package on both sides, and a
+directory that can be searched but not listed still holds its manifest;
+for `src/main.nova` the path is `nova.toml`. Nova's std has no query of
+a path's kind, so N asks `exists` and whether the path lists as a
+directory: as the listing's `DirEntry.is_file` did, it takes a pipe
+named `nova.toml` for a file, and a `nova.toml` directory it may not
+list too, where S0 takes neither; no test makes either. A
 module that cannot be read is skipped, so its
 import is the resolver's "cannot find module"; a root that cannot be read
 is `IOERR`. `ImportTarget`, what an import names, lives here, beside
@@ -451,9 +460,11 @@ declaration order; the mangled method names; a builtin's name redefined;
 `make_public`'s edits; the attribute fix and `closest`'s edges. `nova test`
 in `selfhost/` runs 25. N takes no `--target`: 5.2a resolves natively, and
 `resolver.nova`'s WASM paths (E0090, E0092's WASM arm, `missing`) wait for
-5.2b's flag. Its command line is a test tool's: an empty first FILE or a
-`--` is a root named so (`IOERR NotFound`), where S0's clap refuses the
-one and skips the other; the harness passes neither.
+5.2b's flag. Its command line is a test tool's: an empty FILE is a root
+that is not there, `== ` and `IOERR NotFound`, exit code 2, as in S0's
+form (§1), and the roots test compares it on both sides; a `--` is a
+root named so (`IOERR NotFound`), where S0's form skips it, and the
+harness passes none.
 
 **Differences found while building.** None in output on the inputs:
 N's first build equalled S0 on std's part, all 251 loose corpus programs
@@ -580,10 +591,12 @@ namespace. Now the fuzzer alone catches those three, and the mutants that
 reword E0083's "an impl block" or rename `type_full_name`'s `anon`
 fallbacks; the resolver cases catch all of them too (§9). One kind it
 cannot reach is a file system's shape (a `nova.toml` that is a
-directory): the inputs are files beside fixed siblings, so the header
-test holds that one. The fixed seeds 301–303 give 50 inputs each (150 in
-all; the codes they give: E0001 46, E0002 63, E0082 14, E0083 8, E0089
-10, E0092 13, E0102 50, E0900 18), and the harness asserts each of the 8
+directory, or named in another case): the inputs are files beside fixed
+siblings, so the header test and
+`a_package_is_found_by_its_manifests_path_on_both_sides` hold those.
+The fixed seeds 301–303 give 50 inputs each (150 in all; the codes
+they give: E0001 46, E0002 63, E0082 14, E0083 8, E0089 10, E0092 13,
+E0102 50, E0900 18), and the harness asserts each of the 8
 at least twice, a floor the rarest, E0083, clears with 6 to spare. The inputs are the same on
 every system: the files are picked from their sorted list, read with each
 `\r\n` as `\n`, and the siblings are written from the harness's own
@@ -628,14 +641,19 @@ their exit codes, through the same `compare_batch` as 5.1's dumps:
   kind of dump, `Dumps::Resolution`, which writes them beside the
   siblings;
 - the headers: a missing root, a package's root, a root that does not
-  parse, a root beside a `nova.toml` that is a directory, and a root that
-  is not UTF-8, exit code 2; and no root at all, refused by both sides
-  with nothing on stdout; S0's form given an empty root, `== ` and
+  parse, a root beside a `nova.toml` that is a directory, and a root
+  whose contents are not UTF-8, exit code 2; and no root at all, refused
+  by both sides with nothing on stdout; S0's form given an empty root, `== ` and
   `IOERR NotFound`;
-- roots whose directory is listed as `.`: a root with no directory part
-  beside a directory named `ui.nova` (E0093), a package's `src/main.nova`
-  and `tests/main.nova` named from the package's directory, and an empty
-  root;
+- roots whose directory is `""`: a root with no directory part beside a
+  directory named `ui.nova` (E0093), which both sides list as `.`, a
+  package's `src/main.nova` and `tests/main.nova` named from the
+  package's directory, and an empty root;
+- a package's manifest asked for by its path (§3): a `Nova.toml`, a
+  package on a case-insensitive disk and on no other, the test asking the
+  disk which it is; and, but on Windows, a `nova.toml` that is a link to
+  a file, one that is a dangling link, and one in a directory that can be
+  searched but not listed;
 - eleven spellings of a root's path (§5), and, but on Windows, a root
   named `q"uo\te.nova`, whose label the dump escapes; on Linux, a root
   whose path is not UTF-8, which pins today's difference (§5).
@@ -656,7 +674,7 @@ corpus, the cases and 450 fuzz inputs, parsing std again for each, and
 in 47 s with N's side added at 450 inputs. Three changes bring it down.
 The machine's speed varies from day to day, so 5.2a's tests are measured
 against 5.1's, run alone in the same build, interleaved: after the
-second fact-check's fixes, three runs of the final tree's 36 tests took
+second fact-check's fixes, three runs of the tree's 36 tests then took
 31.9, 32.3 and 30.9 s (95 to 100 s of CPU), against 20.9, 20.0 and
 20.3 s (49 to 51 s of CPU) for the 27 tests 5.1 had, 1.48 to 1.61
 times; after the first fact-check's fixes the same runs took 24.8 to
