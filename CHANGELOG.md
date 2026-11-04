@@ -197,7 +197,10 @@ resolver for loose programs and the resolution dump (spec
   part, the same in every native program, is printed once by `--std`, and
   a program's part names std's definitions by std-relative ids. A root
   that cannot be read is `IOERR` and its kind, and the exit code 2; a root
-  in a package's `src/` or `tests/` is `UNSUPPORTED package` until 5.2b.
+  in a package's `src/` or `tests/` is a module of its package, with the
+  package graph's diagnostics first, and `--target wasm` and `--test` (as
+  `nova test` resolves) dump the WASM target's and test mode's resolution
+  (5.2b, ADR 0054).
   std is parsed once for all the roots. It is absent from `--help` and
   carries no stability promise. It is taken only when `--dump-resolution`
   comes first after `check`, and parsed apart, so every other `nova check`
