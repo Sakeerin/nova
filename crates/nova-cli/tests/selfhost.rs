@@ -914,8 +914,10 @@ fn a_manifest_n_cannot_read_stops_n_with_a_message() {
     ] {
         let pkg = dir.join(name);
         std::fs::create_dir_all(pkg.join("src")).expect("create src/");
-        std::fs::write(pkg.join("nova.toml"), format!("{MANIFEST}{extra}")).expect("write nova.toml");
-        std::fs::write(pkg.join("src").join("main.nova"), "fn main() {}\n").expect("write main.nova");
+        std::fs::write(pkg.join("nova.toml"), format!("{MANIFEST}{extra}"))
+            .expect("write nova.toml");
+        std::fs::write(pkg.join("src").join("main.nova"), "fn main() {}\n")
+            .expect("write main.nova");
         let root = format!("{name}/src/main.nova");
         let s0 = Command::new(nova())
             .current_dir(&dir)
@@ -949,10 +951,12 @@ fn a_manifest_n_cannot_read_stops_n_with_a_message() {
 /// is; elsewhere nothing is changed.
 #[test]
 fn the_paths_of_e0004_and_e0093_are_settled_on_windows_alone() {
-    let dump = "(Diagnostics\n  (Error \"E0004\" \"`a` is both: app\\x5csrc\\x5ca.nova, and the entry at \
+    let dump =
+        "(Diagnostics\n  (Error \"E0004\" \"`a` is both: app\\x5csrc\\x5ca.nova, and the entry at \
                 app\\x5cnova.toml:6\"\n    (Primary \"a\\x5cb\":0..1 \"x\"))\n  \
                 (Error \"E0093\" \"rename sub\\x5cui.nova\"\n  (Error \"E0001\" \"a\\x5cb\"\n";
-    let settled = "(Diagnostics\n  (Error \"E0004\" \"`a` is both: app/src/a.nova, and the entry at \
+    let settled =
+        "(Diagnostics\n  (Error \"E0004\" \"`a` is both: app/src/a.nova, and the entry at \
                    app/nova.toml:6\"\n    (Primary \"a\\x5cb\":0..1 \"x\"))\n  \
                    (Error \"E0093\" \"rename sub/ui.nova\"\n  (Error \"E0001\" \"a\\x5cb\"\n";
     assert_eq!(settle_paths(dump.as_bytes(), true), settled.as_bytes());
@@ -1773,7 +1777,11 @@ fn dump_with(mode: Mode, extra: &[&str]) -> Dump {
     let std_dir = std_dir();
     let mut n = vec!["resolve", "--std", std_dir.as_str()];
     n.extend(mode.flags());
-    n.extend(extra.iter().map(|a| if *a == "--std" { "--std-part" } else { a }));
+    n.extend(
+        extra
+            .iter()
+            .map(|a| if *a == "--std" { "--std-part" } else { a }),
+    );
     Dump {
         s0: leak_args(&s0),
         n: leak_args(&n),
@@ -2285,11 +2293,20 @@ fn the_resolution_dumps_agree_on_the_cases_with_windows_line_endings() {
         crlf_files > 300,
         "only {crlf_files} cases have CRLF line endings"
     );
-    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
-        let (dumps, count) = agree_on_resolve_cases(mode, &dir.join(mode_cases_name(mode)));
-        let parts = dumps.lines().filter(|l| l.starts_with("(Program ")).count();
-        assert_eq!(parts, count, "{mode:?}");
-    }
+    std::thread::scope(|scope| {
+        let modes: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
+            .into_iter()
+            .map(|mode| {
+                let cases = dir.join(mode_cases_name(mode));
+                scope.spawn(move || (mode, agree_on_resolve_cases(mode, &cases)))
+            })
+            .collect();
+        for handle in modes {
+            let (mode, (dumps, count)) = handle.join().expect("a mode's thread");
+            let parts = dumps.lines().filter(|l| l.starts_with("(Program ")).count();
+            assert_eq!(parts, count, "{mode:?}");
+        }
+    });
 }
 
 /// Copy every file under `from` to `to`, as a Windows checkout has it
@@ -2715,6 +2732,15 @@ fn codes_in(dump: &str) -> std::collections::BTreeMap<String, usize> {
     codes
 }
 
+/// What each of `handles` gave, in order: a thread that panicked fails the
+/// test with its panic.
+fn joined<T>(handles: Vec<std::thread::ScopedJoinHandle<'_, T>>) -> Vec<T> {
+    handles
+        .into_iter()
+        .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+        .collect()
+}
+
 /// Each program's part of `dump`, by its root's header.
 fn parts_of(dump: &str) -> Vec<&str> {
     dump.split("== ").filter(|p| !p.is_empty()).collect()
@@ -2750,34 +2776,63 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
     };
     let loose = loose_corpus();
     let loose_wasm = loose_wasm_corpus();
-    for seed in NAME_SEEDS {
-        let inputs = names(seed, NAME_COUNT);
-        let (dir, files) = write_name_inputs(&format!("names-{seed}"), &inputs);
-        let dump = agree_on_resolution(&dir, &files, 0);
+    // Every seed's inputs side by side, each compared in its own thread,
+    // then counted in order.
+    let (names_dumps, wasm_dumps, package_dumps) = std::thread::scope(|scope| {
+        let names: Vec<_> = NAME_SEEDS
+            .iter()
+            .map(|&seed| {
+                let inputs = names(seed, NAME_COUNT);
+                let (dir, files) = write_name_inputs(&format!("names-{seed}"), &inputs);
+                scope.spawn(move || {
+                    let (check, test) = std::thread::scope(|inner| {
+                        let test =
+                            inner.spawn(|| agree_on_resolution_in(Mode::Test, &dir, &files, 0));
+                        let check = agree_on_resolution(&dir, &files, 0);
+                        (check, test.join().expect("a seed's test mode's thread"))
+                    });
+                    (seed, inputs.len(), check, test)
+                })
+            })
+            .collect();
+        let wasm: Vec<_> = WASM_NAME_SEEDS
+            .iter()
+            .map(|&seed| {
+                let inputs = wasm_names_of(&root, &loose_wasm, seed, WASM_NAME_COUNT);
+                let (dir, files) = write_name_inputs(&format!("wasm-names-{seed}"), &inputs);
+                scope.spawn(move || {
+                    let dump = agree_on_resolution_in(Mode::Wasm, &dir, &files, 0);
+                    (seed, inputs.len(), dump)
+                })
+            })
+            .collect();
+        let packages: Vec<_> = PACKAGE_NAME_SEEDS
+            .iter()
+            .map(|&seed| {
+                let inputs = package_names_of(&root, &loose, seed, PACKAGE_NAME_COUNT);
+                let (app, roots) = write_package_inputs(&format!("package-names-{seed}"), &inputs);
+                scope.spawn(move || (seed, inputs.len(), agree_on_resolution(&app, &roots, 0)))
+            })
+            .collect();
+        (joined(names), joined(wasm), joined(packages))
+    });
+    for (seed, count, dump, test) in names_dumps {
         let resolved = dump.matches("resolved=true").count();
         assert_eq!(
-            resolved,
-            inputs.len(),
+            resolved, count,
             "seed {seed}: an input did not reach the resolver"
         );
         add(&dump, Mode::Check, &format!("seed {seed}"));
-        let test = agree_on_resolution_in(Mode::Test, &dir, &files, 0);
-        assert_eq!(test.matches("resolved=true").count(), inputs.len());
+        assert_eq!(test.matches("resolved=true").count(), count);
         add(&test, Mode::Test, &format!("seed {seed} under test mode"));
     }
-    for seed in WASM_NAME_SEEDS {
-        let inputs = wasm_names_of(&root, &loose_wasm, seed, WASM_NAME_COUNT);
-        let (dir, files) = write_name_inputs(&format!("wasm-names-{seed}"), &inputs);
-        let dump = agree_on_resolution_in(Mode::Wasm, &dir, &files, 0);
-        assert_eq!(dump.matches("resolved=true").count(), inputs.len());
+    for (seed, count, dump) in wasm_dumps {
+        assert_eq!(dump.matches("resolved=true").count(), count);
         add(&dump, Mode::Wasm, &format!("WASM seed {seed}"));
     }
-    for seed in PACKAGE_NAME_SEEDS {
-        let inputs = package_names_of(&root, &loose, seed, PACKAGE_NAME_COUNT);
-        let (app, roots) = write_package_inputs(&format!("package-names-{seed}"), &inputs);
-        let dump = agree_on_resolution(&app, &roots, 0);
+    for (seed, count, dump) in package_dumps {
         let parts = parts_of(&dump);
-        assert_eq!(parts.len(), inputs.len());
+        assert_eq!(parts.len(), count);
         for part in parts {
             let stopped_by_the_loader = part.contains("\n  (Error \"E0004\"")
                 || E0001_NOTES.iter().any(|n| part.contains(n));
