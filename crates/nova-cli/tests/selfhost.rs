@@ -28,13 +28,16 @@
 //!
 //! 5.2a (spec
 //! `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
-//! §3.4–§3.5; ADR 0053): S0's hidden `nova check --dump-resolution FILE…`
+//! §3.4–§3.7; ADR 0053): S0's hidden `nova check --dump-resolution FILE…`
 //! and `--std`, absent from `--help`, with every other `check` command
-//! line parsed as before; every form of its dump in its dumps of std's part, every loose corpus
-//! program and the resolver's error cases in
+//! line parsed as before; and N's `selfhost resolve --std DIR FILE…` and
+//! `--std-part`, which must print the same resolution dump byte for byte,
+//! with the same exit codes: std's part once; every loose corpus program,
+//! each file run alone or a root with the sibling files it imports
+//! (packages are 5.2b's); the resolver's error cases in
 //! `tests/selfhost/cases/resolve/`; and the name-level fuzzer's inputs
 //! from fixed seeds, among which every resolver code `check` can give
-//! natively occurs.
+//! natively occurs. Every form of the dump appears in those dumps.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -579,14 +582,21 @@ enum Dumps {
     Tokens,
     /// The token dump, then 5.1b's AST dump.
     TokensAndAst,
+    /// 5.2a's resolution dump, each input a program's root beside
+    /// [`fuzz::NAME_SIBLINGS`].
+    Resolution,
 }
 
 /// Write `inputs` to a fixed directory named after `name`, as
 /// `f00000.nova` and on, and check that both sides agree on them through
 /// `dumps`. Returns S0's output: its token dump and, with the AST dump, its
-/// AST dump after it. The fuzzer's generators all come through here,
-/// 5.1b's deep nesting included.
+/// AST dump after it; or its resolution dump. The fuzzer's generators all
+/// come through here, 5.1b's deep nesting and 5.2a's name fuzzer included.
 fn agree_on_inputs(name: &str, inputs: &[String], dumps: Dumps) -> String {
+    if dumps == Dumps::Resolution {
+        let (dir, files) = write_name_inputs(name, inputs);
+        return agree_on_resolution(&dir, &files, 0);
+    }
     let dir = fresh_dir(name);
     let mut files = Vec::with_capacity(inputs.len());
     for (i, input) in inputs.iter().enumerate() {
@@ -761,8 +771,9 @@ fn the_mutated_corpus_agrees() {
     }
 }
 
-/// `NOVA_SELFHOST_FUZZ=SEED:COUNT`: COUNT inputs of soup and COUNT mutated
-/// corpus files from SEED. Unset, as in CI, it does nothing.
+/// `NOVA_SELFHOST_FUZZ=SEED:COUNT`: COUNT inputs of soup, COUNT mutated
+/// corpus files and COUNT name-mutated loose programs from SEED. Unset, as
+/// in CI, it does nothing.
 #[test]
 fn a_longer_search_from_the_environment() {
     let Ok(spec) = std::env::var("NOVA_SELFHOST_FUZZ") else {
@@ -778,7 +789,8 @@ fn a_longer_search_from_the_environment() {
         Dumps::TokensAndAst,
     );
     // Mutations go in batches of 500, each from a seed of its own, so a long
-    // search keeps few inputs on disk at a time.
+    // search keeps few inputs on disk at a time; the name fuzzer's beside
+    // them.
     let mut done = 0;
     while done < count {
         let n = (count - done).min(500);
@@ -786,6 +798,11 @@ fn a_longer_search_from_the_environment() {
             "search-mutated",
             &mutations(seed.wrapping_add(done as u64), n),
             Dumps::TokensAndAst,
+        );
+        agree_on_inputs(
+            "search-names",
+            &names(seed.wrapping_add(done as u64), n),
+            Dumps::Resolution,
         );
         done += n;
     }
@@ -813,11 +830,11 @@ fn unreadable_files_are_reported_alike() {
     assert!(out.ends_with("== \nIOERR NotFound\n"), "{out}");
 }
 
-/// No file at all: both sides refuse it, print nothing and exit 2, for
-/// either dump.
+/// No file at all: both sides refuse it, print nothing on stdout and exit
+/// 2, for each dump: a resolution dump needs a root (or std's part).
 #[test]
 fn both_sides_refuse_no_file() {
-    for dump in [&TOKENS, &AST] {
+    for dump in [&TOKENS, &AST, resolution()] {
         let out = compare_batch(dump, &root(), &[], 2, &nova(), selfhost());
         assert_eq!(out, Ok(String::new()));
     }
@@ -1417,34 +1434,49 @@ fn resolve_cases_dir() -> PathBuf {
     cases_dir().join("resolve")
 }
 
-/// The roots of the resolver's error cases, relative to the repository:
-/// each file directly in [`resolve_cases_dir`], and each directory's
-/// `main.nova`, sorted.
-fn resolve_cases() -> Vec<String> {
-    let root = root();
-    let mut entries: Vec<_> = std::fs::read_dir(resolve_cases_dir())
+/// [`agree_on_resolution`] the resolver's cases in `cases`
+/// ([`resolve_cases_dir`], or a copy of it), from `cases`: each file in it,
+/// and each directory's `main.nova`, [`BATCH`] roots to a process; but a
+/// directory holding a module named for a std module (`dom.nova`,
+/// `ui.nova`, `RESERVED_MODULE_NAMES`) from inside it, its root named
+/// `main.nova`. E0093 names that module by its path, the root's directory
+/// joined with its file name: S0 joins with `Path::join`, which writes `\`
+/// on Windows, and N with `/`, so the path must have no directory part
+/// (ADR 0053 §5). Returns S0's output and how many programs it holds.
+fn agree_on_resolve_cases(cases: &Path) -> (String, usize) {
+    let mut entries: Vec<_> = std::fs::read_dir(cases)
         .expect("read the resolver's cases")
-        .map(|e| e.expect("a directory entry").path())
+        .map(|e| e.expect("a directory entry"))
         .collect();
-    entries.sort();
+    entries.sort_by_key(|e| e.file_name());
     let mut roots = Vec::new();
-    for path in entries {
-        let file = if path.is_dir() {
-            path.join("main.nova")
-        } else if path.extension().is_some_and(|e| e == "nova") {
-            path.clone()
-        } else {
-            continue;
-        };
-        assert!(file.is_file(), "{} has no main.nova", path.display());
-        let rel = file.strip_prefix(&root).expect("under the root");
-        let parts: Vec<String> = rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect();
-        roots.push(parts.join("/"));
+    let mut apart = Vec::new();
+    for e in entries {
+        let path = e.path();
+        let name = e.file_name().to_string_lossy().into_owned();
+        if path.is_dir() {
+            assert!(
+                path.join("main.nova").is_file(),
+                "{} has no main.nova",
+                path.display()
+            );
+            if ["dom", "ui"]
+                .iter()
+                .any(|std| path.join(format!("{std}.nova")).is_file())
+            {
+                apart.push(path);
+            } else {
+                roots.push(format!("{name}/main.nova"));
+            }
+        } else if name.ends_with(".nova") {
+            roots.push(name);
+        }
     }
-    roots
+    let mut all = agree_on_resolution(cases, &roots, 0);
+    for dir in &apart {
+        all.push_str(&agree_on_resolution(dir, &["main.nova".to_string()], 0));
+    }
+    (all, roots.len() + apart.len())
 }
 
 /// The programs of the corpus that the resolution dump compares in 5.2a:
@@ -1468,15 +1500,57 @@ fn loose_corpus() -> Vec<String> {
         .collect()
 }
 
-/// S0's resolution dump of `files`, relative to `dir`, [`BATCH`] files to
-/// a process, the processes at once, each exiting with `code`. N's is
-/// compared with it from Task 6 on.
-fn s0_resolution(dir: &Path, files: &[String], code: i32) -> String {
-    let nova = nova();
-    let outs: Vec<Result<Run, String>> = std::thread::scope(|scope| {
+/// The resolution dump through both sides (ADR 0053): S0's `check
+/// --dump-resolution`, and N's `resolve --std DIR`, DIR the repository's
+/// `std/`, each followed by the roots.
+fn resolution() -> &'static Dump {
+    static DUMP: OnceLock<Dump> = OnceLock::new();
+    DUMP.get_or_init(|| Dump {
+        s0: RESOLUTION_S0,
+        n: leak_args(&["resolve", "--std", &std_dir()]),
+    })
+}
+
+/// std's part through both sides: S0's `check --dump-resolution --std`,
+/// and N's `resolve --std DIR --std-part`.
+fn std_resolution() -> &'static Dump {
+    static DUMP: OnceLock<Dump> = OnceLock::new();
+    DUMP.get_or_init(|| Dump {
+        s0: &["check", "--dump-resolution", "--std"],
+        n: leak_args(&["resolve", "--std", &std_dir(), "--std-part"]),
+    })
+}
+
+/// The repository's `std/`, which N reads its std modules from.
+fn std_dir() -> String {
+    root().join("std").display().to_string()
+}
+
+/// `args` for a [`Dump`], which holds them for the whole run.
+fn leak_args(args: &[&str]) -> &'static [&'static str] {
+    let owned: Vec<&'static str> = args
+        .iter()
+        .map(|a| &*Box::leak(a.to_string().into_boxed_str()))
+        .collect();
+    Box::leak(owned.into_boxed_slice())
+}
+
+/// [`agree_on`] the resolution dump: `files`, relative to `dir`, each a
+/// program's root, through both sides, [`BATCH`] roots to a process and
+/// the batches side by side, each side exiting with `code`; fail with the
+/// report of the first difference. Returns S0's output, which is N's.
+/// S0 parses std again for each program (about 0.065 s, debug) and N once
+/// per process (about 0.4 s with the debug runtime), so the batches run at
+/// once.
+fn agree_on_resolution(dir: &Path, files: &[String], code: i32) -> String {
+    let (nova, selfhost) = (nova(), selfhost());
+    let outs: Vec<Result<String, String>> = std::thread::scope(|scope| {
         let runs: Vec<_> = files
             .chunks(BATCH)
-            .map(|chunk| scope.spawn(|| run(&nova, RESOLUTION_S0, dir, chunk)))
+            .map(|chunk| {
+                let nova = &nova;
+                scope.spawn(move || compare_batch(resolution(), dir, chunk, code, nova, selfhost))
+            })
             .collect();
         runs.into_iter()
             .map(|r| r.join().expect("a batch's thread"))
@@ -1484,9 +1558,10 @@ fn s0_resolution(dir: &Path, files: &[String], code: i32) -> String {
     });
     let mut all = String::new();
     for out in outs {
-        let out = out.unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(out.code, Some(code), "{}", out.stderr);
-        all.push_str(&String::from_utf8_lossy(&out.stdout));
+        match out {
+            Ok(out) => all.push_str(&out),
+            Err(report) => panic!("{report}"),
+        }
     }
     all
 }
@@ -1621,7 +1696,7 @@ fn the_resolution_dump_flags_are_hidden_and_refused_as_before() {
 /// cannot be read is `IOERR` and its kind, the rest are dumped, and the
 /// exit code is 2; a root in a package is `UNSUPPORTED package`; a program
 /// that fails to load holds the diagnostics so far; `--std` prints std's
-/// part for the target.
+/// part for the target. N prints the same for the same roots.
 #[test]
 fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
     let dir = fresh_dir("resolution-headers");
@@ -1662,14 +1737,33 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
         ),
         "{stdout}"
     );
-    // A root that is not UTF-8 is `IOERR InvalidData`.
+    // N prints the same, a file that is not UTF-8 included, and a root
+    // beside a `nova.toml` that is a directory, which makes no package.
     std::fs::write(dir.join("latin1.nova"), b"fn \xe9() {}\n").expect("write latin1.nova");
-    let out = run(&nova(), RESOLUTION_S0, &dir, &["latin1.nova".to_string()])
-        .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(out.code, Some(2), "{}", out.stderr);
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "== latin1.nova\nIOERR InvalidData\n"
+    std::fs::create_dir_all(dir.join("dirpkg").join("nova.toml")).expect("create nova.toml/");
+    std::fs::create_dir_all(dir.join("dirpkg").join("src")).expect("create dirpkg/src");
+    std::fs::write(
+        dir.join("dirpkg").join("src").join("main.nova"),
+        "fn main() {}\n",
+    )
+    .expect("write dirpkg/src/main.nova");
+    let files = [
+        "a.nova",
+        "missing.nova",
+        "pkg/src/main.nova",
+        "b.nova",
+        "dirpkg/src/main.nova",
+        "latin1.nova",
+    ]
+    .map(String::from);
+    let out = agree_on_resolution(&dir, &files, 2);
+    assert!(
+        out.contains("== dirpkg/src/main.nova\n(Program target=native resolved=true\n"),
+        "{out}"
+    );
+    assert!(
+        out.ends_with("== latin1.nova\nIOERR InvalidData\n"),
+        "{out}"
     );
     // No root: nothing printed, and 2; nor a root with `--std`.
     for args in [&[][..], &["--std", "a.nova"]] {
@@ -1716,42 +1810,53 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
     }
 }
 
-/// Every form of the resolution dump's `KINDS` appears in S0's dump of
-/// std's part, or of some loose corpus program or resolver case (spec
-/// §3.5), every form they print is listed, and no form of `LATER_KINDS`
-/// appears, nor any of the three codes 5.2b's test mode and WASM target
-/// give; N's dumps are compared with these from Task 6 on.
+/// std's part, every loose corpus program and every resolver case give the
+/// same resolution dump on both sides, byte for byte (spec §3.5, §3.7):
+/// std's part once, then the programs, [`BATCH`] to a process. Every form
+/// of the dump's `KINDS` appears in these dumps, every form they print is
+/// listed, and no form of `LATER_KINDS` appears, nor any of the three
+/// codes 5.2b's test mode and WASM target give: the dumps are S0's and
+/// N's alike, so each holds them.
 #[test]
-fn every_resolution_form_appears_in_the_corpus_and_the_cases() {
+fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
     let root = root();
+    let std = compare_batch(std_resolution(), &root, &[], 0, &nova(), selfhost())
+        .unwrap_or_else(|report| panic!("{report}"));
+    assert!(
+        std.starts_with("(Std target=native modules=21 "),
+        "{}",
+        &std[..80]
+    );
     let loose = loose_corpus();
     // 251 loose programs at 5.2a.
     assert!(loose.len() >= 240, "only {} loose programs", loose.len());
-    let cases = resolve_cases();
+    // The files in a package, which are 5.2b's, are skipped, and said to
+    // be: 66 at 5.2a.
+    let skipped = corpus().len() - loose.len();
+    eprintln!(
+        "the resolution pass skips {skipped} corpus files in a package's src/ or tests/ (5.2b's)"
+    );
+    assert!(skipped >= 60, "only {skipped} corpus files in packages");
+    // The corpus and the cases side by side.
+    let (mut dumps, (cases, count)) = std::thread::scope(|scope| {
+        let cases = scope.spawn(|| agree_on_resolve_cases(&resolve_cases_dir()));
+        let corpus = agree_on_resolution(&root, &loose, 0);
+        (corpus, cases.join().expect("the cases' thread"))
+    });
     // 103 cases at 5.2a.
-    assert!(cases.len() >= 90, "only {} resolver cases", cases.len());
-    let mut files = loose;
-    files.extend(cases);
-    let mut dumps = s0_resolution(&root, &files, 0);
+    assert!(count >= 90, "only {count} resolver cases");
+    dumps.push_str(&cases);
+    // Each root's part, so every program was compared.
     let parts = dumps.lines().filter(|l| l.starts_with("(Program ")).count();
-    assert_eq!(parts, files.len());
+    assert_eq!(parts, loose.len() + count);
     // None of the codes that only 5.2b's test mode and WASM target give
     // (decision 8), though cases hold the programs that would give them.
     let codes = codes_in(&dumps);
     for code in LATER_RESOLVER_CODES {
         assert!(!codes.contains_key(code), "{code} in {codes:?}");
     }
-    let std = run(
-        &nova(),
-        &["check", "--dump-resolution", "--std"],
-        &root,
-        &[],
-    )
-    .unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(std.code, Some(0), "{}", std.stderr);
-    dumps.push_str(&String::from_utf8_lossy(&std.stdout));
     let mut found = std::collections::HashSet::new();
-    for line in dumps.lines() {
+    for line in dumps.lines().chain(std.lines()) {
         found.extend(nova_driver::resolution_dump::forms_on(line));
     }
     let missing: Vec<&str> = nova_driver::resolution_dump::KINDS
@@ -1759,7 +1864,7 @@ fn every_resolution_form_appears_in_the_corpus_and_the_cases() {
         .copied()
         .filter(|k| !found.contains(*k))
         .collect();
-    assert!(missing.is_empty(), "no S0 dump holds {missing:?}");
+    assert!(missing.is_empty(), "no dump holds {missing:?}");
     let unlisted: Vec<&String> = found
         .iter()
         .filter(|f| !nova_driver::resolution_dump::listed(f))
@@ -1774,6 +1879,189 @@ fn every_resolution_form_appears_in_the_corpus_and_the_cases() {
         later.is_empty(),
         "{later:?} appear, which LATER_KINDS says 5.2a's programs never print"
     );
+}
+
+/// The resolver's cases as a Windows checkout has them ([`crlf`]): git
+/// gives no `.gitattributes` rule for `cases/`, so CI's Windows runner
+/// compares them with `\r\n`, and every system does here.
+#[test]
+fn the_resolution_dumps_agree_on_the_cases_with_windows_line_endings() {
+    let dir = fresh_dir("crlf-resolve");
+    let mut files = Vec::new();
+    nova_files(&resolve_cases_dir(), &resolve_cases_dir(), &[], &mut files);
+    for file in &files {
+        let text = std::fs::read(resolve_cases_dir().join(file)).expect("read a case");
+        let path = dir.join(file);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
+        std::fs::write(&path, crlf(text)).expect("write a case");
+    }
+    let crlf_files = files
+        .iter()
+        .filter(|f| std::fs::read(dir.join(f)).is_ok_and(|t| t.contains(&b'\r')))
+        .count();
+    assert!(
+        crlf_files > 90,
+        "only {crlf_files} cases have CRLF line endings"
+    );
+    let (dumps, count) = agree_on_resolve_cases(&dir);
+    let parts = dumps.lines().filter(|l| l.starts_with("(Program ")).count();
+    assert_eq!(parts, count);
+}
+
+/// However its root is spelled, both sides form the same paths from it:
+/// E0093 names the sibling it refuses by the root's directory, as
+/// `Path::parent` gives it, joined with the sibling's file name. On Windows
+/// `Path::join` writes `\` where N writes `/`, so there only a root with no
+/// directory is compared (ADR 0053 §5). On Linux a file name that is not
+/// UTF-8 sits beside the root too, which S0's listing drops and N's keeps
+/// with U+FFFD: no import can name it, so the dumps still agree.
+#[test]
+fn a_root_spelled_any_way_names_its_siblings_alike() {
+    let dir = fresh_dir("resolution-spellings");
+    let sub = dir.join("sub");
+    std::fs::create_dir_all(&sub).expect("create sub");
+    std::fs::write(sub.join("main.nova"), "import ui\n\nfn main() {}\n").expect("write main.nova");
+    std::fs::write(sub.join("ui.nova"), "pub fn f() {}\n").expect("write ui.nova");
+    std::fs::write(sub.join("other.nova"), "import shapes\n\nfn main() {}\n")
+        .expect("write other.nova");
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::OsStr::from_bytes(b"shapes\xff.nova");
+        std::fs::write(sub.join(name), "pub fn g() {}\n").expect("write a non-UTF-8 name");
+    }
+    let mut spellings = vec![("sub", "main.nova".to_string())];
+    if !cfg!(windows) {
+        for root in [
+            "sub/main.nova",
+            "./sub/main.nova",
+            "sub/./main.nova",
+            "sub//main.nova",
+            "./sub/.//main.nova",
+            "sub/../sub/main.nova",
+        ] {
+            spellings.push((".", root.to_string()));
+        }
+        for root in ["./main.nova", ".//main.nova", "../sub/main.nova"] {
+            spellings.push(("sub", root.to_string()));
+        }
+        spellings.push((".", sub.join("main.nova").display().to_string()));
+    }
+    // The roots of each directory in one process.
+    for cwd in [".", "sub"] {
+        let roots: Vec<String> = spellings
+            .iter()
+            .filter(|(c, _)| *c == cwd)
+            .map(|(_, root)| root.clone())
+            .collect();
+        if roots.is_empty() {
+            continue;
+        }
+        let out = agree_on_resolution(&dir.join(cwd), &roots, 0);
+        assert_eq!(
+            out.matches("(Error \"E0093\"").count(),
+            roots.len(),
+            "{out}"
+        );
+    }
+    let out = agree_on_resolution(&sub, &["other.nova".to_string()], 0);
+    assert!(
+        out.contains("(Error \"E0001\" \"cannot find module `shapes`\""),
+        "{out}"
+    );
+}
+
+/// A root with no directory part, and a package's (ADR 0053 §5): the
+/// directory both sides list for the root's siblings is then `.`, so a
+/// directory named `ui.nova` beside `main.nova` is E0093's, though it
+/// cannot be read, and a root directly in a package's `src/` or `tests/`,
+/// named from the package's directory, is `UNSUPPORTED package`, as one
+/// named from outside it is. An empty root is a file that is not there.
+#[test]
+fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
+    let dir = fresh_dir("resolution-roots");
+    std::fs::write(dir.join("main.nova"), "import ui\n\nfn main() {}\n").expect("write main.nova");
+    std::fs::create_dir_all(dir.join("ui.nova")).expect("create ui.nova/");
+    let out = agree_on_resolution(&dir, &["main.nova".to_string()], 0);
+    assert!(
+        out.contains("(Program target=native resolved=false\n"),
+        "{out}"
+    );
+    assert_eq!(out.matches("(Error \"E0093\"").count(), 1, "{out}");
+    let pkg = dir.join("pkg");
+    for sub in ["src", "tests"] {
+        std::fs::create_dir_all(pkg.join(sub)).expect("create a package's directory");
+        std::fs::write(pkg.join(sub).join("main.nova"), "fn main() {}\n").expect("write main.nova");
+    }
+    std::fs::write(pkg.join("nova.toml"), "").expect("write nova.toml");
+    let roots = ["src/main.nova", "tests/main.nova"].map(String::from);
+    let out = agree_on_resolution(&pkg, &roots, 0);
+    assert_eq!(
+        out,
+        "== src/main.nova\nUNSUPPORTED package\n== tests/main.nova\nUNSUPPORTED package\n"
+    );
+    let roots = ["pkg/tests/main.nova", ""].map(String::from);
+    let out = agree_on_resolution(&dir, &roots, 2);
+    assert_eq!(
+        out,
+        "== pkg/tests/main.nova\nUNSUPPORTED package\n== \nIOERR NotFound\n"
+    );
+}
+
+/// A module's label is its file's stem, which may hold what the dump's
+/// strings escape: a root named `q"uo\te.nova` is the module
+/// `"q\x22uo\x5cte"` on both sides. Windows refuses `"` in a file name.
+#[cfg(not(windows))]
+#[test]
+fn a_root_whose_name_needs_escapes_is_printed_alike() {
+    let dir = fresh_dir("resolution-escapes");
+    let root = "q\"uo\\te.nova".to_string();
+    std::fs::write(dir.join(&root), "fn main() {}\n").expect("write the root");
+    let out = agree_on_resolution(&dir, std::slice::from_ref(&root), 0);
+    assert!(
+        out.contains("(Module 0 \"q\\x22uo\\x5cte\" package=None)"),
+        "{out}"
+    );
+}
+
+/// A root whose path is not UTF-8 (ADR 0053 §5): S0 dumps its program,
+/// while N, whose arguments arrive as UTF-8 with U+FFFD in place of what
+/// is not, cannot open it and prints `IOERR NotFound`, exiting 2, as for
+/// 5.1's dumps (ADR 0051). No input of the differential has such a path;
+/// this pins the difference. Linux only: macOS and Windows refuse such a
+/// name.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_root_whose_path_is_not_utf8_is_dumped_by_s0_and_not_found_by_n() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = fresh_dir("resolution-non-utf8");
+    std::fs::create_dir(dir.join(OsStr::from_bytes(b"sub\xfe"))).expect("create sub");
+    for root in [&b"r\xff.nova"[..], b"sub\xfe/main.nova"] {
+        let root = OsStr::from_bytes(root);
+        std::fs::write(dir.join(root), "fn main() {}\n").expect("write the root");
+        let s0 = Command::new(nova())
+            .current_dir(&dir)
+            .args(RESOLUTION_S0)
+            .arg(root)
+            .output()
+            .expect("run nova check --dump-resolution");
+        let stdout = String::from_utf8_lossy(&s0.stdout);
+        assert_eq!(s0.status.code(), Some(0), "{root:?}: {stdout}");
+        assert!(
+            stdout.contains("\n(Program target=native resolved=true\n"),
+            "{root:?}: {stdout}"
+        );
+        let n = Command::new(selfhost())
+            .current_dir(&dir)
+            .args(resolution().n)
+            .arg(root)
+            .output()
+            .expect("run selfhost resolve");
+        let stdout = String::from_utf8_lossy(&n.stdout);
+        assert_eq!(n.status.code(), Some(2), "{root:?}: {stdout}");
+        assert!(stdout.ends_with("\nIOERR NotFound\n"), "{root:?}: {stdout}");
+    }
 }
 
 /// The name fuzzer's fixed seeds and counts every run checks (spec §3.5).
@@ -1848,22 +2136,20 @@ fn codes_in(dump: &str) -> std::collections::BTreeMap<String, usize> {
     codes
 }
 
-/// S0's resolution dump of each of the name fuzzer's inputs from the fixed
-/// seeds: every input reaches the resolver, and among them every resolver
-/// code `check` gives a loose native program occurs twice or more, and
-/// none of the three only test mode and WASM give. N's dumps are compared
-/// with these from Task 6 on.
+/// Both sides give the same resolution dump of each of the name fuzzer's
+/// inputs from the fixed seeds, every input reaches the resolver, and among
+/// them every resolver code `check` gives a loose native program occurs
+/// twice or more, and none of the three only test mode and WASM give.
 #[test]
-fn the_name_fuzzer_gives_every_native_resolver_code() {
+fn the_name_fuzzer_agrees_and_gives_every_native_resolver_code() {
     let mut all = std::collections::BTreeMap::new();
     for seed in NAME_SEEDS {
         let inputs = names(seed, NAME_COUNT);
-        let (dir, files) = write_name_inputs(&format!("names-{seed}"), &inputs);
-        let dump = s0_resolution(&dir, &files, 0);
+        let dump = agree_on_inputs(&format!("names-{seed}"), &inputs, Dumps::Resolution);
         let resolved = dump.matches("resolved=true").count();
         assert_eq!(
             resolved,
-            files.len(),
+            inputs.len(),
             "seed {seed}: an input did not reach the resolver"
         );
         for (code, n) in codes_in(&dump) {
