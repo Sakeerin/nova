@@ -1833,11 +1833,70 @@ pub fn name_imports(modules: &mut [ModuleSource]) {
 }
 
 /// The public exports of one module (its `pub` items), used to resolve imports.
+///
+/// Each namespace's names are kept in a `Vec` beside its map, in the order
+/// they were exported, which is the order they were declared: a glob import
+/// binds them, and reports the ones it clashes with, in that order rather
+/// than the map's (spec
+/// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
+/// §3.1), so the self-hosted resolver, whose maps hash otherwise, gives the
+/// same errors in the same order.
 #[derive(Debug, Default)]
 struct Exports {
     values: FxHashMap<String, Res>,
     types: FxHashMap<String, DefId>,
     traits: FxHashMap<String, DefId>,
+    value_names: Vec<String>,
+    type_names: Vec<String>,
+    trait_names: Vec<String>,
+}
+
+impl Exports {
+    /// Export `name` as a value. A module binds a name once per namespace,
+    /// so no name is exported twice.
+    fn export_value(&mut self, name: String, res: Res) {
+        if self.values.insert(name.clone(), res).is_none() {
+            self.value_names.push(name);
+        }
+    }
+
+    /// Export `name` as a type.
+    fn export_type(&mut self, name: String, id: DefId) {
+        if self.types.insert(name.clone(), id).is_none() {
+            self.type_names.push(name);
+        }
+    }
+
+    /// Export `name` as a trait.
+    fn export_trait(&mut self, name: String, id: DefId) {
+        if self.traits.insert(name.clone(), id).is_none() {
+            self.trait_names.push(name);
+        }
+    }
+
+    /// The exported values, in the order they were exported.
+    fn values_in_order(&self) -> Vec<(String, Res)> {
+        self.value_names
+            .iter()
+            .map(|n| (n.clone(), self.values[n]))
+            .collect()
+    }
+
+    /// The exported types, in the order they were exported.
+    fn types_in_order(&self) -> Vec<(String, DefId)> {
+        self.type_names
+            .iter()
+            .map(|n| (n.clone(), self.types[n]))
+            .collect()
+    }
+
+    /// The exported traits, in the order they were exported.
+    fn traits_in_order(&self) -> Vec<(String, DefId)> {
+        self.trait_names
+            .iter()
+            .map(|n| (n.clone(), self.traits[n]))
+            .collect()
+    }
 }
 
 fn push_def(defs: &mut Vec<Def>, def: Def) -> DefId {
@@ -2686,7 +2745,7 @@ fn collect_item(
             } else {
                 scope.traits.insert(name.clone(), id);
                 if pubv {
-                    exp.traits.insert(name, id);
+                    exp.export_trait(name, id);
                 }
             }
             // Default-method bodies become their own method defs (global);
@@ -3146,29 +3205,16 @@ fn resolve_import(
     }
     match &imp.kind {
         ImportKind::Simple => {
-            // Glob: bring all of the target module's public names into scope.
-            let names: Vec<(String, Res)> = exports[target]
-                .values
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            for (n, r) in names {
+            // Glob: bring all of the target module's public names into
+            // scope, in the order they were declared, so the conflicts come
+            // out in that order (spec 5.2 §3.1).
+            for (n, r) in exports[target].values_in_order() {
                 bind_value(&mut definitions.modules[mid], diagnostics, n, span, r);
             }
-            let tys: Vec<(String, DefId)> = exports[target]
-                .types
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            for (n, id) in tys {
+            for (n, id) in exports[target].types_in_order() {
                 bind_type(&mut definitions.modules[mid], diagnostics, n, span, id);
             }
-            let trs: Vec<(String, DefId)> = exports[target]
-                .traits
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect();
-            for (n, id) in trs {
+            for (n, id) in exports[target].traits_in_order() {
                 bind_trait(&mut definitions.modules[mid], diagnostics, n, span, id);
             }
         }
@@ -3338,7 +3384,7 @@ fn insert_value(
     }
     first.insert(name.clone(), span);
     if is_pub {
-        exp.values.insert(name.clone(), res);
+        exp.export_value(name.clone(), res);
     }
     scope.values.insert(name, res);
 }
@@ -3365,7 +3411,7 @@ fn insert_type(
     }
     first.insert(name.clone(), span);
     if is_pub {
-        exp.types.insert(name.clone(), id);
+        exp.export_type(name.clone(), id);
     }
     scope.types.insert(name, id);
 }
@@ -3629,6 +3675,40 @@ mod tests {
             "pub fn helper() -> Int { 2 }\n",
         );
         assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    }
+
+    /// A glob import's E0002s for the names it clashes with come out in the
+    /// order the imported module declared them, values, then types, then
+    /// traits, whatever a hash map's order (spec 5.2 §3.1). Before, they
+    /// came in `FxHash` order: `beta, delta, epsilon, alpha, gamma`, then
+    /// `Eta, Zeta`.
+    #[test]
+    fn a_glob_imports_clashes_are_reported_in_declaration_order() {
+        let p = resolve_two(
+            "fn alpha() -> Int { 10 }\nfn beta() -> Int { 20 }\nfn gamma() -> Int { 30 }\n\
+             fn delta() -> Int { 40 }\nfn epsilon() -> Int { 50 }\n\
+             record Zeta { y: Int }\nrecord Eta { y: Int }\ntrait Tau {}\ntrait Sigma {}\n\
+             import lib\nfn main() { }\n",
+            "pub fn alpha() -> Int { 1 }\npub fn beta() -> Int { 2 }\n\
+             pub fn gamma() -> Int { 3 }\npub fn delta() -> Int { 4 }\n\
+             pub fn epsilon() -> Int { 5 }\npub record Zeta { x: Int }\n\
+             pub record Eta { x: Int }\npub trait Tau {}\npub trait Sigma {}\n",
+        );
+        let messages: Vec<&str> = p.diagnostics.iter().map(|d| d.message.as_str()).collect();
+        assert_eq!(
+            messages,
+            [
+                "`alpha` is already defined or imported in this module",
+                "`beta` is already defined or imported in this module",
+                "`gamma` is already defined or imported in this module",
+                "`delta` is already defined or imported in this module",
+                "`epsilon` is already defined or imported in this module",
+                "type `Zeta` is already defined or imported in this module",
+                "type `Eta` is already defined or imported in this module",
+                "trait `Tau` is already defined or imported in this module",
+                "trait `Sigma` is already defined or imported in this module",
+            ]
+        );
     }
 
     #[test]
