@@ -224,7 +224,9 @@ resolver for loose programs and the resolution dump (spec
   with its path dependencies, reading `nova.toml` with a minimal reader
   of its own, and resolves for `--target wasm` and under `--test`, compared
   with S0 on the corpus's packages, WASM programs and tests, the cases of
-  each mode and the fuzzer's (ADR 0054).
+  each mode and the fuzzer's (ADR 0054). Nothing a user sees changes with
+  5.2b: `nova check`, `nova test` and `nova build` give what they gave,
+  byte for byte, on every file and package of the repository.
 
 ### Changed
 

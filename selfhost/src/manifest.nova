@@ -10,8 +10,11 @@
 // in, and refuses the rest with a message, which the driver prints on
 // stderr before it exits non-zero, never printing a partial dump:
 //
-// - comments, blank lines, and the tables `[package]`, `[dependencies]`
-//   and `[dev-dependencies]`, each once;
+// - comments, blank lines, a byte-order mark, and the tables
+//   `[package]`, `[dependencies]` and `[dev-dependencies]`, each once, the
+//   two dependency tables also as one inline table of inline tables
+//   before every header (`dependencies = { geom = { path = "g" } }`, as
+//   `nova add` writes into one);
 // - in `[package]`, the keys nova-pm reads (`PACKAGE_KEYS`): `name`,
 //   `version` and `edition`, which must be there, `description`,
 //   `license` and `repository` as strings, `authors`, `keywords` and
@@ -21,7 +24,9 @@
 //
 // Anything else, among it what S0 would warn about (an unknown key,
 // M0006) or reject (a version entry, which needs the registry; a name or
-// a version nova-pm refuses; an edition other than 2026), is refused.
+// a version nova-pm refuses; an edition other than 2026), is refused. A
+// version is any semver takes with no build metadata, a pre-release
+// included, as nova-pm takes it.
 
 import builtins
 import lexer
@@ -99,7 +104,21 @@ pub fn parse_manifest(text: String) -> Result<Manifest, String> {
     let mut package_end = -1
     let mut dependencies: Vec<Dependency> = Vec::new()
     let mut dev_dependencies: Vec<Dependency> = Vec::new()
-    let mut line_start = 0
+    // TOML allows no control character but a tab, a line feed, and a
+    // carriage return right before one (toml_edit's M0001).
+    let mut c = 0
+    while c < n {
+        let b = text.byte_at(c)
+        let crlf = b == 13 && c + 1 < n && text.byte_at(c + 1) == 10
+        if (b < 32 && b != 9 && b != 10 && !crlf) || b == 127 {
+            return Err("a control character other than a tab or a line break is not TOML")
+        }
+        c += 1
+    }
+    // A byte-order mark is skipped, as toml_edit skips it; spans still
+    // count its three bytes.
+    let bom = n >= 3 && text.byte_at(0) == 239 && text.byte_at(1) == 187 && text.byte_at(2) == 191
+    let mut line_start = if bom { 3 } else { 0 }
     while line_start < n {
         let mut line_end = line_start
         while line_end < n && text.byte_at(line_end) != 10 { line_end += 1 }
@@ -133,6 +152,29 @@ pub fn parse_manifest(text: String) -> Result<Manifest, String> {
                     return Err("only `key = value` with a bare key is read")
                 }
                 let key = text.byte_slice(i, k_end)
+                if table == "" && (key == "dependencies" || key == "dev-dependencies") {
+                    // The table as one inline table of inline tables, before
+                    // every header, as `nova add` writes it into one.
+                    if contains(tables, key) { return Err("the table `${key}` is written twice") }
+                    tables.push(key)
+                    let (entries, entries_end) = parse_dependency_table(
+                        text,
+                        skip_space(text, eq + 1, end),
+                        end,
+                    )?
+                    if !line_ends(text, entries_end, end) {
+                        return Err("only a comment may follow the value of `${key}`")
+                    }
+                    for d in entries.iter() {
+                        if key == "dependencies" {
+                            dependencies.push(d)
+                        } else {
+                            dev_dependencies.push(d)
+                        }
+                    }
+                    line_start = line_end + 1
+                    continue
+                }
                 let (value, value_end) = parse_value(text, skip_space(text, eq + 1, end), end)?
                 if !line_ends(text, value_end, end) {
                     return Err("only a comment may follow the value of `${key}`")
@@ -247,22 +289,105 @@ fn check_name(name: String) -> Result<(), String> {
     Ok(())
 }
 
-// Whether `text` is `MAJOR.MINOR.PATCH`, each a number without a leading
-// zero, which semver takes: this reader refuses the pre-release and the
-// build parts semver also takes, which no manifest it reads has.
+// Whether `text` is a version nova-pm takes: one `semver::Version::parse`
+// takes, `MAJOR.MINOR.PATCH`, each a number without a leading zero, then
+// optionally `-` and a pre-release, identifiers of ASCII letters, digits
+// and `-` between dots, none empty, a numeric one without a leading zero;
+// and with no build metadata (`+...`), which nova-pm refuses (M0003).
 fn is_version(text: String) -> Bool {
-    let parts = text.split(".")
+    if byte_index(text, 43) >= 0 { return false }
+    let mut rest = text
+    let minus = byte_index(rest, 45)
+    if minus >= 0 {
+        if !identifiers(rest.byte_slice(minus + 1, rest.byte_len())) { return false }
+        rest = rest.byte_slice(0, minus)
+    }
+    let parts = rest.split(".")
     if parts.len() != 3 { return false }
-    for p in parts.iter() {
-        let n = p.byte_len()
-        if n == 0 || (n > 1 && p.byte_at(0) == 48) { return false }
+    for p in parts.iter() { if !is_number(p) { return false } }
+    true
+}
+
+// Whether `text` is a pre-release: dot-separated identifiers of ASCII
+// letters, digits and `-`, none empty, each that is all digits a number
+// without a leading zero.
+fn identifiers(text: String) -> Bool {
+    for id in text.split(".").iter() {
+        let n = id.byte_len()
+        if n == 0 { return false }
+        let mut digits = true
         let mut i = 0
         while i < n {
-            if !is_digit(p.byte_at(i)) { return false }
+            let c = id.byte_at(i)
+            if !(is_letter(c) || is_digit(c) || c == 45) { return false }
+            if !is_digit(c) { digits = false }
             i += 1
         }
+        if digits && !is_number(id) { return false }
     }
     true
+}
+
+// Where the first byte `c` of `text` is, or -1.
+fn byte_index(text: String, c: Int) -> Int {
+    let mut i = 0
+    while i < text.byte_len() {
+        if text.byte_at(i) == c { return i }
+        i += 1
+    }
+    -1
+}
+
+// Whether `text` is a number without a leading zero.
+fn is_number(text: String) -> Bool {
+    let n = text.byte_len()
+    if n == 0 || (n > 1 && text.byte_at(0) == 48) { return false }
+    let mut i = 0
+    while i < n {
+        if !is_digit(text.byte_at(i)) { return false }
+        i += 1
+    }
+    true
+}
+
+// The inline table of dependencies starting at `i`, before `end`, and
+// where it ends: `{}`, or `{ key = { path = "..." }, ... }` on one line,
+// each key bare and once.
+fn parse_dependency_table(
+    text: String,
+    i: Int,
+    end: Int,
+) -> Result<(Vec<Dependency>, Int), String> {
+    let mut entries: Vec<Dependency> = Vec::new()
+    if i >= end || text.byte_at(i) != 123 {
+        return Err("a dependency table outside its header must be an inline table")
+    }
+    let mut j = skip_space(text, i + 1, end)
+    if j < end && text.byte_at(j) == 125 { return Ok((entries, j + 1)) }
+    while true {
+        let k_end = bare_key_end(text, j, end)
+        let eq = skip_space(text, k_end, end)
+        if k_end == j || eq >= end || text.byte_at(eq) != 61 {
+            return Err("only `key = { path = \"...\" }` with a bare key is read")
+        }
+        let key = text.byte_slice(j, k_end)
+        for d in entries.iter() {
+            if d.name == key { return Err("the key `${key}` is written twice") }
+        }
+        let (value, after) = parse_value(text, skip_space(text, eq + 1, end), end)?
+        let path = match value {
+            ValueTable(fields) => path_of(key, fields)?
+            _ => return Err("dependency `${key}` must be `{ path = \"...\" }`")
+        }
+        entries.push(Dependency { name: key, path: path, span: Span { start: j, end: k_end } })
+        j = skip_space(text, after, end)
+        if j < end && text.byte_at(j) == 125 { return Ok((entries, j + 1)) }
+        if j >= end || text.byte_at(j) != 44 {
+            return Err("only an inline table on one line is read")
+        }
+        j = skip_space(text, j + 1, end)
+    }
+    Err("unreachable")
 }
 
 // The value starting at `i`, before `end`, and where it ends: a string,

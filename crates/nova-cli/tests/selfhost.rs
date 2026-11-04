@@ -689,24 +689,76 @@ fn crlf(text: Vec<u8>) -> Vec<u8> {
     out
 }
 
+/// The corpus's and the fixed cases' dumps, each compared once a run
+/// ([`agree`], from the repository): their files and S0's AST dump, which
+/// is N's. `the_corpus_dumps_agree`, `the_fixed_cases_agree` and
+/// `every_kind_appears_in_the_dumps_of_the_corpus_and_the_cases` read the
+/// same dumps, so whichever test asks first compares them and the others
+/// wait for it (5.2b, ADR 0054 §9).
+struct Compared {
+    files: Vec<String>,
+    ast: String,
+}
+
+fn compared(files: Vec<String>) -> Compared {
+    let root = root();
+    agree_on(&TOKENS, &root, &files, BATCH, 0);
+    let ast = agree_on(&AST, &root, &files, BATCH, 0);
+    Compared { files, ast }
+}
+
+/// [`Compared`] of the corpus.
+fn corpus_compared() -> &'static Compared {
+    static DUMPS: OnceLock<Compared> = OnceLock::new();
+    DUMPS.get_or_init(|| compared(corpus()))
+}
+
+/// [`Compared`] of the fixed cases: every `.nova` file under [`cases_dir`].
+fn cases_compared() -> &'static Compared {
+    static DUMPS: OnceLock<Compared> = OnceLock::new();
+    DUMPS.get_or_init(|| {
+        let mut files = Vec::new();
+        nova_files(&root(), &cases_dir(), &[], &mut files);
+        compared(files)
+    })
+}
+
 #[test]
 fn the_corpus_dumps_agree() {
-    let files = corpus();
+    let compared = corpus_compared();
+    let files = &compared.files;
     // 281 under std/, tests/ and examples/ alone at 5.0c.
     assert!(files.len() >= 290, "only {} corpus files", files.len());
     assert!(files.iter().any(|f| f == "selfhost/src/lexer.nova"));
-    let dumps = agree(&root(), &files, BATCH, 0);
     // Each file's tree, so the AST dumps were compared too.
-    let trees = dumps.lines().filter(|l| l.starts_with("(File")).count();
+    let trees = compared
+        .ast
+        .lines()
+        .filter(|l| l.starts_with("(File"))
+        .count();
     assert_eq!(trees, files.len());
 }
 
 /// Both lexers must agree on the corpus as a Windows checkout has it
-/// ([`windows_corpus`]) on every system, not on Windows alone.
+/// ([`windows_corpus`]) on every system, not on Windows alone: on each
+/// file the checkout changes. On a Windows checkout, which already has
+/// each `\r\n`, the copy changes no file, and `the_corpus_dumps_agree`
+/// has compared those bytes (5.2b, ADR 0054 §9).
 #[test]
 fn the_corpus_dumps_agree_with_windows_line_endings() {
     let (dir, files) = windows_corpus("crlf");
-    let dumps = agree(&dir, &files, BATCH, 0);
+    let root = root();
+    let read = |path: PathBuf| std::fs::read(path).expect("read a corpus file");
+    let changed: Vec<String> = files
+        .into_iter()
+        .filter(|f| read(root.join(f)) != read(dir.join(f)))
+        .collect();
+    if changed.is_empty() {
+        let text = read(root.join("selfhost/src/lexer.nova"));
+        assert!(text.windows(2).any(|w| w == b"\r\n"), "no file changed");
+        return;
+    }
+    let dumps = agree(&dir, &changed, BATCH, 0);
     assert!(dumps.contains(" NL\n"), "the corpus has line breaks");
 }
 
@@ -756,11 +808,8 @@ fn the_mutations_are_the_same_with_windows_line_endings() {
 
 #[test]
 fn the_fixed_cases_agree() {
-    let root = root();
-    let mut files = Vec::new();
-    nova_files(&root, &cases_dir(), &[], &mut files);
+    let files = &cases_compared().files;
     assert!(files.len() >= 10, "only {} fixed cases", files.len());
-    agree(&root, &files, BATCH, 0);
 }
 
 #[test]
@@ -897,6 +946,44 @@ fn both_sides_refuse_no_file() {
     for (dump, files) in [(&wasm_test, &main[..]), (&wasm_test_std, &[])] {
         let out = compare_batch(dump, &root(), files, 2, &nova(), selfhost());
         assert_eq!(out, Ok(String::new()));
+    }
+}
+
+/// Both hidden forms take `--test` wherever an option may stand, and agree
+/// on what each shape gives, stdout and exit code (5.2b, ADR 0054 §1):
+/// before or after a root, beside an empty root (not found), twice
+/// (refused), and with std's part for the WASM target in either order
+/// (refused, as `nova test` has no target). `--std` is N's `--std-part`.
+/// A `--` is left out: N reads it as a root of that name, where S0's form
+/// skips it, and the harness passes none (ADR 0053 §5).
+#[test]
+fn both_sides_take_test_in_every_position_alike() {
+    let file = "tests/runtime/array_helpers.nova";
+    assert!(root().join(file).is_file());
+    let std = std_dir();
+    let shapes: [(&[&str], i32); 6] = [
+        (&["--test", file], 0),
+        (&[file, "--test"], 0),
+        (&["--test", ""], 2),
+        (&["--test", "--test", file], 2),
+        (&["--test", "--std", "--target", "wasm"], 2),
+        (&["--target", "wasm", "--std", "--test"], 2),
+    ];
+    for (args, code) in shapes {
+        let n: Vec<&str> = ["resolve", "--std", std.as_str()]
+            .into_iter()
+            .chain(
+                args.iter()
+                    .map(|a| if *a == "--std" { "--std-part" } else { a }),
+            )
+            .collect();
+        let dump = Dump {
+            s0: leak_args(&[RESOLUTION_S0, args].concat()),
+            n: leak_args(&n),
+        };
+        if let Err(report) = compare_batch(&dump, &root(), &[], code, &nova(), selfhost()) {
+            panic!("{args:?}: {report}");
+        }
     }
 }
 
@@ -1249,34 +1336,25 @@ fn kinds_on(line: &str, found: &mut std::collections::HashSet<String>) {
 }
 
 /// Every kind of node, field-less value and literal the dump can print
-/// appears in S0's dump of some corpus file or fixed case, and in N's
-/// (spec §4.3): it follows from the dumps' being equal, which
-/// `the_corpus_dumps_agree` and `the_fixed_cases_agree` check, and each
-/// side is checked on its own all the same.
+/// appears in the AST dump of some corpus file or fixed case (spec §4.3),
+/// which both sides print byte for byte: `the_corpus_dumps_agree` and
+/// `the_fixed_cases_agree` compare the same dumps ([`Compared`]), so each
+/// side's holds every kind. 5.1 ran both sides over the files again here;
+/// from 5.2b the dumps compared are read (ADR 0054 §9).
 #[test]
 fn every_kind_appears_in_the_dumps_of_the_corpus_and_the_cases() {
-    let root = root();
-    let mut files = corpus();
-    nova_files(&root, &cases_dir(), &[], &mut files);
-    for (side, program, args) in [("S0", nova(), AST.s0), ("N", selfhost().into(), AST.n)] {
-        let mut found = std::collections::HashSet::new();
-        for chunk in files.chunks(BATCH) {
-            let out = run(&program, args, &root, chunk).unwrap_or_else(|e| panic!("{e}"));
-            assert_eq!(out.code, Some(0), "{side}: {}", out.stderr);
-            for line in String::from_utf8_lossy(&out.stdout).lines() {
-                kinds_on(line, &mut found);
-            }
+    let mut found = std::collections::HashSet::new();
+    for compared in [corpus_compared(), cases_compared()] {
+        for line in compared.ast.lines() {
+            kinds_on(line, &mut found);
         }
-        let missing: Vec<&str> = nova_ast::dump::KINDS
-            .iter()
-            .copied()
-            .filter(|k| !found.contains(*k))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "no file's dump by {side} holds {missing:?}"
-        );
     }
+    let missing: Vec<&str> = nova_ast::dump::KINDS
+        .iter()
+        .copied()
+        .filter(|k| !found.contains(*k))
+        .collect();
+    assert!(missing.is_empty(), "no file's dump holds {missing:?}");
 }
 
 #[test]
@@ -1674,14 +1752,15 @@ fn case_roots(cases: &Path) -> CaseRoots {
 }
 
 /// [`agree_on_resolution_in`] `mode` on the resolver's cases in `cases`
-/// ([`mode_cases_dir`], or a copy of it), from `cases` ([`case_roots`]),
-/// [`BATCH`] roots to a process: the loose programs, those apart, and the
-/// packages' roots. Returns S0's output, which is N's, and how many
-/// programs it holds.
+/// ([`mode_cases_dir`], or a copy of it) ([`case_roots`]): the loose
+/// programs and the packages' roots from `cases`, in one process a side,
+/// then each program apart from its own directory. Returns S0's output,
+/// which is N's, and how many programs it holds.
 fn agree_on_resolve_cases(mode: Mode, cases: &Path) -> (String, usize) {
     let roots = case_roots(cases);
     let count = roots.loose.len() + roots.apart.len() + roots.packages.len();
-    let mut all = agree_on_resolution_in(mode, cases, &roots.loose, 0);
+    let from_cases: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
+    let mut all = agree_on_resolution_in(mode, cases, &from_cases, 0);
     for dir in &roots.apart {
         all.push_str(&agree_on_resolution_in(
             mode,
@@ -1690,7 +1769,6 @@ fn agree_on_resolve_cases(mode: Mode, cases: &Path) -> (String, usize) {
             0,
         ));
     }
-    all.push_str(&agree_on_resolution_in(mode, cases, &roots.packages, 0));
     (all, count)
 }
 
@@ -1808,37 +1886,19 @@ fn agree_on_resolution(dir: &Path, files: &[String], code: i32) -> String {
 }
 
 /// [`agree_on`] the resolution dump under `mode`: `files`, relative to
-/// `dir`, each a program's root, through both sides, [`BATCH`] roots to a
-/// process and the batches side by side, each side exiting with `code`;
-/// fail with the report of the first difference. Returns S0's output,
-/// which is N's. S0 parses std again for each program (about 0.065 s,
-/// debug) and N once per process (about 0.4 s with the debug runtime, 0.7 s
-/// for the WASM target, which also parses `STD_MODULES` for `missing`), so
-/// the batches run at once.
+/// `dir`, each a program's root, through both sides, all in one process a
+/// side, each side exiting with `code`; fail with the report of the first
+/// difference. Returns S0's output, which is N's. N reads and parses std
+/// once per process, about 0.4 s with the debug runtime (0.55 s for the
+/// WASM target, which also parses `STD_MODULES` for `missing`), so a set
+/// of roots goes to one process, not to batches (5.2b, ADR 0054 §9), and
+/// the callers run their sets side by side.
 fn agree_on_resolution_in(mode: Mode, dir: &Path, files: &[String], code: i32) -> String {
-    let (nova, selfhost) = (nova(), selfhost());
-    let outs: Vec<Result<String, String>> = std::thread::scope(|scope| {
-        let runs: Vec<_> = files
-            .chunks(BATCH)
-            .map(|chunk| {
-                let nova = &nova;
-                scope.spawn(move || {
-                    compare_batch(resolution_in(mode), dir, chunk, code, nova, selfhost)
-                })
-            })
-            .collect();
-        runs.into_iter()
-            .map(|r| r.join().expect("a batch's thread"))
-            .collect()
-    });
-    let mut all = String::new();
-    for out in outs {
-        match out {
-            Ok(out) => all.push_str(&out),
-            Err(report) => panic!("{report}"),
-        }
+    if files.is_empty() {
+        return String::new();
     }
-    all
+    compare_batch(resolution_in(mode), dir, files, code, &nova(), selfhost())
+        .unwrap_or_else(|report| panic!("{report}"))
 }
 
 /// `nova check`'s help names neither hidden flag, and every `nova check`
@@ -2150,7 +2210,7 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
     let loose = loose_corpus();
     // 251 loose programs at 5.2a.
     assert!(loose.len() >= 240, "only {} loose programs", loose.len());
-    // 5.2b: the 66 files directly in a package's src/ or tests/, in 11
+    // 5.2b: the 67 files directly in a package's src/ or tests/, in 11
     // packages (the nine the spec counts, `05-geometry`'s dependency and
     // the VS Code extension's fixture), each a root, which 5.2a skipped.
     let packages = package_corpus();
@@ -2279,22 +2339,30 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
 /// The resolver's cases of every mode as a Windows checkout has them
 /// ([`crlf`]): git gives no `.gitattributes` rule for `cases/`, so CI's
 /// Windows runner compares them with `\r\n`, `nova.toml`s included, and
-/// every system does here.
+/// every system does here. A mode whose copy changes no file, as on a
+/// Windows checkout, which already has each `\r\n`, is not compared
+/// again: `the_resolution_dumps_agree_on_std_the_corpus_and_the_cases`
+/// has compared those bytes (5.2b, ADR 0054 §9).
 #[test]
 fn the_resolution_dumps_agree_on_the_cases_with_windows_line_endings() {
     let dir = fresh_dir("crlf-resolve");
     let mut crlf_files = 0;
+    let mut changed_modes = Vec::new();
     for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
         let from = mode_cases_dir(mode);
         let to = dir.join(mode_cases_name(mode));
-        crlf_files += copy_crlf(&from, &to);
+        let (held, changed) = copy_crlf(&from, &to);
+        crlf_files += held;
+        if changed > 0 {
+            changed_modes.push(mode);
+        }
     }
     assert!(
         crlf_files > 300,
         "only {crlf_files} cases have CRLF line endings"
     );
     std::thread::scope(|scope| {
-        let modes: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
+        let modes: Vec<_> = changed_modes
             .into_iter()
             .map(|mode| {
                 let cases = dir.join(mode_cases_name(mode));
@@ -2310,9 +2378,10 @@ fn the_resolution_dumps_agree_on_the_cases_with_windows_line_endings() {
 }
 
 /// Copy every file under `from` to `to`, as a Windows checkout has it
-/// ([`crlf`]); returns how many copies hold a `\r`.
-fn copy_crlf(from: &Path, to: &Path) -> usize {
-    let mut held = 0;
+/// ([`crlf`]); returns how many copies hold a `\r`, and how many differ
+/// from their files.
+fn copy_crlf(from: &Path, to: &Path) -> (usize, usize) {
+    let (mut held, mut changed) = (0, 0);
     let mut entries: Vec<_> = std::fs::read_dir(from)
         .expect("read a directory of cases")
         .map(|e| e.expect("a directory entry"))
@@ -2322,14 +2391,18 @@ fn copy_crlf(from: &Path, to: &Path) -> usize {
     for e in entries {
         let target = to.join(e.file_name());
         if e.path().is_dir() {
-            held += copy_crlf(&e.path(), &target);
+            let (h, c) = copy_crlf(&e.path(), &target);
+            held += h;
+            changed += c;
         } else {
-            let text = crlf(std::fs::read(e.path()).expect("read a case"));
+            let original = std::fs::read(e.path()).expect("read a case");
+            let text = crlf(original.clone());
             held += usize::from(text.contains(&b'\r'));
+            changed += usize::from(text != original);
             std::fs::write(&target, text).expect("write a case");
         }
     }
-    held
+    (held, changed)
 }
 
 /// However its root is spelled, both sides form the same paths from it:
@@ -2677,6 +2750,12 @@ fn package_names_of(root: &Path, files: &[String], seed: u64, count: usize) -> V
 /// the inputs' files, each a program's root.
 fn write_name_inputs(name: &str, inputs: &[String]) -> (PathBuf, Vec<String>) {
     let dir = fresh_dir(name);
+    let files = write_name_inputs_in(&dir, inputs);
+    (dir, files)
+}
+
+/// [`write_name_inputs`] into `dir`, which exists: the inputs' files.
+fn write_name_inputs_in(dir: &Path, inputs: &[String]) -> Vec<String> {
     for (stem, source) in fuzz::NAME_SIBLINGS {
         std::fs::write(dir.join(format!("{stem}.nova")), source).expect("write a sibling");
     }
@@ -2686,7 +2765,40 @@ fn write_name_inputs(name: &str, inputs: &[String]) -> (PathBuf, Vec<String>) {
         std::fs::write(dir.join(&file), input).expect("write a name-fuzz input");
         files.push(file);
     }
-    (dir, files)
+    files
+}
+
+/// Each seed's inputs, [`write_name_inputs`] into a directory named for
+/// the seed in a fixed directory named after `name`: that directory, and
+/// every seed's roots, relative to it (`301/f00000.nova`), so that one
+/// process a side resolves all the seeds' inputs ([`seed_parts`]).
+fn write_seeded_inputs(name: &str, seeded: &[(u64, Vec<String>)]) -> (PathBuf, Vec<String>) {
+    let dir = fresh_dir(name);
+    let mut roots = Vec::new();
+    for (seed, inputs) in seeded {
+        let sub = dir.join(seed.to_string());
+        std::fs::create_dir_all(&sub).expect("create a seed's directory");
+        let files = write_name_inputs_in(&sub, inputs);
+        roots.extend(files.into_iter().map(|f| format!("{seed}/{f}")));
+    }
+    (dir, roots)
+}
+
+/// The parts of `dump`, a resolution dump of [`write_seeded_inputs`]'
+/// roots, whose roots are `seed`'s, each from its `== ` header on.
+fn seed_parts(dump: &str, seed: u64) -> String {
+    let header = format!("== {seed}/");
+    let mut out = String::new();
+    let mut keep = false;
+    for line in dump.split_inclusive('\n') {
+        if line.starts_with("== ") {
+            keep = line.starts_with(&header);
+        }
+        if keep {
+            out.push_str(line);
+        }
+    }
+    out
 }
 
 /// Write [`fuzz::PACKAGE_FILES`] to a fixed directory named after `name`,
@@ -2750,9 +2862,12 @@ fn parts_of(dump: &str) -> Vec<&str> {
 /// inputs from the fixed seeds, and every input reaches the resolver; and,
 /// from 5.2b, its inputs under test mode, its WASM sibling's for the WASM
 /// target and its package sibling's. A package's input reaches the
-/// resolver, or the loader stops it with E0004 or a noted E0001. Among them every one of the
-/// resolver's 11 codes, E0004 and E0001's two notes occur twice or more;
-/// E0084 and E0085 only under test mode, E0090 only for the WASM target.
+/// resolver, or the loader stops it with E0004 or a noted E0001. Among
+/// them every one of the resolver's 11 codes, E0004 and E0001's two notes
+/// occur twice or more; E0084 and E0085 only under test mode, E0090 only
+/// for the WASM target. The loose inputs of every seed are written to
+/// `names/<seed>/` and the WASM ones to `wasm-names/<seed>/`, each set
+/// resolved in one process a side and mode ([`write_seeded_inputs`]).
 #[test]
 fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
     let root = root();
@@ -2776,36 +2891,26 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
     };
     let loose = loose_corpus();
     let loose_wasm = loose_wasm_corpus();
-    // Every seed's inputs side by side, each compared in its own thread,
-    // then counted in order.
-    let (names_dumps, wasm_dumps, package_dumps) = std::thread::scope(|scope| {
-        let names: Vec<_> = NAME_SEEDS
-            .iter()
-            .map(|&seed| {
-                let inputs = names(seed, NAME_COUNT);
-                let (dir, files) = write_name_inputs(&format!("names-{seed}"), &inputs);
-                scope.spawn(move || {
-                    let (check, test) = std::thread::scope(|inner| {
-                        let test =
-                            inner.spawn(|| agree_on_resolution_in(Mode::Test, &dir, &files, 0));
-                        let check = agree_on_resolution(&dir, &files, 0);
-                        (check, test.join().expect("a seed's test mode's thread"))
-                    });
-                    (seed, inputs.len(), check, test)
-                })
-            })
-            .collect();
-        let wasm: Vec<_> = WASM_NAME_SEEDS
-            .iter()
-            .map(|&seed| {
-                let inputs = wasm_names_of(&root, &loose_wasm, seed, WASM_NAME_COUNT);
-                let (dir, files) = write_name_inputs(&format!("wasm-names-{seed}"), &inputs);
-                scope.spawn(move || {
-                    let dump = agree_on_resolution_in(Mode::Wasm, &dir, &files, 0);
-                    (seed, inputs.len(), dump)
-                })
-            })
-            .collect();
+    // Every seed's loose inputs in one process a side under `check`, again
+    // under test mode, and the WASM inputs in one, each mode in its own
+    // thread, as each seed's package inputs, which run from inside their
+    // own package; then counted in order, seed by seed.
+    let names_inputs: Vec<(u64, Vec<String>)> = NAME_SEEDS
+        .iter()
+        .map(|&seed| (seed, names(seed, NAME_COUNT)))
+        .collect();
+    let (names_dir, names_roots) = write_seeded_inputs("names", &names_inputs);
+    let wasm_inputs: Vec<(u64, Vec<String>)> = WASM_NAME_SEEDS
+        .iter()
+        .map(|&seed| {
+            let inputs = wasm_names_of(&root, &loose_wasm, seed, WASM_NAME_COUNT);
+            (seed, inputs)
+        })
+        .collect();
+    let (wasm_dir, wasm_roots) = write_seeded_inputs("wasm-names", &wasm_inputs);
+    let (check, test, wasm, package_dumps) = std::thread::scope(|scope| {
+        let test = scope.spawn(|| agree_on_resolution_in(Mode::Test, &names_dir, &names_roots, 0));
+        let wasm = scope.spawn(|| agree_on_resolution_in(Mode::Wasm, &wasm_dir, &wasm_roots, 0));
         let packages: Vec<_> = PACKAGE_NAME_SEEDS
             .iter()
             .map(|&seed| {
@@ -2814,20 +2919,27 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
                 scope.spawn(move || (seed, inputs.len(), agree_on_resolution(&app, &roots, 0)))
             })
             .collect();
-        (joined(names), joined(wasm), joined(packages))
+        let check = agree_on_resolution(&names_dir, &names_roots, 0);
+        let [test, wasm] =
+            [test, wasm].map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)));
+        (check, test, wasm, joined(packages))
     });
-    for (seed, count, dump, test) in names_dumps {
+    for (seed, inputs) in &names_inputs {
+        let count = inputs.len();
+        let dump = seed_parts(&check, *seed);
         let resolved = dump.matches("resolved=true").count();
         assert_eq!(
             resolved, count,
             "seed {seed}: an input did not reach the resolver"
         );
         add(&dump, Mode::Check, &format!("seed {seed}"));
+        let test = seed_parts(&test, *seed);
         assert_eq!(test.matches("resolved=true").count(), count);
         add(&test, Mode::Test, &format!("seed {seed} under test mode"));
     }
-    for (seed, count, dump) in wasm_dumps {
-        assert_eq!(dump.matches("resolved=true").count(), count);
+    for (seed, inputs) in &wasm_inputs {
+        let dump = seed_parts(&wasm, *seed);
+        assert_eq!(dump.matches("resolved=true").count(), inputs.len());
         add(&dump, Mode::Wasm, &format!("WASM seed {seed}"));
     }
     for (seed, count, dump) in package_dumps {

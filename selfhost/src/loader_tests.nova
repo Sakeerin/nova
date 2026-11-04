@@ -353,6 +353,85 @@ fn the_manifest_reader_reads_what_the_loader_needs_and_refuses_the_rest() {
     }
 }
 
+// The reader's table (ADR 0054 §5), pinned: each text here is read, and
+// each in the second list refused, whatever else S0's reader would say
+// of it. S0 accepts every text of the first list too; for the second it
+// gives an M-code, or reads what N's reader does not (a version entry
+// with the registry, an escape, a number).
+@test
+fn the_manifest_readers_accepted_and_refused_forms_are_pinned() {
+    let accepted = [
+        manifest_of("app", ""),
+        "# a comment\n\n[ package ]\nname = 'app'   # a name\nversion = \"10.20.30\"\nedition = '2026'\n",
+        manifest_of(
+            "my-app_2",
+            "description = \"d\"\nlicense = 'MIT'\nrepository = \"r\"\nauthors = []\nkeywords = [\"a\", 'b',]\ncategories = [\"c\"]\n",
+        ),
+        manifest_of("app", "[dependencies]\n[dev-dependencies]\n"),
+        manifest_of(
+            "app",
+            "[dependencies]\ngeom = {path='g'}\n[dev-dependencies]\nhelp = { path = \"../h\" }\n",
+        ),
+        "[package]\r\nname = \"app\"\r\nversion = \"0.1.0\"\r\nedition = \"2026\"\r\n\r\n[dependencies]\r\ng = { path = \"g\" }\r\n",
+        "[package]\nedition = \"2026\"\nversion = \"0.1.0\"\nname = \"app\"\n",
+        // As `nova add` writes into an inline table; a byte-order mark;
+        // semver's pre-release.
+        "dependencies = {}\n\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        "dev-dependencies = { geom = { path = \"../geom\" }, h = {path='h'} }\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        "${char_from_int(65279).unwrap()}[package]\nname = \"app\"\nversion = \"1.2.3-alpha.1\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"1.0.0-x-y.0.a\"\nedition = \"2026\"\n",
+    ]
+    for text in accepted.iter() {
+        match parse_manifest(text) {
+            Ok(_) => ()
+            Err(why) => assert(false, "accepted: ${text}: ${why}")
+        }
+    }
+    let refused = [
+        "",
+        manifest_of("app", "[workspace]\n"),
+        manifest_of("app", "[[bin]]\n"),
+        manifest_of("app", "readme = \"r\"\n"),
+        manifest_of("app", "\"license\" = \"MIT\"\n"),
+        manifest_of("app", "package.license = \"MIT\"\n"),
+        manifest_of("app", "license = 7\n"),
+        manifest_of("app", "license = true\n"),
+        manifest_of("app", "authors = [\n\"a\"]\n"),
+        manifest_of("app", "description = '''x'''\n"),
+        manifest_of("app", "[dependencies]\ngeom = { path = \"g\" }\ngeom = { path = \"g\" }\n"),
+        manifest_of("app", "[dependencies]\n[dependencies]\n"),
+        manifest_of("app", "[dependencies]\ngeom = { path = \"g\", features = [] }\n"),
+        manifest_of("app", "[dependencies]\ngeom = {}\n"),
+        manifest_of("app", "[dependencies]\ngeom = { path = 1 }\n"),
+        "[package]\nname = \"app\"\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[package]\n",
+        "[package]\nname = \"app\"\nversion = \"1.0.0-01\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"1.0.0-a..b\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"1.0.0+\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"1.0.0+build\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"1.0\"\nedition = \"2026\"\n",
+        "dependencies = {}\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\n",
+        "dependencies = { g = { path = \"g\" }, g = { path = \"g\" } }\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        "dependencies = { g = \"1.0\" }\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"a\\tp\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        manifest_of("dom", ""),
+        manifest_of("a.b", ""),
+        manifest_of("aux", ""),
+        manifest_of("a12345678901234567890123456789012345678901234567890123456789012345", ""),
+        // A carriage return not before a line feed, as the last byte or
+        // in a comment, and another control character.
+        "[package]\r\nname = \"app\"\r\nversion = \"0.1.0\"\r\nedition = \"2026\"\r",
+        manifest_of("app", "# a\rb\n"),
+        manifest_of("app", "# a\0b\n"),
+    ]
+    for text in refused.iter() {
+        match parse_manifest(text) {
+            Ok(_) => assert(false, "refused: ${text}")
+            Err(_) => ()
+        }
+    }
+}
+
 @test
 fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
     // Each would be an M-code in S0's graph, which N does not give, so

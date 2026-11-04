@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (2026-11-04), 5.2b's prototype, branch `proto/5-2b-whole`
+Proposed (2026-11-04). Branch `claude/loving-archimedes-frtf5q-52b`
 (`docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
 §4). It extends ADR 0053, whose §1 grammar and examples stay as they were
 for 5.2a's forms: §1 here is what 5.2b adds to S0's dump and to the hidden
@@ -251,9 +251,9 @@ definitions, 563 items and 92 `missing` names; its test-mode part 8,098
 lines (333 KB), against the native part's 7,728 (320 KB). A package's
 program holds every module its root reaches: `examples/05-geometry`'s
 `src/main.nova` is 587 lines (19 KB), `examples/07-fullstack-blog`'s 2,184
-(71 KB), and `selfhost/src/main.nova`, which reaches most of N, 10,661
-lines (391 KB); the corpus's 66 package files dump to 146,588 lines (5.2
-MB) in 2.5 s, S0 debug, one process.
+(71 KB), and `selfhost/src/main.nova`, which reaches most of N, 11,202
+lines (411 KB); the corpus's 67 package files dump to 152,084 lines (5.4
+MB) in 2.7 s, S0 debug, one process.
 
 ### 2. The cases
 
@@ -271,7 +271,7 @@ The cases come from the programs the tests resolve, recorded by a
 temporary instrumentation of the resolver and the loader while the
 workspace's library tests, the driver's and the CLI's package, fix,
 doc-test, analysis, index and project tests, `wasm_tests.rs` and
-`run_tests.rs` ran (`$P/proto52b/instrument.py`, `extract.py`): every
+`run_tests.rs` ran (a script, not committed): every
 program resolved as a package, for the WASM target or under test mode,
 kept when it is a package's, gives a resolver diagnostic, holds a
 `@test` (under test mode) or imports `dom` or `ui` (for the WASM target);
@@ -326,8 +326,8 @@ E0084 and E0085 only under test mode and E0090 only for WASM.
 
 ### 4. The corpus
 
-Natively, every corpus file is now a root: the 251 loose programs and the
-66 files directly in a package's `src/` or `tests/`, in 11 directories
+Natively, every corpus file is now a root, 318: the 251 loose programs and
+the 67 files directly in a package's `src/` or `tests/`, in 11 directories
 (the spec's nine packages, `05-geometry`'s dependency `shapes`, and the VS
 Code extension's fixture), which 5.2a skipped; for the WASM target, the 39
 files under `tests/dom/` and `tests/wasm/`, six of them a package's; under
@@ -354,9 +354,11 @@ E0004 there labels the whole table, from its `[` to the end of its last
 value, as toml_edit spans it), and whether each package's `src/lib.nova`
 (and the root's `src/main.nova`) is a file. The M-codes stay S0's.
 
-**It accepts** comments, blank lines, `\r\n`, and the tables `[package]`,
-`[dependencies]` and `[dev-dependencies]`, each once, headers with
-spaces inside the brackets; bare keys; strings in `"..."` without an
+**It accepts** comments, blank lines, `\r\n`, a byte-order mark, and the
+tables `[package]`, `[dependencies]` and `[dev-dependencies]`, each once,
+headers with spaces inside the brackets, the two dependency tables also
+as one inline table of inline tables before every header (`dependencies
+= { geom = { path = "../geom" } }`, as `nova add` writes into one); bare keys; strings in `"..."` without an
 escape or in `'...'`; in `[package]` the keys nova-pm reads (`name`,
 `version` and `edition`, which must be there, `description`, `license`,
 `repository` as strings, `authors`, `keywords`, `categories` as arrays of
@@ -367,9 +369,25 @@ dotted or quoted key, an array of tables, a multi-line string, an escape,
 a number or a boolean, a version entry (which needs the registry), a
 `path` beside a `version`, a key written twice, a name nova-pm refuses
 (`check_name`: a letter first, ASCII letters, digits, `-` and `_`, at
-most 64, not a Windows device, not `dom` or `ui`), a version other than
-`MAJOR.MINOR.PATCH` (semver's pre-release and build parts included,
-which no manifest it reads has), an edition other than 2026.
+most 64, not a Windows device, not `dom` or `ui`), a version semver
+refuses or one with build metadata (`+...`, M0003; a pre-release is
+read), an edition other than 2026, and a
+control character other than a tab, a line feed and a `\r` before one,
+as TOML refuses it. N's test `the_manifest_readers_accepted_and_refused_forms_are_pinned`
+pins this table: 11 texts read and 33 refused; S0 reads each of the 11
+with no M-code, gives 30 of the 33 an M-code, and reads the other three
+(a quoted key, an array over two lines, a multi-line string), which no
+manifest of the repository holds.
+
+**Every manifest of the repository** (the 100 tracked `nova.toml` files
+and every manifest the workspace's tests parse, recorded by a temporary
+instrumentation of nova-pm while the whole suite ran: 211 distinct
+texts), each in a package with `src/main.nova` and a library at each of
+its relative paths, through both sides: 131 read as S0 reads them, the
+same dump; 80 refused where S0 gives an M-code; none refused that S0
+reads. Before the split four were: the inline dependency table `nova
+add` writes (two), a byte-order mark, and a pre-release version; the
+reader takes them now.
 
 **The graph** (`loader.nova`'s `read_graph`) is nova-pm's walk: the
 root, then breadth first each package's entries, and the root's
@@ -383,7 +401,8 @@ cycle of `[dependencies]` (M0010), two packages of one name (M0011), an
 import name that is a keyword, taken twice or the root's own (M0012),
 a root with neither a library nor a program (M0013). A refusal stops
 `selfhost resolve`: it prints `error: selfhost resolve cannot dump ROOT:
-WHY` on stderr, the manifest's path in WHY, and exits 1, having printed
+WHY` on stderr, the manifest's path in WHY, and exits 1 (not 2, which
+is a root that cannot be read or a misuse, as in S0's form), having printed
 nothing of that root's part, never a partial dump; the roots before it
 were printed. A test pins it beside S0's M-code for the same root.
 
@@ -420,8 +439,7 @@ link that the folded path does not see.
 Every input part A ran through S0 alone is now compared byte for byte
 with N, exit codes included: std's native, WASM and test-mode parts; the
 corpus natively, 251 loose programs and 67 files directly in a package's
-`src/` or `tests/` (318; part A counted 66, before
-`selfhost/src/manifest.nova`), its 39 WASM programs for the WASM target
+`src/` or `tests/` (318, §4), its 39 WASM programs for the WASM target
 and its 9 files with tests under test mode; the cases, `resolve/` 141
 programs (38 a package's roots), `resolve-wasm/` 30 and `resolve-test/`
 126, and all of them again with `\r\n`; and the name fuzzer's fixed
@@ -452,6 +470,48 @@ the manifest by path, and E0093's the module it refuses, each as
 a test checks the rule on every system. So the package inputs are
 compared on Windows too, not skipped.
 
+**Edges probed before the split**, each through both sides:
+
+- A dependency reached through `..`, an absolute one, and E0004 inside a
+  dependency reached through `..`: the same dump; both print a path as it
+  is joined, `..` kept.
+- A dependency that is the package itself (M0012, its import name the
+  package's), two entries with one path (M0008), and a dev-dependency
+  that is also a dependency (M0012): S0's M-code, N's refusal, exit 1.
+- A root in a subdirectory of `src/` (a loose program on both:
+  `package_of` looks directly in `src/` and `tests/` only), an empty
+  `tests/`, a package whose only root is `src/lib.nova`, a `tests/` file
+  importing the library, a dependency and a dev-dependency, `--test` on
+  a package of four dependencies whose tests (one named as the root's)
+  are stripped, and colliding `@test`s (E0002 under test mode, stripped
+  under `check`), each under `check` and test mode: the same dump.
+- **One difference found:** N's reader read a manifest ending in a `\r`
+  with no line feed, or with a control character in a comment, which
+  toml_edit refuses (M0001). It now refuses every control character but
+  a tab, a line feed and a `\r` before one, as TOML does.
+- Case-insensitive disks: both sides ask for `nova.toml` by its path and
+  compare the parent's name with `src` and `tests` exactly, so `Nova.toml`
+  is a manifest on a case-folding disk on both (5.2a's test, now through
+  N too) and `SRC/main.nova` is a loose program on both; a dependency's
+  manifest is asked for by its path as well.
+- Windows: `src\main.nova` typed as a root is a package's module to S0 and
+  a loose program to N, whose paths split at `/` only (ADR 0053 §5); the
+  harness writes every root with `/`, and 5.5 settles both. macOS (a
+  temporary directory behind a link): a package is identified by
+  `real_path` in S0 and by its folded path in N, which differ only for a
+  package reached by two spellings through a link, which no input has;
+  no printed path is canonical.
+- CRLF: `cases/` has no `.gitattributes` rule, so CI's Windows checkout
+  gives every case's `nova.toml` `\r\n`, and the CRLF copy reads them on
+  every system.
+- The harness's threads are scoped and joined in a fixed order, and each
+  output is joined in order: no count of cores changes what is compared
+  or printed.
+- `--test` before or after a root, beside an empty root, twice, and with
+  `--std --target wasm` in either order: the same stdout and exit code on
+  both sides (a test). A `--` is still a root of that name to N, where
+  S0's form skips it (ADR 0053 §5); the harness passes none.
+
 ### 8. The decisions part A took, and the spec's correction
 
 1. **Roots are files:** a file directly in a package's `src/` or
@@ -472,27 +532,64 @@ compared on Windows too, not skipped.
 
 ### 9. CI's time
 
-Measured locally (4 cores, Linux), the test binaries prebuilt, three
-interleaved rounds (`$P/proto52b/b-time.sh`): 5.1's 27 tests alone 23.7,
-23.8 and 22.3 s; part A's `selfhost.rs` 38.2, 38.8 and 38.4 s; part B's
-56.1, 50.1 and 51.8 s, 167 to 188 s of CPU, against part A's 119 to
-124 s. Part B is 2.1 to 2.4 times 5.1's tests, part A 1.6 to 1.7. N's
-side of what part A ran through S0 alone costs about 41 s of CPU, almost
-all the debug runtime's (`b-cpu.sh`): the 67 package files 12.0 s (the
-23 of `selfhost/src/`, each reaching most of N, 8.3 s), the cases under
-the three modes about 6.5 s and again with `\r\n`, the fuzzer's
-test-mode inputs 5.5 s, its WASM inputs 2.9 s and its package inputs
-3.6 s, the files with tests 3.0 s, the WASM corpus 1.4 s. The fuzzer's
-seeds and the CRLF cases' modes now run side by side, as the corpus's
-batches did; the run is bound by CPU, not by its longest test.
+**Before the split** (the prototype as part B left it; 4 cores, Linux,
+the test binaries prebuilt, three interleaved rounds): `selfhost.rs` 51.6,
+49.5 and 51.9 s, 165 to 174 s of user CPU; 5.1's 27 tests alone 22.4,
+24.1 and 21.1 s. Each test alone, N's build (3.7 s of CPU) in each: the
+corpus's and the cases' resolution 67 s of CPU, the name fuzzer 36 s, the
+cases again with `\r\n` 22 s, 5.1's mutated corpus 15 s, its corpus and
+its CRLF corpus 9 s each, and 5.1's every-kind test 9 s, which ran both
+sides over the corpus and the cases again. The processes are nearly all
+the CPU (the harness 1 to 2 s): N, with the debug runtime, about two
+thirds of it. Where N's time goes (callgrind): the debug runtime is about
+five sixths of N's instructions; of N's own work on a package's root,
+lexing and parsing are about half; on a small root, resolving std again
+for each program (seeding std's scopes, collecting its items) is about
+half, as it is S0's (61% of S0's per-root time). N read and parsed std
+once per process, 0.40 s (0.57 s for the WASM target, which parses
+`STD_MODULES` too), and 61 N processes took roots, 50 to a batch.
 
-**Projected,** by ADR 0053's method (CI's 5.1 time times the local
-ratio: 19.3 s on Linux, 19.45 s on Windows, 22.50 s on macOS), 41 to
-46 s on Linux and Windows and 47 to 53 s on macOS; by the local time
-with Windows at 1.3 times Linux, as part A warned, 65 to 73 s on Windows,
-past the spec's minute (risk 4), which the user is asked about. The
-cheapest cuts, each measured in two interleaved rounds against the full
-run's 51.2 and 51.2 s (`b-cuts.sh`, a temporary build of the harness):
+**The speed-up**, every input kept:
+
+- One process a side for each set and mode (`agree_on_resolution_in`):
+  the loose corpus, the package corpus, the WASM corpus, the files with
+  tests, each mode's cases (loose and packages together, the case apart
+  from its own directory), each of 5.2a's small tests' sets; the sets of
+  a test still run side by side.
+- The name fuzzer's three seeds in one process a mode, each seed's inputs
+  in a directory named for it (`names/301/f00000.nova`), counted seed by
+  seed from the headers (`seed_parts`); the package inputs, each seed
+  from inside its own package, as before.
+- 5.1's corpus and cases dumps compared once a run (`Compared`), and the
+  every-kind test reads them, as it read both sides' equal output again.
+- The CRLF copies compared only where the copy changes a file: on a
+  Windows checkout, which already has each `\r\n`, the cases' and the
+  corpus's copies change nothing, and the first comparison was of those
+  bytes; on Linux and macOS every file with a line break changes.
+
+**After:** 49.2, 47.3 and 48.7 s, 145 to 151 s of user CPU, 2.0 to 2.3
+times 5.1's tests. The target, 40 s locally, is not reached: what is left
+is the processes' own work, most of it the debug runtime's.
+
+**Projected:** by 5.2a's CI against its local time (Linux 36.5 s, macOS
+30.0 s, Windows 49.6 and 36.0 s, against 27.2 to 28.5 s here: 1.28 to
+1.34, 1.05 to 1.10 and 1.26 to 1.82), 61 to 66 s on Linux, 50 to 54 s on
+macOS and 60 to 90 s on Windows, less on Windows by the CRLF comparisons
+it no longer repeats (about a sixth of the CPU): about 50 to 75 s. By
+5.1's CI time times the local ratio (ADR 0053's method: 19.3, 22.5 and
+19.45 s), 39 to 45 s on Linux and Windows and 45 to 52 s on macOS. Either
+way some leg may pass the spec's minute (risk 4), which the user is asked
+about, with these options:
+
+| option | `selfhost.rs` here | what it costs |
+|---|---:|---|
+| the runtime that a debug `nova` links optimized (`[profile.dev.package.nova-runtime] opt-level = 2`), debug assertions kept | 26.2, 26.4 s (83 s of CPU) | every debug build and CI's tests use an optimized runtime; two runtime tests assume an unoptimized one (`gc_reclaims_garbage`'s `max_live > 0`, `the_yield_futures_layout_is_the_one_the_abi_declares`' function address) and fail; keeping the test profile unoptimized keeps them, but which runtime N links then depends on which cargo command last built `target/debug/libnova_runtime.a` |
+| std's collected state shared by every root of a process, on both sides | not built; about two fifths of the resolution's CPU, by the profile | a change to S0's resolver (`nova check`'s) and N's port of it |
+| part B's cuts (below) | 47 to 55 s | inputs |
+| none | 47 to 49 s | CI's time, which may pass a minute on a leg |
+
+Part B's cuts, each measured in two interleaved rounds against its full
+run's 51.2 and 51.2 s (a temporary build of the harness):
 
 | cut | wall (s) | CPU saved (s) | what is lost |
 |---|---:|---:|---|
@@ -500,9 +597,7 @@ run's 51.2 and 51.2 s (`b-cuts.sh`, a temporary build of the harness):
 | `selfhost/src/` once, by its `main.nova` (45 of 67) | 50.3, 47.7 | 0–17 | 22 roots that `main.nova` reaches as modules |
 | one seed, not three, for the fuzzer's test-mode, WASM and package inputs | 49.4, 47.1 | 3–17 | 100 of 150 test-mode, 40 of 60 WASM and 60 of 90 package inputs; E0085 then occurs once, under the floor of 2 |
 
-Each saves 0 to 4 s of wall time here, inside the runs' own spread
-(50 to 56 s); together about 5 s. No cut is taken: the spec gives the
-choice to the user.
+No option is taken: the spec gives the choice to the user.
 
 ### 10. The live heap (spec §4.4, phase plan decision 8)
 
@@ -515,7 +610,7 @@ three by `wait4`; the pauses are timed with gdb from the entry of
 mark and `Pages::sweep` (inlined in the release runtime, so the pause
 ends at the return of the allocation that triggered it); the live heap
 is the largest `NOVA_GC_DEBUG` reports after a collection. The script is
-`$P/proto52b/b-heap.sh`, with `b-gcpause.py`.
+in the 5.2b plan's last task.
 
 | input | runtime | wall | peak RSS | collections | median pause | p95 | max | total GC | max live |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -548,7 +643,8 @@ compiler; the cost to watch is CI's time, not the pause.
 - N reads `nova.toml` through a reader of its own that refuses what it
   does not read; the package graph's diagnostics stay S0's until a driver
   needs them (5.5).
-- `selfhost.rs` takes 2.1 to 2.4 times 5.1's tests locally, which may put
-  CI's Windows leg past a minute (§9); the cuts are measured, and none is
-  taken without the user.
+- `selfhost.rs` takes 2.0 to 2.3 times 5.1's tests locally after the
+  speed-up, which keeps every input, and may put a CI leg past a minute
+  (§9); the options, an optimized debug runtime among them, are measured,
+  and none is taken without the user.
 - The live heap is recorded (§10), with no threshold.
