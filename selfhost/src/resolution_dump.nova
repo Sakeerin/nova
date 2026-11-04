@@ -1,0 +1,455 @@
+// The resolution dump: what the loader and the resolver built for one
+// program, as text, one entry per line, exactly as S0's `nova check
+// --dump-resolution` prints it: a port of crates/nova-resolver/src/dump.rs,
+// function by function (spec
+// docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
+// §3.4). ADR 0053 writes the grammar out, with an example of every form.
+//
+// - Two parts: std's, printed once (`dump_std`), and a program's
+//   (`dump_program`), which prints only what is the program's own.
+// - A program's own definition is `u<n>`, a std one `s<n>`, its id less the
+//   first std definition's; modules and items are numbered from 0 in each
+//   part.
+// - Namespaces print sorted by name (a `Map`'s keys, sorted), exports in
+//   the order they were exported.
+// - Strings are quoted as the AST dump quotes them (dump.nova's
+//   `push_escaped`).
+
+import ast
+import builtins
+import diagnostic
+import dump
+import loader
+import resolver
+import token
+
+/// A program's part for `target`: its `modules` as the loader gave them,
+/// its resolution once it got that far, and every diagnostic, the
+/// loader's and the resolver's, in order (`dump_program`); `table` names
+/// the builtins.
+pub fn dump_program(
+    target: CompileTarget,
+    modules: Vec<ModuleSource>,
+    resolution: Option<ProgramResolution>,
+    diagnostics: Vec<Diagnostic>,
+    table: BuiltinTable,
+) -> String {
+    let mut d = ResDump {
+        out: StringBuilder::new(),
+        std_def: 9223372036854775807,
+        fresh: true,
+        variants: table.variants,
+    }
+    d.open(0, "Program")
+    d.field("target", compile_target_name(target))
+    d.bool_field("resolved", resolution.is_some())
+    let mut index = 0
+    for m in modules.iter() {
+        d.open(1, "Module")
+        d.out.push(" ${index}")
+        d.string(m.name)
+        d.field("package", package(m.package))
+        for name in sort_strings(Vec::from_array(m.imports.keys())).iter() {
+            d.open(2, "Import")
+            d.string(name)
+            match m.imports.get(name).unwrap() {
+                ImportTargetModule(t) => d.out.push(" ${t}")
+                ImportTargetReported => d.out.push(" Reported")
+            }
+            d.close()
+        }
+        for (name, t) in m.importable.iter() {
+            d.open(2, "Importable")
+            d.string(name)
+            d.out.push(" ${t}")
+            d.close()
+        }
+        d.close()
+        index += 1
+    }
+    match resolution {
+        Some(r) => {
+            let defs = r.definitions
+            let std_module = defs.std_start
+            let std_item = first_item_of(defs, std_module)
+            let std_def = first_std_def(defs, std_item)
+            d.std_def = std_def
+            d.open(1, "StdStart")
+            d.field("module", "${std_module}")
+            d.field("def", "${std_def}")
+            d.field("item", "${std_item}")
+            d.close()
+            d.defs(defs, 0, std_def, 0)
+            d.scopes(defs, 0, std_module, 0)
+            d.exports(defs, 0, std_module, 0)
+            d.items(defs, 0, std_item, 0, 0)
+            for (file, split) in r.newline_splits.iter() {
+                d.open(1, "Split")
+                d.place(file, split.at)
+                d.field("kind", split_kind_word(split.kind))
+                d.close()
+            }
+            for test in r.tests.iter() {
+                d.open(1, "Test")
+                d.out.push(" ${d.id(test.def_id)}")
+                d.string(test.name)
+                d.bool_field("should_panic", test.should_panic)
+                d.close()
+            }
+        }
+        None => ()
+    }
+    d.close()
+    d.newline()
+    d.diagnostics(diagnostics)
+    d.out.to_string()
+}
+
+/// std's part for `target`, from the resolution of a program of no module
+/// of its own (`dump_std`).
+pub fn dump_std(
+    target: CompileTarget,
+    resolution: ProgramResolution,
+    table: BuiltinTable,
+) -> String {
+    let mut d = ResDump {
+        out: StringBuilder::new(),
+        std_def: 0,
+        fresh: true,
+        variants: table.variants,
+    }
+    d.std_part(target, resolution.definitions, 0, 0, 0)
+    d.newline()
+    d.diagnostics(resolution.diagnostics)
+    d.out.to_string()
+}
+
+// The index of the first merged item of a module from `std_module` on.
+fn first_item_of(defs: Definitions, std_module: Int) -> Int {
+    let mut i = 0
+    while i < defs.item_module.len() {
+        if defs.item_module.at(i) >= std_module { return i }
+        i += 1
+    }
+    defs.item_module.len()
+}
+
+/// The first std definition's index: the first definition of an item of a
+/// std module; an associated type, which names no item, is passed over
+/// (`first_std_def`).
+fn first_std_def(defs: Definitions, std_item: Int) -> Int {
+    let mut i = 0
+    while i < defs.defs.len() {
+        let item = item_index_of(defs.defs.at(i).kind)
+        if item >= 0 && item >= std_item { return i }
+        i += 1
+    }
+    defs.defs.len()
+}
+
+// A package key as the dump prints it (`package`).
+fn package(key: Int) -> String { if key < 0 { "None" } else { "${key}" } }
+
+// A newline split's kind, as Rust's `Debug` prints it.
+fn split_kind_word(kind: SplitKind) -> String {
+    match kind {
+        SplitKindCall => "Call"
+        SplitKindIndex => "Index"
+        SplitKindMinus => "Minus"
+        SplitKindValue => "Value"
+    }
+}
+
+/// The line kind of a definition, one per `DefKind` variant (`def_kind`).
+pub fn def_kind(kind: DefKind) -> String {
+    match kind {
+        DefKindFn(_) => "Def.Fn"
+        DefKindSum(_, _) => "Def.Sum"
+        DefKindRecord(_) => "Def.Record"
+        DefKindConst(_) => "Def.Const"
+        DefKindTrait(_) => "Def.Trait"
+        DefKindMethod(_, _, _) => "Def.Method"
+        DefKindExternFn(_, _) => "Def.ExternFn"
+        DefKindAssocType(_) => "Def.AssocType"
+    }
+}
+
+/// The line kind of a value's resolution, one per `Res` variant
+/// (`res_kind`).
+pub fn res_kind(res: Res) -> String {
+    match res {
+        ResDef(_) => "Value.Def"
+        ResVariant(_, _) => "Value.Variant"
+        ResBuiltin(_) => "Value.Builtin"
+    }
+}
+
+/// The line kind of a diagnostic, one per `Severity` variant
+/// (`severity_kind`): a diagnostic of severity `Note` is
+/// `NoteDiagnostic`, apart from a diagnostic's own note.
+pub fn severity_kind(severity: Severity) -> String {
+    match severity {
+        SeverityError => "Error"
+        SeverityWarning => "Warning"
+        SeverityNote => "NoteDiagnostic"
+        SeverityHelp => "Help"
+    }
+}
+
+// The text being written, the first std definition's id, from which ids
+// print as `s<n>`, whether the text is empty or ends a line (`Dump`), and
+// the builtins' Rust variant names.
+record ResDump { out: StringBuilder, std_def: Int, fresh: Bool, variants: [String] }
+
+impl ResDump {
+    // A line, up to its kind (`open`).
+    fn open(mut self, depth: Int, kind: String) {
+        if !self.fresh { self.out.push("\n") }
+        self.fresh = false
+        let mut i = 0
+        while i < depth {
+            self.out.push("  ")
+            i += 1
+        }
+        self.out.push("(")
+        self.out.push(kind)
+    }
+
+    fn close(mut self) { self.out.push(")") }
+
+    // A line break, after which the next line needs none (`push('\n')`).
+    fn newline(mut self) {
+        self.out.push("\n")
+        self.fresh = true
+    }
+
+    // ` key=value`.
+    fn field(mut self, key: String, value: String) { self.out.push(" ${key}=${value}") }
+
+    fn bool_field(mut self, key: String, value: Bool) { self.out.push(" ${key}=${value}") }
+
+    // ` ` and `text` quoted.
+    fn string(mut self, text: String) {
+        self.out.push(" \"")
+        push_escaped(self.out, text, true)
+        self.out.push("\"")
+    }
+
+    // ` ` and a place: the file's label quoted, `:`, the span.
+    fn place(mut self, file: String, span: Span) {
+        self.string(file)
+        self.out.push(":${span.start}..${span.end}")
+    }
+
+    // A definition's id: `u<n>` for the program's own, `s<n>` for std's.
+    fn id(self, id: Int) -> String {
+        if id >= self.std_def { "s${id - self.std_def}" } else { "u${id}" }
+    }
+
+    // std's part: its modules, definitions, namespaces, exports, items
+    // and `missing`, each numbered from std's first (`std_part`).
+    fn std_part(
+        mut self,
+        target: CompileTarget,
+        defs: Definitions,
+        std_module: Int,
+        std_def: Int,
+        std_item: Int,
+    ) {
+        self.open(0, "Std")
+        self.field("target", compile_target_name(target))
+        self.field("modules", "${defs.modules.len() - std_module}")
+        self.field("defs", "${defs.defs.len() - std_def}")
+        self.field("items", "${defs.item_module.len() - std_item}")
+        let mut index = 0
+        while std_module + index < defs.modules.len() {
+            let m = defs.modules.at(std_module + index)
+            self.open(1, "Module")
+            self.out.push(" ${index}")
+            self.string(m.name)
+            self.field("package", package(defs.packages.at(std_module + index)))
+            for (name, t) in defs.importable.at(std_module + index).iter() {
+                self.open(2, "Importable")
+                self.string(name)
+                self.out.push(" ${t - std_module}")
+                self.close()
+            }
+            self.close()
+            index += 1
+        }
+        self.defs(defs, std_def, defs.defs.len(), std_item)
+        self.scopes(defs, std_module, defs.modules.len(), std_module)
+        self.exports(defs, std_module, defs.modules.len(), std_module)
+        self.items(defs, std_item, defs.item_module.len(), std_item, std_module)
+        for name in sort_strings(Vec::from_array(defs.missing.keys())).iter() {
+            self.open(1, "Missing")
+            self.string(name)
+            self.string(defs.missing.get(name).unwrap())
+            self.close()
+        }
+        self.close()
+    }
+
+    // The definitions `start..end`, their items numbered from `first_item`
+    // (`defs`).
+    fn defs(mut self, defs: Definitions, start: Int, end: Int, first_item: Int) {
+        let mut i = start
+        while i < end {
+            let def = defs.defs.at(i)
+            self.open(1, def_kind(def.kind))
+            self.out.push(" ${self.id(i)}")
+            self.string(def.name)
+            self.place(def.file, def.span)
+            match def.kind {
+                DefKindFn(item) => self.field("item", "${item - first_item}")
+                DefKindRecord(item) => self.field("item", "${item - first_item}")
+                DefKindConst(item) => self.field("item", "${item - first_item}")
+                DefKindTrait(item) => self.field("item", "${item - first_item}")
+                DefKindSum(item, variants) => {
+                    self.field("item", "${item - first_item}")
+                    for v in variants.iter() {
+                        self.open(2, "Variant")
+                        self.string(v.name)
+                        self.place(v.file, v.span)
+                        self.field("arity", "${v.arity}")
+                        self.close()
+                    }
+                }
+                DefKindMethod(item, method_index, owner) => {
+                    self.field("item", "${item - first_item}")
+                    self.field("method", "${method_index}")
+                    let o = match owner {
+                        MethodOwnerImpl => "Impl"
+                        MethodOwnerTraitDefault => "TraitDefault"
+                    }
+                    self.field("owner", o)
+                }
+                DefKindExternFn(item, fn_index) => {
+                    self.field("item", "${item - first_item}")
+                    self.field("fn", "${fn_index}")
+                }
+                DefKindAssocType(trait_def) => self.field("trait", self.id(trait_def))
+            }
+            self.close()
+            i += 1
+        }
+    }
+
+    // Each module of `start..end`'s three namespaces, sorted by name, the
+    // modules numbered from `first` (`scopes`).
+    fn scopes(mut self, defs: Definitions, start: Int, end: Int, first: Int) {
+        let mut mid = start
+        while mid < end {
+            let scope = defs.modules.at(mid)
+            self.open(1, "Scope")
+            self.out.push(" ${mid - first}")
+            for name in sort_strings(Vec::from_array(scope.values.keys())).iter() {
+                self.value(name, scope.values.get(name).unwrap())
+            }
+            for name in sort_strings(Vec::from_array(scope.types.keys())).iter() {
+                self.binding("Type", name, scope.types.get(name).unwrap())
+            }
+            for name in sort_strings(Vec::from_array(scope.traits.keys())).iter() {
+                self.binding("Trait", name, scope.traits.get(name).unwrap())
+            }
+            self.close()
+            mid += 1
+        }
+    }
+
+    // Each module of `start..end`'s exports, in the order they were
+    // exported: values, then types, then traits (`exports`).
+    fn exports(mut self, defs: Definitions, start: Int, end: Int, first: Int) {
+        let mut mid = start
+        while mid < end {
+            let e = defs.exports.at(mid)
+            self.open(1, "Exports")
+            self.out.push(" ${mid - first}")
+            for name in e.value_names.iter() { self.value(name, e.value(name)) }
+            for name in e.type_names.iter() { self.binding("Type", name, e.type_of(name)) }
+            for name in e.trait_names.iter() { self.binding("Trait", name, e.trait_of(name)) }
+            self.close()
+            mid += 1
+        }
+    }
+
+    // A value's line: its name and what it resolves to (`value`).
+    fn value(mut self, name: String, res: Res) {
+        self.open(2, res_kind(res))
+        self.string(name)
+        match res {
+            ResDef(id) => self.out.push(" ${self.id(id)}")
+            ResVariant(sum, index) => self.out.push(" ${self.id(sum)} ${index}")
+            ResBuiltin(b) => self.out.push(" ${self.variants[b]}")
+        }
+        self.close()
+    }
+
+    // A type's or a trait's line: its name and its definition (`binding`).
+    fn binding(mut self, kind: String, name: String, id: Int) {
+        self.open(2, kind)
+        self.string(name)
+        self.out.push(" ${self.id(id)}")
+        self.close()
+    }
+
+    // The merged items `start..end` as runs of one module, `(Items
+    // start..end module)`, the items numbered from `first_item` and the
+    // modules from `first_module` (`items`).
+    fn items(
+        mut self,
+        defs: Definitions,
+        start: Int,
+        end: Int,
+        first_item: Int,
+        first_module: Int,
+    ) {
+        let mut s = start
+        while s < end {
+            let owner = defs.item_module.at(s)
+            let mut e = s + 1
+            while e < end && defs.item_module.at(e) == owner { e += 1 }
+            self.open(1, "Items")
+            self.out.push(" ${s - first_item}..${e - first_item} ${owner - first_module}")
+            self.close()
+            s = e
+        }
+    }
+
+    // `(Diagnostics`, each diagnostic in order, `)`: its severity's kind,
+    // code and message, then its labels in order, notes and fixes
+    // (`diagnostics`).
+    fn diagnostics(mut self, diagnostics: Vec<Diagnostic>) {
+        self.open(0, "Diagnostics")
+        for diag in diagnostics.iter() {
+            self.open(1, severity_kind(diag.severity))
+            self.string(diag.code)
+            self.string(diag.message)
+            for label in diag.labels.iter() {
+                self.open(2, if label.primary { "Primary" } else { "Secondary" })
+                self.place(label.file, label.span)
+                self.string(label.message)
+                self.close()
+            }
+            for note in diag.notes.iter() {
+                self.open(2, "Note")
+                self.string(note)
+                self.close()
+            }
+            for fix in diag.fixes.iter() {
+                self.open(2, "Fix")
+                self.string(fix.title)
+                for edit in fix.edits.iter() {
+                    self.open(3, "Edit")
+                    self.place(edit.file, edit.span)
+                    self.string(edit.text)
+                    self.close()
+                }
+                self.close()
+            }
+            self.close()
+        }
+        self.close()
+        self.newline()
+    }
+}
