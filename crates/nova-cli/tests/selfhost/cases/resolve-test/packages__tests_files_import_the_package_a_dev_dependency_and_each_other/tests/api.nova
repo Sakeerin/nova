@@ -1,0 +1,12 @@
+import app
+import geom
+import helper
+import util
+
+@test
+fn sees_all_four() {
+    assert_eq(name(), "app")
+    assert_eq(area(), 9)
+    assert_eq(twice(2), 4)
+    assert_eq(one(), 1)
+}

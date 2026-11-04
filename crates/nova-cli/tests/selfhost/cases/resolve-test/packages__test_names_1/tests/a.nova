@@ -1,0 +1,6 @@
+import shapes
+
+@test
+fn first() {
+    assert_eq(area(), 9)
+}

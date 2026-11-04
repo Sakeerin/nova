@@ -1,0 +1,3 @@
+pub fn side() -> Int {
+    2
+}

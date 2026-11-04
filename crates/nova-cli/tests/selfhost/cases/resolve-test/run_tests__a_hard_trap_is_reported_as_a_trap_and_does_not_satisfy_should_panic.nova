@@ -1,0 +1,2 @@
+@test(should_panic)
+fn divides_by_zero() { let _ = 1 / 0 }

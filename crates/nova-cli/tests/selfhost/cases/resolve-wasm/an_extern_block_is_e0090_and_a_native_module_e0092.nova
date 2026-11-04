@@ -1,0 +1,7 @@
+import ui::ssr
+
+extern "C" {
+    fn abs(x: Int) -> Int
+}
+
+fn main() {}

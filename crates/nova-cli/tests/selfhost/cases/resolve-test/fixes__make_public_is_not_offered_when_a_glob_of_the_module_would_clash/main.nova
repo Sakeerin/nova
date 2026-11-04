@@ -1,0 +1,6 @@
+import lib::{helper}
+import other
+
+fn main() {
+    println("${helper()} ${twice()}")
+}

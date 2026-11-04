@@ -1,0 +1,27 @@
+/// A rectangle.
+pub record Rect {
+    pub w: Int,
+    pub h: Int,
+}
+
+impl Rect {
+    /// Its area.
+    pub fn area(self) -> Int { self.w * self.h }
+
+    fn hidden(self) -> Int { 0 }
+}
+
+/// What can be measured.
+pub trait Measure {
+    /// The size.
+    fn size(self) -> Int
+}
+
+impl Measure for Rect {
+    fn size(self) -> Int { self.area() }
+}
+
+impl Int {
+    /// Twice it.
+    pub fn doubled(self) -> Int { self * 2 }
+}

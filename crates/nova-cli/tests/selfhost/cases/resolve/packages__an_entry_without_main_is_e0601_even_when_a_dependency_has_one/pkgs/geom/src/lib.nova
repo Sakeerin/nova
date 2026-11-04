@@ -1,0 +1,7 @@
+pub fn area() -> Int {
+    9
+}
+
+fn main() {
+    println("geom's demo")
+}

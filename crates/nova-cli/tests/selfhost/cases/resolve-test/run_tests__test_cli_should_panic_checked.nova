@@ -1,0 +1,3 @@
+@test(should_panic)
+fn out_of_bounds_panics() { let xs = [1, 2, 3]
+ let _ = xs[7] }

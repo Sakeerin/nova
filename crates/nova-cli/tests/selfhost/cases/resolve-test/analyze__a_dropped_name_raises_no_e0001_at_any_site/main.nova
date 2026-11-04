@@ -1,0 +1,11 @@
+import lib::{area}
+fn f(x: Int {
+}
+record P %
+trait T %
+fn main() {
+    f(1)
+    let g = f
+    let p: P = P { x: 1 }
+}
+impl T for Int {}

@@ -1,0 +1,3 @@
+pub fn area() -> Int {
+    2
+}

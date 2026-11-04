@@ -1,0 +1,8 @@
+async fn helper() -> Int {
+  yield_now().await
+  41
+}
+@test
+fn an_async_body_runs_under_block_on() { assert_eq(block_on(helper()), 41) }
+@test
+fn a_wrong_answer_inside_block_on_fails() { assert_eq(block_on(helper()), 999) }

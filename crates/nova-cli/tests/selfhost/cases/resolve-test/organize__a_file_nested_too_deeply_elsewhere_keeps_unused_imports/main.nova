@@ -1,0 +1,6 @@
+import geometry::{manhattan, origin}
+
+fn main() {
+    let o = origin()
+    let m = manhattan()
+}

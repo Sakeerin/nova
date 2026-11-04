@@ -1,0 +1,17 @@
+pub record Point { x: Int, y: Int }
+
+pub fn origin() -> Point {
+    Point { x: 0, y: 0 }
+}
+
+pub fn manhattan(p: Point) -> Int {
+    p.x + p.y
+}
+
+pub trait Shape {
+    fn area(self) -> Int
+}
+
+pub fn one() -> Int {
+    1
+}

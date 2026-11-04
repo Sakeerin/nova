@@ -1,0 +1,6 @@
+import ui
+import ui::html::{div, text}
+
+fn main() {
+    println(render_to_string(| | div([], [text("x")])))
+}

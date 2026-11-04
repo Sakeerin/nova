@@ -1,0 +1,6 @@
+pub fn width() -> Int {
+    2
+}
+
+@test
+fn stripped() {}

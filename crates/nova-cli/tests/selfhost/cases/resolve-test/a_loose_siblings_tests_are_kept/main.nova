@@ -1,0 +1,8 @@
+import helpers
+
+@test
+fn in_main() {
+    assert_eq(helper(), 0)
+}
+
+fn main() {}

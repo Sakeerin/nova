@@ -1,0 +1,3 @@
+@test
+fn alpha() { println("TEST-RAN") }
+fn main() { println("USER-MAIN-RAN") }

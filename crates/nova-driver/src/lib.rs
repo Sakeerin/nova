@@ -116,45 +116,82 @@ pub fn check_program_counted_for(program: Program, target: Target) -> Result<Che
 /// The resolution dumps of programs for one target (`nova_resolver::dump`;
 /// spec
 /// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
-/// §3.4, ADR 0053), with std's modules lexed and parsed once for them all,
-/// as the self-hosted resolver parses them: each program's own file
-/// database registers std's modules first, so their ids, and the parsed
-/// trees' spans, are the same in every program.
+/// §3.4 and §4, ADRs 0053 and 0054), under `check`'s pipeline or `nova
+/// test`'s, with std's modules lexed and parsed once for them all, as the
+/// self-hosted resolver parses them: each program's own file database
+/// registers std's modules first, so their ids, and the parsed trees'
+/// spans, are the same in every program.
 pub struct ResolutionDumps {
     target: Target,
+    test: bool,
     std: nova_resolver::ParsedStd,
 }
 
 impl ResolutionDumps {
-    /// std's modules for `target`, parsed.
-    pub fn new(target: Target) -> ResolutionDumps {
+    /// std's modules for `target`, parsed, and `std/test` after them under
+    /// test mode (`test`), as `nova test` registers it.
+    pub fn new(target: Target, test: bool) -> ResolutionDumps {
         let mut db = FileDb::new();
-        let (std_files, _) = register_std(&mut db, target);
+        let (std_files, extra, _) = register_std_for(&mut db, target, test);
         ResolutionDumps {
             target,
-            std: nova_resolver::parse_std(target, &std_files, None),
+            test,
+            std: nova_resolver::parse_std(target, &std_files, extra),
         }
     }
 
-    /// The resolution dump of the program whose root is `path`: `check`'s
-    /// pipeline up to the resolver, rendering nothing. It loads the
-    /// program, stops there on any error, as `check` does, strips the
-    /// `@test` functions, and resolves; the dump holds what was built and
-    /// every diagnostic so far. A root directly in a package's `src/` or
-    /// `tests/` is `UNSUPPORTED package`: 5.2a dumps loose programs alone.
-    /// `Err` when the root cannot be read.
+    /// The resolution dump of the program whose root is `path`, as `nova
+    /// check FILE` takes it (`Program::for_file`): a loose file and the
+    /// files beside it that it imports, or, for a file directly in a
+    /// package's `src/` or `tests/`, a module of that package, with its
+    /// graph read from the `nova.toml`s. The pipeline is `check`'s up to the
+    /// resolver, rendering nothing, and syncing nothing: the graph's
+    /// diagnostics, the program stopped there on any error; the loader, the
+    /// program stopped there on any error; then the `@test` functions
+    /// stripped, and the resolver. Under test mode it is `nova test`'s
+    /// (`FrontendContext::check(true)`): the root package's and a loose
+    /// program's `@test` functions are kept, `std/test` joins std, and the
+    /// tests of a `tests/` file are named `<file stem>::<function>`. A
+    /// registry package's warnings are dropped, as `check` hides them. The
+    /// dump holds what was built and every diagnostic so far. `Err` when the
+    /// root cannot be read.
     pub fn dump(&self, path: &Path) -> std::io::Result<String> {
-        if package_of(path).is_some() {
-            return Ok("UNSUPPORTED package\n".to_string());
+        let mut db = FileDb::new();
+        let (_, _, mut labels) = register_std_for(&mut db, self.target, self.test);
+        let Program {
+            mut db,
+            graph,
+            roots,
+            diagnostics: graph_diagnostics,
+            ..
+        } = Program::for_file_with(path, db);
+        labels.extend(manifest_labels(graph.as_ref(), &graph_diagnostics));
+        let has_error = |ds: &[Diagnostic]| ds.iter().any(|d| d.severity == Severity::Error);
+        if has_error(&graph_diagnostics) {
+            return Ok(nova_resolver::dump::dump_program(
+                self.target,
+                self.test,
+                &[],
+                &labels,
+                None,
+                &graph_diagnostics,
+            ));
         }
-        let Program { mut db, roots, .. } = Program::loose(path);
-        let (_, mut labels) = register_std(&mut db, self.target);
-        let load = program::load_program(None, &roots, &DiskSources, &mut db)?;
+        let load = program::load_program(graph.as_ref(), &roots, &DiskSources, &mut db)?;
         let mut modules = load.modules;
-        let mut diagnostics = load.diagnostics;
-        let failed = diagnostics.iter().any(|d| d.severity == Severity::Error);
+        let registry = program::registry_files(graph.as_ref(), &modules);
+        let shown = |ds: &[Diagnostic]| -> Vec<Diagnostic> {
+            ds.iter()
+                .filter(|d| !program::a_dependencys_warning(d, &registry))
+                .cloned()
+                .collect()
+        };
+        let mut diagnostics = graph_diagnostics;
+        let loaded = shown(&load.diagnostics);
+        let failed = has_error(&loaded);
+        diagnostics.extend(loaded);
         if !failed {
-            strip_test_functions(&mut modules, false);
+            strip_test_functions(&mut modules, self.test);
         }
         labels.extend(modules.iter().map(|m| (m.file, m.name.clone())));
         let sources: Vec<ModuleSource> = modules
@@ -168,13 +205,15 @@ impl ResolutionDumps {
                 importable: m.importable.clone(),
             })
             .collect();
-        let resolved = (!failed)
+        let mut resolved = (!failed)
             .then(|| nova_resolver::resolve_program_with_std(self.target, &sources, &self.std));
-        if let Some(resolved) = &resolved {
-            diagnostics.extend(resolved.diagnostics.iter().cloned());
+        if let Some(resolved) = &mut resolved {
+            name_tests(&mut resolved.tests, &resolved.definitions, &modules);
+            diagnostics.extend(shown(&resolved.diagnostics));
         }
         Ok(nova_resolver::dump::dump_program(
             self.target,
+            self.test,
             &sources,
             &labels,
             resolved.as_ref(),
@@ -183,13 +222,52 @@ impl ResolutionDumps {
     }
 }
 
-/// std's part of the resolution dump for `target`: the resolution of a
-/// program of no module of its own, which is std's in every program.
-pub fn dump_std_resolution(target: Target) -> String {
+/// The label of each manifest a program's graph read (ADR 0054 §1):
+/// `nova.toml` for the root package's, and `<import name>/nova.toml` for a
+/// dependency's, the name its modules' labels begin with. Without a graph
+/// only the root's manifest was read, and every file the graph's
+/// diagnostics name is it.
+fn manifest_labels(
+    graph: Option<&nova_pm::Graph>,
+    diagnostics: &[Diagnostic],
+) -> Vec<(FileId, String)> {
+    match graph {
+        Some(graph) => graph
+            .packages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let label = if i == 0 {
+                    nova_pm::MANIFEST.to_string()
+                } else {
+                    format!("{}/{}", p.import_name, nova_pm::MANIFEST)
+                };
+                (p.manifest_file, label)
+            })
+            .collect(),
+        None => {
+            let mut files: Vec<FileId> = Vec::new();
+            for label in diagnostics.iter().flat_map(|d| &d.labels) {
+                if !files.contains(&label.span.file) {
+                    files.push(label.span.file);
+                }
+            }
+            files
+                .into_iter()
+                .map(|file| (file, nova_pm::MANIFEST.to_string()))
+                .collect()
+        }
+    }
+}
+
+/// std's part of the resolution dump for `target`, under test mode with
+/// `std/test` (`test`): the resolution of a program of no module of its
+/// own, which is std's in every program.
+pub fn dump_std_resolution(target: Target, test: bool) -> String {
     let mut db = FileDb::new();
-    let (std_files, labels) = register_std(&mut db, target);
-    let resolved = nova_resolver::resolve_program_for(target, &[], &std_files, None);
-    nova_resolver::dump::dump_std(target, &labels, &resolved)
+    let (std_files, extra, labels) = register_std_for(&mut db, target, test);
+    let resolved = nova_resolver::resolve_program_for(target, &[], &std_files, extra);
+    nova_resolver::dump::dump_std(target, test, &labels, &resolved)
 }
 
 /// Register each of `target`'s std modules in `db` as `check` does, as
@@ -205,6 +283,31 @@ fn register_std(db: &mut FileDb, target: Target) -> (Vec<FileId>, Vec<(FileId, S
         labels.push((id, label));
     }
     (ids, labels)
+}
+
+/// [`register_std`], then, under test mode, `std/test` as `nova test`
+/// registers it (`FrontendContext::check`): the target's std ids, the
+/// extra module the resolver takes, and every id with its name.
+#[allow(clippy::type_complexity)]
+fn register_std_for(
+    db: &mut FileDb,
+    target: Target,
+    test: bool,
+) -> (
+    Vec<FileId>,
+    Option<((&'static str, &'static str), FileId)>,
+    Vec<(FileId, String)>,
+) {
+    let (ids, mut labels) = register_std(db, target);
+    let extra = test.then(|| {
+        let (name, src) = nova_resolver::STD_TEST_MODULE;
+        let short = name.strip_prefix("$std.").unwrap_or(name);
+        let label = format!("<std/{short}>");
+        let id = db.add(label.clone(), src);
+        labels.push((id, label));
+        (nova_resolver::STD_TEST_MODULE, id)
+    });
+    (ids, extra, labels)
 }
 
 /// The stack of the threads the pipeline runs on: every command's (`nova`'s
@@ -1138,6 +1241,115 @@ fn strip_test_functions(modules: &mut [Loaded], keep_root_tests: bool) {
 /// What doc tests need of a build (spec
 /// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
 /// §7, §11.2), where only this crate can see it.
+#[cfg(test)]
+mod resolution_dumps {
+    use super::*;
+
+    /// Write each `(path, text)` under a fresh `dir`, a fixed name under the
+    /// system temp directory.
+    fn package(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("nova-driver-resolution-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (path, text) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        dir
+    }
+
+    /// The `(Test` lines of a dump: each test's id, name and
+    /// `should_panic`, without the `)` that closes the program after the
+    /// last.
+    fn tests_of(dump: &str) -> Vec<String> {
+        dump.lines()
+            .filter(|l| l.starts_with("  (Test "))
+            .map(|l| {
+                l.strip_suffix("))")
+                    .map_or(l.to_string(), |l| format!("{l})"))
+            })
+            .collect()
+    }
+
+    /// A [`TestFn`] as the dump prints it.
+    fn line(test: &TestFn) -> String {
+        format!(
+            "  (Test u{} \"{}\" should_panic={})",
+            test.def_id.0, test.name, test.should_panic
+        )
+    }
+
+    /// Under test mode the dump shows what `nova test`'s own path resolves
+    /// (`FrontendContext::check(true)`, which `build_test_program` runs):
+    /// the same tests, by id, name and `should_panic`, in the same order,
+    /// for a `tests/` file of a package with a dependency, whose `@test`
+    /// functions are stripped while the root package's are kept, and for a
+    /// loose file; and its `std/test` makes `assert_eq` resolve, which
+    /// `check`'s mode does not have.
+    #[test]
+    fn test_mode_dumps_the_tests_nova_test_collects() {
+        let manifest = |name: &str, extra: &str| {
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n{extra}"
+            )
+        };
+        let dir = package(
+            "test-mode",
+            &[
+                (
+                    "app/nova.toml",
+                    &manifest("app", "\n[dependencies]\ngeom = { path = \"../geom\" }\n"),
+                ),
+                (
+                    "app/src/lib.nova",
+                    "import geom\n\npub fn twice(n: Int) -> Int {\n    n * width()\n}\n\n\
+                     @test\nfn twice_doubles() {\n    assert_eq(twice(2), 4)\n}\n",
+                ),
+                (
+                    "app/tests/api.nova",
+                    "import app\n\n@test\nfn first() {\n    assert_eq(twice(1), 2)\n}\n\n\
+                     @test(should_panic)\nfn second() {\n    panic(\"no\")\n}\n",
+                ),
+                ("geom/nova.toml", &manifest("geom", "")),
+                (
+                    "geom/src/lib.nova",
+                    "pub fn width() -> Int {\n    2\n}\n\n@test\nfn stripped() {}\n",
+                ),
+                (
+                    "loose.nova",
+                    "@test\nfn alone() {\n    assert_eq(1, 1)\n}\n\nfn main() {}\n",
+                ),
+            ],
+        );
+        let dumps = ResolutionDumps::new(Target::Native, true);
+        for root in [dir.join("app/tests/api.nova"), dir.join("loose.nova")] {
+            let mut ctx = FrontendContext::new(Program::for_file(&root)).unwrap();
+            let (_, tests, _) = ctx.check(true).unwrap().expect("the program checks");
+            let dump = dumps.dump(&root).unwrap();
+            assert!(dump.starts_with("(Program target=native mode=test resolved=true\n"));
+            assert!(dump.ends_with("\n(Diagnostics)\n"), "{dump}");
+            let want: Vec<String> = tests.iter().map(line).collect();
+            assert!(!want.is_empty());
+            assert_eq!(tests_of(&dump), want, "{}", root.display());
+        }
+        let api = dumps.dump(&dir.join("app/tests/api.nova")).unwrap();
+        assert_eq!(
+            tests_of(&api)
+                .iter()
+                .map(|l| l.split('"').nth(1).unwrap())
+                .collect::<Vec<_>>(),
+            ["api::first", "api::second", "twice_doubles"]
+        );
+        // `check`'s mode strips every test and has no `assert_eq`.
+        let check = ResolutionDumps::new(Target::Native, false)
+            .dump(&dir.join("app/tests/api.nova"))
+            .unwrap();
+        assert!(tests_of(&check).is_empty());
+        assert!(!check.contains("(Value.Def \"assert_eq\""));
+        assert!(api.contains("(Value.Def \"assert_eq\""));
+    }
+}
+
 #[cfg(test)]
 mod doc_test_builds {
     use super::*;

@@ -1,0 +1,10 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+geom = { path = "pkgs/geom" }
+
+[dev-dependencies]
+helper = { path = "pkgs/helper" }

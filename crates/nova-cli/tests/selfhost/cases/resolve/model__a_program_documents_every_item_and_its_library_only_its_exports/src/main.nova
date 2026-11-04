@@ -1,0 +1,13 @@
+import geom
+
+/// Shows `p`.
+fn show(p: Point) -> String { "${p.x}" }
+
+/// A record of the app's own.
+record Local {
+    hidden: Int,
+}
+
+fn main() {
+    println(show(Point { x: area(), y: 0 }))
+}

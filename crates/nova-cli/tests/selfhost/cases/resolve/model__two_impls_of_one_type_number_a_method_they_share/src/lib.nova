@@ -1,0 +1,15 @@
+/// Two of a kind.
+pub record Pair<T> {
+    pub a: T,
+    pub b: T,
+}
+
+impl Pair<Int> {
+    /// Their sum.
+    pub fn total(self) -> Int { self.a + self.b }
+}
+
+impl Pair<String> {
+    /// The two, joined.
+    pub fn total(self) -> String { "${self.a}${self.b}" }
+}

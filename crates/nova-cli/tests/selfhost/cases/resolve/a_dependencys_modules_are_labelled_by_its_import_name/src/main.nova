@@ -1,0 +1,6 @@
+import geo_metry::{area, Shape}
+import helpers
+
+fn main() {
+    println("${area(Shape::Dot)} ${twice(1)}")
+}

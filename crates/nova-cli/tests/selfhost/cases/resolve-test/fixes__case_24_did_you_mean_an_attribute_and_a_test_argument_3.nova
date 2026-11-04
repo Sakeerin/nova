@@ -1,0 +1,6 @@
+@test(should_panik)
+fn t() {
+    panic("x")
+}
+
+fn main() {}

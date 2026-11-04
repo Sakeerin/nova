@@ -1,0 +1,6 @@
+import utils
+
+@test
+fn the_tests_utils_is_seen() {
+    assert_eq(helper(), "tests")
+}

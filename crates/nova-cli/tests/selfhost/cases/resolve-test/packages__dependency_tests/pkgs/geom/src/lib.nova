@@ -1,0 +1,8 @@
+pub fn area() -> Int {
+    9
+}
+
+@test
+fn geom_checks_its_area() {
+    assert_eq(area(), 9)
+}

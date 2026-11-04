@@ -1,0 +1,12 @@
+fn inc(x: Int) -> Int { x + 1 }
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+@test
+fn a_closure() {
+    let f = |x: Int| x + 1
+    assert_eq(f(1), 2)
+}
+@test
+fn a_named_function_as_a_value() {
+    assert_eq(apply(inc, 1), 2)
+    assert_eq(Some(1).map(inc).unwrap_or(0), 2)
+}

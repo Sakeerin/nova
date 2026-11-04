@@ -1,0 +1,7 @@
+extern "C" {
+    fn abs(x: Int) -> Int
+}
+
+pub fn one() -> Int {
+    1
+}

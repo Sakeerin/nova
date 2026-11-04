@@ -1,0 +1,10 @@
+import geom
+
+pub fn twice(n: Int) -> Int {
+    n * width()
+}
+
+@test
+fn twice_doubles() {
+    assert_eq(twice(2), 4)
+}

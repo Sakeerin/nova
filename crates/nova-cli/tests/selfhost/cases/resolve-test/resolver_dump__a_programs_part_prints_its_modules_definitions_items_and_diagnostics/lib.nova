@@ -1,0 +1,5 @@
+import lib
+pub fn alpha() -> Int { 1 }
+fn secret() -> Int { 2 }
+pub record P {}
+pub trait T {}
