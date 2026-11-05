@@ -568,36 +568,57 @@ once per process, 0.40 s (0.57 s for the WASM target, which parses
   bytes; on Linux and macOS every file with a line break changes.
 
 **After:** 49.2, 47.3 and 48.7 s, 145 to 151 s of user CPU, 2.0 to 2.3
-times 5.1's tests. The target, 40 s locally, is not reached: what is left
-is the processes' own work, most of it the debug runtime's.
+times 5.1's tests. CI then measured `selfhost.rs` at 35.59 s on Linux,
+29.54 s on macOS and 76.59 s on Windows (all 16 jobs green), Windows about
+2.1 times Linux in every test, 5.1's included: past the spec's minute on
+Windows (risk 4). Of the options measured (an optimized debug runtime;
+std resolved once and shared; part B's cuts; none), the user chose the
+second, with no input cut.
 
-**Projected:** by 5.2a's CI against its local time (Linux 36.5 s, macOS
-30.0 s, Windows 49.6 and 36.0 s, against 27.2 to 28.5 s here: 1.28 to
-1.34, 1.05 to 1.10 and 1.26 to 1.82), 61 to 66 s on Linux, 50 to 54 s on
-macOS and 60 to 90 s on Windows, less on Windows by the CRLF comparisons
-it no longer repeats (about a sixth of the CPU): about 50 to 75 s. By
-5.1's CI time times the local ratio (ADR 0053's method: 19.3, 22.5 and
-19.45 s), 39 to 45 s on Linux and Windows and 45 to 52 s on macOS. Either
-way some leg may pass the spec's minute (risk 4), which the user is asked
-about, with these options:
+**std resolved once, shared by every root of a process (differs).** The
+spec has each program resolved as `check` resolves it, std included.
+The hidden dump's path now resolves std once per process and mode and
+shares it: S0's `ResolutionDumps` holds a `nova_resolver::SharedStd` (the
+resolution of a program of no module of its own: std's exports, the
+variants std globs, `missing`) and resolves each program with
+`resolve_program_with_shared_std`, and N's `selfhost resolve` holds a
+`SharedStd` (`share_std`) and resolves with `resolve_program_shared`. The
+user's modules go through the same steps in the same order; where the
+full resolution reads std's own state they read std's exports, rebased
+past the user's definitions (`Exports::rebased`), and std's glob binds
+the same names in each user module, std module by std module; std's own
+modules are not resolved again. The result holds the user's definitions,
+scopes, items and tests and every module's exports, all a program's part
+prints, and is not for the type checker. A program reads the shared
+state and never writes it: S0's is borrowed immutably, and N's is read
+through copies. Should resolving std alone give a diagnostic beyond
+parsing it, which would come between a program's own, every program is
+resolved in full. `nova check`, `nova build`, `nova test` and the language
+server keep `resolve_program_with_std`; the resolver's only other change
+is `variant_shadowing` split around the variants it reads
+(`variant_shadowing_of`), and `FileDb` derives `Clone`, so that S0's dump
+registers std's files once and copies them for each root. The driver's
+test `std_resolved_once_dumps_what_std_resolved_for_each_program_dumps`
+compares S0's shared and unshared dumps byte for byte over the corpus
+and the cases of each mode (`check`, the WASM target, test mode; 459,
+69 and 135 roots), in order and reversed; the differential compares N's
+shared dumps with S0's. The harness also runs std's three parts side by
+side and the corpus's packages in three processes a side, root `i` in
+process `i % 3`.
 
-| option | `selfhost.rs` here | what it costs |
-|---|---:|---|
-| the runtime that a debug `nova` links optimized (`[profile.dev.package.nova-runtime] opt-level = 2`), debug assertions kept | 26.2, 26.4 s (83 s of CPU) | every debug build and CI's tests use an optimized runtime; two runtime tests assume an unoptimized one (`gc_reclaims_garbage`'s `max_live > 0`, `the_yield_futures_layout_is_the_one_the_abi_declares`' function address) and fail; keeping the test profile unoptimized keeps them, but which runtime N links then depends on which cargo command last built `target/debug/libnova_runtime.a` |
-| std's collected state shared by every root of a process, on both sides | not built; about two fifths of the resolution's CPU, by the profile | a change to S0's resolver (`nova check`'s) and N's port of it |
-| part B's cuts (below) | 47 to 55 s | inputs |
-| none | 47 to 49 s | CI's time, which may pass a minute on a leg |
-
-Part B's cuts, each measured in two interleaved rounds against its full
-run's 51.2 and 51.2 s (a temporary build of the harness):
-
-| cut | wall (s) | CPU saved (s) | what is lost |
-|---|---:|---:|---|
-| the package corpus's entry files only (`src/main.nova`, `src/lib.nova`: 12 of 67) | 54.6, 49.3 | 10–12 | 55 package roots, the modules they reach still compared from the entries |
-| `selfhost/src/` once, by its `main.nova` (45 of 67) | 50.3, 47.7 | 0–17 | 22 roots that `main.nova` reaches as modules |
-| one seed, not three, for the fuzzer's test-mode, WASM and package inputs | 49.4, 47.1 | 3–17 | 100 of 150 test-mode, 40 of 60 WASM and 60 of 90 package inputs; E0085 then occurs once, under the floor of 2 |
-
-No option is taken: the spec gives the choice to the user.
+Per root, S0 resolves the loose corpus about six times as fast (4.7 s of
+CPU to 0.5 s), N about three times (9.6 s to 3.0 s); the packages, whose
+roots are slow to parse, little faster. `selfhost.rs` locally, measured
+on one machine state with the binaries of both trees built: before, 40.6,
+40.3 and 40.8 s (126 to 128 s of user CPU); after, 28.5, 27.3 and 27.0 s
+(83 to 87 s), 1.5 times 5.1's 27 tests alone (18.1, 18.2 and 18.0 s). (An
+earlier, slower state of the machine gave 47.3 to 49.2 s before and 34.0
+to 37.4 s after.) The rest is mostly N's debug runtime parsing: std's 21
+modules once per process (0.36 s, 49 processes) and the package roots
+that reach most of N. Projected by the run above's ratios of CI to the
+local time before on the same state (Linux 0.88, macOS 0.73, Windows
+1.89): about 24 to 25 s on Linux, 20 to 21 s on macOS and 51 to 54 s on
+Windows, under the minute on each; the real PR's CI measures it.
 
 ### 10. The live heap (spec §4.4, phase plan decision 8)
 
@@ -643,8 +664,8 @@ compiler; the cost to watch is CI's time, not the pause.
 - N reads `nova.toml` through a reader of its own that refuses what it
   does not read; the package graph's diagnostics stay S0's until a driver
   needs them (5.5).
-- `selfhost.rs` takes 2.0 to 2.3 times 5.1's tests locally after the
-  speed-up, which keeps every input, and may put a CI leg past a minute
-  (§9); the options, an optimized debug runtime among them, are measured,
-  and none is taken without the user.
+- The hidden dump resolves std once per process and mode, on both sides,
+  a departure from the spec's per-program resolution that a test shows
+  changes no byte (§9); `selfhost.rs` runs in 27 to 29 s locally, every
+  input kept, which projects CI's Windows leg to 51 to 54 s.
 - The live heap is recorded (§10), with no threshold.

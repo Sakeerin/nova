@@ -150,9 +150,11 @@ async fn resolve_command(argv: Vec<String>) {
         print(dump_std(target, test, resolved, std_set.builtins))
         return
     }
+    // std is resolved once, and every root reads it (ADR 0054 §9).
+    let shared = share_std(target, std_set)
     let mut failed = false
     for path in files.iter() {
-        match dump_resolution(path, target, test, std_set).await {
+        match dump_resolution(path, target, test, shared).await {
             DumpedText(out) => print("== ${path}\n${out}")
             DumpedIoError(e) => {
                 print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
@@ -233,14 +235,15 @@ async fn read_std_modules(
 // It loads the program, stops there on any error, strips the `@test`
 // functions, but under test mode the root package's and a loose
 // program's, and resolves; under test mode a `tests/` file's tests are
-// named for it. The dump holds what was built and every diagnostic so
-// far.
+// named for it; the resolver reads std resolved once (`SharedStd`). The
+// dump holds what was built and every diagnostic so far.
 async fn dump_resolution(
     path: String,
     target: CompileTarget,
     test: Bool,
-    std_set: StdSet,
+    shared: SharedStd,
 ) -> Dumped {
+    let std_set = shared.std_set
     let mut graph: Option<Graph> = None
     let mut kind = RootLoose
     match package_of(path).await {
@@ -279,7 +282,7 @@ async fn dump_resolution(
     if failed {
         return DumpedText(dump_program(target, test, sources, None, diagnostics, std_set.builtins))
     }
-    let resolved = resolve_program_for(target, sources, std_set)
+    let resolved = resolve_program_shared(sources, shared)
     name_tests(resolved.tests, resolved.definitions, modules)
     for d in resolved.diagnostics.iter() { diagnostics.push(d) }
     DumpedText(dump_program(target, test, sources, Some(resolved), diagnostics, std_set.builtins))

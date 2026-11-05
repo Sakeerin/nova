@@ -124,19 +124,42 @@ pub fn check_program_counted_for(program: Program, target: Target) -> Result<Che
 pub struct ResolutionDumps {
     target: Target,
     test: bool,
-    std: nova_resolver::ParsedStd,
+    std: nova_resolver::SharedStd,
+    /// A file database holding std's files alone, each program's starting
+    /// point, and their labels: registered once, as std is parsed once.
+    std_db: FileDb,
+    std_labels: Vec<(FileId, String)>,
+    /// Whether each program reads std resolved once
+    /// ([`nova_resolver::resolve_program_with_shared_std`]), or resolves
+    /// it again, as `check` does ([`ResolutionDumps::unshared`]).
+    shared: bool,
 }
 
 impl ResolutionDumps {
     /// std's modules for `target`, parsed, and `std/test` after them under
     /// test mode (`test`), as `nova test` registers it.
+    /// std is also resolved once, and each program reads it (5.2b, ADR
+    /// 0054 §9).
     pub fn new(target: Target, test: bool) -> ResolutionDumps {
         let mut db = FileDb::new();
-        let (std_files, extra, _) = register_std_for(&mut db, target, test);
+        let (std_files, extra, labels) = register_std_for(&mut db, target, test);
+        let parsed = nova_resolver::parse_std(target, &std_files, extra);
         ResolutionDumps {
             target,
             test,
-            std: nova_resolver::parse_std(target, &std_files, extra),
+            std: nova_resolver::SharedStd::new(target, parsed),
+            std_db: db,
+            std_labels: labels,
+            shared: true,
+        }
+    }
+
+    /// [`ResolutionDumps::new`], each program resolving std again, as
+    /// `check` resolves it: the dumps are the same, which a test checks.
+    pub fn unshared(target: Target, test: bool) -> ResolutionDumps {
+        ResolutionDumps {
+            shared: false,
+            ..ResolutionDumps::new(target, test)
         }
     }
 
@@ -156,8 +179,8 @@ impl ResolutionDumps {
     /// dump holds what was built and every diagnostic so far. `Err` when the
     /// root cannot be read.
     pub fn dump(&self, path: &Path) -> std::io::Result<String> {
-        let mut db = FileDb::new();
-        let (_, _, mut labels) = register_std_for(&mut db, self.target, self.test);
+        let db = self.std_db.clone();
+        let mut labels = self.std_labels.clone();
         let Program {
             mut db,
             graph,
@@ -205,8 +228,13 @@ impl ResolutionDumps {
                 importable: m.importable.clone(),
             })
             .collect();
-        let mut resolved = (!failed)
-            .then(|| nova_resolver::resolve_program_with_std(self.target, &sources, &self.std));
+        let mut resolved = (!failed).then(|| {
+            if self.shared {
+                nova_resolver::resolve_program_with_shared_std(&sources, &self.std)
+            } else {
+                nova_resolver::resolve_program_with_std(self.target, &sources, self.std.parsed())
+            }
+        });
         if let Some(resolved) = &mut resolved {
             name_tests(&mut resolved.tests, &resolved.definitions, &modules);
             diagnostics.extend(shown(&resolved.diagnostics));
@@ -1347,6 +1375,171 @@ mod resolution_dumps {
         assert!(tests_of(&check).is_empty());
         assert!(!check.contains("(Value.Def \"assert_eq\""));
         assert!(api.contains("(Value.Def \"assert_eq\""));
+    }
+
+    /// The repository, two levels above this crate.
+    fn repository() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("the repository")
+            .to_path_buf()
+    }
+
+    /// Every `.nova` file under `dir`, sorted, skipping `target`,
+    /// `node_modules`, directories whose names begin with `.`, and `skip`.
+    fn nova_files(dir: &Path, skip: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("read a directory")
+            .map(|e| e.expect("a directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if path.is_dir() {
+                if name != "target"
+                    && name != "node_modules"
+                    && !name.starts_with('.')
+                    && path != skip
+                {
+                    nova_files(&path, skip, out);
+                }
+            } else if name.ends_with(".nova") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// The programs of a directory of the differential's cases (the
+    /// harness's `case_roots`): each `.nova` file, each `.nova` file directly
+    /// in a package's `src/` and `tests/`, and each other directory's
+    /// `main.nova`.
+    fn case_roots(cases: &Path) -> Vec<std::path::PathBuf> {
+        let mut entries: Vec<_> = std::fs::read_dir(cases)
+            .expect("read the cases")
+            .map(|e| e.expect("a directory entry").path())
+            .collect();
+        entries.sort();
+        let mut roots = Vec::new();
+        for path in entries {
+            if path.join("nova.toml").is_file() {
+                for sub in ["src", "tests"] {
+                    if let Ok(dir) = std::fs::read_dir(path.join(sub)) {
+                        let mut files: Vec<_> = dir
+                            .map(|e| e.expect("a directory entry").path())
+                            .filter(|p| p.extension().is_some_and(|e| e == "nova"))
+                            .collect();
+                        files.sort();
+                        roots.extend(files);
+                    }
+                }
+            } else if path.is_dir() {
+                roots.push(path.join("main.nova"));
+            } else if path.extension().is_some_and(|e| e == "nova") {
+                roots.push(path);
+            }
+        }
+        roots
+    }
+
+    /// std resolved once and shared by every program of a process (5.2b,
+    /// ADR 0054 §9) dumps what resolving it again for each program dumps,
+    /// byte for byte, under `check`, for the WASM target and under test
+    /// mode: on the differential's inputs of each mode, the corpus's and
+    /// the cases', in their order and again in reverse, so that nothing a
+    /// program leaves in the shared state reaches the next.
+    #[test]
+    fn std_resolved_once_dumps_what_std_resolved_for_each_program_dumps() {
+        let root = repository();
+        let cases = root.join("crates/nova-cli/tests/selfhost/cases");
+        let mut corpus = Vec::new();
+        nova_files(&root, &cases, &mut corpus);
+        let has_test = |p: &std::path::PathBuf| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .lines()
+                .any(|l| l.trim_start().starts_with("@test"))
+        };
+        let under = |p: &std::path::PathBuf, dir: &str| p.starts_with(root.join(dir));
+        let sets: Vec<(Target, bool, Vec<std::path::PathBuf>)> = vec![
+            (
+                Target::Native,
+                false,
+                corpus
+                    .iter()
+                    .cloned()
+                    .chain(case_roots(&cases.join("resolve")))
+                    .collect(),
+            ),
+            (
+                Target::Wasm,
+                false,
+                corpus
+                    .iter()
+                    .filter(|p| under(p, "tests/dom") || under(p, "tests/wasm"))
+                    .cloned()
+                    .chain(case_roots(&cases.join("resolve-wasm")))
+                    .collect(),
+            ),
+            (
+                Target::Native,
+                true,
+                corpus
+                    .iter()
+                    .filter(|p| has_test(p))
+                    .cloned()
+                    .chain(case_roots(&cases.join("resolve-test")))
+                    .collect(),
+            ),
+        ];
+        std::thread::scope(|scope| {
+            let runs: Vec<_> = sets
+                .iter()
+                .map(|(target, test, roots)| {
+                    scope.spawn(move || {
+                        let dump_all = |dumps: &ResolutionDumps, roots: &[std::path::PathBuf]| {
+                            roots
+                                .iter()
+                                .map(|r| dumps.dump(r).map_err(|e| e.kind()))
+                                .collect::<Vec<_>>()
+                        };
+                        let unshared = dump_all(&ResolutionDumps::unshared(*target, *test), roots);
+                        let shared = ResolutionDumps::new(*target, *test);
+                        let forward = dump_all(&shared, roots);
+                        let reversed: Vec<std::path::PathBuf> =
+                            roots.iter().rev().cloned().collect();
+                        let mut backward = dump_all(&shared, &reversed);
+                        backward.reverse();
+                        for (i, r) in roots.iter().enumerate() {
+                            assert_eq!(
+                                forward[i],
+                                unshared[i],
+                                "{target:?} {test}: {}",
+                                r.display()
+                            );
+                            assert_eq!(
+                                backward[i],
+                                unshared[i],
+                                "{target:?} {test}, reversed: {}",
+                                r.display()
+                            );
+                        }
+                        let resolved = unshared
+                            .iter()
+                            .filter(|d| d.as_ref().is_ok_and(|d| d.contains(" resolved=true")))
+                            .count();
+                        (roots.len(), resolved)
+                    })
+                })
+                .collect();
+            for (run, floor) in runs.into_iter().zip([400, 60, 120]) {
+                let (roots, resolved) = run.join().expect("a mode's thread");
+                assert!(
+                    roots >= floor && resolved * 2 > roots,
+                    "{roots} roots, {resolved} resolved"
+                );
+            }
+        });
     }
 }
 

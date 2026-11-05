@@ -219,6 +219,24 @@ impl Exports {
         out
     }
 
+    /// A copy of these exports with every definition's id `offset` higher,
+    /// as they are when `offset` definitions come before their module's
+    /// (`Exports::rebased`); these are left as they are.
+    pub fn rebased(self, offset: Int) -> Exports {
+        let mut out = Exports::new()
+        for n in self.value_names.iter() {
+            let r = match self.value(n) {
+                ResDef(id) => ResDef(id + offset)
+                ResVariant(sum, index) => ResVariant(sum + offset, index)
+                ResBuiltin(b) => ResBuiltin(b)
+            }
+            out.export_value(n, r)
+        }
+        for n in self.type_names.iter() { out.export_type(n, self.type_of(n) + offset) }
+        for n in self.trait_names.iter() { out.export_trait(n, self.trait_of(n) + offset) }
+        out
+    }
+
     /// What the exported value `name` resolves to; it is exported.
     pub fn value(self, name: String) -> Res { self.values.get(name).unwrap() }
 
@@ -490,6 +508,250 @@ pub fn resolve_program_for(
     }
 }
 
+/// std resolved once for every root of a `selfhost resolve` run (5.2b,
+/// ADR 0054 §9, nova-resolver's `SharedStd`): the resolution of a program
+/// of no module of its own, from which each program takes std's exports,
+/// its globbed variants and its `missing` names. A program's resolution
+/// only reads it, through copies.
+pub record SharedStd {
+    pub target: CompileTarget,
+    pub std_set: StdSet,
+    pub exports: Vec<Exports>,
+    pub variants: Map<String, String>,
+    pub missing: Map<String, String>,
+    // What std's glob binds in every user module (`import_std_module`
+    // from 0): each such std module's exported values, types and traits
+    // in order, their definitions numbered from 0.
+    pub globs: Vec<(Vec<(String, Res)>, Vec<(String, Int)>, Vec<(String, Int)>)>,
+    // Whether resolving std gave no diagnostic beyond parsing it; else a
+    // program is resolved in full.
+    pub shareable: Bool,
+}
+
+/// std for `target`, resolved once (`SharedStd::new`).
+pub fn share_std(target: CompileTarget, std_set: StdSet) -> SharedStd {
+    let alone = resolve_program_for(target, Vec::new(), std_set)
+    let mut parsed = 0
+    let mut all: Vec<ModuleSource> = Vec::new()
+    for s in std_set.modules.iter() {
+        parsed += s.diagnostics.len()
+        match s.file {
+            Some(file) => all.push(module_source(s.name, s.label, file))
+            None => ()
+        }
+    }
+    let exports = alone.definitions.exports
+    let mut globs: Vec<(Vec<(String, Res)>, Vec<(String, Int)>, Vec<(String, Int)>)> = Vec::new()
+    let mut k = 0
+    while k < exports.len() {
+        let name = all.at(k).name
+        if !is_imported_std_module(name) && !holds(STD_INTERNAL, name) {
+            let e = exports.at(k)
+            globs.push((e.values_in_order(), e.types_in_order(), e.traits_in_order()))
+        }
+        k += 1
+    }
+    SharedStd {
+        target: target,
+        std_set: std_set,
+        exports: exports,
+        variants: std_globbed_variants(alone.definitions, exports, all, 0),
+        missing: alone.definitions.missing,
+        globs: globs,
+        shareable: alone.diagnostics.len() == parsed,
+    }
+}
+
+/// `resolve_program_for` with std resolved once (`SharedStd`), for the
+/// resolution dump alone (nova-resolver's
+/// `resolve_program_with_shared_std`): the user's modules go through the
+/// same steps in the same order, reading std's exports rebased past the
+/// user's definitions; std's modules are not resolved again, and the
+/// result holds the user's definitions, scopes and items and every
+/// module's exports, which the dump prints.
+pub fn resolve_program_shared(modules: Vec<ModuleSource>, shared: SharedStd) -> ProgramResolution {
+    let target = shared.target
+    let std_set = shared.std_set
+    if !shared.shareable { return resolve_program_for(target, modules, std_set) }
+    let table = std_set.builtins
+    let mut definitions = Definitions {
+        defs: Vec::new(),
+        modules: Vec::new(),
+        item_module: Vec::new(),
+        exports: Vec::new(),
+        importable: Vec::new(),
+        packages: Vec::new(),
+        std_start: 0,
+        target: target,
+        missing: shared.missing,
+    }
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    let mut merged: Vec<Spanned<Item>> = Vec::new()
+    let mut tests: Vec<TestFn> = Vec::new()
+    for s in std_set.modules.iter() { for d in s.diagnostics.iter() { diagnostics.push(d) } }
+    let user_count = modules.len()
+    let mut all: Vec<ModuleSource> = Vec::new()
+    for m in modules.iter() { all.push(m) }
+    for s in std_set.modules.iter() {
+        match s.file {
+            Some(file) => all.push(module_source(s.name, s.label, file))
+            None => ()
+        }
+    }
+    let std_start = user_count
+    let mut exports: Vec<Exports> = Vec::new()
+    let mut mid = 0
+    while mid < std_start {
+        let mut scope = new_scope(all.at(mid).name)
+        seed(scope, table, table.global)
+        definitions.modules.push(scope)
+        exports.push(Exports::new())
+        mid += 1
+    }
+    mid = 0
+    while mid < std_start {
+        let m = all.at(mid)
+        let first_value: Map<String, Span> = Map::new()
+        let first_type: Map<String, Span> = Map::new()
+        let before = diagnostics.len()
+        for item in m.file.items.iter() {
+            let item_index = merged.len()
+            definitions.item_module.push(mid)
+            collect_item(
+                definitions.defs,
+                definitions.modules.at(mid),
+                exports.at(mid),
+                first_value,
+                first_type,
+                diagnostics,
+                tests,
+                item_index,
+                item.value,
+                m.label,
+            )
+            merged.push(item)
+        }
+        if !owned(all, std_start, mid) { clear_fixes(diagnostics, before) }
+        mid += 1
+    }
+    // std's definitions come after the user's.
+    let offset = definitions.defs.len()
+    for e in shared.exports.iter() { exports.push(e.rebased(offset)) }
+    match target {
+        CompileTargetWasm => {
+            mid = 0
+            while mid < std_start {
+                let m = all.at(mid)
+                for item in m.file.items.iter() {
+                    match item.value {
+                        ItemExtern(_) => {
+                            diagnostics.push(
+                                error_at(
+                                    "E0090",
+                                    "extern functions are not available on target wasm",
+                                    m.label,
+                                    item.span,
+                                    "this `extern` block",
+                                ),
+                            )
+                        }
+                        _ => ()
+                    }
+                }
+                mid += 1
+            }
+        }
+        CompileTargetNative => ()
+    }
+    let mut public_fixes: Vec<(Int, Int, String)> = Vec::new()
+    mid = 0
+    while mid < std_start {
+        let m = all.at(mid)
+        let before = diagnostics.len()
+        for item in m.file.items.iter() {
+            match item.value {
+                ItemImport(imp) => resolve_import(
+                    definitions,
+                    exports,
+                    all,
+                    target,
+                    mid,
+                    imp,
+                    diagnostics,
+                    public_fixes,
+                )
+                _ => ()
+            }
+        }
+        if !owned(all, std_start, mid) { clear_fixes(diagnostics, before) }
+        mid += 1
+    }
+    // No std module imports a user's, so none would receive a name.
+    for (at, fix_target, name) in public_fixes.iter() {
+        let mut clash = false
+        let mut g = 0
+        while g < std_start && !clash {
+            if g != fix_target
+                && would_receive(all.at(g), fix_target, name)
+                && binds(definitions.modules.at(g), name) {
+                clash = true
+            }
+            g += 1
+        }
+        if clash {
+            let mut d = diagnostics.at(at)
+            d.fixes = Vec::new()
+        }
+    }
+    // std's glob into the user's modules, as `import_std_module` binds it,
+    // each std module's in turn, a name a module has kept: an imported std
+    // module's binds into none, and `STD_INTERNAL`'s into std's alone.
+    for (values, types, traits) in shared.globs.iter() {
+        mid = 0
+        while mid < std_start {
+            let mut scope = definitions.modules.at(mid)
+            for (n, r) in values.iter() {
+                if !scope.values.contains_key(n) {
+                    let shifted = match r {
+                        ResDef(id) => ResDef(id + offset)
+                        ResVariant(sum, index) => ResVariant(sum + offset, index)
+                        ResBuiltin(b) => ResBuiltin(b)
+                    }
+                    let _ = scope.values.insert(n, shifted)
+                }
+            }
+            for (n, id) in types.iter() {
+                if !scope.types.contains_key(n) { let _ = scope.types.insert(n, id + offset) }
+            }
+            for (n, id) in traits.iter() {
+                if !scope.traits.contains_key(n) { let _ = scope.traits.insert(n, id + offset) }
+            }
+            mid += 1
+        }
+    }
+    for d in variant_shadowing_of(shared.variants, all, std_start).iter() { diagnostics.push(d) }
+    for m in all.iter() {
+        definitions.importable.push(m.importable)
+        definitions.packages.push(m.package)
+    }
+    definitions.std_start = std_start
+    definitions.exports = exports
+    let mut splits: Vec<(String, NewlineSplit)> = Vec::new()
+    mid = 0
+    while mid < std_start {
+        let m = all.at(mid)
+        for s in m.file.newline_splits.iter() { splits.push((m.label, s)) }
+        mid += 1
+    }
+    ProgramResolution {
+        items: merged,
+        newline_splits: splits,
+        definitions: definitions,
+        diagnostics: diagnostics,
+        tests: tests,
+    }
+}
+
 // Bind each builtin of `builtins` by its name in `scope`'s values.
 fn seed(mut scope: ModuleScope, table: BuiltinTable, builtins: Vec<Int>) {
     for b in builtins.iter() { let _ = scope.values.insert(table.names[b], ResBuiltin(b)) }
@@ -550,7 +812,17 @@ fn variant_shadowing(
     all: Vec<ModuleSource>,
     std_start: Int,
 ) -> Vec<Diagnostic> {
-    let std_variants = std_globbed_variants(definitions, exports, all, std_start)
+    variant_shadowing_of(std_globbed_variants(definitions, exports, all, std_start), all, std_start)
+}
+
+/// `variant_shadowing`'s warnings for the user's modules, the first
+/// `std_start` of `all`, from `std_variants`, the variants std globs into
+/// them with their sums' names (`variant_shadowing_of`).
+fn variant_shadowing_of(
+    std_variants: Map<String, String>,
+    all: Vec<ModuleSource>,
+    std_start: Int,
+) -> Vec<Diagnostic> {
     let mut out: Vec<Diagnostic> = Vec::new()
     let mut mid = 0
     while mid < std_start && mid < all.len() {

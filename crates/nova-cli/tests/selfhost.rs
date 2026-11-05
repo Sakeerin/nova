@@ -1901,6 +1901,50 @@ fn agree_on_resolution_in(mode: Mode, dir: &Path, files: &[String], code: i32) -
         .unwrap_or_else(|report| panic!("{report}"))
 }
 
+/// [`agree_on_resolution_in`] `files` in `parts` processes a side, side by
+/// side, root `i` in part `i % parts`: for a set whose roots are slow to
+/// load, the corpus's packages (`selfhost/src/`'s each reach most of N),
+/// which in one process would make the longest wait of the file. Returns
+/// S0's output, each root's part in the roots' order.
+fn agree_on_resolution_in_parts(
+    mode: Mode,
+    dir: &Path,
+    files: &[String],
+    code: i32,
+    parts: usize,
+) -> String {
+    let parts = parts.clamp(1, files.len().max(1));
+    let dealt: Vec<Vec<String>> = (0..parts)
+        .map(|k| files.iter().skip(k).step_by(parts).cloned().collect())
+        .collect();
+    let outs: Vec<String> = std::thread::scope(|scope| {
+        let runs: Vec<_> = dealt
+            .iter()
+            .map(|part| scope.spawn(move || agree_on_resolution_in(mode, dir, part, code)))
+            .collect();
+        joined(runs)
+    });
+    // Each output's parts, by its roots' headers, dealt back in order.
+    let mut split: Vec<std::collections::VecDeque<String>> = outs
+        .iter()
+        .map(|out| {
+            let mut roots = std::collections::VecDeque::new();
+            for line in out.split_inclusive('\n') {
+                if line.starts_with("== ") || roots.is_empty() {
+                    roots.push_back(String::new());
+                }
+                roots.back_mut().expect("a root's part").push_str(line);
+            }
+            roots
+        })
+        .collect();
+    let mut all = String::new();
+    for i in 0..files.len() {
+        all.push_str(&split[i % parts].pop_front().expect("each root's part"));
+    }
+    all
+}
+
 /// `nova check`'s help names neither hidden flag, and every `nova check`
 /// command line whose first argument after `check` is not
 /// `--dump-resolution` is parsed as before the flags (ADR 0053 §1): each
@@ -2191,15 +2235,23 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
 #[test]
 fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
     let root = root();
-    let std_parts: Vec<String> = [Mode::Check, Mode::Wasm, Mode::Test]
-        .into_iter()
-        .map(|mode| {
-            let part = compare_batch(std_resolution(mode), &root, &[], 0, &nova(), selfhost())
-                .unwrap_or_else(|report| panic!("{mode:?}: {report}"));
-            assert!(part.ends_with("))\n(Diagnostics)\n"), "{mode:?}");
-            part
-        })
-        .collect();
+    // std's parts side by side, while the corpus and the cases are listed.
+    let std_parts: Vec<String> = std::thread::scope(|scope| {
+        let parts: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
+            .into_iter()
+            .map(|mode| {
+                let root = &root;
+                scope.spawn(move || {
+                    compare_batch(std_resolution(mode), root, &[], 0, &nova(), selfhost())
+                        .unwrap_or_else(|report| panic!("{mode:?}: {report}"))
+                })
+            })
+            .collect();
+        joined(parts)
+    });
+    for (part, mode) in std_parts.iter().zip([Mode::Check, Mode::Wasm, Mode::Test]) {
+        assert!(part.ends_with("))\n(Diagnostics)\n"), "{mode:?}");
+    }
     for (part, head) in std_parts.iter().zip([
         "(Std target=native modules=21 ",
         "(Std target=wasm modules=16 ",
@@ -2248,7 +2300,7 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
             .map(|mode| scope.spawn(move || agree_on_resolve_cases(mode, &mode_cases_dir(mode))))
             .collect();
         let package_dumps =
-            scope.spawn(|| agree_on_resolution_in(Mode::Check, &root, &packages, 0));
+            scope.spawn(|| agree_on_resolution_in_parts(Mode::Check, &root, &packages, 0, 3));
         let wasm_dumps = scope.spawn(|| agree_on_resolution_in(Mode::Wasm, &root, &wasm, 0));
         let test_dumps = scope.spawn(|| agree_on_resolution_in(Mode::Test, &root, &tests, 0));
         let mut check = agree_on_resolution(&root, &loose, 0);
