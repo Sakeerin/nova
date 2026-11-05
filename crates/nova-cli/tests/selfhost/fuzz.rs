@@ -752,6 +752,51 @@ pub const PACKAGE_FILES: [(&str, &str); 10] = [
     ("devdep/src/lib.nova", "pub fn expect() -> Int { 2 }\n"),
 ];
 
+/// The forms [`PACKAGE_FILES`]' manifests are written in, `app`'s and
+/// `dep`'s, input `i` of a seed in a package whose manifests are form `i %
+/// 4` (5.2b, ADR 0054 §5): each a form N's manifest reader takes and
+/// nova-pm reads with no M-code, so that each of the reader's forms meets
+/// the loader, E0004's line and span in a manifest included. Form 0 is
+/// [`PACKAGE_FILES`]' own. Form 1 has comments, a header with spaces, a
+/// name in `'...'`, a pre-release, more keys, the dependency tables in
+/// another order and `[package]`'s last value before a comment; form 2 the
+/// dependency tables as inline tables before the header, the keys in
+/// another order and the largest version; form 3 a byte-order mark and
+/// `\r\n`. `dep`'s forms add dev-dependencies, which nova-pm reads and,
+/// in a dependency's manifest, never resolves: a version entry, and a
+/// path to no package.
+pub fn package_manifests() -> [(String, String); 4] {
+    let app = PACKAGE_FILES[0].1.to_string();
+    let dep = PACKAGE_FILES[3].1.to_string();
+    let bom = char::from_u32(0xFEFF)
+        .expect("the byte-order mark")
+        .to_string();
+    [
+        (app.clone(), dep.clone()),
+        (
+            "# The fuzzer's package, written another way.\n\n[ package ]\nname = 'app'   # its name\n\
+             version = \"1.2.3-alpha.1\"\ndescription = \"d\"\nauthors = [\"a\", 'b',]\n\
+             edition = '2026' # the last value\n\n[dev-dependencies]\ndevdep = {path='../devdep'}\n\n\
+             [dependencies]\nclash = { path = \"../clash\" }   # a module's name too\n\
+             dep = { path = \"../dep\" }\n"
+                .to_string(),
+            format!("{dep}\n[dev-dependencies]\njson = \"^1.2\"\n"),
+        ),
+        (
+            "dependencies = { dep = { path = \"../dep\" }, clash = { path = \"../clash\" } }\n\
+             dev-dependencies = { devdep = { path = \"../devdep\" } }\n\n[package]\nedition = \"2026\"\n\
+             version = \"18446744073709551615.0.0\"\nname = \"app\"\nlicense = \"MIT\"\n"
+                .to_string(),
+            dep.replace("0.1.0", "0.0.18446744073709551615")
+                + "\n[dev-dependencies]\nlocal = { path = \"../nowhere\" }\nreg = { version = \"=1\" }\n",
+        ),
+        (
+            format!("{bom}{}", app.replace('\n', "\r\n")),
+            dep.replace('\n', "\r\n"),
+        ),
+    ]
+}
+
 /// What [`wasm_name_mutate`] adds to a WASM program, one of them, after
 /// [`name_mutate`]'s mutations: at the top (`true`) an import of `ui::ssr`,
 /// which only the native target has (E0092), of `ui::router`, or of

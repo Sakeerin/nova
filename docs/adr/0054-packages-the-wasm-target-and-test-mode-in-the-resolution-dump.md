@@ -54,7 +54,9 @@ A manifest is labelled `nova.toml` for the root package's and `<import
 name>/nova.toml` for a dependency's, so E0004's secondary label, in the
 manifest, names a place without a path; without a graph (a root manifest
 that does not parse) every file the graph's diagnostics name is the root's
-`nova.toml`.
+`nova.toml`. A dependency's manifest that gives an M-code is not in the
+graph, so its file has no label, and its M-code's labels print `?` in
+place of one (`(Primary ?:82..83 ...)`); N refuses such a manifest (§5).
 
 **The package key** is each module's `package=`, the graph's `PackageId`:
 0 for the root package, then the dependencies in the graph's breadth-first
@@ -284,7 +286,9 @@ temporary directory. The 5.2a cases holding a `@test` are copied to
 `resolve-test/`, since `check` strips what they test. Hand cases (names
 without `__`): E0004, E0004 inside a dependency (its secondary label
 that dependency's manifest, which also has a dev-dependency the graph
-never reads), a package module named `ui` (E0093), E0001's two
+never reads), E0004 for a `tests/` module named for the package (its
+secondary label `[package]`'s span, whose last value is followed by a
+comment; the first fact-check), a package module named `ui` (E0093), E0001's two
 notes, a dependency's modules labelled by its import name with a dropped
 fix and an E0102 in it, a dependency's tests stripped while a `tests/`
 file names its own, a `tests/` file's dev-dependency and siblings, every
@@ -292,8 +296,8 @@ file names its own, a `tests/` file's dev-dependency and siblings, every
 E0092, `dom` and `ui` imported on WASM, and a WASM package whose dependency
 has an `extern` block.
 
-At the split: `resolve/` 142 programs (103 of 5.2a, and 27 packages with
-39 roots), `resolve-wasm/` 30, `resolve-test/` 126 (37 packages with 71
+At the split: `resolve/` 145 programs (103 of 5.2a, and 28 packages with
+42 roots), `resolve-wasm/` 30, `resolve-test/` 126 (37 packages with 71
 roots). 5.1's token and AST differentials read them too, `nova fmt`'s gate
 skips `cases/`, and the CRLF test copies all three directories,
 `nova.toml`s included.
@@ -312,17 +316,34 @@ input in `src/` or, one in three, `tests/` of `PACKAGE_FILES`' package
 `@test`, a dependency `clash`, a dev-dependency `devdep`, and no library
 of its own), and adds an import of `dep`, of its items, of a private one,
 of `devdep`, of `clash` (E0004) or of `app` (from `tests/`, E0001 with a
-note); seeds 321 to 323, 30 each, from the loose corpus, named from inside
-`app`. The loose name inputs are also resolved under test mode; the
-package's under `check` only, to keep the fuzzer's time in proportion
-(test mode on a package is the cases'). The inputs are the same on every
-system, which the Windows-checkout test checks for the two siblings too.
+note); seeds 321 to 323, 30 each, from the loose corpus. The package is
+written four times, `v0/` to `v3/`, each with its manifests in one of four
+forms N's reader takes and nova-pm reads with no M-code
+(`fuzz::package_manifests`: the plain one; comments, a header with
+spaces, `'...'`, a pre-release, more keys, the tables in another order
+and a comment after `[package]`'s last value; the dependency tables as
+inline tables before the header and the largest version; a byte-order
+mark and `\r\n`; `dep`'s adding a version entry and a path to nothing
+among its dev-dependencies), input `i` in form `i % 4`; the harness
+asserts that E0004 names its entry on more than one line of a manifest
+over them. The loose name
+inputs are also resolved under test mode; the package's under `check`,
+and seed 321's also under test mode and seed 322's for the WASM target,
+each in the process of that mode's loose inputs, which costs no
+measurable time (the first fact-check; §9). Manifests N refuses are not
+among the fuzzer's: a refusal stops N's whole process, so each would
+need two processes of its own (about 0.5 s of N's debug runtime each),
+and the reader's table, the repository's manifests (§5) and a test of
+the refusal pin them instead. The inputs are the same on every system,
+which the Windows-checkout test checks for the two siblings too.
 
 On the fixed seeds (S0's dump; part A): under `check` E0001 46, E0002 63,
 E0082 14, E0083 8, E0089 10, E0092 13, E0102 50, E0900 18 (5.2a's); under
 test mode E0084 8 and E0085 5 more, among the same; the WASM inputs
 E0090 28 and E0092 10; the package's E0004 9, E0001's note on a package
-with no library 5 and on a dev-dependency 6. The harness asserts each of
+with no library 5 and on a dev-dependency 6. With the manifest forms and
+the two modes (the first fact-check), all the dumps together hold E0004
+16 times and each note 9. The harness asserts each of
 the 11 codes, E0004 and the two notes at least twice over all of them,
 E0084 and E0085 only under test mode and E0090 only for WASM.
 
@@ -365,24 +386,39 @@ escape or in `'...'`; in `[package]` the keys nova-pm reads (`name`,
 `version` and `edition`, which must be there, `description`, `license`,
 `repository` as strings, `authors`, `keywords`, `categories` as arrays of
 strings on one line, a trailing comma allowed); in the dependency tables
-`key = { path = "..." }` on one line. **It refuses**, with a message,
-everything else: another table or key (which S0 warns about, M0006), a
-dotted or quoted key, an array of tables, a multi-line string, an escape,
-a number or a boolean, a version entry (which needs the registry), a
-`path` beside a `version`, a key written twice, a name nova-pm refuses
+`key = { path = "..." }` on one line; and in `[dev-dependencies]` a
+version entry, `key = "REQ"` or `key = { version = "REQ" }`, whose
+requirement is one to three numbers between dots after `^`, `~`, `=` or
+nothing, each without a leading zero and at most `u64::MAX`, which
+semver's `VersionReq` takes. nova-pm reads every manifest's
+dev-dependencies but resolves only the root's, so a dependency's version
+entries are read and left alone, as S0 leaves them, and the graph refuses
+one in the root's manifest, which would need the registry. **It
+refuses**, with a message, everything else: another table or key (which
+S0 warns about, M0006), a dotted or quoted key, an array of tables, a
+multi-line string, an escape, a number or a boolean, a version entry in
+`[dependencies]` (which needs the registry), a `path` beside a `version`
+(M0003), any other requirement (S0 takes more: `*`, `>=1`, a
+pre-release, a list), a key written twice, a name nova-pm refuses
 (`check_name`: a letter first, ASCII letters, digits, `-` and `_`, at
 most 64, not a Windows device, not `dom` or `ui`), a version semver
-refuses or one with build metadata (`+...`, M0003; a pre-release is
-read), an edition other than 2026, and a
-control character other than a tab, a line feed and a `\r` before one,
-as TOML refuses it. N's test `the_manifest_readers_accepted_and_refused_forms_are_pinned`
-pins this table: 11 texts read and 33 refused, and three refusals'
-words; S0 reads each of the 11
-with no M-code, gives 30 of the 33 an M-code, and reads the other three
-(a quoted key, an array over two lines, a multi-line string), which no
-manifest of the repository holds.
+refuses (three numbers, each without a leading zero and at most
+`u64::MAX`, a pre-release's unbounded) or one with build metadata
+(`+...`, M0003; a pre-release is read), an edition other than 2026, and
+a control character other than a tab, a line feed and a `\r` before one
+(DEL included), as TOML refuses it. N's test
+`the_manifest_readers_accepted_and_refused_forms_are_pinned` pins this
+table: 16 texts read and 51 refused, and three refusals' words. S0 reads
+14 of the 16 with no M-code; the other two hold version entries among the
+root's dev-dependencies, which the graph refuses and S0 gives an M-code
+(the registry). S0 gives 48 of the 51 an M-code, and reads the other
+three (a quoted key, an array over two lines, a multi-line string),
+which no manifest of the repository holds. Among the 51 are a name of 65
+characters, `1.0.0.0` and each number of a version one past `u64::MAX`
+(the first fact-check found N reading those three, and DEL), and the
+graph's test refuses a dependency's version past `u64::MAX`.
 
-**Every manifest of the repository** (the 100 tracked `nova.toml` files
+**Every manifest of the repository** (at the split, the 100 tracked `nova.toml` files
 and every manifest the workspace's tests parse, recorded by a temporary
 instrumentation of nova-pm while the whole suite ran: 211 distinct
 texts), each in a package with `src/main.nova` and a library at each of
@@ -390,13 +426,33 @@ its relative paths, through both sides: 131 read as S0 reads them, the
 same dump; 80 refused where S0 gives an M-code; none refused that S0
 reads. Before the split four were: the inline dependency table `nova
 add` writes (two), a byte-order mark, and a pre-release version; the
-reader takes them now.
+reader takes them now. After the first fact-check, at the 104 tracked
+`nova.toml` files and every manifest the whole suite parses: 229 distinct texts, 146 read as S0
+reads them, 83 refused where S0 gives an M-code, none refused that S0
+reads.
 
 **The graph** (`loader.nova`'s `read_graph`) is nova-pm's walk: the
 root, then breadth first each package's entries, and the root's
 dev-dependencies after its dependencies, a package read once by its
-identity, its directory with `.` and `x/..` folded (nova-pm's
-`real_path`, which no link changes in any input), its key its index.
+identity, its key its index. nova-pm's identity is `real_path` of the
+package's directory, the absolute path with every link followed. N's
+std and runtime have no way to name the current directory or follow a
+link, so N's identity is the directory as the root's path and the
+entries' paths spell it, with `.` and `x/..` folded (**differs**). The
+two are the same package for every input of the differential: no input
+holds a link, and every input that spells a dependency by its absolute
+path gives its root by its absolute path too, so every directory is
+absolute. They differ on three inputs, each pinned or stated: one
+directory spelled by an absolute path and a relative one under a
+relative root (the first fact-check's case (a)), and one directory
+reached through a link and without it (case (b)), each two packages of
+one name to N, which refuses the graph as M0011, saying for the first
+that the two may be one directory, where S0 reads one package; and
+`x/..` after a link `x` (case (c)), which N folds and `real_path` follows,
+so N dumps a package other than S0's, or S0 gives an M-code where N
+dumps. A Unix test pins the first two beside a root given absolutely,
+where both read one package; on Windows N's paths read no drive, which
+5.5 takes up with a root written with `\`.
 Where nova-pm gives an error the graph refuses instead: a dependency's
 directory with no manifest (M0007), a key that is not the package's name
 (M0008), a dependency with no library (M0009), its own directory or a
@@ -421,8 +477,9 @@ as S0 labels them, keyed as S0 keys them (`package=`), and each import's
 E0004, E0093 and E0001 with its two notes is S0's, word for word. The
 driver's `strip_test_functions` takes `keep_root_tests`, and
 `name_tests` names a `tests/` file's tests `<file stem>::<function>`.
-`selfhost resolve` takes `--target native|wasm` and `--test`, each once,
-as the hidden form does, and refuses `--test --target wasm` with one line
+`selfhost resolve` takes `--target native|wasm` (also as
+`--target=VALUE`, as clap takes it for S0, since the first fact-check)
+and `--test`, each once, as the hidden form does, and refuses `--test --target wasm` with one line
 on stderr and the exit code 2, as S0 does. For the WASM target it parses
 `WASM_STD_MODULES` and also `STD_MODULES`, which `missing` reads, a file
 both name parsed once; under test mode `std/test` follows std's modules,
@@ -434,8 +491,8 @@ checks (E0083 to E0085) and `TestFn`s, which no comparison had reached.
 refuses (§5); registry packages, `nova.lock` and `project::sync`, which
 the dump never runs; doc tests (`RootKind::Doc`) and `nova test`'s
 whole-package program of several roots (decision 1); a registry
-package's dropped warnings (no input has one); a package found through a
-link that the folded path does not see.
+package's dropped warnings (no input has one); `real_path`'s identity
+through a link or the current directory (§5).
 
 ### 7. The differential on both sides
 
@@ -443,11 +500,12 @@ Every input part A ran through S0 alone is now compared byte for byte
 with N, exit codes included: std's native, WASM and test-mode parts; the
 corpus natively, 251 loose programs and 67 files directly in a package's
 `src/` or `tests/` (318, §4), its 39 WASM programs for the WASM target
-and its 9 files with tests under test mode; the cases, `resolve/` 142
-programs (39 a package's roots), `resolve-wasm/` 30 and `resolve-test/`
+and its 9 files with tests under test mode; the cases, `resolve/` 145
+programs (42 a package's roots), `resolve-wasm/` 30 and `resolve-test/`
 126, and all of them again with `\r\n`; and the name fuzzer's fixed
 seeds: 150 loose inputs under `check` and under test mode, 60 WASM
-inputs and 90 package inputs. The floors part A set on these counts stay
+inputs and 90 package inputs, 30 of them also under test mode and 30
+for the WASM target. The floors part A set on these counts stay
 (240 loose, 60 package files in 10 directories, 35 WASM, 8 with tests;
 130, 25 and 115 cases), and so do the floors on codes, now over dumps
 both sides print: every one of the 11 codes, E0004 and both notes twice
@@ -501,9 +559,10 @@ compared on Windows too, not skipped.
   a loose program to N, whose paths split at `/` only (ADR 0053 §5); the
   harness writes every root with `/`, and 5.5 settles both. macOS (a
   temporary directory behind a link): a package is identified by
-  `real_path` in S0 and by its folded path in N, which differ only for a
-  package reached by two spellings through a link, which no input has;
-  no printed path is canonical.
+  `real_path` in S0 and by its folded path in N, which differ only on
+  the inputs §5 lists, none of the differential's; a temporary directory
+  behind a link is behind it in every spelling, and no printed path is
+  canonical.
 - CRLF: `cases/` has no `.gitattributes` rule, so CI's Windows checkout
   gives every case's `nova.toml` `\r\n`, and the CRLF copy reads them on
   every system.
@@ -595,15 +654,25 @@ scopes, items and tests and every module's exports, all a program's part
 prints, and is not for the type checker. A program reads the shared
 state and never writes it: S0's is borrowed immutably, and N's is read
 through copies. Should resolving std alone give a diagnostic beyond
-parsing it, which would come between a program's own, every program is
-resolved in full. `nova check`, `nova build`, `nova test` and the language
+parsing it, which would come between a program's own, or find a `@test`
+function, which the full resolution lists with a program's tests and
+the shared one would drop, every program is resolved in full on both
+sides (no std file holds either; a std's diagnostic and its test are all
+std could add to a program's part that the shared path leaves out, its
+definitions, scopes and items being std's part's). nova-resolver's test
+`std_with_a_diagnostic_or_a_test_is_resolved_for_each_program` builds std
+from altered text (`core` defining a name twice, `ui` marking a function
+`@test`) and checks the shared dump is the full one under `check` and
+test mode; the harness runs N with `--std` pointed at such a copy and
+checks each program keeps std's E0002 or lists std's test and is
+otherwise S0's. `nova check`, `nova build`, `nova test` and the language
 server keep `resolve_program_with_std`; the resolver's only other change
 is `variant_shadowing` split around the variants it reads
 (`variant_shadowing_of`), and `FileDb` derives `Clone`, so that S0's dump
 registers std's files once and copies them for each root. The driver's
 test `std_resolved_once_dumps_what_std_resolved_for_each_program_dumps`
 compares S0's shared and unshared dumps byte for byte over the corpus
-and the cases of each mode (`check`, the WASM target, test mode; 460,
+and the cases of each mode (`check`, the WASM target, test mode; 463,
 69 and 135 roots), in order and reversed; the differential compares N's
 shared dumps with S0's. The harness also runs std's three parts side by
 side and the corpus's packages in three processes a side, root `i` in
@@ -622,6 +691,22 @@ that reach most of N. Projected by the run above's ratios of CI to the
 local time before on the same state (Linux 0.88, macOS 0.73, Windows
 1.89): about 24 to 25 s on Linux, 20 to 21 s on macOS and 51 to 54 s on
 Windows, under the minute on each; the real PR's CI measures it.
+
+**After the first fact-check** (its fixes, two tests and a case, and the
+fuzzer's manifest forms and package inputs under test mode and for the
+WASM target), on a slower machine state than the figures above:
+`selfhost.rs` took 30.7, 31.8 and 30.8 s before (`5d48e977`'s test
+binary; it took 27.9 to 28.8 s on the earlier state) and 31.8, 30.9 and
+31.7 s after; with the fuzzer as it was, 32.1, 31.6 and 31.3 s, so the
+fuzzer's new inputs cost no measurable time. Scaled from the earlier
+projection by the after-to-before ratio on this state (1.01), CI would
+take about 24 to 25 s on Linux, 20 to 21 s on macOS and 52 to 55 s on
+Windows; the ratios above applied to these slower local times directly
+give 27 to 28, 22 to 23 and 58 to 60 s. Both assume Windows scales as
+the local CPU does, which the 76.59 s measurement (Windows about 2.1
+times Linux, not the 1.89 times the local time it projects from) shows
+it may not: the figures are likely optimistic, and the PR's CI measures
+Windows against the minute.
 
 ### 10. The live heap (spec §4.4, phase plan decision 8)
 
@@ -675,6 +760,7 @@ compiler; the cost to watch is CI's time, not the pause.
   needs them (5.5).
 - The hidden dump resolves std once per process and mode, on both sides,
   a departure from the spec's per-program resolution that a test shows
-  changes no byte (§9); `selfhost.rs` runs in 27 to 29 s locally, every
-  input kept, which projects CI's Windows leg to 51 to 54 s.
+  changes no byte (§9); `selfhost.rs` runs in 31 to 32 s on a slower machine state (27 to 29 s on the earlier one) locally, every
+  input kept, which projects CI's Windows leg to about 52 to 55 s (likely optimistic, §9), a projection
+  that assumes Windows scales as the local CPU does.
 - The live heap is recorded (§10), with no threshold.

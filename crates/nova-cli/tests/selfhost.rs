@@ -953,21 +953,26 @@ fn both_sides_refuse_no_file() {
 /// on what each shape gives, stdout and exit code (5.2b, ADR 0054 §1):
 /// before or after a root, beside an empty root (not found), twice
 /// (refused), and with std's part for the WASM target in either order
-/// (refused, as `nova test` has no target). `--std` is N's `--std-part`.
-/// A `--` is left out: N reads it as a root of that name, where S0's form
+/// (refused, as `nova test` has no target); and `--target=VALUE`, as clap
+/// takes it, an empty, repeated or unknown value refused. `--std` is N's
+/// `--std-part`. A `--` is left out: N reads it as a root of that name, where S0's form
 /// skips it, and the harness passes none (ADR 0053 §5).
 #[test]
 fn both_sides_take_test_in_every_position_alike() {
     let file = "tests/runtime/array_helpers.nova";
     assert!(root().join(file).is_file());
     let std = std_dir();
-    let shapes: [(&[&str], i32); 6] = [
+    let shapes: [(&[&str], i32); 10] = [
         (&["--test", file], 0),
         (&[file, "--test"], 0),
         (&["--test", ""], 2),
         (&["--test", "--test", file], 2),
         (&["--test", "--std", "--target", "wasm"], 2),
         (&["--target", "wasm", "--std", "--test"], 2),
+        (&["--target=wasm", "--std"], 0),
+        (&["--target=", file], 2),
+        (&["--target=wasm", "--target", "wasm", "--std"], 2),
+        (&["--target=bogus", file], 2),
     ];
     for (args, code) in shapes {
         let n: Vec<&str> = ["resolve", "--std", std.as_str()]
@@ -1040,6 +1045,238 @@ fn a_manifest_n_cannot_read_stops_n_with_a_message() {
             "{name}: {stderr}"
         );
     }
+}
+
+/// N shares std resolved once only when std alone gives no diagnostic and
+/// holds no `@test` function, either of which the shared path would drop
+/// (ADR 0054 §9): with a std whose `core` defines a name twice, or whose
+/// `ui` marks a function `@test` (under test mode), N resolves std again
+/// for each program, so each program that reaches the resolver keeps
+/// std's E0002, or lists std's test, and its dump is otherwise S0's, whose
+/// std is built in (nova-resolver's own test pins S0's side); the rest
+/// are S0's. The roots are the first six loose programs and the first four
+/// package roots of the mode's cases.
+#[test]
+fn n_resolves_std_for_each_program_when_std_gives_a_diagnostic_or_a_test() {
+    let alterations = [
+        (
+            Mode::Check,
+            "core/lib.nova",
+            "fn mix64(x: Int) -> Int {",
+            "fn escape_common(x: Int) -> Int {",
+            "(Error \"E0002\" \"duplicate definition of `escape_common`\"",
+        ),
+        (
+            Mode::Test,
+            "ui/lib.nova",
+            "\nfn flush() {",
+            "\n@test\nfn flush() {",
+            " \"flush\" should_panic=false)",
+        ),
+    ];
+    std::thread::scope(|scope| {
+        let runs: Vec<_> = alterations
+            .into_iter()
+            .enumerate()
+            .map(|(k, (mode, file, old, new, mark))| {
+                scope.spawn(move || {
+                    // A copy of std's sources, `file` altered.
+                    let std = fresh_dir(&format!("altered-std-{k}"));
+                    let from = root().join("std");
+                    let mut sources = Vec::new();
+                    nova_files(&from, &from, &[], &mut sources);
+                    for rel in &sources {
+                        let to = std.join(rel);
+                        std::fs::create_dir_all(to.parent().expect("a parent"))
+                            .expect("create a std directory");
+                        std::fs::copy(from.join(rel), &to).expect("copy a std file");
+                    }
+                    let text = std::fs::read_to_string(std.join(file))
+                        .expect("read the std file")
+                        .replace("\r\n", "\n");
+                    assert_eq!(text.matches(old).count(), 1, "{file}: {old}");
+                    std::fs::write(std.join(file), text.replacen(old, new, 1))
+                        .expect("alter the std file");
+                    let cases = mode_cases_dir(mode);
+                    let found = case_roots(&cases);
+                    let roots: Vec<String> = found.loose[..6]
+                        .iter()
+                        .chain(&found.packages[..4])
+                        .cloned()
+                        .collect();
+                    let std = std.display().to_string();
+                    let n_args: Vec<&str> = ["resolve", "--std", std.as_str()]
+                        .into_iter()
+                        .chain(mode.flags().iter().copied())
+                        .collect();
+                    let s0 = run(&nova(), resolution_in(mode).s0, &cases, &roots).expect("run S0");
+                    let n = run(selfhost(), &n_args, &cases, &roots).expect("run N");
+                    assert_eq!((s0.code, n.code), (Some(0), Some(0)), "{}", n.stderr);
+                    let (s0, n) = (
+                        String::from_utf8_lossy(&s0.stdout).into_owned(),
+                        String::from_utf8_lossy(&n.stdout).into_owned(),
+                    );
+                    let (s0_parts, n_parts) = (parts_of(&s0), parts_of(&n));
+                    assert_eq!(s0_parts.len(), roots.len(), "{s0}");
+                    assert_eq!(n_parts.len(), roots.len(), "{n}");
+                    let mut resolved = 0;
+                    for (s0_part, n_part) in s0_parts.iter().zip(&n_parts) {
+                        if !s0_part.contains(" resolved=true\n") {
+                            assert_eq!(n_part, s0_part);
+                            continue;
+                        }
+                        resolved += 1;
+                        assert_eq!(n_part.matches(mark).count(), 1, "{file}: {n_part}");
+                        assert_eq!(
+                            without_parens(&without_block(n_part, mark)),
+                            without_parens(s0_part),
+                            "{file}: {n_part}"
+                        );
+                    }
+                    assert!(resolved >= 6, "{resolved} of {} resolved", roots.len());
+                })
+            })
+            .collect();
+        joined(runs);
+    });
+}
+
+/// `part` without the line holding `mark` and the lines below it indented
+/// further, a diagnostic and its labels or a test's line.
+fn without_block(part: &str, mark: &str) -> String {
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let mut out = String::new();
+    let mut inside: Option<usize> = None;
+    for line in part.split_inclusive('\n') {
+        if let Some(depth) = inside {
+            if indent(line) > depth {
+                continue;
+            }
+            inside = None;
+        }
+        if line.contains(mark) {
+            inside = Some(indent(line));
+            continue;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// `text` with the `)`s that end each line taken off, so that a part
+/// with a line taken out compares with one that never had it.
+fn without_parens(text: &str) -> String {
+    text.lines()
+        .map(|l| l.trim_end_matches(')'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A package's identity (ADR 0054 §5, the first fact-check's case (a)):
+/// `app` depends on `../geom` and `../b`, and `b` on `geom` by its
+/// absolute path. Under a root given by its absolute path both sides
+/// read one `geom`. N cannot name the current directory, so under a
+/// relative root it refuses the graph as M0011, saying the two paths may
+/// name one directory, where S0, which reads the real path, resolves it;
+/// and through a link to `geom` (case (b)) N refuses it as M0011, where S0
+/// resolves it. No other input of the differential holds an absolute
+/// dependency path or a link; on Windows N's paths read no drive, which
+/// 5.5 takes up with a root written with `\`, so the test is Unix's.
+#[cfg(unix)]
+#[test]
+fn a_directory_spelled_two_ways_is_one_package_under_an_absolute_root() {
+    let dir = fresh_dir("resolution-identity");
+    let geom = dir.join("geom").display().to_string();
+    let files = [
+        (
+            "app/nova.toml",
+            format!(
+                "{MANIFEST}[dependencies]\ngeom = {{ path = \"../geom\" }}\n\
+                 b = {{ path = \"../b\" }}\n"
+            ),
+        ),
+        (
+            "app/src/main.nova",
+            "import geom\nimport b\n\nfn main() {\n    println(\"${area()} ${twice()}\")\n}\n"
+                .to_string(),
+        ),
+        ("geom/nova.toml", MANIFEST.replace("pkg", "geom")),
+        (
+            "geom/src/lib.nova",
+            "pub fn area() -> Int { 1 }\n".to_string(),
+        ),
+        (
+            "b/nova.toml",
+            format!(
+                "{}[dependencies]\ngeom = {{ path = \"{geom}\" }}\n",
+                MANIFEST.replace("pkg", "b")
+            ),
+        ),
+        (
+            "b/src/lib.nova",
+            "import geom\n\npub fn twice() -> Int { area() * 2 }\n".to_string(),
+        ),
+        (
+            "linked/nova.toml",
+            format!(
+                "{}[dependencies]\ngeom = {{ path = \"../geom\" }}\nc = {{ path = \"../c\" }}\n",
+                MANIFEST.replace("pkg", "linked")
+            ),
+        ),
+        (
+            "linked/src/main.nova",
+            "import geom\nimport c\n\nfn main() {}\n".to_string(),
+        ),
+        (
+            "c/nova.toml",
+            format!(
+                "{}[dependencies]\ngeom = {{ path = \"../link\" }}\n",
+                MANIFEST.replace("pkg", "c")
+            ),
+        ),
+        (
+            "c/src/lib.nova",
+            "import geom\n\npub fn c() -> Int { area() }\n".to_string(),
+        ),
+    ];
+    for (path, text) in &files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
+        std::fs::write(path, text).expect("write a package's file");
+    }
+    std::os::unix::fs::symlink("geom", dir.join("link")).expect("link geom");
+    let absolute = dir.join("app/src/main.nova").display().to_string();
+    let out = agree_on_resolution(&dir, std::slice::from_ref(&absolute), 0);
+    assert!(
+        out.starts_with(&format!(
+            "== {absolute}\n(Program target=native resolved=true\n"
+        )),
+        "{out}"
+    );
+    assert_eq!(out.matches("(Module ").count(), 3, "{out}");
+    let refused = |root: &str, why: &str| {
+        let s0 = run(&nova(), RESOLUTION_S0, &dir, &[root.to_string()]).expect("run S0");
+        let s0_out = String::from_utf8_lossy(&s0.stdout);
+        assert_eq!(s0.code, Some(0), "{root}: {s0_out}");
+        assert!(s0_out.contains(" resolved=true\n"), "{root}: {s0_out}");
+        assert_eq!(s0_out.matches("(Module ").count(), 3, "{root}: {s0_out}");
+        let n = run(selfhost(), resolution().n, &dir, &[root.to_string()]).expect("run N");
+        assert_eq!(n.code, Some(1), "{root}: {}", n.stderr);
+        assert!(n.stdout.is_empty(), "{root}");
+        assert_eq!(
+            n.stderr,
+            format!(
+                "error: selfhost resolve cannot dump {root}: two packages named `geom` in one \
+                 build (M0011){why}\n"
+            )
+        );
+    };
+    refused(
+        "app/src/main.nova",
+        ", or one directory spelled by an absolute and a relative path, which N cannot tell \
+         apart without the current directory",
+    );
+    refused(&dir.join("linked/src/main.nova").display().to_string(), "");
 }
 
 /// On Windows a resolution dump's E0004 and E0093 messages are compared
@@ -2729,9 +2966,11 @@ fn a_root_whose_path_is_not_utf8_is_dumped_by_s0_and_not_found_by_n() {
 /// The name fuzzer's fixed seeds and counts every run checks (spec §3.5),
 /// and, from 5.2b (spec §4.5, ADR 0054), its WASM and package siblings'.
 /// The loose inputs are also resolved under test mode, which keeps their
-/// `@test` functions; the package's are resolved under `check`: test mode
-/// on a package is the cases' (`cases/resolve-test/`), and the fuzzer's
-/// time is kept in proportion (ADR 0054).
+/// `@test` functions; the package's under `check`, each in a package whose
+/// manifests are one of four forms ([`fuzz::package_manifests`]), and the
+/// first seed's also under test mode and the second's for the WASM target,
+/// in the process of that mode's loose inputs, which keeps the fuzzer's
+/// time in proportion (ADR 0054).
 const NAME_SEEDS: [u64; 3] = [301, 302, 303];
 const NAME_COUNT: usize = 50;
 const WASM_NAME_SEEDS: [u64; 3] = [311, 312, 313];
@@ -2859,7 +3098,13 @@ fn write_seeded_inputs(name: &str, seeded: &[(u64, Vec<String>)]) -> (PathBuf, V
 /// The parts of `dump`, a resolution dump of [`write_seeded_inputs`]'
 /// roots, whose roots are `seed`'s, each from its `== ` header on.
 fn seed_parts(dump: &str, seed: u64) -> String {
-    let header = format!("== {seed}/");
+    parts_under(dump, &seed.to_string())
+}
+
+/// The parts of `dump` whose roots are in the directory `dir`, each from
+/// its `== ` header on.
+fn parts_under(dump: &str, dir: &str) -> String {
+    let header = format!("== {dir}/");
     let mut out = String::new();
     let mut keep = false;
     for line in dump.split_inclusive('\n') {
@@ -2873,33 +3118,41 @@ fn seed_parts(dump: &str, seed: u64) -> String {
     out
 }
 
-/// Write [`fuzz::PACKAGE_FILES`] to a fixed directory named after `name`,
-/// [`fuzz::NAME_SIBLINGS`] in its `app/src/` and `app/tests/`, and input
-/// `i` as `f{i:05}.nova` in `app/tests/` or `app/src/`: `app`'s directory,
-/// and the inputs' roots, relative to it. The roots are named from inside
-/// the package, so that E0004's paths begin at its `src/` (ADR 0054).
-fn write_package_inputs(name: &str, inputs: &[(bool, String)]) -> (PathBuf, Vec<String>) {
-    let dir = fresh_dir(name);
-    for (path, text) in fuzz::PACKAGE_FILES {
-        let path = dir.join(path);
-        std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
-        std::fs::write(path, text).expect("write a package's file");
-    }
-    let app = dir.join("app");
-    for sub in ["src", "tests"] {
-        std::fs::create_dir_all(app.join(sub)).expect("create a package's directory");
-        for (stem, source) in fuzz::NAME_SIBLINGS {
-            std::fs::write(app.join(sub).join(format!("{stem}.nova")), source)
-                .expect("write a sibling");
+/// Write [`fuzz::PACKAGE_FILES`] to `dir`, which exists, once for each
+/// form of [`fuzz::package_manifests`], `v0/` to `v3/`, each with its
+/// manifests in that form and [`fuzz::NAME_SIBLINGS`] in its `app/src/` and
+/// `app/tests/`, and input `i` as `f{i:05}.nova` in the `app/tests/` or
+/// `app/src/` of form `i % 4`: the inputs' roots, relative to `dir`.
+fn write_package_inputs_in(dir: &Path, inputs: &[(bool, String)]) -> Vec<String> {
+    let forms = fuzz::package_manifests();
+    for (k, (app_manifest, dep_manifest)) in forms.iter().enumerate() {
+        let form = dir.join(format!("v{k}"));
+        for (path, text) in fuzz::PACKAGE_FILES {
+            let text = match path {
+                "app/nova.toml" => app_manifest.as_str(),
+                "dep/nova.toml" => dep_manifest.as_str(),
+                _ => text,
+            };
+            let path = form.join(path);
+            std::fs::create_dir_all(path.parent().expect("a parent")).expect("create a directory");
+            std::fs::write(path, text).expect("write a package's file");
+        }
+        for sub in ["src", "tests"] {
+            let app = form.join("app").join(sub);
+            std::fs::create_dir_all(&app).expect("create a package's directory");
+            for (stem, source) in fuzz::NAME_SIBLINGS {
+                std::fs::write(app.join(format!("{stem}.nova")), source).expect("write a sibling");
+            }
         }
     }
     let mut roots = Vec::with_capacity(inputs.len());
     for (i, (tests, input)) in inputs.iter().enumerate() {
-        let root = format!("{}/f{i:05}.nova", if *tests { "tests" } else { "src" });
-        std::fs::write(app.join(&root), input).expect("write a name-fuzz input");
+        let sub = if *tests { "tests" } else { "src" };
+        let root = format!("v{}/app/{sub}/f{i:05}.nova", i % forms.len());
+        std::fs::write(dir.join(&root), input).expect("write a name-fuzz input");
         roots.push(root);
     }
-    (app, roots)
+    roots
 }
 
 /// How many diagnostics of each code `dump`, a resolution dump, holds.
@@ -2933,8 +3186,11 @@ fn parts_of(dump: &str) -> Vec<&str> {
 /// Both sides give the same resolution dump of each of the name fuzzer's
 /// inputs from the fixed seeds, and every input reaches the resolver; and,
 /// from 5.2b, its inputs under test mode, its WASM sibling's for the WASM
-/// target and its package sibling's. A package's input reaches the
-/// resolver, or the loader stops it with E0004 or a noted E0001. Among
+/// target and its package sibling's, with the package's manifests in four
+/// forms, one seed's also under test mode and another's for the WASM
+/// target. A package's input reaches the resolver, or the loader stops it
+/// with E0004 or a noted E0001, and E0004 names its entry on more than one
+/// line of a manifest, as the forms place it. Among
 /// them every one of the resolver's 11 codes, E0004 and E0001's two notes
 /// occur twice or more; E0084 and E0085 only under test mode, E0090 only
 /// for the WASM target. The loose inputs of every seed are written to
@@ -2979,16 +3235,37 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
             (seed, inputs)
         })
         .collect();
-    let (wasm_dir, wasm_roots) = write_seeded_inputs("wasm-names", &wasm_inputs);
+    let (wasm_dir, mut wasm_roots) = write_seeded_inputs("wasm-names", &wasm_inputs);
+    let package_inputs: Vec<(u64, Vec<(bool, String)>)> = PACKAGE_NAME_SEEDS
+        .iter()
+        .map(|&seed| {
+            (
+                seed,
+                package_names_of(&root, &loose, seed, PACKAGE_NAME_COUNT),
+            )
+        })
+        .collect();
+    // One seed's package inputs under test mode, and another's for the WASM
+    // target, in the process of the loose inputs of that mode.
+    let mut test_roots = names_roots.clone();
+    for ((seed, inputs), (dir, roots)) in package_inputs[..2]
+        .iter()
+        .zip([(&names_dir, &mut test_roots), (&wasm_dir, &mut wasm_roots)])
+    {
+        let sub = format!("package-{seed}");
+        std::fs::create_dir_all(dir.join(&sub)).expect("create a package seed's directory");
+        let found = write_package_inputs_in(&dir.join(&sub), inputs);
+        roots.extend(found.into_iter().map(|r| format!("{sub}/{r}")));
+    }
     let (check, test, wasm, package_dumps) = std::thread::scope(|scope| {
-        let test = scope.spawn(|| agree_on_resolution_in(Mode::Test, &names_dir, &names_roots, 0));
+        let test = scope.spawn(|| agree_on_resolution_in(Mode::Test, &names_dir, &test_roots, 0));
         let wasm = scope.spawn(|| agree_on_resolution_in(Mode::Wasm, &wasm_dir, &wasm_roots, 0));
-        let packages: Vec<_> = PACKAGE_NAME_SEEDS
+        let packages: Vec<_> = package_inputs
             .iter()
-            .map(|&seed| {
-                let inputs = package_names_of(&root, &loose, seed, PACKAGE_NAME_COUNT);
-                let (app, roots) = write_package_inputs(&format!("package-names-{seed}"), &inputs);
-                scope.spawn(move || (seed, inputs.len(), agree_on_resolution(&app, &roots, 0)))
+            .map(|(seed, inputs)| {
+                let dir = fresh_dir(&format!("package-names-{seed}"));
+                let roots = write_package_inputs_in(&dir, inputs);
+                scope.spawn(move || (*seed, inputs.len(), agree_on_resolution(&dir, &roots, 0)))
             })
             .collect();
         let check = agree_on_resolution(&names_dir, &names_roots, 0);
@@ -3014,7 +3291,33 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
         assert_eq!(dump.matches("resolved=true").count(), inputs.len());
         add(&dump, Mode::Wasm, &format!("WASM seed {seed}"));
     }
-    for (seed, count, dump) in package_dumps {
+    let under_modes = [
+        (
+            Mode::Test,
+            parts_under(&test, &format!("package-{}", package_inputs[0].0)),
+        ),
+        (
+            Mode::Wasm,
+            parts_under(&wasm, &format!("package-{}", package_inputs[1].0)),
+        ),
+    ];
+    let package_parts = package_dumps
+        .into_iter()
+        .map(|(seed, count, dump)| (Mode::Check, seed, count, dump))
+        .chain(
+            under_modes
+                .into_iter()
+                .zip(&package_inputs)
+                .map(|((mode, dump), (seed, inputs))| (mode, *seed, inputs.len(), dump)),
+        );
+    // The line of each E0004's entry in a manifest, which the manifests'
+    // forms put on different lines.
+    let mut entry_lines = std::collections::BTreeSet::new();
+    for (mode, seed, count, dump) in package_parts {
+        for at in dump.split("and the entry at ").skip(1) {
+            let entry = at.split('"').next().unwrap_or("");
+            entry_lines.insert(entry.rsplit(':').next().unwrap_or("").to_string());
+        }
         let parts = parts_of(&dump);
         assert_eq!(parts.len(), count);
         for part in parts {
@@ -3026,8 +3329,16 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
             );
             assert!(part.contains(" package=0"), "{part}");
         }
-        add(&dump, Mode::Check, &format!("package seed {seed}"));
+        add(
+            &dump,
+            mode,
+            &format!("package seed {seed} ({})", mode_cases_name(mode)),
+        );
     }
+    assert!(
+        entry_lines.len() >= 2,
+        "E0004's entries all on one line of a manifest: {entry_lines:?}"
+    );
     eprintln!(
         "codes over seeds {NAME_SEEDS:?}, {WASM_NAME_SEEDS:?} and {PACKAGE_NAME_SEEDS:?}: {all:?}"
     );

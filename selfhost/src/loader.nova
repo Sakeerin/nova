@@ -25,8 +25,15 @@
 //   on Windows, where the harness reads `\` as `/` in the two messages
 //   that print a path, E0004's and E0093's (ADR 0054).
 // - A package's identity, `real_path` of its directory in nova-pm, is its
-//   directory with `.` and `x/..` folded away, which no link changes in
-//   any input of the differential.
+//   directory as the root's path and the entries' paths spell it, with
+//   `.` and `x/..` folded away (`normal_path`). Neither N's std nor its
+//   runtime names the current directory or follows a link, so this is
+//   `real_path`'s identity when no link is on the way and the root is
+//   given by an absolute path or every path is relative. Otherwise one
+//   directory spelled two ways is two packages, which N refuses as M0011,
+//   and `x/..` after a link `x` is folded where `real_path` follows the
+//   link; no input of the differential holds a link or, under a relative
+//   root, an absolute path (ADR 0054 §5).
 // - The graph's diagnostics, the M-codes, are S0's alone (ADR 0054 §5):
 //   where nova-pm would give one, or where the manifest reader refuses a
 //   manifest, `read_graph` is `Err`, and the driver prints the message and
@@ -196,6 +203,16 @@ async fn expand(mut graph: Graph, id: Int) -> Result<(), String> {
     let mut entries: Vec<(Dependency, Bool)> = Vec::new()
     for d in p.manifest.dependencies.iter() { entries.push((d, false)) }
     if id == 0 { for d in p.manifest.dev_dependencies.iter() { entries.push((d, true)) } }
+    // A version entry needs the registry, which N does not read; the
+    // reader takes one in `[dev-dependencies]` alone, which nova-pm never
+    // resolves but in the root's manifest.
+    for (d, _) in entries.iter() {
+        if d.version != "" {
+            return Err(
+                "${p.manifest_path}: dev-dependency `${d.name}` is a version entry, which needs the registry",
+            )
+        }
+    }
     // M0012: the entries' import names, together.
     let mut seen: Vec<String> = Vec::new()
     for (d, _) in entries.iter() {
@@ -244,7 +261,15 @@ async fn expand(mut graph: Graph, id: Int) -> Result<(), String> {
             if !new.has_lib { return Err("dependency `${d.name}` is not a library (M0009)") }
             for other in graph.packages.iter() {
                 if other.name == new.name {
-                    return Err("two packages named `${new.name}` in one build (M0011)")
+                    // Under a relative root, an absolute path and a
+                    // relative one may name one directory.
+                    let mixed = other.canonical.starts_with("/") != new.canonical.starts_with("/")
+                    let or_one = if mixed {
+                        ", or one directory spelled by an absolute and a relative path, which N cannot tell apart without the current directory"
+                    } else {
+                        ""
+                    }
+                    return Err("two packages named `${new.name}` in one build (M0011)${or_one}")
                 }
             }
             target = graph.packages.len()

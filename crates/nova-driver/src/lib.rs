@@ -1266,9 +1266,9 @@ fn strip_test_functions(modules: &mut [Loaded], keep_root_tests: bool) {
     }
 }
 
-/// What doc tests need of a build (spec
-/// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
-/// §7, §11.2), where only this crate can see it.
+/// The resolution dumps of packages and under test mode (5.2b, ADR 0054):
+/// the tests a dump lists are `nova test`'s, and std resolved once dumps
+/// what std resolved for each program dumps.
 #[cfg(test)]
 mod resolution_dumps {
     use super::*;
@@ -1543,6 +1543,9 @@ mod resolution_dumps {
     }
 }
 
+/// What doc tests need of a build (spec
+/// `docs/superpowers/specs/2026-10-11-phase-3-5b-doc-tests-design.md`
+/// §7, §11.2), where only this crate can see it.
 #[cfg(test)]
 mod doc_test_builds {
     use super::*;

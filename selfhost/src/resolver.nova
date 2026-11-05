@@ -523,8 +523,9 @@ pub record SharedStd {
     // from 0): each such std module's exported values, types and traits
     // in order, their definitions numbered from 0.
     pub globs: Vec<(Vec<(String, Res)>, Vec<(String, Int)>, Vec<(String, Int)>)>,
-    // Whether resolving std gave no diagnostic beyond parsing it; else a
-    // program is resolved in full.
+    // Whether resolving std gave no diagnostic beyond parsing it and found
+    // no `@test` function, which the shared path would drop; else a program
+    // is resolved in full.
     pub shareable: Bool,
 }
 
@@ -558,7 +559,7 @@ pub fn share_std(target: CompileTarget, std_set: StdSet) -> SharedStd {
         variants: std_globbed_variants(alone.definitions, exports, all, 0),
         missing: alone.definitions.missing,
         globs: globs,
-        shareable: alone.diagnostics.len() == parsed,
+        shareable: alone.diagnostics.len() == parsed && alone.tests.is_empty(),
     }
 }
 

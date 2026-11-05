@@ -81,7 +81,8 @@ async fn main() {
 // (--std-part | FILE...)`: std's modules are read from DIR and parsed
 // once, then std's part, or each program's part after its header, for
 // the target, natively by default, under test mode with `--test`. Each
-// option is taken once. Without `--std DIR`, with a target other than
+// option is taken once, and the target also as `--target=VALUE`, as
+// clap takes it for S0. Without `--std DIR`, with a target other than
 // `native` or `wasm`, or with neither `--std-part` nor a file, or with
 // both, nothing is printed and the exit code is 2, as S0's `check
 // --dump-resolution` gives; `--test` with `--target wasm` too, which S0
@@ -100,6 +101,15 @@ async fn resolve_command(argv: Vec<String>) {
     let mut i = 2
     while i < argv.len() {
         let a = argv.at(i)
+        if a.starts_with("--target=") {
+            // `--target=VALUE`, as clap takes it for S0; an empty value is
+            // refused.
+            if target_name != "" { bad = true }
+            target_name = a.byte_slice(9, a.byte_len())
+            if target_name == "" { bad = true }
+            i += 1
+            continue
+        }
         if (a == "--std" || a == "--target") && i + 1 < argv.len() {
             let value = argv.at(i + 1)
             if a == "--std" {

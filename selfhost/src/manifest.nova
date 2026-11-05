@@ -19,22 +19,29 @@
 //   `version` and `edition`, which must be there, `description`,
 //   `license` and `repository` as strings, `authors`, `keywords` and
 //   `categories` as arrays of strings on one line;
-// - in the dependency tables, `key = { path = "..." }` on one line;
+// - in the dependency tables, `key = { path = "..." }` on one line, and
+//   in `[dev-dependencies]` also a version entry, `key = "REQ"` or
+//   `key = { version = "REQ" }`, whose requirement is a version of one to
+//   three numbers after `^`, `~`, `=` or nothing, which only a
+//   dependency's manifest may hold, where nova-pm reads it and never
+//   resolves it (the graph refuses one in the root's manifest);
 // - bare keys, and strings in `"..."` without an escape or in `'...'`.
 //
 // Anything else, among it what S0 would warn about (an unknown key,
-// M0006) or reject (a version entry, which needs the registry; a name or
-// a version nova-pm refuses; an edition other than 2026), is refused. A
-// version is any semver takes with no build metadata, a pre-release
-// included, as nova-pm takes it.
+// M0006) or reject (a version entry in `[dependencies]`, which needs the
+// registry; a name or a version nova-pm refuses; an edition other than
+// 2026), is refused, and so is any other requirement. A version is any
+// semver takes with no build metadata, a pre-release included, each of
+// its three numbers at most `u64::MAX`, as nova-pm takes it.
 
 import builtins
 import lexer
 import token
 
-/// A path entry of `[dependencies]` or `[dev-dependencies]`
-/// (nova-pm's `Dependency`): its key, its `path`, and where its key is.
-pub record Dependency { pub name: String, pub path: String, pub span: Span }
+/// An entry of `[dependencies]` or `[dev-dependencies]` (nova-pm's
+/// `Dependency`): its key, its `path`, or "" for a version entry, its
+/// requirement, or "" for a path entry, and where its key is.
+pub record Dependency { pub name: String, pub path: String, pub version: String, pub span: Span }
 
 /// What the loader reads of a `nova.toml` (nova-pm's `Manifest`): the
 /// package's name, where `[package]` is, from its header to its last
@@ -161,6 +168,7 @@ pub fn parse_manifest(text: String) -> Result<Manifest, String> {
                         text,
                         skip_space(text, eq + 1, end),
                         end,
+                        key == "dev-dependencies",
                     )?
                     if !line_ends(text, entries_end, end) {
                         return Err("only a comment may follow the value of `${key}`")
@@ -205,15 +213,12 @@ pub fn parse_manifest(text: String) -> Result<Manifest, String> {
                         ValueTable(_) => return Err("`package.${key}` may not be a table")
                     }
                 } else {
-                    let path = match value {
-                        ValueTable(fields) => path_of(key, fields)?
-                        _ => return Err("dependency `${key}` must be `{ path = \"...\" }`")
-                    }
-                    let d = Dependency {
-                        name: key,
-                        path: path,
-                        span: Span { start: i, end: k_end },
-                    }
+                    let d = entry(
+                        key,
+                        value,
+                        table == "dev-dependencies",
+                        Span { start: i, end: k_end },
+                    )?
                     if table == "dependencies" {
                         dependencies.push(d)
                     } else {
@@ -258,13 +263,42 @@ pub fn import_name(name: String) -> String {
 /// (nova-pm's `is_keyword`).
 pub fn is_keyword(name: String) -> Bool { holds(KEYWORDS, name) }
 
-// The `path` of the dependency `key`'s inline table, which must hold it
-// alone: a `version` needs the registry, and any other key is M0006.
-fn path_of(key: String, fields: Vec<(String, String)>) -> Result<String, String> {
-    if fields.len() != 1 { return Err("dependency `${key}` must be `{ path = \"...\" }` alone") }
-    let (field, path) = fields.at(0)
-    if field != "path" { return Err("dependency `${key}` must be `{ path = \"...\" }`") }
-    Ok(path)
+// The entry `key = value` at `span`: a `path` alone in an inline table,
+// or, where `versions` (in `[dev-dependencies]`), a requirement
+// [`is_requirement`] takes, as a string or a `version` alone in an inline
+// table. A `version` in `[dependencies]` needs the registry, a `version`
+// beside a `path` is M0003, and any other key is M0006.
+fn entry(key: String, value: Value, versions: Bool, span: Span) -> Result<Dependency, String> {
+    let (field, text) = match value {
+        ValueString(s) => ("version", s)
+        ValueTable(fields) => {
+            if fields.len() != 1 {
+                return Err("dependency `${key}` must be `{ path = \"...\" }` alone")
+            }
+            fields.at(0)
+        }
+        ValueArray(_) => ("", "")
+    }
+    if field == "path" { return Ok(Dependency { name: key, path: text, version: "", span: span }) }
+    if field == "version" && versions && is_requirement(text) {
+        return Ok(Dependency { name: key, path: "", version: text, span: span })
+    }
+    Err("dependency `${key}` must be `{ path = \"...\" }`")
+}
+
+// Whether `text` is a requirement this reader takes, one semver's
+// `VersionReq::parse` surely takes: `^`, `~`, `=` or nothing, then one to
+// three numbers between dots, each without a leading zero and at most
+// `u64::MAX`.
+fn is_requirement(text: String) -> Bool {
+    let mut rest = text
+    if rest.starts_with("^") || rest.starts_with("~") || rest.starts_with("=") {
+        rest = rest.byte_slice(1, rest.byte_len())
+    }
+    let parts = rest.split(".")
+    if parts.len() > 3 { return false }
+    for p in parts.iter() { if !is_u64(p) { return false } }
+    true
 }
 
 // nova-pm's `check_name`: ASCII letters, digits, `-` and `_`, starting
@@ -304,7 +338,26 @@ fn is_version(text: String) -> Bool {
     }
     let parts = rest.split(".")
     if parts.len() != 3 { return false }
-    for p in parts.iter() { if !is_number(p) { return false } }
+    for p in parts.iter() { if !is_u64(p) { return false } }
+    true
+}
+
+// Whether `text` is a number without a leading zero that fits `u64`, as
+// semver reads a version's and a requirement's numbers: at most 20
+// digits, and 20 only up to `18446744073709551615`.
+fn is_u64(text: String) -> Bool {
+    if !is_number(text) { return false }
+    let n = text.byte_len()
+    if n < 20 { return true }
+    if n > 20 { return false }
+    let max = "18446744073709551615"
+    let mut i = 0
+    while i < n {
+        let a = text.byte_at(i)
+        let b = max.byte_at(i)
+        if a != b { return a < b }
+        i += 1
+    }
     true
 }
 
@@ -352,11 +405,13 @@ fn is_number(text: String) -> Bool {
 
 // The inline table of dependencies starting at `i`, before `end`, and
 // where it ends: `{}`, or `{ key = { path = "..." }, ... }` on one line,
-// each key bare and once.
+// each key bare and once, and where `versions` each entry also as
+// [`entry`] takes it.
 fn parse_dependency_table(
     text: String,
     i: Int,
     end: Int,
+    versions: Bool,
 ) -> Result<(Vec<Dependency>, Int), String> {
     let mut entries: Vec<Dependency> = Vec::new()
     if i >= end || text.byte_at(i) != 123 {
@@ -375,11 +430,7 @@ fn parse_dependency_table(
             if d.name == key { return Err("the key `${key}` is written twice") }
         }
         let (value, after) = parse_value(text, skip_space(text, eq + 1, end), end)?
-        let path = match value {
-            ValueTable(fields) => path_of(key, fields)?
-            _ => return Err("dependency `${key}` must be `{ path = \"...\" }`")
-        }
-        entries.push(Dependency { name: key, path: path, span: Span { start: j, end: k_end } })
+        entries.push(entry(key, value, versions, Span { start: j, end: k_end })?)
         j = skip_space(text, after, end)
         if j < end && text.byte_at(j) == 125 { return Ok((entries, j + 1)) }
         if j >= end || text.byte_at(j) != 44 {

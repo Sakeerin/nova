@@ -2342,8 +2342,10 @@ pub struct SharedStd {
     variants: FxHashMap<String, String>,
     missing: FxHashMap<String, &'static str>,
     /// Whether resolving std gave no diagnostic of its own, beyond parsing
-    /// it: one would come between a program's, so a program is then
-    /// resolved by [`resolve_program_with_std`].
+    /// it, and found no `@test` function: a diagnostic would come between
+    /// a program's, and a test would be listed with a program's, which the
+    /// shared path drops, so a program is then resolved by
+    /// [`resolve_program_with_std`].
     shareable: bool,
 }
 
@@ -2366,7 +2368,7 @@ impl SharedStd {
             .collect();
         let variants =
             std_globbed_variants(&alone.definitions, &alone.definitions.exports, &all, 0);
-        let shareable = alone.diagnostics.len() == std.diagnostics.len();
+        let shareable = alone.diagnostics.len() == std.diagnostics.len() && alone.tests.is_empty();
         SharedStd {
             target,
             exports: alone.definitions.exports,
@@ -2387,7 +2389,7 @@ impl SharedStd {
 /// module's exports, which is what the dump prints. Not for the type
 /// checker: std's definitions, scopes, items and import occurrences are
 /// not in it. A program whose resolution would differ, because std's gave
-/// a diagnostic, is resolved in full.
+/// a diagnostic or holds a `@test` function, is resolved in full.
 pub fn resolve_program_with_shared_std(
     modules: &[ModuleSource],
     shared: &SharedStd,

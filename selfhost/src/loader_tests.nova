@@ -380,6 +380,18 @@ fn the_manifest_readers_accepted_and_refused_forms_are_pinned() {
         "dev-dependencies = { geom = { path = \"../geom\" }, h = {path='h'} }\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
         "${char_from_int(65279).unwrap()}[package]\nname = \"app\"\nversion = \"1.2.3-alpha.1\"\nedition = \"2026\"\n",
         "[package]\nname = \"app\"\nversion = \"1.0.0-x-y.0.a\"\nedition = \"2026\"\n",
+        // Each number at most `u64::MAX`, a pre-release's unbounded, as
+        // semver reads them; a name of 64 characters.
+        "[package]\nname = \"app\"\nversion = \"18446744073709551615.18446744073709551615.18446744073709551615\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"1.0.0-99999999999999999999\"\nedition = \"2026\"\n",
+        manifest_of("a123456789012345678901234567890123456789012345678901234567890123", ""),
+        // A version entry in `[dev-dependencies]`, which nova-pm reads and,
+        // in a dependency's manifest, never resolves.
+        manifest_of(
+            "app",
+            "[dev-dependencies]\na = \"1\"\nb = '^1.2'\nc = { version = \"~0.1.2\" }\nd = \"=18446744073709551615\"\n",
+        ),
+        "dev-dependencies = { a = \"1.0\", b = { version = \"2\" } }\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
     ]
     for text in accepted.iter() {
         match parse_manifest(text) {
@@ -423,6 +435,28 @@ fn the_manifest_readers_accepted_and_refused_forms_are_pinned() {
         "[package]\r\nname = \"app\"\r\nversion = \"0.1.0\"\r\nedition = \"2026\"\r",
         manifest_of("app", "# a\rb\n"),
         manifest_of("app", "# a\0b\n"),
+        manifest_of("app", "# a${char_from_int(127).unwrap()}b\n"),
+        // A name of 65 characters; four numbers; a number over `u64::MAX`,
+        // in each place.
+        manifest_of("a1234567890123456789012345678901234567890123456789012345678901234", ""),
+        "[package]\nname = \"app\"\nversion = \"1.0.0.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"18446744073709551616.0.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.18446744073709551616.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.0.18446744073709551616\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"99999999999999999999.0.0\"\nedition = \"2026\"\n",
+        "[package]\nname = \"app\"\nversion = \"0.0.100000000000000000000\"\nedition = \"2026\"\n",
+        // A version entry in `[dependencies]`, or one beside a path, or a
+        // requirement outside the reader's.
+        manifest_of("app", "[dependencies]\na = \"1\"\n"),
+        manifest_of("app", "[dependencies]\na = { version = \"1\" }\n"),
+        manifest_of("app", "[dev-dependencies]\na = { version = \"1\", path = \"a\" }\n"),
+        manifest_of("app", "[dev-dependencies]\na = \"01\"\n"),
+        manifest_of("app", "[dev-dependencies]\na = \"1.2.3.4\"\n"),
+        manifest_of("app", "[dev-dependencies]\na = \"18446744073709551616\"\n"),
+        manifest_of("app", "[dev-dependencies]\na = \"\"\n"),
+        manifest_of("app", "[dev-dependencies]\na = \"*\"\n"),
+        manifest_of("app", "[dev-dependencies]\na = \">=1\"\n"),
+        manifest_of("app", "[dev-dependencies]\na = []\n"),
     ]
     for text in refused.iter() {
         match parse_manifest(text) {
@@ -455,7 +489,9 @@ fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
     // manifest (M0007), an entry whose key is not the package's name
     // (M0008), a dependency with no library (M0009), a cycle and a
     // dependency on the package itself (M0010), and an import name taken
-    // twice (M0012).
+    // twice (M0012); and as the reader would refuse it: a dependency's
+    // version over `u64::MAX` (M0003), and a version entry among the
+    // root's dev-dependencies, which needs the registry.
     let dir = "${temp_dir()}/nova-selfhost-graph-test"
     let cases = [
         ("missing", "[dependencies]\ngeom = { path = \"nowhere\" }\n", "(M0007)"),
@@ -467,6 +503,16 @@ fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
             "twice",
             "[dependencies]\ngeom = { path = \"geom\" }\n[dev-dependencies]\ngeom = { path = \"geom\" }\n",
             "two entries are imported as `geom` (M0012)",
+        ),
+        (
+            "huge",
+            "[dependencies]\nhuge = { path = \"huge\" }\n",
+            "huge/nova.toml: `0.0.18446744073709551616` is not a version this reader takes",
+        ),
+        (
+            "registry",
+            "[dev-dependencies]\njson = \"1.0\"\n",
+            "dev-dependency `json` is a version entry, which needs the registry",
         ),
     ]
     for (name, deps, why) in cases.iter() {
@@ -490,6 +536,11 @@ fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
                     manifest_of("back", "[dependencies]\nloop = { path = \"..\" }\n"),
                 ),
                 ("loop/back/src/lib.nova", "pub fn b() {}\n"),
+                (
+                    "huge/nova.toml",
+                    "[package]\nname = \"huge\"\nversion = \"0.0.18446744073709551616\"\nedition = \"2026\"\n",
+                ),
+                ("huge/src/lib.nova", "pub fn h() {}\n"),
             ],
         )
         match block_on(read_graph(root)) {
@@ -510,6 +561,22 @@ fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
             Ok(_) => assert(false, "refused: ${name}")
             Err(message) => assert(message.contains(why), "${name}: ${message}")
         }
+    }
+    // A dependency's own version entries, which nova-pm reads and never
+    // resolves, are read and left alone.
+    let root = "${dir}/devversions"
+    write_tree(
+        root,
+        [
+            ("nova.toml", manifest_of("app", "[dependencies]\ngeom = { path = \"geom\" }\n")),
+            ("src/main.nova", "fn main() {}\n"),
+            ("geom/nova.toml", manifest_of("geom", "[dev-dependencies]\njson = \"1.0\"\n")),
+            ("geom/src/lib.nova", "pub fn g() {}\n"),
+        ],
+    )
+    match block_on(read_graph(root)) {
+        Ok(g) => assert_eq(g.packages.len(), 2)
+        Err(message) => assert(false, "devversions: ${message}")
     }
     let _ = block_on(remove_dir_all(dir))
 }

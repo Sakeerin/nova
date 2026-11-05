@@ -1066,4 +1066,90 @@ mod tests {
             assert!(listed(severity_kind(severity)), "{severity:?}");
         }
     }
+
+    /// std resolved once ([`crate::SharedStd`], 5.2b, ADR 0054 §9) is
+    /// shared only when std alone gives no diagnostic and holds no `@test`
+    /// function, either of which the shared path would drop: with a std
+    /// whose `core` defines a name twice (E0002), or whose `ui` marks a
+    /// function `@test`, each program is resolved in full, and its dump,
+    /// under `check` and under test mode, is the full path's, std's E0002
+    /// or std's test kept.
+    #[test]
+    fn std_with_a_diagnostic_or_a_test_is_resolved_for_each_program() {
+        let alterations = [
+            (
+                "$std.core",
+                "fn mix64(x: Int) -> Int {",
+                "fn escape_common(x: Int) -> Int {",
+                "(Error \"E0002\" \"duplicate definition of `escape_common`\"",
+            ),
+            (
+                "$std.ui",
+                "\nfn flush() {",
+                "\n@test\nfn flush() {",
+                " \"flush\" should_panic=false)",
+            ),
+        ];
+        for (module, old, new, mark) in alterations {
+            let mut db = FileDb::new();
+            let main_id = db.add("main.nova", MAIN);
+            let lib_id = db.add("lib.nova", LIB);
+            let mut labels = vec![(main_id, "main".to_string()), (lib_id, "lib".to_string())];
+            let mut texts = Vec::new();
+            for &(name, src) in &STD_MODULES {
+                let text = if name == module {
+                    assert_eq!(src.matches(old).count(), 1, "{module}: {old}");
+                    src.replacen(old, new, 1)
+                } else {
+                    src.to_string()
+                };
+                let label = format!("<std/{}>", name.strip_prefix("$std.").unwrap_or(name));
+                let id = db.add(label.clone(), text.clone());
+                labels.push((id, label));
+                texts.push((name, text, id));
+            }
+            let mut diagnostics = Vec::new();
+            let modules = texts
+                .iter()
+                .map(|(name, text, id)| {
+                    let (file, diags) = crate::std_module(text, *id);
+                    diagnostics.extend(diags);
+                    (name.to_string(), file)
+                })
+                .collect();
+            let parsed = crate::ParsedStd {
+                modules,
+                diagnostics,
+            };
+            let shared = crate::SharedStd::new(CompileTarget::Native, parsed);
+            assert!(!shared.shareable, "{module}");
+            let main = parse(MAIN, main_id);
+            let lib = parse(LIB, lib_id);
+            let mut sources = [
+                ModuleSource::new("main", &main),
+                ModuleSource::new("lib", &lib),
+            ];
+            name_imports(&mut sources);
+            sources[0].text = Some(MAIN);
+            sources[1].text = Some(LIB);
+            let full =
+                crate::resolve_program_with_std(CompileTarget::Native, &sources, shared.parsed());
+            let once = crate::resolve_program_with_shared_std(&sources, &shared);
+            for test in [false, true] {
+                let dump = |r: &crate::ProgramResolution| {
+                    dump_program(
+                        CompileTarget::Native,
+                        test,
+                        &sources,
+                        &labels,
+                        Some(r),
+                        &r.diagnostics,
+                    )
+                };
+                let (want, got) = (dump(&full), dump(&once));
+                assert!(want.contains(mark), "{module}: {want}");
+                assert_eq!(got, want, "{module}, test mode {test}");
+            }
+        }
+    }
 }
