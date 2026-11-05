@@ -638,17 +638,23 @@ in the 5.2b plan's last task.
 
 | input | runtime | wall | peak RSS | collections | median pause | p95 | max | total GC | max live |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| `selfhost/src/main.nova`, a package root, all 23 of N's modules | debug | 1.25 s | 32.8 MB | 15 | 16.8 ms | 83.8 ms | 102.3 ms | 462 ms | 9.9 MB |
-| std's native part (`--std-part`) | debug | 0.54 s | 16.9 MB | 12 | 12.8 ms | 41.8 ms | 57.2 ms | 224 ms | 6.7 MB |
-| std's WASM part (`--target wasm --std-part`) | debug | 0.61 s | 19.1 MB | 12 | 12.2 ms | 44.9 ms | 58.4 ms | 240 ms | 5.5 MB |
-| `selfhost/src/main.nova` | release | 0.29 s | 31.8 MB | 15 | 4.5 ms | 23.2 ms | 29.8 ms | 132 ms | 9.9 MB |
-| std's native part | release | 0.13 s | 16.1 MB | 12 | 5.4 ms | 10.7 ms | 16.8 ms | 70 ms | 6.7 MB |
-| std's WASM part | release | 0.14 s | 18.3 MB | 12 | 5.0 ms | 10.7 ms | 13.1 ms | 67 ms | 5.5 MB |
+| `selfhost/src/main.nova`, a package root, all 23 of N's modules | debug | 1.08 s | 36.9 MB | 15 | 15.3 ms | 70.3 ms | 93.5 ms | 396 ms | 10.0 MB |
+| std's native part (`--std-part`) | debug | 0.48 s | 16.8 MB | 12 | 10.7 ms | 32.1 ms | 47.1 ms | 185 ms | 6.7 MB |
+| std's WASM part (`--target wasm --std-part`) | debug | 0.55 s | 19.0 MB | 12 | 9.7 ms | 30.1 ms | 44.3 ms | 170 ms | 5.5 MB |
+| `selfhost/src/main.nova` | release | 0.26 s | 36.1 MB | 15 | 3.9 ms | 18.1 ms | 29.0 ms | 105 ms | 10.0 MB |
+| std's native part | release | 0.11 s | 16.0 MB | 12 | 2.4 ms | 8.0 ms | 11.1 ms | 47 ms | 6.7 MB |
+| std's WASM part | release | 0.13 s | 18.2 MB | 12 | 2.5 ms | 7.2 ms | 9.9 ms | 41 ms | 5.5 MB |
 
-No threshold is set. The pauses grow with the live heap, about 10 ms a
+These are the split's figures, with std resolved once (§9). Before it,
+part B measured the root at 32.8 MB of peak RSS and a 102.3 ms longest
+pause with the debug runtime, 31.8 MB and 29.8 ms with the release one:
+std's state, resolved alone and kept for every root, adds about 4 MB of
+peak to a run of one root, and the pauses are the same within noise.
+
+No threshold is set. The pauses grow with the live heap, about 9 ms a
 live MB at the largest with the debug runtime and 3 ms with the release
 one, as the research found (7 to 8 and 2 to 3), and the collector takes
-37 to 45% of N's time on these inputs. For 5.3, which holds a type on
+31 to 41% of N's time on these inputs. For 5.3, which holds a type on
 every node of std as well, a live heap five to ten times this one would
 give pauses of about 0.5 to 1 s with the debug runtime and 0.15 to 0.3 s
 with a release one: slower runs, not a failure, since N is a batch
