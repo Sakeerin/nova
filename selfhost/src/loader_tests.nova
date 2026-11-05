@@ -430,27 +430,46 @@ fn the_manifest_readers_accepted_and_refused_forms_are_pinned() {
             Err(_) => ()
         }
     }
+    // Some refusals' words, as N's refusal line prints them: a check
+    // another would back up still says what it refuses.
+    let worded = [
+        ("", "there is no `[package]` table"),
+        ("[package]\nname = \"app\"\nedition = \"2026\"\n", "`[package]` has no `version`"),
+        (
+            "x = { path = \"g\" }\n[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+            "the key `x` is outside every table",
+        ),
+    ]
+    for (text, message) in worded.iter() {
+        match parse_manifest(text) {
+            Ok(_) => assert(false, "refused: ${text}")
+            Err(why) => assert_eq(why, message)
+        }
+    }
 }
 
 @test
 fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
     // Each would be an M-code in S0's graph, which N does not give, so
-    // N's graph refuses it: a dependency's directory with no manifest
-    // (M0007), an entry whose key is not the package's name (M0008), a
-    // dependency with no library (M0009), a cycle (M0010), and an import
-    // name taken twice (M0012).
+    // N's graph refuses it, saying which: a dependency's directory with no
+    // manifest (M0007), an entry whose key is not the package's name
+    // (M0008), a dependency with no library (M0009), a cycle and a
+    // dependency on the package itself (M0010), and an import name taken
+    // twice (M0012).
     let dir = "${temp_dir()}/nova-selfhost-graph-test"
     let cases = [
-        ("missing", "[dependencies]\ngeom = { path = \"nowhere\" }\n"),
-        ("renamed", "[dependencies]\nother = { path = \"geom\" }\n"),
-        ("nolib", "[dependencies]\nbare = { path = \"bare\" }\n"),
-        ("cycle", "[dependencies]\nloop = { path = \"loop\" }\n"),
+        ("missing", "[dependencies]\ngeom = { path = \"nowhere\" }\n", "(M0007)"),
+        ("renamed", "[dependencies]\nother = { path = \"geom\" }\n", "(M0008)"),
+        ("nolib", "[dependencies]\nbare = { path = \"bare\" }\n", "(M0009)"),
+        ("cycle", "[dependencies]\nloop = { path = \"loop\" }\n", "a dependency cycle"),
+        ("self", "[dependencies]\nme = { path = \".\" }\n", "is its own package (M0010)"),
         (
             "twice",
             "[dependencies]\ngeom = { path = \"geom\" }\n[dev-dependencies]\ngeom = { path = \"geom\" }\n",
+            "two entries are imported as `geom` (M0012)",
         ),
     ]
-    for (name, deps) in cases.iter() {
+    for (name, deps, why) in cases.iter() {
         let root = "${dir}/${name}"
         write_tree(
             root,
@@ -475,7 +494,21 @@ fn the_graph_refuses_what_nova_pm_gives_an_m_code() {
         )
         match block_on(read_graph(root)) {
             Ok(_) => assert(false, "refused: ${name}")
-            Err(_) => ()
+            Err(message) => assert(message.contains(why), "${name}: ${message}")
+        }
+    }
+    // The root package alone: neither src/lib.nova nor src/main.nova
+    // (M0013), and a library imported as a keyword (M0012).
+    let alone = [
+        ("noentry", "app", "src/other.nova", "has neither src/lib.nova nor src/main.nova (M0013)"),
+        ("keyword", "fn", "src/lib.nova", "would be imported as a keyword (M0012)"),
+    ]
+    for (name, package, file, why) in alone.iter() {
+        let root = "${dir}/${name}"
+        write_tree(root, [("nova.toml", manifest_of(package, "")), (file, "pub fn a() {}\n")])
+        match block_on(read_graph(root)) {
+            Ok(_) => assert(false, "refused: ${name}")
+            Err(message) => assert(message.contains(why), "${name}: ${message}")
         }
     }
     let _ = block_on(remove_dir_all(dir))

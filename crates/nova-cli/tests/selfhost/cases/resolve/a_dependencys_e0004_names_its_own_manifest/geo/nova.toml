@@ -1,0 +1,10 @@
+[package]
+name = "geo"
+version = "0.1.0"
+edition = "2026"
+
+[dependencies]
+units = { path = "units" }
+
+[dev-dependencies]
+ghost = { path = "ghost" }

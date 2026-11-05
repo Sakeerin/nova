@@ -282,7 +282,9 @@ it has them moved under `pkgs/`, its manifests' `path`s rewritten. Named
 `<file>__<test>[_n]` as 5.2a's; a test that ran `nova` is named by its
 temporary directory. The 5.2a cases holding a `@test` are copied to
 `resolve-test/`, since `check` strips what they test. Hand cases (names
-without `__`): E0004, a package module named `ui` (E0093), E0001's two
+without `__`): E0004, E0004 inside a dependency (its secondary label
+that dependency's manifest, which also has a dev-dependency the graph
+never reads), a package module named `ui` (E0093), E0001's two
 notes, a dependency's modules labelled by its import name with a dropped
 fix and an E0102 in it, a dependency's tests stripped while a `tests/`
 file names its own, a `tests/` file's dev-dependency and siblings, every
@@ -290,8 +292,8 @@ file names its own, a `tests/` file's dev-dependency and siblings, every
 E0092, `dom` and `ui` imported on WASM, and a WASM package whose dependency
 has an `extern` block.
 
-At part A: `resolve/` 141 programs (103 of 5.2a, and 26 packages with 38
-roots), `resolve-wasm/` 30, `resolve-test/` 126 (37 packages with 71
+At the split: `resolve/` 142 programs (103 of 5.2a, and 27 packages with
+39 roots), `resolve-wasm/` 30, `resolve-test/` 126 (37 packages with 71
 roots). 5.1's token and AST differentials read them too, `nova fmt`'s gate
 skips `cases/`, and the CRLF test copies all three directories,
 `nova.toml`s included.
@@ -374,7 +376,8 @@ refuses or one with build metadata (`+...`, M0003; a pre-release is
 read), an edition other than 2026, and a
 control character other than a tab, a line feed and a `\r` before one,
 as TOML refuses it. N's test `the_manifest_readers_accepted_and_refused_forms_are_pinned`
-pins this table: 11 texts read and 33 refused; S0 reads each of the 11
+pins this table: 11 texts read and 33 refused, and three refusals'
+words; S0 reads each of the 11
 with no M-code, gives 30 of the 33 an M-code, and reads the other three
 (a quoted key, an array over two lines, a multi-line string), which no
 manifest of the repository holds.
@@ -440,8 +443,8 @@ Every input part A ran through S0 alone is now compared byte for byte
 with N, exit codes included: std's native, WASM and test-mode parts; the
 corpus natively, 251 loose programs and 67 files directly in a package's
 `src/` or `tests/` (318, §4), its 39 WASM programs for the WASM target
-and its 9 files with tests under test mode; the cases, `resolve/` 141
-programs (38 a package's roots), `resolve-wasm/` 30 and `resolve-test/`
+and its 9 files with tests under test mode; the cases, `resolve/` 142
+programs (39 a package's roots), `resolve-wasm/` 30 and `resolve-test/`
 126, and all of them again with `\r\n`; and the name fuzzer's fixed
 seeds: 150 loose inputs under `check` and under test mode, 60 WASM
 inputs and 90 package inputs. The floors part A set on these counts stay
@@ -600,7 +603,7 @@ is `variant_shadowing` split around the variants it reads
 registers std's files once and copies them for each root. The driver's
 test `std_resolved_once_dumps_what_std_resolved_for_each_program_dumps`
 compares S0's shared and unshared dumps byte for byte over the corpus
-and the cases of each mode (`check`, the WASM target, test mode; 459,
+and the cases of each mode (`check`, the WASM target, test mode; 460,
 69 and 135 roots), in order and reversed; the differential compares N's
 shared dumps with S0's. The harness also runs std's three parts side by
 side and the corpus's packages in three processes a side, root `i` in

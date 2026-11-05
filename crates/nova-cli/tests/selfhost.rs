@@ -988,10 +988,11 @@ fn both_sides_take_test_in_every_position_alike() {
 }
 
 /// A root whose package's manifest N's minimal reader refuses (ADR 0054
-/// §5): S0 dumps it with the package graph's M-code, and N, which gives no
-/// M-code, prints nothing of it, says why on stderr, naming the manifest,
-/// and exits 1. No input of the differential has such a manifest; this
-/// pins what N does instead of printing a partial dump.
+/// §5): S0 dumps it with the package graph's M-code, an error stopping
+/// it before the loader, and N, which gives no M-code, prints nothing of
+/// it, says why on stderr, naming the manifest, and exits 1. No input
+/// of the differential has such a manifest; this pins what N does
+/// instead of printing a partial dump.
 #[test]
 fn a_manifest_n_cannot_read_stops_n_with_a_message() {
     let dir = fresh_dir("resolution-refused");
@@ -1015,6 +1016,14 @@ fn a_manifest_n_cannot_read_stops_n_with_a_message() {
         let stdout = String::from_utf8_lossy(&s0.stdout);
         assert_eq!(s0.status.code(), Some(0), "{name}: {stdout}");
         assert!(stdout.contains("\"M00"), "{name}: {stdout}");
+        // An error among the graph's M-codes stops S0 before the loader,
+        // with no module; the unknown key's warning does not.
+        let stopped = format!("== {root}\n(Program target=native resolved=false)\n(Diagnostics\n");
+        assert_eq!(
+            stdout.starts_with(&stopped),
+            name == "registry",
+            "{name}: {stdout}"
+        );
         let n = Command::new(selfhost())
             .current_dir(&dir)
             .args(resolution().n)
@@ -1905,7 +1914,8 @@ fn agree_on_resolution_in(mode: Mode, dir: &Path, files: &[String], code: i32) -
 /// side, root `i` in part `i % parts`: for a set whose roots are slow to
 /// load, the corpus's packages (`selfhost/src/`'s each reach most of N),
 /// which in one process would make the longest wait of the file. Returns
-/// S0's output, each root's part in the roots' order.
+/// S0's output, each root's part in the roots' order, each checked to be
+/// its root's, and none left over, so no root is dropped or dealt twice.
 fn agree_on_resolution_in_parts(
     mode: Mode,
     dir: &Path,
@@ -1939,9 +1949,19 @@ fn agree_on_resolution_in_parts(
         })
         .collect();
     let mut all = String::new();
-    for i in 0..files.len() {
-        all.push_str(&split[i % parts].pop_front().expect("each root's part"));
+    for (i, root) in files.iter().enumerate() {
+        let part = split[i % parts].pop_front().expect("each root's part");
+        assert!(
+            part.starts_with(&format!("== {root}\n")),
+            "root {i}, {root}, was dealt the part of {}",
+            part.lines().next().unwrap_or("")
+        );
+        all.push_str(&part);
     }
+    assert!(
+        split.iter().all(|s| s.is_empty()),
+        "a part no root was dealt"
+    );
     all
 }
 
@@ -2319,7 +2339,7 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
         }
         (check, wasm_dumps, test_dumps, counts)
     });
-    // 103 cases at 5.2a; at 5.2b 141 programs under `check` (38 of them a
+    // 103 cases at 5.2a; at 5.2b 142 programs under `check` (39 of them a
     // package's roots), 30 for the WASM target and 126 under test mode.
     assert!(counts[0] >= 130, "only {} resolver cases", counts[0]);
     assert!(counts[1] >= 25, "only {} WASM cases", counts[1]);
