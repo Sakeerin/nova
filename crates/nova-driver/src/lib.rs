@@ -17,6 +17,9 @@ pub use nova_codegen_cranelift::CompiledProgram;
 /// test (spec 5.2 §3.4).
 pub use nova_resolver::dump as resolution_dump;
 pub use nova_resolver::CompileTarget as Target;
+/// The HIR dump's forms, for the self-hosted type checker's differential
+/// test (spec 5.3 §3.3).
+pub use nova_typeck::dump as hir_dump;
 pub use program::{package_of, Program, Root, RootKind, Roots};
 pub use runtime_cache::{set_embedded_runtime, EmbeddedRuntime};
 

@@ -31,6 +31,15 @@
 //!    [`PACKAGE_FILES`] lays out, with its sibling modules, a dependency,
 //!    a dev-dependency and a module named as a dependency.
 //!
+//! 5. [`type_mutate`] (5.3a, spec
+//!    `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
+//!    §3.6): a corpus program that checks at the item level, mutated at
+//!    the level of items, so that the item passes' codes occur among the
+//!    fixed seeds' inputs: a parameter's, a return's or a field's type, a
+//!    duplicated generic, a trait impl's method dropped, added or retyped,
+//!    an impl duplicated, and items appended that give each aimed code.
+//!    5.3b adds the body mutations.
+//!
 //! Beside them, [`edges`]: fixed inputs that no file under `cases/` can
 //! hold as it is, such as a lone `\r` or a NUL.
 
@@ -1009,4 +1018,211 @@ pub fn package_name_mutate(rng: &mut SplitMix64, source: &str, stem: &str) -> (b
 /// fuzzer starts from.
 pub fn parses(source: &str) -> bool {
     named_items(source).is_some()
+}
+
+/// A type that the item passes refuse, for [`type_mutate`]'s retyping:
+/// E0001 (a type nowhere, `_`), E0012 (arities) and E0900 (the types not
+/// supported yet).
+const TYPE_REPLACEMENTS: [&str; 10] = [
+    "FzNowhere",
+    "Option<Int, Int>",
+    "Option",
+    "Int<Bool>",
+    "&Int",
+    "Int?",
+    "_",
+    "[FzMissing]",
+    "core::Int",
+    "Future<Int, Bool>",
+];
+
+/// Items [`type_mutate`] appends, `{n}` replaced by a number of the
+/// input's own so that no name repeats, each aimed at an item code: the
+/// code it gives, then the text; `{chain}` is [`binding_chain`]'s.
+pub const TYPE_ITEMS: [(&str, &str); 24] = [
+    ("E0001", "fn fz_missing{n}(x: FzNowhere{n}) {}"),
+    ("E0001", "impl FzNoTrait{n} for Int {}"),
+    ("E0001", "fn fz_bound{n}<T: FzNoBound{n}>(x: T) {}"),
+    ("E0012", "fn fz_arity{n}(x: Option) -> Result<Int> { panic(\"\") }"),
+    ("E0015", "trait FzOne{n} {\n    type Out\n}\ntrait FzTwo{n} {\n    type Out\n}\nfn fz_amb{n}<T: FzOne{n} + FzTwo{n}>(x: T::Out) {}"),
+    ("E0070", "trait FzAssoc{n} {\n    type Item\n    fn get(self) -> Int\n}\nrecord FzR{n} {}\nimpl FzAssoc{n} for FzR{n} {}"),
+    ("E0071", "record FzIn{n} {}\nimpl FzIn{n} {\n    type Item = Int\n}"),
+    ("E0071", "trait FzSmall{n} {}\nrecord FzS{n} {}\nimpl FzSmall{n} for FzS{n} {\n    fn extra(self) {}\n}"),
+    ("E0072", "trait FzSup{n} {}\ntrait FzSub{n}: FzSup{n} {}\nrecord FzT{n} {}\nimpl FzSub{n} for FzT{n} {}"),
+    ("E0072", "trait FzRet{n} {\n    fn f(self) -> Int\n}\nrecord FzU{n} {}\nimpl FzRet{n} for FzU{n} {\n    fn f(self) -> Bool { true }\n}"),
+    ("E0073", "record FzV{n} {}\nimpl<T> FzV{n} {}"),
+    ("E0074", "record FzW{n} {}\nimpl FzW{n} {\n    fn m(self) {}\n}\nimpl FzW{n} {\n    fn m(self) {}\n}"),
+    ("E0074", "record FzX{n} {}\nimpl Eq for FzX{n} {\n    fn eq(self, o: FzX{n}) -> Bool { true }\n}\nimpl Eq for FzX{n} {\n    fn eq(self, o: FzX{n}) -> Bool { false }\n}"),
+    ("E0076", "fn fz_self{n}<Self>() {}"),
+    ("E0077", "trait FzCyc{n} {\n    type A\n    type B\n}\nrecord FzY{n} {}\nimpl FzCyc{n} for FzY{n} {\n    type A = Self::B\n    type B = Self::A\n}"),
+    ("E0078", "{chain}"),
+    ("E0403", "record FzDup{n}<T, T> { t: T }"),
+    ("E0403", "trait FzBind{n} {\n    type Item\n}\nimpl FzBind{n} for Bool {\n    type Item = Int\n    type Item = Int\n}"),
+    ("E0105", "trait FzLast{n} {\n    fn last(self) -> Int\n}\nimpl<T> FzLast{n} for Vec<T> {\n    fn last(self) -> Int { 0 }\n}"),
+    ("E0010", "impl (Int, Bool) {}"),
+    ("E0010", "trait FzArr{n} {}\nimpl FzArr{n} for [Int] {}"),
+    ("E0900", "extern \"C\" {\n    fn fz_ffi{n}(x: String) -> [Int]\n}"),
+    ("E0900", "extern \"Rust\" {\n    fn fz_abi{n}()\n}"),
+    ("E0900", "extern \"C\" {\n    fn nova_fz{n}()\n}"),
+];
+
+/// What [`type_mutate`] edits in place: the spans of the program's types
+/// (parameters', returns', fields'), of its generic lists' first
+/// parameters, of its trait impls' methods and its impls.
+struct TypeSites {
+    types: Vec<(usize, usize)>,
+    generics: Vec<(usize, usize)>,
+    /// Each trait impl's methods: (start of its line, end of its body,
+    /// end of its return type or of its parameter list's last type).
+    methods: Vec<(usize, usize, Option<(usize, usize)>)>,
+    /// Each trait impl's body's last byte, its `}`.
+    trait_impl_ends: Vec<usize>,
+    impls: Vec<(usize, usize)>,
+}
+
+fn type_sites(source: &str) -> Option<TypeSites> {
+    use nova_ast::Item;
+    let (tokens, lex_errors) = nova_lexer::lex(source, FileId::DUMMY);
+    if !lex_errors.is_empty() {
+        return None;
+    }
+    let parsed = nova_parser::parse_recovering(&tokens, FileId::DUMMY);
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    let span = |s: nova_diagnostics::Span| (s.start as usize, s.end as usize);
+    let mut sites = TypeSites {
+        types: Vec::new(),
+        generics: Vec::new(),
+        methods: Vec::new(),
+        trait_impl_ends: Vec::new(),
+        impls: Vec::new(),
+    };
+    let function = |f: &nova_ast::item::Function, sites: &mut TypeSites| {
+        sites.types.extend(
+            f.params
+                .iter()
+                .filter(|p| p.name.value != "self")
+                .map(|p| span(p.ty.span)),
+        );
+        sites.types.extend(f.return_ty.iter().map(|t| span(t.span)));
+        sites
+            .generics
+            .extend(f.generics.first().map(|g| span(g.name.span)));
+    };
+    for item in &parsed.file.items {
+        match &item.value {
+            Item::Function(f) => function(f, &mut sites),
+            Item::Record(r) => {
+                sites.types.extend(r.fields.iter().map(|f| span(f.ty.span)));
+                sites
+                    .generics
+                    .extend(r.generics.first().map(|g| span(g.name.span)));
+            }
+            Item::Impl(b) => {
+                sites.impls.push(span(item.span));
+                sites
+                    .generics
+                    .extend(b.generics.first().map(|g| span(g.name.span)));
+                for f in &b.functions {
+                    function(f, &mut sites);
+                    if b.trait_.is_some() {
+                        let start = line_start(source, f.name.span.start as usize);
+                        let typed = f.return_ty.as_ref().map(|t| span(t.span));
+                        sites.methods.push((start, f.body.span.end as usize, typed));
+                    }
+                }
+                if b.trait_.is_some() {
+                    sites.trait_impl_ends.push(item.span.end as usize - 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(sites)
+}
+
+/// `source`, a program that checks at the item level, mutated one to
+/// three times at the level of items (module docs, 5.): a type replaced
+/// by one of [`TYPE_REPLACEMENTS`], a generic list's first parameter
+/// duplicated, a trait impl's method dropped, added or given another
+/// return type, an impl duplicated, or one of [`TYPE_ITEMS`] appended,
+/// each numbered from `n`. A mutation that would not parse is skipped;
+/// every name an appended item declares is new, so every input reaches
+/// the type checker, which the harness checks.
+pub fn type_mutate(rng: &mut SplitMix64, source: &str, n: usize) -> String {
+    let mut text = source.to_string();
+    for step in 0..1 + rng.below(3) {
+        let Some(sites) = type_sites(&text) else {
+            break;
+        };
+        let splice = |(start, end): (usize, usize), with: &str| {
+            format!("{}{with}{}", &text[..start], &text[end..])
+        };
+        let edited = match rng.below(20) {
+            0..=3 if !sites.types.is_empty() => Some(splice(
+                *rng.pick(&sites.types),
+                rng.pick(&TYPE_REPLACEMENTS),
+            )),
+            4 if !sites.generics.is_empty() => {
+                let (start, end) = *rng.pick(&sites.generics);
+                let name = text[start..end].to_string();
+                Some(splice((start, end), &format!("{name}, {name}")))
+            }
+            5 if !sites.methods.is_empty() => {
+                let (start, end, _) = *rng.pick(&sites.methods);
+                Some(splice((start, end), ""))
+            }
+            6 if !sites.trait_impl_ends.is_empty() => {
+                let at = *rng.pick(&sites.trait_impl_ends);
+                Some(splice(
+                    (at, at),
+                    &format!("    fn fz_added{n}(self) {{}}\n"),
+                ))
+            }
+            7 if sites.methods.iter().any(|m| m.2.is_some()) => {
+                let typed: Vec<(usize, usize)> = sites.methods.iter().filter_map(|m| m.2).collect();
+                Some(splice(*rng.pick(&typed), "(Int, Bool)"))
+            }
+            8 if !sites.impls.is_empty() => {
+                let (start, end) = *rng.pick(&sites.impls);
+                let copy = text[start..end].to_string();
+                Some(format!("{}\n{copy}\n", text.trim_end_matches('\n')))
+            }
+            _ => {
+                let (_, item) = rng.pick(&TYPE_ITEMS);
+                let item = item
+                    .replace("{chain}", &binding_chain())
+                    .replace("{n}", &format!("{n}x{step}"));
+                Some(format!("{}\n{item}\n", text.trim_end_matches('\n')))
+            }
+        };
+        if let Some(next) = edited {
+            if type_sites(&next).is_some() {
+                text = next;
+            }
+        }
+    }
+    text
+}
+
+/// An impl whose associated types double at each of 17 steps, so that the
+/// method signature's check meets more type nodes than normalizing allows
+/// (E0078), as the type checker's own test of the limit builds one.
+fn binding_chain() -> String {
+    let mut text = String::from("record FzPair{n}<A, B> { a: A, b: B }\ntrait FzChain{n} {\n");
+    for i in 0..17 {
+        text.push_str(&format!("    type A{i}\n"));
+    }
+    text.push_str(
+        "    fn put(self, y: Self::A0) -> Int\n}\nrecord FzW{n} {}\nimpl FzChain{n} for FzW{n} {\n",
+    );
+    for i in 0..16 {
+        let next = i + 1;
+        text.push_str(&format!(
+            "    type A{i} = FzPair{{n}}<Self::A{next}, Self::A{next}>\n"
+        ));
+    }
+    text.push_str("    type A16 = Int\n    fn put(self, y: Self::A0) -> Int { 0 }\n}");
+    text
 }

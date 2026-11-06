@@ -80,7 +80,9 @@ pub const KINDS: &[&str] = &[
     "head=Int",
     "head=Float",
     "head=Bool",
+    "head=Char",
     "head=String",
+    "head=Bytes",
     "head=Array",
     "(SelfType",
     "(AssocBinding",
@@ -102,9 +104,8 @@ pub const KINDS: &[&str] = &[
     "(Edit",
 ];
 
-/// The forms no input prints: impls on `Char` and `Bytes`, which neither
-/// std nor any input writes, and the two severities no stage gives.
-pub const LATER_KINDS: &[&str] = &["head=Char", "head=Bytes", "(Help", "(NoteDiagnostic"];
+/// The forms no input prints: the two severities no stage gives.
+pub const LATER_KINDS: &[&str] = &["(Help", "(NoteDiagnostic"];
 
 /// A program's part (module docs) for `target`, under test mode when
 /// `test`: when the program reached the type checker, its resolution and
