@@ -1,0 +1,6 @@
+import ui
+record Page { title: String, count: Int }
+component card(p: Page) {
+    view { text(p.title) }
+}
+fn main() {}

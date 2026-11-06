@@ -1,0 +1,5 @@
+trait It { type Item
+ fn get(self) -> Int }
+record K { v: Int }
+impl K { fn peek(self) -> Self::Item { panic("x") } }
+fn main() { }

@@ -1,0 +1,6 @@
+trait Foo { type Item
+ fn f(self) -> Int }
+trait It { type Other
+ fn get(self) -> Int }
+fn f<A: Foo, B: It>(x: A, y: B) -> A::Other { panic("x") }
+fn main() { }

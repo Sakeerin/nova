@@ -1,0 +1,12 @@
+record P { x: Int }
+impl Eq for P {
+    fn eq(self, other: P) -> Bool { true }
+}
+fn helper<T: Eq>(a: T, b: T) -> Bool { a == b }
+@test
+fn compares() {
+    assert(helper(P { x: 1 }, P { x: 1 }))
+}
+@test(should_panic)
+fn panics() { panic("no") }
+impl Missing for P {}

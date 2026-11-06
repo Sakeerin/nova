@@ -1,0 +1,6 @@
+import shapes::{Dot}
+fn area(s: Shape) -> Int { 1 }
+fn long(m: Meter) -> Int { 1 }
+fn named(s: Strin) -> Int { 1 }
+fn bounded<T: Eqq>(x: T) {}
+impl Shows for Int {}

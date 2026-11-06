@@ -1,0 +1,2 @@
+fn f<Self>(x: Self) -> Int { 1 }
+fn main() { }

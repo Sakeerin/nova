@@ -1,0 +1,4 @@
+record Box<T> { value: T }
+impl<T> Box<T> { fn tag(self) -> String { "g" } }
+impl Box<Int> { fn tag(self) -> String { "i" } }
+fn main() { }

@@ -1,0 +1,2 @@
+trait T { async fn m(self) -> Int }
+fn main() {}

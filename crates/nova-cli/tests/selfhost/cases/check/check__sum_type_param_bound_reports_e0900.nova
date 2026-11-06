@@ -1,0 +1,5 @@
+trait Hash2 { fn h(self) -> Int }
+type Wrap<T: Hash2> = | Wrapped(T) | Empty
+record NoHash { n: Int }
+fn main() { let x = Wrapped(NoHash { n: 1 })
+ match x { Wrapped(_) => println("w"), Empty => println("e") } }

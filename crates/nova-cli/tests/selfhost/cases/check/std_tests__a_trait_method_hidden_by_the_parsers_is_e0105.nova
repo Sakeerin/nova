@@ -1,0 +1,7 @@
+trait Parse {
+    fn parse_int_radix(self, r: Int) -> Option<Int>
+}
+impl Parse for String {
+    fn parse_int_radix(self, r: Int) -> Option<Int> { Some(r) }
+}
+fn main() {}

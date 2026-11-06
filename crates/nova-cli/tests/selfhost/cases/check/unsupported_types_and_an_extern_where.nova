@@ -1,0 +1,7 @@
+fn reference(x: &Int) {}
+fn optional(x: Int?) {}
+fn placeholder(x: _) {}
+fn qualified(x: core::Option<Int>) {}
+extern "C" {
+    fn clause(x: Int) where Int: Eq
+}

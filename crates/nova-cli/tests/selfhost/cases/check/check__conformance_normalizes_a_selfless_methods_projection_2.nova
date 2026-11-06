@@ -1,0 +1,8 @@
+trait Zero { type Out
+fn zero() -> Self::Out
+fn of(x: Self::Out) -> Self::Out }
+record P { v: Int }
+impl Zero for P { type Out = Int
+fn zero() -> Int { 0 }
+fn of(x: Int) -> Int { x } }
+fn main() { println("${P::of(P::zero())}") }

@@ -1,0 +1,4 @@
+impl [Int] {
+    fn total(self) -> Int { 0 }
+}
+fn main() {}

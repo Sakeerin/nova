@@ -1,0 +1,4 @@
+trait Foo { async fn bar(self) -> Int { 7 } }
+record Thing { v: Int }
+impl Foo for Thing { fn bar(self) -> Int { self.v } }
+fn main() { let t = Thing { v: 1 } }

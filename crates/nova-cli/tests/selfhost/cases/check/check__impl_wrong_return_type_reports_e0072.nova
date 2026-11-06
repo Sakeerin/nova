@@ -1,0 +1,4 @@
+record P { v: Int }
+trait T { fn m(self) -> Int }
+impl T for P { fn m(self) -> String { "x" } }
+fn main() { }

@@ -1,0 +1,4 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+type S<I: It> = | A(I) | B
+fn main() { }

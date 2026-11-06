@@ -1,0 +1,4 @@
+trait Zero { fn zero() -> Self }
+record R { v: Int }
+impl Zero for R { fn zero(self) -> R { self } }
+fn main() { }

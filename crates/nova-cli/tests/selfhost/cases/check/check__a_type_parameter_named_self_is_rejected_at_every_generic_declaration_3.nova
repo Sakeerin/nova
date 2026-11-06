@@ -1,0 +1,2 @@
+type S<Self> = | A(Self)
+fn main() { }

@@ -1,0 +1,6 @@
+record Box<T> { value: T }
+impl<T> Box<T> { fn make(v: T) -> Box<T> { Box { value: v } } }
+fn main() {
+let b = Box::make(5)
+println("${b.value}")
+}

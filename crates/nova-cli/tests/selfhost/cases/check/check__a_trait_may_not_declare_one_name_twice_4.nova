@@ -1,0 +1,10 @@
+trait It { type A
+ type B
+ fn g(self) -> Self::A
+ fn h(self) -> Self::B }
+record W { v: Int }
+impl It for W { type A = Int
+ type B = Bool
+fn g(self) -> Int { 1 }
+ fn h(self) -> Bool { true } }
+fn main() { }

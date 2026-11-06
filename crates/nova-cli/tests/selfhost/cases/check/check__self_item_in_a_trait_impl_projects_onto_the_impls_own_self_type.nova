@@ -1,0 +1,6 @@
+trait It { type Item
+ fn get(self) -> Self::Item }
+record W<T> { v: T }
+impl<T> It for W<T> { type Item = T
+ fn get(self) -> Self::Item { panic("x") } }
+fn main() { }

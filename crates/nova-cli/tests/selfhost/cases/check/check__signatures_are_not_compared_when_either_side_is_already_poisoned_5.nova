@@ -1,0 +1,6 @@
+trait It { type Item
+ fn get(self) -> Int }
+record W { v: Int }
+impl It for W { type Item = Int
+ fn get(self) -> Bool { true } }
+fn main() { }

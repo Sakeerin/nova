@@ -1,0 +1,5 @@
+record P { v: Int }
+trait Show { fn name(self) -> String }
+impl Show for P { fn name(self) -> String { "p" }
+ fn extra(self) -> Int { 0 } }
+fn main() { }

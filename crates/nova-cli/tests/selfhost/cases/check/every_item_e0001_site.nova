@@ -1,0 +1,5 @@
+trait Shown: Nope {}
+impl Missing for Int {}
+fn bounded<T: Absent>(x: T) {}
+fn clause<T>(x: T) where T: Gone {}
+fn typed(x: Nowhere) {}

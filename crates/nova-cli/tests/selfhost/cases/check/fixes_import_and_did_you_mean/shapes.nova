@@ -1,0 +1,8 @@
+import units
+pub type Shape =
+  | Dot
+  | Line(Int)
+pub trait Shows {
+    fn show(self) -> String
+}
+pub fn span() -> Meter { Meter { n: 1 } }

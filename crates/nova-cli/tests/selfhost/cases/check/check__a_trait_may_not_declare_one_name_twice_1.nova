@@ -1,0 +1,7 @@
+trait It { type Item
+ type Item
+ fn g(self) -> Int }
+record W { v: Int }
+impl It for W { type Item = Int
+ fn g(self) -> Int { 1 } }
+fn main() { }

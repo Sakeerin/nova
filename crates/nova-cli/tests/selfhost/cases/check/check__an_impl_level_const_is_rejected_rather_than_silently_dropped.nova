@@ -1,0 +1,4 @@
+record K { v: Int }
+impl K { const LIMIT: Int = 99
+ fn get(self) -> Int { self.v } }
+fn main() { }

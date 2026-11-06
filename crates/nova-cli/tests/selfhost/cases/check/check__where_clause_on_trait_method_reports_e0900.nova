@@ -1,0 +1,2 @@
+trait Foo { fn f(self) -> Int where Self: Foo }
+fn main() { }

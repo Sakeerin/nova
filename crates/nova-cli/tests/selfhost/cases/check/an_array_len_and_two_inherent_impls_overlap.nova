@@ -1,0 +1,9 @@
+impl [Int] {
+    fn len(self) -> Int { 0 }
+}
+impl [Bool] {
+    fn first(self) -> Bool { true }
+}
+impl [Bool] {
+    fn first(self) -> Bool { false }
+}

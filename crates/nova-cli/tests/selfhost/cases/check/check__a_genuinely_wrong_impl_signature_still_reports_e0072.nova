@@ -1,0 +1,6 @@
+trait It { type Item
+ fn get_item(self) -> Self::Item }
+record W<T> { v: T }
+impl<T> It for W<T> { type Item = T
+ fn get_item(self) -> Bool { true } }
+fn main() { }

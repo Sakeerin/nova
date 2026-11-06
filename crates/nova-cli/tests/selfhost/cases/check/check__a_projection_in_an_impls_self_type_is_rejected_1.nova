@@ -1,0 +1,7 @@
+trait It { type Item
+ fn g(self) -> Int }
+trait Tr { fn h(self) -> Int }
+record W<T> { v: T }
+impl<T: It> Tr for W<T::Item> { fn h(self) -> Int { 1 } }
+impl Tr for W<Int> { fn h(self) -> Int { 2 } }
+fn main() { }

@@ -1,0 +1,5 @@
+record Box<T> { value: T }
+trait Dup { fn dup(self) -> Self }
+impl<T> Dup for Box<T> { fn dup(self) -> T { self.value } }
+fn main() { let b = Box { value: 1 }
+ let c = b.dup() }

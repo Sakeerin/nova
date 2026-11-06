@@ -1,0 +1,4 @@
+impl<T> [T] {
+    fn iter(self) -> Int { 0 }
+}
+fn main() {}

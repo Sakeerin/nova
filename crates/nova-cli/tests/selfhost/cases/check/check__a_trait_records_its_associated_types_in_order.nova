@@ -1,0 +1,4 @@
+trait Pair { type A
+ type B
+ fn get(self) -> Int }
+fn main() { }

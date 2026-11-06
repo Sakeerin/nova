@@ -1,0 +1,3 @@
+record W { v: Int }
+impl W { fn m<Self>(self, x: Self) -> Int { 1 } }
+fn main() { }
