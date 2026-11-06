@@ -421,13 +421,14 @@ impl<'a> Checker<'a> {
         let std = &shared.tables;
         match at {
             Splice::Arities => {
-                for (id, n) in sorted(&std.type_arity) {
-                    self.type_arity.insert(r.id(id), n);
+                for id in sorted(&std.type_arity) {
+                    self.type_arity.insert(r.id(id), std.type_arity[&id]);
                 }
             }
             Splice::Supertraits => {
-                for (id, supers) in sorted(&std.supertraits) {
-                    self.supertraits.insert(r.id(id), r.ids(&supers));
+                for id in sorted(&std.supertraits) {
+                    self.supertraits
+                        .insert(r.id(id), r.ids(&std.supertraits[&id]));
                 }
             }
             Splice::Records => {
@@ -478,24 +479,25 @@ impl<'a> Checker<'a> {
                     .extend(std.impl_method_spans.iter().cloned());
                 self.impl_param_names
                     .extend(std.impl_param_names.iter().cloned());
-                for (item, s) in sorted(&std.impl_selves) {
-                    self.impl_selves.insert(item + r.item, r.impl_self(&s));
+                for item in sorted(&std.impl_selves) {
+                    let s = r.impl_self(&std.impl_selves[&item]);
+                    self.impl_selves.insert(item + r.item, s);
                 }
             }
             Splice::Signatures => {
-                for (id, sig) in sorted(&std.sigs) {
+                for id in sorted(&std.sigs) {
                     if matches!(
                         self.defs.def(r.id(id)).kind,
                         DefKind::Fn { .. } | DefKind::Const { .. }
                     ) {
-                        self.sigs.insert(r.id(id), r.sig(&sig));
+                        self.sigs.insert(r.id(id), r.sig(&std.sigs[&id]));
                     }
                 }
             }
             Splice::Externs => {
-                for (id, sig) in sorted(&std.sigs) {
+                for id in sorted(&std.sigs) {
                     if matches!(self.defs.def(r.id(id)).kind, DefKind::ExternFn { .. }) {
-                        self.sigs.insert(r.id(id), r.sig(&sig));
+                        self.sigs.insert(r.id(id), r.sig(&std.sigs[&id]));
                     }
                 }
                 self.externs
@@ -518,7 +520,8 @@ impl<'a> Checker<'a> {
             return;
         };
         let std = &shared.tables;
-        for (id, loc) in sorted(&std.method_locs) {
+        for id in sorted(&std.method_locs) {
+            let loc = std.method_locs[&id];
             if loc.owner != owner {
                 continue;
             }
@@ -543,11 +546,11 @@ impl<'a> Checker<'a> {
     }
 }
 
-/// A map's entries sorted by key, so that no map's order reaches a table.
-fn sorted<K: Ord + Copy, V: Clone>(map: &FxHashMap<K, V>) -> Vec<(K, V)> {
-    let mut entries: Vec<(K, V)> = map.iter().map(|(k, v)| (*k, v.clone())).collect();
-    entries.sort_by_key(|(k, _)| *k);
-    entries
+/// A map's keys sorted, so that no map's order reaches a table.
+fn sorted<K: Ord + Copy, V>(map: &FxHashMap<K, V>) -> Vec<K> {
+    let mut keys: Vec<K> = map.keys().copied().collect();
+    keys.sort();
+    keys
 }
 
 #[cfg(test)]
