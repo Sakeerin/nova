@@ -1,0 +1,4 @@
+import dom
+fn main() {
+    let _ = body().add_event_listener("click", |e: Event| println("x"))
+}

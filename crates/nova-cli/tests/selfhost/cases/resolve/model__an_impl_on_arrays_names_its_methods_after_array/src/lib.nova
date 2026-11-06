@@ -1,0 +1,4 @@
+impl<T> [T] {
+    /// The second element.
+    pub fn second(self) -> T { self[1] }
+}

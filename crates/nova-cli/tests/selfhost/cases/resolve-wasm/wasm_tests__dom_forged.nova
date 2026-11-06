@@ -1,0 +1,6 @@
+import dom
+fn main() {
+    let e = Element { box: 0 }
+    println("before")
+    e.set_text("x")
+}

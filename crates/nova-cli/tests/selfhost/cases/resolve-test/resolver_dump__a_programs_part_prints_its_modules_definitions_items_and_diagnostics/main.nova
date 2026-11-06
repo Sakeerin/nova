@@ -1,0 +1,40 @@
+import lib
+import lib::{secret}
+import nosuch
+import dom
+import lib as l
+import a::b
+type Name = String
+record Int { x: Int }
+@tset
+fn main() {
+    g
+    (1)
+    g
+    [1]
+    g
+    -1
+}
+@test
+record R {}
+@bogus
+pub const K: Int = 1
+pub type Shade = | Red | Ok(Int)
+trait Show {
+    type Item
+    fn twice(self) {}
+}
+impl Show for R {
+    fn twice(self) {}
+}
+extern "C" {
+    fn abs(x: Int) -> Int
+}
+fn println() {}
+fn dup() {}
+fn dup() {}
+fn alpha() -> Int { 0 }
+fn back() -> Int {
+    return
+    1
+}

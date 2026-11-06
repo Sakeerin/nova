@@ -1,0 +1,6 @@
+// A header.
+
+// What main does.
+fn main() {
+    println("${twice()} ${one()}")
+}

@@ -44,14 +44,15 @@ use crate::{
     ProgramResolution, Res,
 };
 
-/// Every form the dump can print, by which the differential checks that
+/// Every form the dump prints, by which the differential checks that std,
 /// the corpus and the cases hold each of them
 /// (`crates/nova-cli/tests/selfhost.rs`): a line's kind as `(Kind`, and a
 /// field's word values as `key=Value` or, for a `bool`, after its line's
-/// kind as `(Kind key=value` ([`forms_on`]). [`LATER_KINDS`] are the
-/// forms only a package, the WASM target or test mode prints, which 5.2b
-/// compares. An import the loader reported, `(Import Reported`, is a
-/// loose program's too: E0093 reports one.
+/// kind as `(Kind key=value` ([`forms_on`]). 5.2a's loose native programs
+/// print the first 43; a package's module key, the WASM target with its
+/// `missing` names, and test mode with its tests are 5.2b's (ADR 0054). An
+/// import the loader reported, `(Import Reported`, is a loose program's
+/// too: E0093 reports one, as a package's E0004 and noted E0001s do.
 pub const KINDS: &[&str] = &[
     "(Program",
     "(Program resolved=true",
@@ -96,23 +97,19 @@ pub const KINDS: &[&str] = &[
     "(Note",
     "(Fix",
     "(Edit",
-];
-
-/// The forms a loose program does not print natively outside test mode:
-/// 5.2b's packages (a module's package key), its WASM target (`missing`)
-/// and its test mode (` mode=test`; `@test` functions are stripped under
-/// `check`), and the two severities the resolver never gives.
-pub const LATER_KINDS: &[&str] = &[
-    "target=wasm",
+    // 5.2b (ADR 0054).
     "package=<n>",
+    "target=wasm",
+    "(Missing",
     "mode=test",
     "(Test",
     "(Test should_panic=true",
     "(Test should_panic=false",
-    "(Missing",
-    "(Help",
-    "(NoteDiagnostic",
 ];
+
+/// The forms no program prints: the two severities neither the package
+/// graph, the loader nor the resolver gives.
+pub const LATER_KINDS: &[&str] = &["(Help", "(NoteDiagnostic"];
 
 /// The label each file of a program is printed under: a user module's
 /// label, and std's modules' names in the file database, as `<std/core>`.

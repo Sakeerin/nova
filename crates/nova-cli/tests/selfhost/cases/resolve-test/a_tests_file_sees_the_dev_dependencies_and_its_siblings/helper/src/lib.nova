@@ -1,0 +1,6 @@
+pub fn expected() -> Int {
+    42
+}
+
+@test
+fn not_kept() {}

@@ -1,0 +1,4 @@
+@test
+fn assert_pass() { assert(true, "boom") }
+@test
+fn assert_fail() { assert(false, "boom") }

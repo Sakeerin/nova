@@ -1,0 +1,4 @@
+/// The secret.
+fn hidden() -> Int {
+    1
+}

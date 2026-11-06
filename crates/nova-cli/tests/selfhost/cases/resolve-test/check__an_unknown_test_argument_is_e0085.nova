@@ -1,0 +1,3 @@
+@test(shuold_panic)
+fn t() { }
+fn main() { }

@@ -1,0 +1,14 @@
+async fn spin() -> Int { 1 }
+
+@test(should_panic)
+fn joining_a_never_spawned_handle_aborts() {
+  let h = JoinHandle { fut: spin() }
+  let _ = block_on(h.join())
+}
+
+@test(should_panic)
+fn spawning_the_same_future_twice_aborts() {
+  let f = spin()
+  spawn(f)
+  let _ = spawn(f)
+}

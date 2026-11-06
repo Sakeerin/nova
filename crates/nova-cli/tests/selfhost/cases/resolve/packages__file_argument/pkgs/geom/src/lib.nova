@@ -1,0 +1,5 @@
+import utils
+
+pub fn area() -> Int {
+    width() * width()
+}

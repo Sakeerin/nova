@@ -24,7 +24,12 @@
 //!    `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
 //!    §3.5): a loose corpus program that parses, mutated at the level of
 //!    names, beside four sibling modules ([`NAME_SIBLINGS`]), so that the
-//!    resolver's codes occur among the fixed seeds' inputs.
+//!    resolver's codes occur among the fixed seeds' inputs. 5.2b (spec
+//!    §4.5, ADR 0054) adds two siblings, each `name_mutate` then one edit
+//!    of its own: [`wasm_name_mutate`], for the WASM target's programs, and
+//!    [`package_name_mutate`], for a module of the package
+//!    [`PACKAGE_FILES`] lays out, with its sibling modules, a dependency,
+//!    a dev-dependency and a module named as a dependency.
 //!
 //! Beside them, [`edges`]: fixed inputs that no file under `cases/` can
 //! hold as it is, such as a lone `\r` or a NUL.
@@ -706,6 +711,136 @@ const NAME_ITEMS: [&str; 11] = [
     "trait Marked {}\nimpl Marked for () { fn mark(self) {} }\nimpl Marked for fn(Int) -> Int { fn mark(self) {} }\n",
 ];
 
+/// The package every [`package_name_mutate`] input is a module of, `(path,
+/// text)` under the fuzzer's directory: `app`, whose `src/` and `tests/`
+/// hold [`NAME_SIBLINGS`] and the inputs, and `src/` a module named
+/// `clash`, as a dependency is (E0004), and a `main.nova`, which the
+/// package graph requires; `app` has no `src/lib.nova`, so a `tests/`
+/// module's `import app` is E0001 with a note. Its dependencies:
+/// `dep`, whose library imports its own `inner` and keeps a private
+/// function and a `@test` (stripped under test mode, being a
+/// dependency's); `clash`; and the dev-dependency `devdep`, which a `src/`
+/// module may not import (E0001 with a note).
+pub const PACKAGE_FILES: [(&str, &str); 10] = [
+    (
+        "app/nova.toml",
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [dependencies]\ndep = { path = \"../dep\" }\nclash = { path = \"../clash\" }\n\n\
+         [dev-dependencies]\ndevdep = { path = \"../devdep\" }\n",
+    ),
+    ("app/src/main.nova", "fn main() {}\n"),
+    ("app/src/clash.nova", "pub fn twin() -> Int { 0 }\n"),
+    (
+        "dep/nova.toml",
+        "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    ),
+    (
+        "dep/src/lib.nova",
+        "import inner\npub fn lift() -> Int { ground() }\npub record Gauge { n: Int }\n\
+         fn sunk() -> Int { 0 }\n@test\nfn a_dependencys_test() {}\n",
+    ),
+    ("dep/src/inner.nova", "pub fn ground() -> Int { 0 }\n"),
+    (
+        "clash/nova.toml",
+        "[package]\nname = \"clash\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    ),
+    ("clash/src/lib.nova", "pub fn twin() -> Int { 1 }\n"),
+    (
+        "devdep/nova.toml",
+        "[package]\nname = \"devdep\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    ),
+    ("devdep/src/lib.nova", "pub fn expect() -> Int { 2 }\n"),
+];
+
+/// The forms [`PACKAGE_FILES`]' manifests are written in, `app`'s and
+/// `dep`'s, input `i` of a seed in a package whose manifests are form `i %
+/// 4` (5.2b, ADR 0054 §5): each a form N's manifest reader takes and
+/// nova-pm reads with no M-code, so that each of the reader's forms meets
+/// the loader, E0004's line and span in a manifest included. Form 0 is
+/// [`PACKAGE_FILES`]' own. Form 1 has comments, a header with spaces, a
+/// name in `'...'`, a pre-release, more keys, the dependency tables in
+/// another order and `[package]`'s last value before a comment; form 2 the
+/// dependency tables as inline tables before the header, the keys in
+/// another order and the largest version; form 3 a byte-order mark and
+/// `\r\n`. `dep`'s forms add dev-dependencies, which nova-pm reads and,
+/// in a dependency's manifest, never resolves: a version entry, and a
+/// path to no package.
+pub fn package_manifests() -> [(String, String); 4] {
+    let app = PACKAGE_FILES[0].1.to_string();
+    let dep = PACKAGE_FILES[3].1.to_string();
+    let bom = char::from_u32(0xFEFF)
+        .expect("the byte-order mark")
+        .to_string();
+    [
+        (app.clone(), dep.clone()),
+        (
+            "# The fuzzer's package, written another way.\n\n[ package ]\nname = 'app'   # its name\n\
+             version = \"1.2.3-alpha.1\"\ndescription = \"d\"\nauthors = [\"a\", 'b',]\n\
+             edition = '2026' # the last value\n\n[dev-dependencies]\ndevdep = {path='../devdep'}\n\n\
+             [dependencies]\nclash = { path = \"../clash\" }   # a module's name too\n\
+             dep = { path = \"../dep\" }\n"
+                .to_string(),
+            format!("{dep}\n[dev-dependencies]\njson = \"^1.2\"\n"),
+        ),
+        (
+            "dependencies = { dep = { path = \"../dep\" }, clash = { path = \"../clash\" } }\n\
+             dev-dependencies = { devdep = { path = \"../devdep\" } }\n\n[package]\nedition = \"2026\"\n\
+             version = \"18446744073709551615.0.0\"\nname = \"app\"\nlicense = \"MIT\"\n"
+                .to_string(),
+            dep.replace("0.1.0", "0.0.18446744073709551615")
+                + "\n[dev-dependencies]\nlocal = { path = \"../nowhere\" }\nreg = { version = \"=1\" }\n",
+        ),
+        (
+            format!("{bom}{}", app.replace('\n', "\r\n")),
+            dep.replace('\n', "\r\n"),
+        ),
+    ]
+}
+
+/// What [`wasm_name_mutate`] adds to a WASM program, one of them, after
+/// [`name_mutate`]'s mutations: at the top (`true`) an import of `ui::ssr`,
+/// which only the native target has (E0092), of `ui::router`, or of
+/// `dom`, which only WASM has; or at the end an `extern "C"` or `extern
+/// "JS"` block (E0090).
+const WASM_ADDITIONS: [(bool, &str); 5] = [
+    (true, "import ui::ssr"),
+    (true, "import ui::router"),
+    (true, "import dom"),
+    (false, "extern \"C\" {\n    fn abs(x: Int) -> Int\n}\n"),
+    (false, "extern \"JS\" {\n    fn now() -> Float\n}\n"),
+];
+
+/// What [`package_name_mutate`] adds to a module of [`PACKAGE_FILES`]'
+/// `app`, one of them, at the top, after [`name_mutate`]'s mutations: an
+/// import of the dependency whole, by a list and by a private name, of
+/// the dev-dependency, of `clash`, a module and a dependency at once
+/// (E0004), and of the package itself, which a `tests/` module sees by
+/// its name but which has no library.
+const PACKAGE_ADDITIONS: [(bool, &str); 6] = [
+    (true, "import dep"),
+    (true, "import dep::{lift, Gauge}"),
+    (true, "import dep::{sunk}"),
+    (true, "import devdep"),
+    (true, "import clash"),
+    (true, "import app"),
+];
+
+/// `text` with one of `additions` that the rng picks, at the top or at the
+/// end, when the result still parses.
+fn add_one(rng: &mut SplitMix64, text: String, additions: &[(bool, &str)]) -> String {
+    let (top, addition) = *rng.pick(additions);
+    let next = if top {
+        format!("{addition}\n{text}")
+    } else {
+        format!("{}\n{addition}", text.trim_end_matches('\n'))
+    };
+    if named_items(&next).is_some() {
+        next
+    } else {
+        text
+    }
+}
+
 /// One top-level item, as the name fuzzer edits it: its span, and its
 /// name's span, its name and whether it is `pub` when it has one, with
 /// whether it introduces a type name (a record or a sum) and whether it is
@@ -852,6 +987,22 @@ pub fn name_mutate(rng: &mut SplitMix64, source: &str, stem: &str) -> String {
         }
     }
     text
+}
+
+/// [`name_mutate`] for a WASM program (5.2b), then one of
+/// [`WASM_ADDITIONS`].
+pub fn wasm_name_mutate(rng: &mut SplitMix64, source: &str, stem: &str) -> String {
+    let text = name_mutate(rng, source, stem);
+    add_one(rng, text, &WASM_ADDITIONS)
+}
+
+/// [`name_mutate`] for a module of [`PACKAGE_FILES`]' `app` (5.2b), then
+/// one of [`PACKAGE_ADDITIONS`]: whether the module goes in `tests/` (one
+/// in three) rather than `src/`, and its text.
+pub fn package_name_mutate(rng: &mut SplitMix64, source: &str, stem: &str) -> (bool, String) {
+    let tests = rng.one_in(3);
+    let text = name_mutate(rng, source, stem);
+    (tests, add_one(rng, text, &PACKAGE_ADDITIONS))
 }
 
 /// Whether `source` lexes and parses without an error: what the name

@@ -1,0 +1,11 @@
+import helper
+
+@test
+fn adds() {
+    assert_eq(add(1, 2), 3)
+}
+
+@test
+fn fails() {
+    assert_eq(add(1, 2), 4)
+}

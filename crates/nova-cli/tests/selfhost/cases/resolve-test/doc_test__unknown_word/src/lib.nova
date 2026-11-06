@@ -1,0 +1,17 @@
+//! Arithmetic, checked.
+//!
+//! ```
+//! assert_eq(twice(2) + 1, 5)
+//! ```
+
+import units
+
+/// Twice `x`.
+///
+/// ```nova,should_panic
+/// assert_eq(twice(3), 6)
+/// ```
+pub fn twice(x: Int) -> Int { x * 2 + zero() }
+
+@test
+fn twice_doubles() { assert_eq(twice(1), 2) }

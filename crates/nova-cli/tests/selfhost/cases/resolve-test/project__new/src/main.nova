@@ -1,0 +1,6 @@
+fn greeting() -> String { "Hello, Nova!" }
+
+fn main() { println(greeting()) }
+
+@test
+fn greeting_says_hello() { assert_eq(greeting(), "Hello, Nova!") }

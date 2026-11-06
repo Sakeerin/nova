@@ -1,0 +1,6 @@
+import demo::{name}
+
+@test
+fn t() {
+    assert_eq(name(), "app")
+}

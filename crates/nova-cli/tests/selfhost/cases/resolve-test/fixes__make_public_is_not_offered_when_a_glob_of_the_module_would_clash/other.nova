@@ -1,0 +1,9 @@
+import lib
+
+fn helper() -> Int {
+    2
+}
+
+pub fn twice() -> Int {
+    helper() * 2
+}

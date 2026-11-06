@@ -1,0 +1,2 @@
+import dom
+fn main() { body().set_text("x") }

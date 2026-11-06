@@ -1,0 +1,2 @@
+import ui::nope
+fn main() { }

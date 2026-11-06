@@ -1415,11 +1415,8 @@ mod resolution_dumps {
     /// in a package's `src/` and `tests/`, and each other directory's
     /// `main.nova`.
     fn case_roots(cases: &Path) -> Vec<std::path::PathBuf> {
-        // Task 3 adds the WASM and test-mode cases' directories.
-        let Ok(listing) = std::fs::read_dir(cases) else {
-            return Vec::new();
-        };
-        let mut entries: Vec<_> = listing
+        let mut entries: Vec<_> = std::fs::read_dir(cases)
+            .expect("read the cases")
             .map(|e| e.expect("a directory entry").path())
             .collect();
         entries.sort();
@@ -1535,8 +1532,7 @@ mod resolution_dumps {
                     })
                 })
                 .collect();
-            // The corpus's floors, until Task 3 adds the cases of each mode.
-            for (run, floor) in runs.into_iter().zip([400, 35, 8]) {
+            for (run, floor) in runs.into_iter().zip([400, 60, 120]) {
                 let (roots, resolved) = run.join().expect("a mode's thread");
                 assert!(
                     roots >= floor && resolved * 2 > roots,

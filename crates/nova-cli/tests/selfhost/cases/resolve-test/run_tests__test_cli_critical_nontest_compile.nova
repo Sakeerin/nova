@@ -1,0 +1,5 @@
+@test
+fn addition_is_correct() { assert_eq(2 + 2, 4) }
+@test
+fn addition_is_wrong() { assert_eq(2 + 2, 5) }
+fn main() { println("hello") }

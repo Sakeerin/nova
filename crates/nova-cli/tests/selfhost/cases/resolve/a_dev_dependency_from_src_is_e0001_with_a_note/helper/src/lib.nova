@@ -1,0 +1,3 @@
+pub fn expected() -> Int {
+    42
+}

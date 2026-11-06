@@ -1,0 +1,4 @@
+@test
+fn uses_nope() {
+    assert_eq(nope(2), 4)
+}

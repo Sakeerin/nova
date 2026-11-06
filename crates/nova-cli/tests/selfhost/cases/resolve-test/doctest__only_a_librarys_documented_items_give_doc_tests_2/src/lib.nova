@@ -1,0 +1,14 @@
+/// ```
+/// let a = secret()
+/// ```
+fn secret() -> Int { 1 }
+
+/// ```text
+/// shown()
+/// ```
+pub fn shown() -> Int { secret() }
+
+/// ```ignore
+/// skipped()
+/// ```
+pub fn skipped() -> Int { 2 }

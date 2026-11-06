@@ -1,0 +1,47 @@
+//! Shapes.
+//!
+//! ```
+//! let a = circle(1.0)
+//! ```
+
+import units
+
+/// A circle's area.
+///
+/// ```nova,should_panic
+/// let a = circle(2.0)
+/// ```
+///
+/// ```text
+/// not a test
+/// ```
+pub fn circle(r: Float) -> Float { 3.0 * r * r }
+
+/// A rectangle.
+pub record Rect {
+    /// Its width.
+    ///
+    /// ```
+    /// let r = Rect { width: 1.0 }
+    /// ```
+    pub width: Float,
+}
+
+/// Rect's own methods.
+///
+///     let r = Rect { width: 2.0 }
+impl Rect {
+    /// Its width, twice.
+    ///
+    /// ```ignore
+    /// let w = Rect { width: 1.0 }.twice()
+    /// ```
+    pub fn twice(self) -> Float { self.width * 2.0 }
+}
+
+/// Not exported.
+///
+/// ```
+/// let s = secret()
+/// ```
+fn secret() -> Int { 1 }

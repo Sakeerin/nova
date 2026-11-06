@@ -1,0 +1,7 @@
+fn secret() -> Int {
+    1
+}
+
+pub fn area() -> Int {
+    1
+}

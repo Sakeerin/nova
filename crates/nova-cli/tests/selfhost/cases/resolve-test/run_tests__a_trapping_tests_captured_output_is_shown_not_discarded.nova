@@ -1,0 +1,5 @@
+@test(should_panic)
+fn prints_then_traps() {
+    println("about to trap")
+    let _ = 1 / 0
+}

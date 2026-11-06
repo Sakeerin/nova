@@ -1,0 +1,6 @@
+/// Starts.
+///
+/// ```
+/// assert(false, "never run")
+/// ```
+fn main() {}

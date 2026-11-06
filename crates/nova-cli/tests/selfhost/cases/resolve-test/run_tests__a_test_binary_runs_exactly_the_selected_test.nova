@@ -1,0 +1,4 @@
+@test
+fn alpha() { println("A") }
+@test
+fn beta() { println("B") }

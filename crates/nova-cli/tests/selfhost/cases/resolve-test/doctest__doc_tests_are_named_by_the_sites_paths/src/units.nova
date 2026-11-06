@@ -1,0 +1,21 @@
+//! Lengths.
+//!
+//! ```
+//! let l = Length { metres: 1.0 }
+//! ```
+
+/// A length.
+pub record Length {
+    pub metres: Float,
+}
+
+impl Length {
+    /// The sum of two lengths.
+    ///
+    /// ```
+    /// let l = Length { metres: 1.0 }.plus(Length { metres: 2.0 })
+    /// ```
+    pub fn plus(self, other: Length) -> Length {
+        Length { metres: self.metres + other.metres }
+    }
+}

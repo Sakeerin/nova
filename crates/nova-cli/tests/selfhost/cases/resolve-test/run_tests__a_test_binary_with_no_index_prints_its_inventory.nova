@@ -1,0 +1,4 @@
+@test
+fn alpha() { }
+@test
+fn beta() { }

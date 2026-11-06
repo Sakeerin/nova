@@ -1,0 +1,8 @@
+pub fn area() -> Int {
+    9
+}
+
+@test
+fn in_the_library() {
+    assert_eq(area(), 9)
+}

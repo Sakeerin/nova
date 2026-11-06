@@ -1,0 +1,10 @@
+import geom
+
+fn main() {
+    println("${area()}")
+}
+
+@test
+fn app_checks_the_area() {
+    assert_eq(area(), 9)
+}

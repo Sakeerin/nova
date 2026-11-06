@@ -1,0 +1,37 @@
+@test
+fn plain() {}
+
+@test(should_panic)
+fn panics() {
+    panic("no")
+}
+
+@test
+fn takes(n: Int) {}
+
+@test
+fn gives() -> Int {
+    1
+}
+
+@test
+fn generic<T>() {}
+
+@test
+async fn later() {}
+
+@test(should_panc)
+fn misspelt() {}
+
+@test(should_panic, again)
+fn twice() {}
+
+@test
+record Probe {
+    n: Int,
+}
+
+@tset
+fn close() {}
+
+fn main() {}

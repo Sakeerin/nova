@@ -1,0 +1,6 @@
+import app
+import helper
+
+fn check() -> Bool {
+    answer() == expected()
+}
