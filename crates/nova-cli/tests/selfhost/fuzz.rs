@@ -1066,6 +1066,9 @@ pub const TYPE_ITEMS: [(&str, &str); 24] = [
     ("E0900", "extern \"C\" {\n    fn nova_fz{n}()\n}"),
 ];
 
+/// A span of a source's bytes, start and end.
+type Range = (usize, usize);
+
 /// What [`type_mutate`] edits in place: the spans of the program's types
 /// (parameters', returns', fields'), of its generic lists' first
 /// parameters, of its trait impls' methods and its impls.
@@ -1074,7 +1077,7 @@ struct TypeSites {
     generics: Vec<(usize, usize)>,
     /// Each trait impl's methods: (start of its line, end of its body,
     /// end of its return type or of its parameter list's last type).
-    methods: Vec<(usize, usize, Option<(usize, usize)>)>,
+    methods: Vec<(usize, usize, Option<Range>)>,
     /// Each trait impl's body's last byte, its `}`.
     trait_impl_ends: Vec<usize>,
     impls: Vec<(usize, usize)>,

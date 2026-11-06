@@ -598,6 +598,9 @@ pub fn dump(cmd: DumpCmd) -> Result<()> {
     Ok(())
 }
 
+/// One program's part of a dump, from its root.
+type DumpOne = dyn Fn(&Path) -> std::io::Result<String>;
+
 fn dump_code(cmd: &DumpCmd) -> Result<i32> {
     let flag = cmd.kind.flag();
     let args = &cmd.args;
@@ -627,7 +630,7 @@ fn dump_code(cmd: &DumpCmd) -> Result<i32> {
     }
     // std is parsed once for every program, as N parses it, and resolved
     // and its items collected once.
-    let dumps: Box<dyn Fn(&Path) -> std::io::Result<String>> = match cmd.kind {
+    let dumps: Box<DumpOne> = match cmd.kind {
         DumpKind::Resolution => {
             let dumps = nova_driver::ResolutionDumps::new(target, args.test);
             Box::new(move |file| dumps.dump(file))
