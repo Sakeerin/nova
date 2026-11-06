@@ -20,6 +20,7 @@ use crate::{
 };
 
 mod fixes;
+mod items;
 #[cfg(test)]
 mod lang_tests;
 #[cfg(test)]
@@ -32,20 +33,22 @@ mod tuple_tests;
 mod view;
 
 use fixes::{Binding, Need};
+pub use items::{check_items, check_items_shared, ItemTables, SharedItems};
+use items::{Rebase, Splice};
 use patterns::PatState;
 
 /// A collected function (or method) signature.
 #[derive(Debug, Clone)]
-struct FnSig {
-    generics: u32,
+pub(crate) struct FnSig {
+    pub(crate) generics: u32,
     /// Trait bounds per generic parameter.
-    bounds: Vec<Vec<DefId>>,
+    pub(crate) bounds: Vec<Vec<DefId>>,
     /// Parameter types. For a method that declares a `self` receiver,
     /// `params[0]` is that receiver. An associated function (an impl method with
     /// no `self`, tracked in `Checker::selfless`) holds only its declared
     /// parameters, so `params` stays positionally aligned with the AST's.
-    params: Vec<Ty>,
-    ret: Ty,
+    pub(crate) params: Vec<Ty>,
+    pub(crate) ret: Ty,
 }
 
 /// Outcome of resolving a method name against a receiver type.
@@ -115,7 +118,7 @@ enum TraitCallSelf<'a> {
 /// by-index bound table either. Its candidate traits are not bounds at all but
 /// the single trait the impl implements.
 #[derive(Debug, Clone)]
-struct ImplSelf {
+pub(crate) struct ImplSelf {
     /// The impl's self type, with the impl's own `Param(k)` still in it.
     ty: Ty,
     /// The trait this impl implements, or `None` for an inherent impl — which
@@ -125,10 +128,10 @@ struct ImplSelf {
 
 /// The AST location and flavor of a method to compile.
 #[derive(Debug, Clone, Copy)]
-struct MethodLoc {
-    item_index: usize,
-    method_index: usize,
-    owner: MethodOwner,
+pub(crate) struct MethodLoc {
+    pub(crate) item_index: usize,
+    pub(crate) method_index: usize,
+    pub(crate) owner: MethodOwner,
 }
 
 /// Type-check a parsed file against its resolved definitions.
@@ -138,74 +141,14 @@ pub fn check(file: &ast::File, defs: &Definitions) -> CheckResult {
 
 /// [`check`], with the language server's probe (spec
 /// `docs/superpowers/specs/2026-10-08-phase-3-2-lsp-core-design.md` §4.1).
+///
+/// The item stage, passes 1 to 5, is [`check_items`] (5.3a); the bodies,
+/// the constant cycles, the newline splits and the lifted functions follow
+/// it here.
 pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) -> CheckResult {
-    let mut checker = Checker {
-        file,
-        defs,
-        cur_module: ModuleId(0),
-        sigs: FxHashMap::default(),
-        method_locs: FxHashMap::default(),
-        selfless: FxHashSet::default(),
-        mut_self: FxHashSet::default(),
-        sums: Vec::new(),
-        records: Vec::new(),
-        supertraits: FxHashMap::default(),
-        traits: Vec::new(),
-        impls: Vec::new(),
-        impl_param_names: Vec::new(),
-        impl_self: None,
-        impl_selves: FxHashMap::default(),
-        extra_functions: Vec::new(),
-        next_closure_def: defs.defs().len() as u32,
-        type_arity: FxHashMap::default(),
-        externs: Vec::new(),
-        diagnostics: Vec::new(),
-        probe: options.probe,
-        probe_result: ProbeResult::default(),
-        probe_pending: None,
-        probe_locals_pending: None,
-        index: options.index.then(Index::default),
-        type_params: Vec::new(),
-        sources: options.sources,
-        bindings: FxHashMap::default(),
-        qualified_callee: None,
-        pats: PatState::default(),
-        quiet_splits: FxHashSet::default(),
-    };
-    // Before any collection pass: every later pass builds a generic scope, and
-    // one containing `Self` would give the name two meanings at once.
-    checker.note_item_declarations();
-    checker.reject_self_type_params();
-    checker.collect_type_arities();
-    // Before `collect_records`: since Task 1 of the iterator-finishing plan,
-    // `collect_records` resolves each record's bounds and calls
-    // `expand_bounds`, which folds transitive supertraits in from
-    // `Checker::supertraits` — the very table `collect_supertraits` builds.
-    // Moved ahead of `collect_records` (and `collect_sums`, which never reads
-    // it but has no reason to run first either) so that table is populated
-    // before the first `expand_bounds` call, not just before
-    // `collect_traits`'s. `collect_supertraits` itself only reads trait
-    // declarations via `self.defs` (already fully resolved before `check`
-    // runs) and `decl.supertraits`, so it has no ordering dependency on
-    // `collect_type_arities`, `collect_records`, or `collect_sums`.
-    //
-    // It did change the *order* diagnostics are rendered in, and nothing sorts
-    // `self.diagnostics` before rendering, so pass order is emission order.
-    // Measured on one program carrying an unresolvable supertrait, a duplicate
-    // record generic and a sum-type bound: `E0001` -> `E0403` -> `E0900` now,
-    // `E0403` -> `E0900` -> `E0001` with this call back in its old slot (the
-    // move was re-run in both directions to confirm it, not inferred from the
-    // pass list). Cosmetic — every diagnostic is still reported, with its own
-    // span — and recorded rather than fixed: stabilizing order would mean
-    // sorting by span, which is a separate decision affecting every diagnostic
-    // in the compiler.
-    checker.collect_supertraits();
-    checker.collect_records();
-    checker.collect_sums();
-    checker.collect_traits();
-    checker.collect_impls();
-    checker.collect_signatures();
-    checker.collect_externs();
+    let tables = check_items(file, defs, options);
+    let mut checker = Checker::new(file, defs, options, None);
+    checker.restore(tables);
 
     let mut functions = Vec::new();
     let fn_ids: Vec<(DefId, usize)> = defs.functions().collect();
@@ -348,6 +291,18 @@ struct Checker<'a> {
     /// been well typed, so E0103 is not reported there (the user's 5.0b
     /// ruling of 2026-10-27), by the split's span.
     quiet_splits: FxHashSet<Span>,
+    /// Each impl's self type's span, whether its module is std's, and its
+    /// methods' names' spans, by the index of `impls`: what the impl checks
+    /// read, kept for the HIR dump and std's shared tables (5.3a).
+    impl_spans: Vec<Span>,
+    impl_in_std: Vec<bool>,
+    impl_method_spans: Vec<Vec<Span>>,
+    /// The definitions the item passes collect, `0..own_defs`: every one,
+    /// unless std's tables are `shared`, when std's, which come after the
+    /// program's, are not collected again but read from them (5.3a,
+    /// [`check_items_shared`]).
+    own_defs: u32,
+    shared: Option<(&'a SharedItems, Rebase)>,
 }
 
 /// What the probe met, before its function's inference is finished.
@@ -592,7 +547,13 @@ impl<'a> Checker<'a> {
     }
 
     fn collect_records(&mut self) {
-        for (i, def) in self.defs.defs().iter().enumerate() {
+        for (i, def) in self
+            .defs
+            .defs()
+            .iter()
+            .enumerate()
+            .take(self.own_defs as usize)
+        {
             let DefKind::Record { item_index } = &def.kind else {
                 continue;
             };
@@ -643,7 +604,13 @@ impl<'a> Checker<'a> {
     /// last), so arity must not be read from the incrementally-populated tables.
     fn collect_type_arities(&mut self) {
         let mut arities: Vec<(DefId, u32)> = Vec::new();
-        for (i, def) in self.defs.defs().iter().enumerate() {
+        for (i, def) in self
+            .defs
+            .defs()
+            .iter()
+            .enumerate()
+            .take(self.own_defs as usize)
+        {
             let n = match &def.kind {
                 DefKind::Record { item_index } => match &self.file.items[*item_index].value {
                     ast::Item::Record(r) => r.generics.len() as u32,
@@ -663,7 +630,13 @@ impl<'a> Checker<'a> {
     }
 
     fn collect_sums(&mut self) {
-        for (i, def) in self.defs.defs().iter().enumerate() {
+        for (i, def) in self
+            .defs
+            .defs()
+            .iter()
+            .enumerate()
+            .take(self.own_defs as usize)
+        {
             let DefKind::Sum { item_index, .. } = &def.kind else {
                 continue;
             };
@@ -718,6 +691,7 @@ impl<'a> Checker<'a> {
             .defs()
             .iter()
             .enumerate()
+            .take(self.own_defs as usize)
             .filter_map(|(i, d)| match d.kind {
                 DefKind::Trait { item_index } => Some((DefId(i as u32), item_index)),
                 _ => None,
@@ -818,7 +792,13 @@ impl<'a> Checker<'a> {
             .map(|(id, ii, mi, _)| ((ii, mi), id))
             .collect();
 
-        for (i, def) in self.defs.defs().iter().enumerate() {
+        for (i, def) in self
+            .defs
+            .defs()
+            .iter()
+            .enumerate()
+            .take(self.own_defs as usize)
+        {
             let DefKind::Trait { item_index } = def.kind else {
                 continue;
             };
@@ -1047,11 +1027,13 @@ impl<'a> Checker<'a> {
 
         // Signatures for default-method function bodies: generic over Self
         // (`Param(0)`), bounded by the enclosing trait.
+        self.splice(Splice::Traits);
         let trait_items: Vec<(DefId, usize)> = self
             .defs
             .defs()
             .iter()
             .enumerate()
+            .take(self.own_defs as usize)
             .filter_map(|(i, d)| match d.kind {
                 DefKind::Trait { item_index } => Some((DefId(i as u32), item_index)),
                 _ => None,
@@ -1125,6 +1107,7 @@ impl<'a> Checker<'a> {
                 );
             }
         }
+        self.splice(Splice::TraitDefaults);
     }
 
     /// Collect impl blocks into the impl table and method signatures.
@@ -1543,6 +1526,17 @@ impl<'a> Checker<'a> {
         // No impl is in scope for `collect_signatures` / `collect_externs`,
         // which run next.
         self.impl_self = None;
+        self.impl_spans = impl_spans;
+        self.impl_in_std = impl_in_std;
+        self.impl_method_spans = impl_method_spans;
+        self.impl_param_names = impl_param_names;
+        // std's impls come after the program's, as the full check collects
+        // them; the checks below pair the two (5.3a).
+        self.splice(Splice::Impls);
+        let impl_spans = self.impl_spans.clone();
+        let impl_in_std = self.impl_in_std.clone();
+        let impl_method_spans = self.impl_method_spans.clone();
+        let impl_param_names = self.impl_param_names.clone();
 
         // Ordered first among the three post-collection passes so that an
         // `E0072` about a method signature still precedes `check_supertrait_impls`'s
@@ -1556,7 +1550,6 @@ impl<'a> Checker<'a> {
             &impl_param_names,
         );
         self.check_supertrait_impls(&impl_spans);
-        self.impl_param_names = impl_param_names;
     }
 
     /// E0105, a warning: a program's trait impl defines (or takes from the
@@ -2434,6 +2427,9 @@ impl<'a> Checker<'a> {
     fn collect_signatures(&mut self) {
         let fn_ids: Vec<(DefId, usize)> = self.defs.functions().collect();
         for (def_id, item_index) in fn_ids {
+            if !self.own(def_id) {
+                continue;
+            }
             let ast::Item::Function(f) = &self.file.items[item_index].value else {
                 continue;
             };
@@ -2479,6 +2475,9 @@ impl<'a> Checker<'a> {
         // A constant compiles to a zero-argument function returning its
         // value; register its signature here.
         for (def_id, item_index) in self.const_ids() {
+            if !self.own(def_id) {
+                continue;
+            }
             let ast::Item::Const(c) = &self.file.items[item_index].value else {
                 continue;
             };
@@ -2503,6 +2502,9 @@ impl<'a> Checker<'a> {
     fn collect_externs(&mut self) {
         let externs: Vec<(DefId, usize, usize)> = self.defs.extern_functions().collect();
         for (def_id, item_index, fn_index) in externs {
+            if !self.own(def_id) {
+                continue;
+            }
             let ast::Item::Extern(block) = &self.file.items[item_index].value else {
                 continue;
             };
@@ -14815,6 +14817,11 @@ mod tests {
             qualified_callee: None,
             pats: PatState::default(),
             quiet_splits: FxHashSet::default(),
+            impl_spans: Vec::new(),
+            impl_in_std: Vec::new(),
+            impl_method_spans: Vec::new(),
+            own_defs: defs.defs().len() as u32,
+            shared: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
@@ -14895,6 +14902,11 @@ mod tests {
             qualified_callee: None,
             pats: PatState::default(),
             quiet_splits: FxHashSet::default(),
+            impl_spans: Vec::new(),
+            impl_in_std: Vec::new(),
+            impl_method_spans: Vec::new(),
+            own_defs: defs.defs().len() as u32,
+            shared: None,
         };
         let mut fcx = FnCtx {
             icx: InferCtx::default(),
