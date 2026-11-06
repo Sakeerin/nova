@@ -272,9 +272,10 @@ The branch is `claude/loving-archimedes-frtf5q-52b`, from `2d38ad7a`.
     drive in N's paths (5.5, decisions 14 and 23);
   - package identity through a link, or, under a relative root, an
     absolute dependency path or one climbing above the current
-    directory: N refuses where S0 reads one package, and `x/..` after a
-    link, which N folds (decision 23, ADR 0054 §5); no comparison input
-    has either;
+    directory, or, on a case-insensitive disk, one directory spelled two
+    ways by case: N refuses where S0 reads one package, and `x/..` after
+    a link, which N folds (decision 23, ADR 0054 §5); no comparison
+    input has any of the three;
   - the mutants that pass by design (decision 21).
 ## Global Constraints
 
@@ -302,7 +303,8 @@ The branch is `claude/loving-archimedes-frtf5q-52b`, from `2d38ad7a`.
   `wasm-names` (the fuzzer's seeds, which replace 5.2a's `names-301` to
   `names-303`), `package-names-321` to `package-names-323`,
   `resolution-identity`,
-  `altered-std-0` and `altered-std-1`; the driver's
+  `altered-std-0` and `altered-std-1`, `trait-std` and `trait-roots`
+  (the trait-offset test); the driver's
   unit tests' `nova-driver-resolution-<name>`; and N's own tests', under
   Nova's `temp_dir()`, `nova-selfhost-package-test`,
   `-package-clash-test`, `-package-of-test` and `-graph-test`
@@ -578,10 +580,11 @@ check in the task that owns the code:
    and the graph's M0011; decision 23 **(differs)**): N folds the paths
    as spelled, where S0 reads `real_path`. They can differ only on a
    path through a link, or, under a relative root, an absolute
-   dependency path or one climbing above the current directory; N then
-   refuses as M0011 (with the "may be one directory" clause for the
+   dependency path or one climbing above the current directory, or, on
+   a case-insensitive disk, one directory spelled two ways by case; N
+   then refuses as M0011 (with the "may be one directory" clause for the
    second kind) where S0 reads one package, or, after a link, dumps
-   another package. No comparison input reaches either →
+   another package. No comparison input reaches any of the three →
    `a_directory_spelled_two_ways_is_one_package_under_an_absolute_root`
    (Task 3, Unix) (mutants 117, 130 to
    134). The reviewer checks the list of inputs
@@ -824,12 +827,17 @@ How this plan is cut and checked:
       manifest; the table pins each place one past it, `1.0.0.0`, DEL and
       a 65-character name, and the graph's test a dependency's.
     - **Package identity** **(differs)**: N's std and runtime can neither
-      name the current directory nor follow a link, so N cannot read
+      name the current directory, follow a link nor read a disk's case
+      folding, so N cannot read
       `real_path`; it folds the path as the root and the entries spell
-      it. Exactly two kinds of input can differ: any path through a
-      link, whatever the root; and, unless the root is given by an
+      it. Exactly three kinds of input can differ: any path through a
+      link, whatever the root; unless the root is given by an
       absolute path, a dependency path that is absolute or whose folded
-      form climbs above the current directory (starts with `..`). Where
+      form climbs above the current directory (starts with `..`); and,
+      on a case-insensitive disk (Windows, usually macOS), one
+      directory spelled two ways by case **(differs)** (the review's
+      finding), `../Geom` and `../geom`, one package to S0 and two to
+      N, which refuses as M0011 without the clause. Where
       they differ, none the comparison's: one directory spelled relative
       and absolute under a relative root, or by a path climbing above the
       current directory and back and one that does not (the second
@@ -839,10 +847,15 @@ How this plan is cut and checked:
       refuses as M0011 with no such clause, and S0 reads one; and `x/..`
       after a link `x`, N folds and S0 follows the link, so S0 may give
       M0011 where N dumps. No case, corpus file or fuzz input holds a
-      link, an absolute dependency path under a relative root or a path
-      climbing above the current directory. The Unix test
+      link, an absolute dependency path under a relative root, a path
+      climbing above the current directory or a path spelled two ways by
+      case. A `..` at an absolute path's leading `/` is dropped, as
+      `real_path` drops it (the review's finding: `/../x` is `/x`; a
+      drive is not read, so `C:/../x` folds to `x`, decision 14). The
+      Unix test
       `a_directory_spelled_two_ways_is_one_package_under_an_absolute_root`
-      pins both sides reading one package under absolute roots and N's
+      pins both sides reading one package under absolute roots, a path
+      climbing past `/` among them, and N's
       refusals under relative ones, each pair of paths each way round
       (decision 25). On Windows N's paths read no drive, so the test is
       Unix's (5.5, with decision 14).

@@ -1252,7 +1252,10 @@ fn without_parens(text: &str) -> String {
 /// `../geom`, so the absolute path comes first; `up` on `../geom` and
 /// `../climb`, and `climb` on `../../run/geom`, which climbs above the
 /// current directory and comes back down; `up2` on `../../run/geom` and
-/// on `../b3`, so the climbing path comes first. Under a root given by its
+/// on `../b3`, so the climbing path comes first; `past` on `../geom` and
+/// `../b4`, and `b4` on `geom` by thirty `../` and its absolute path
+/// without the leading `/`, which climbs past `/`, where a `..` stays at
+/// `/`. Under a root given by its
 /// absolute path both sides read one `geom` in each. N cannot name the
 /// current directory, so under a relative root it refuses each graph as
 /// M0011, saying the two paths may name one directory, where S0, which
@@ -1267,6 +1270,7 @@ fn without_parens(text: &str) -> String {
 fn a_directory_spelled_two_ways_is_one_package_under_an_absolute_root() {
     let dir = fresh_dir("resolution-identity").join("run");
     let geom = dir.join("geom").display().to_string();
+    let past = format!("{}{}", "../".repeat(30), geom.trim_start_matches('/'));
     let manifest = |name: &str, deps: &[(&str, &str)]| {
         let mut text = MANIFEST.replace("pkg", name);
         if !deps.is_empty() {
@@ -1303,6 +1307,11 @@ fn a_directory_spelled_two_ways_is_one_package_under_an_absolute_root() {
             manifest("up2", &[("geom", "../../run/geom"), ("b3", "../b3")]),
         ),
         ("up2/src/main.nova", main(&["geom", "b3"])),
+        (
+            "past/nova.toml",
+            manifest("past", &[("geom", "../geom"), ("b4", "../b4")]),
+        ),
+        ("past/src/main.nova", main(&["geom", "b4"])),
         ("geom/nova.toml", manifest("geom", &[])),
         (
             "geom/src/lib.nova",
@@ -1312,6 +1321,8 @@ fn a_directory_spelled_two_ways_is_one_package_under_an_absolute_root() {
         ("b/src/lib.nova", lib("twice")),
         ("b3/nova.toml", manifest("b3", &[("geom", "../geom")])),
         ("b3/src/lib.nova", lib("thrice")),
+        ("b4/nova.toml", manifest("b4", &[("geom", &past)])),
+        ("b4/src/lib.nova", lib("past")),
         (
             "climb/nova.toml",
             manifest("climb", &[("geom", "../../run/geom")]),
@@ -1332,7 +1343,7 @@ fn a_directory_spelled_two_ways_is_one_package_under_an_absolute_root() {
     }
     std::os::unix::fs::symlink("geom", dir.join("link")).expect("link geom");
     let absolute = |root: &str| dir.join(root).display().to_string();
-    let roots: Vec<String> = ["app", "app3", "up", "up2"]
+    let roots: Vec<String> = ["app", "app3", "up", "up2", "past"]
         .iter()
         .map(|p| absolute(&format!("{p}/src/main.nova")))
         .collect();
@@ -1364,7 +1375,7 @@ fn a_directory_spelled_two_ways_is_one_package_under_an_absolute_root() {
     };
     let or_one = ", or one directory spelled by two paths, which N cannot tell apart without \
                   the current directory";
-    for root in ["app", "app3", "up", "up2"] {
+    for root in ["app", "app3", "up", "up2", "past"] {
         refused(&format!("{root}/src/main.nova"), or_one);
     }
     refused(&absolute("linked/src/main.nova"), "");
@@ -2704,7 +2715,7 @@ fn the_resolution_dumps_agree_on_std_the_corpus_and_the_cases() {
         }
         (check, wasm_dumps, test_dumps, counts)
     });
-    // 103 cases at 5.2a; at 5.2b 142 programs under `check` (39 of them a
+    // 103 cases at 5.2a; at 5.2b 145 programs under `check` (42 of them a
     // package's roots), 30 for the WASM target and 126 under test mode.
     assert!(counts[0] >= 130, "only {} resolver cases", counts[0]);
     assert!(counts[1] >= 25, "only {} WASM cases", counts[1]);
