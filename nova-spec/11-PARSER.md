@@ -509,6 +509,11 @@ by std-relative ids. The hidden `nova check --dump-resolution FILE…`
 resolve --std DIR FILE…` (and `--std-part`) prints the same bytes; it
 changes with resolution, in both compilers at once.
 
+**Amended 2026-11-04 (branch `claude/loving-archimedes-frtf5q-52b`, ADR
+0054):** both forms also take a package's module as a root, `--target
+wasm` and `--test` (`nova test`'s resolution); ADR 0054 §1 writes the
+forms they add (`package=<n>`, `mode=test`, `(Test`, `(Missing`).
+
 ---
 
 ## 5. Error Recovery
