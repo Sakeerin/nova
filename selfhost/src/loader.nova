@@ -27,18 +27,22 @@
 // - A package's identity, `real_path` of its directory in nova-pm, is its
 //   directory as the root's path and the entries' paths spell it, with
 //   `.` and `x/..` folded away (`normal_path`). Neither N's std nor its
-//   runtime names the current directory or follows a link, so this is
-//   `real_path`'s identity except on two kinds of input: any path through
-//   a link, whatever the root, where `x/..` after a link `x` is folded
-//   where `real_path` follows the link; and, unless the root is given by
-//   an absolute path, an absolute dependency path or one whose folded
-//   form climbs above the current directory (starts with `..`), which N
-//   cannot compare with the other paths without the current directory's
-//   name. There one directory spelled two ways is two packages, which N
-//   refuses as M0011, saying, where the paths are of the second kind,
-//   that they may be one directory. No input of the differential holds a
-//   link or, under a relative root, an absolute path or one that climbs
-//   above the current directory (ADR 0054 §5).
+//   runtime names the current directory, follows a link or reads a
+//   disk's case folding, so this is `real_path`'s identity except on
+//   three kinds of input: any path through a link, whatever the root,
+//   where `x/..` after a link `x` is folded where `real_path` follows the
+//   link; unless the root is given by an absolute path, an absolute
+//   dependency path or one whose folded form climbs above the current
+//   directory (starts with `..`), which N cannot compare with the other
+//   paths without the current directory's name; and, on a
+//   case-insensitive disk (Windows, usually macOS), one directory
+//   spelled two ways by case, `../Geom` and `../geom`. There one
+//   directory spelled two ways is two packages, which N refuses as
+//   M0011, saying, where the paths are of the second kind, that they may
+//   be one directory. No input of the differential holds a link, a
+//   directory spelled two ways by case or, under a relative root, an
+//   absolute path or one that climbs above the current directory (ADR
+//   0054 §5).
 // - The graph's diagnostics, the M-codes, are S0's alone (ADR 0054 §5):
 //   where nova-pm would give one, or where the manifest reader refuses a
 //   manifest, `read_graph` is `Err`, and the driver prints the message and
@@ -316,12 +320,16 @@ fn climbs_above(path: String) -> Bool { path == ".." || path.starts_with("../") 
 
 // `path` with its `.` components dropped and each `x/..` folded, where
 // `x` is not `..`, as `real_path` names a directory when no link is on the
-// way; a leading `/` stays.
+// way; a leading `/` stays, and a `..` at it is dropped, as `/..` is `/`
+// (`/../x` is `/x`). A drive is not read (ADR 0054 §7): `C:` is a
+// component like any other, so `C:/../x` is `x`, a path 5.5 takes up
+// with a root written with `\`.
 fn normal_path(path: String) -> String {
     let absolute = path.starts_with("/")
     let mut parts: Vec<String> = Vec::new()
     for part in path.split("/").iter() {
         if part == "" || part == "." { continue }
+        if part == ".." && absolute && parts.is_empty() { continue }
         if part == ".." && !parts.is_empty() && parts.last() != ".." {
             let _ = parts.pop()
             continue

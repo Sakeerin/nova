@@ -440,32 +440,43 @@ root, then breadth first each package's entries, and the root's
 dev-dependencies after its dependencies, a package read once by its
 identity, its key its index. nova-pm's identity is `real_path` of the
 package's directory, the absolute path with every link followed. N's
-std and runtime have no way to name the current directory or follow a
-link, so N's identity is the directory as the root's path and the
-entries' paths spell it, with `.` and `x/..` folded (**differs**). The
-two can differ on exactly two kinds of input: any path through a link,
-whatever the root; and, unless the root is given by an absolute path,
-any dependency path that is absolute or whose folded form climbs above
-the current directory (starts with `..`), since N cannot compare it
-with the other paths without the current directory's name. The two are
-the same package for every input of the differential: no input holds a
-link, every input that spells a dependency by its absolute path gives
-its root by its absolute path too, and no folded path climbs above the
-current directory. Where they differ: one directory spelled by an
-absolute path and a relative one under a relative root (the first
-fact-check's case (a)), or by a path that climbs above the current
-directory and comes back down and one that does not (the second
-fact-check's: in a directory `run`, `b` depends on `../../run/geom`), is
+std and runtime have no way to name the current directory, follow a
+link or read a disk's case folding, so N's identity is the directory as
+the root's path and the entries' paths spell it, with `.` and `x/..`
+folded, and a `..` at a leading `/` dropped (**differs**). The two can
+differ on exactly three kinds of input: any path through a link,
+whatever the root; unless the root is given by an absolute path, any
+dependency path that is absolute or whose folded form climbs above the
+current directory (starts with `..`), since N cannot compare it with
+the other paths without the current directory's name; and, on a
+case-insensitive disk (Windows, usually macOS), one directory spelled
+two ways by case (**differs**). The two are the same package for every
+input of the differential: no input holds a link, every input that
+spells a dependency by its absolute path gives its root by its absolute
+path too, no folded path climbs above the current directory, and no
+input spells a path two ways by case. Where they differ: one directory
+spelled by an absolute path and a relative one under a relative root
+(the first fact-check's case (a)), or by a path that climbs above the
+current directory and comes back down and one that does not (the
+second fact-check's: in a directory `run`, `b` depends on
+`../../run/geom`), is
 two packages of one name to N, which refuses the graph as M0011, saying
 that the two may be one directory, where S0 reads one package; one
 directory reached through a link and without it (case (b)) is refused
 as M0011 too, with no such clause, since N cannot see a link; and
 `x/..` after a link `x` (case (c)), which N folds and `real_path`
 follows, makes N dump a package other than S0's, or S0 give an M-code
-where N dumps. A Unix test pins the first three, each pair of paths
-each way round, beside a root given absolutely, where both read one
-package; on Windows N's paths read no drive, which 5.5
-takes up with a root written with `\`.
+where N dumps; and `../Geom` and `../geom` naming one directory on a
+case-insensitive disk are one package to S0, whose `real_path` gives
+the directory's one spelling, and two to N, which refuses the graph as
+M0011 with no such clause (the review's finding, not probed: this
+machine's disk is case-sensitive, and a clause there would make N's
+message differ from S0's on a case-sensitive disk). A Unix test pins
+the first three, each pair of paths each way round, beside a root given
+absolutely, where both read one package, and a path from an absolute
+root that climbs past `/` (the review's finding: `/..` is `/`); on
+Windows N's paths read no drive, which 5.5 takes up with a root written
+with `\`.
 Where nova-pm gives an error the graph refuses instead: a dependency's
 directory with no manifest (M0007), a key that is not the package's name
 (M0008), a dependency with no library (M0009), its own directory or a
@@ -507,7 +518,7 @@ refuses (§5); registry packages, `nova.lock` and `project::sync`, which
 the dump never runs; doc tests (`RootKind::Doc`) and `nova test`'s
 whole-package program of several roots (decision 1); a registry
 package's dropped warnings (no input has one); `real_path`'s identity
-through a link or the current directory (§5).
+through a link, the current directory or a disk's case folding (§5).
 
 ### 7. The differential on both sides
 
@@ -574,7 +585,9 @@ S0's E0004 as Windows writes it and checks it equals N's.
   compare the parent's name with `src` and `tests` exactly, so `Nova.toml`
   is a manifest on a case-folding disk on both (5.2a's test, now through
   N too) and `SRC/main.nova` is a loose program on both; a dependency's
-  manifest is asked for by its path as well.
+  manifest is asked for by its path as well. One dependency directory
+  spelled two ways by case, `../Geom` and `../geom`, is one package to
+  S0 and two to N (§5's third kind); no input has one.
 - Windows: `src\main.nova` typed as a root is a package's module to S0 and
   a loose program to N, whose paths split at `/` only (ADR 0053 §5); the
   harness writes every root with `/`, and 5.5 settles both. macOS (a
