@@ -1018,10 +1018,12 @@ fn both_sides_take_test_in_every_position_alike() {
     ];
     // Both dumps: the HIR dump's forms take what the resolution dump's
     // take (5.3a, ADR 0055).
-    for ((args, code), (s0, command)) in shapes
-        .iter()
-        .flat_map(|shape| [(shape, (RESOLUTION_S0, "resolve")), (shape, (HIR_S0, "hir"))])
-    {
+    for ((args, code), (s0, command)) in shapes.iter().flat_map(|shape| {
+        [
+            (shape, (RESOLUTION_S0, "resolve")),
+            (shape, (HIR_S0, "hir")),
+        ]
+    }) {
         let n: Vec<&str> = [command, "--std", std.as_str()]
             .into_iter()
             .chain(
@@ -3892,10 +3894,14 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
     let packages = package_corpus();
     let wasm = wasm_corpus();
     let tests = test_corpus();
-    // The resolution dump's floors (5.2b): 251 loose programs, 67 package
-    // files, 39 WASM programs and 9 files with tests at 5.3a.
+    // The resolution dump's floors (5.2b): 251 loose programs, 74 package
+    // files, 39 WASM programs and 10 files with tests at 5.3a.
     assert!(loose.len() >= 240, "only {} loose programs", loose.len());
-    assert!(packages.len() >= 60, "only {} package files", packages.len());
+    assert!(
+        packages.len() >= 60,
+        "only {} package files",
+        packages.len()
+    );
     assert!(wasm.len() >= 35, "only {} WASM programs", wasm.len());
     assert!(tests.len() >= 8, "only {} files with tests", tests.len());
     let (check, wasm_dumps, test_dumps, counts) = std::thread::scope(|scope| {
@@ -4091,10 +4097,18 @@ fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
         );
     }
     assert!(checked >= 6, "{checked} of {} checked", roots.len());
-    let part = run(selfhost(), &["hir", "--std", &std, "--std-part"], &cases, &[])
-        .expect("run N's std part");
+    let part = run(
+        selfhost(),
+        &["hir", "--std", &std, "--std-part"],
+        &cases,
+        &[],
+    )
+    .expect("run N's std part");
     assert_eq!(part.code, Some(0));
-    assert_eq!(String::from_utf8_lossy(&part.stdout).matches(mark).count(), 1);
+    assert_eq!(
+        String::from_utf8_lossy(&part.stdout).matches(mark).count(),
+        1
+    );
 }
 
 /// The type fuzzer's seeds (5.3a): its own, past the name fuzzer's.
