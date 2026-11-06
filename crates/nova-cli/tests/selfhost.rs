@@ -3531,7 +3531,7 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
 /// Whether N has `selfhost hir --std DIR [--target wasm] [--test] FILE…`
 /// (or `--std-part`), the HIR dump's other side (spec 5.3 §3.3): part B of
 /// 5.3a sets it.
-const N_HIR: bool = false;
+const N_HIR: bool = true;
 
 /// The item codes of 5.3a (spec 5.3 §3.2): each occurs among the HIR
 /// dumps of the cases, the corpus and the fuzzer's inputs. E0092 is the

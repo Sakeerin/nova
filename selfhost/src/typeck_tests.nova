@@ -1,0 +1,9 @@
+// N's own tests of the type checker's item passes (5.3a).
+
+import hir
+import typeck
+
+@test
+fn ty_eq_compares_by_structure() {
+    assert(ty_eq(TyParam(1), TyParam(1)))
+}

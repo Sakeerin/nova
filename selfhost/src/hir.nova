@@ -1,0 +1,584 @@
+// HIR's types and the item tables: a port of crates/nova-hir/src/lib.rs's
+// `Ty`, `TyHead`, `TraitDef`, `TraitMethod`, `ImplInfo`, `RecordType`,
+// `RecordField`, `SumType`, `Variant`, `ExternFn` and `ExternAbi`, and of
+// its logic (`subst`, the queries, `match_pattern`, `match_args`,
+// `normalize_ty` with its limits, `self_types_overlap`), function by
+// function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §3.1, ADR 0055). The bodies' nodes (`Function`, `Expr`, `Pattern`) come
+// in 5.3b.
+//
+// The Rust's idioms, translated one way everywhere (ADR 0055 lists them):
+//
+// - A `DefId` is an `Int`, and an `Option<DefId>` an `Int`, -1 for none.
+// - `Ty` derives `PartialEq`, and a user sum has no `==` in Nova (E0013), so
+//   two types are compared by `ty_eq`, two heads by `head_eq`.
+// - A variant whose name a module of N already holds carries `Hir`
+//   (`HirVariant`, `HirField`), as one module may not import two of a name.
+// - A span carries no file in N (ADR 0052), so a span kept in a table,
+//   which a diagnostic or the dump prints with its file, is a `FileSpan`.
+
+import token
+
+/// A type (`Ty`): the 18 variants, `Var` included, which the bodies use.
+pub type Ty =
+    | TyInt
+    | TyFloat
+    | TyBool
+    | TyChar
+    | TyString
+    | TyBytes
+    | TyUnit
+    // params, ret
+    | TyFn(Vec<Ty>, Ty)
+    | TyFuture(Ty)
+    // def_id, args
+    | TySum(Int, Vec<Ty>)
+    // def_id, args
+    | TyRecord(Int, Vec<Ty>)
+    | TyArray(Ty)
+    | TyTuple(Vec<Ty>)
+    | TyParam(Int)
+    // on, assoc
+    | TyAssoc(Ty, Int)
+    | TyVar(Int)
+    | TyNever
+    | TyError
+
+/// The outermost constructor of a type an impl can be written for
+/// (`TyHead`).
+pub type TyHead =
+    | TyHeadInt
+    | TyHeadFloat
+    | TyHeadBool
+    | TyHeadChar
+    | TyHeadString
+    | TyHeadBytes
+    | TyHeadArray
+    | TyHeadSum(Int)
+    | TyHeadRecord(Int)
+
+/// A span of the file labelled `file`.
+pub record FileSpan { pub file: String, pub span: Span }
+
+/// An `extern` function's ABI (`ExternAbi`).
+pub type ExternAbi = | ExternAbiC | ExternAbiJs
+
+/// An `extern` function (`ExternFn`): its symbol, ABI, signature and the
+/// span of its name.
+pub record ExternFn {
+    pub def_id: Int,
+    pub symbol: String,
+    pub abi: ExternAbi,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub span: FileSpan,
+}
+
+/// A trait (`TraitDef`).
+pub record TraitDef {
+    pub def_id: Int,
+    pub name: String,
+    pub supertraits: Vec<Int>,
+    pub methods: Vec<TraitMethod>,
+    pub assoc_types: Vec<(String, Int)>,
+}
+
+/// A trait's method (`TraitMethod`): `Self` is `TyParam(0)`, its own
+/// generics `TyParam(1..)`; `params` holds no `self`.
+pub record TraitMethod {
+    pub name: String,
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    pub has_self: Bool,
+    pub mut_self: Bool,
+    pub generics: Int,
+    pub bounds: Vec<Vec<Int>>,
+    pub default_def: Int,
+}
+
+/// An impl (`ImplInfo`); `trait_id` is -1 for an inherent impl.
+pub record ImplInfo {
+    pub trait_id: Int,
+    pub self_head: TyHead,
+    pub self_ty: Ty,
+    pub generics: Int,
+    pub bounds: Vec<Vec<Int>>,
+    pub methods: Vec<(String, Int)>,
+    pub assoc_bindings: Vec<(Int, Ty)>,
+}
+
+/// A record type (`RecordType`).
+pub record RecordType {
+    pub def_id: Int,
+    pub name: String,
+    pub generics: Int,
+    pub fields: Vec<HirField>,
+}
+
+/// A record's field (`RecordField`).
+pub record HirField { pub name: String, pub ty: Ty }
+
+/// A sum type (`SumType`).
+pub record SumType {
+    pub def_id: Int,
+    pub name: String,
+    pub generics: Int,
+    pub variants: Vec<HirVariant>,
+}
+
+/// A sum's variant (`Variant`).
+pub record HirVariant { pub name: String, pub fields: Vec<Ty> }
+
+// ---------------------------------------------------------------------------
+// Equality
+// ---------------------------------------------------------------------------
+
+/// `a == b` on two types (`Ty`'s derived `PartialEq`).
+pub fn ty_eq(a: Ty, b: Ty) -> Bool {
+    match (a, b) {
+        (TyInt, TyInt) => true
+        (TyFloat, TyFloat) => true
+        (TyBool, TyBool) => true
+        (TyChar, TyChar) => true
+        (TyString, TyString) => true
+        (TyBytes, TyBytes) => true
+        (TyUnit, TyUnit) => true
+        (TyFn(p1, r1), TyFn(p2, r2)) => tys_eq(p1, p2) && ty_eq(r1, r2)
+        (TyFuture(o1), TyFuture(o2)) => ty_eq(o1, o2)
+        (TySum(d1, a1), TySum(d2, a2)) => d1 == d2 && tys_eq(a1, a2)
+        (TyRecord(d1, a1), TyRecord(d2, a2)) => d1 == d2 && tys_eq(a1, a2)
+        (TyArray(e1), TyArray(e2)) => ty_eq(e1, e2)
+        (TyTuple(t1), TyTuple(t2)) => tys_eq(t1, t2)
+        (TyParam(i), TyParam(j)) => i == j
+        (TyAssoc(o1, x), TyAssoc(o2, y)) => x == y && ty_eq(o1, o2)
+        (TyVar(i), TyVar(j)) => i == j
+        (TyNever, TyNever) => true
+        (TyError, TyError) => true
+        _ => false
+    }
+}
+
+/// Element-wise `ty_eq` of two lists of types.
+pub fn tys_eq(a: Vec<Ty>, b: Vec<Ty>) -> Bool {
+    if a.len() != b.len() { return false }
+    let mut i = 0
+    while i < a.len() {
+        if !ty_eq(a.at(i), b.at(i)) { return false }
+        i += 1
+    }
+    true
+}
+
+/// `a == b` on two heads (`TyHead`'s derived `PartialEq`).
+pub fn head_eq(a: TyHead, b: TyHead) -> Bool {
+    match (a, b) {
+        (TyHeadInt, TyHeadInt) => true
+        (TyHeadFloat, TyHeadFloat) => true
+        (TyHeadBool, TyHeadBool) => true
+        (TyHeadChar, TyHeadChar) => true
+        (TyHeadString, TyHeadString) => true
+        (TyHeadBytes, TyHeadBytes) => true
+        (TyHeadArray, TyHeadArray) => true
+        (TyHeadSum(x), TyHeadSum(y)) => x == y
+        (TyHeadRecord(x), TyHeadRecord(y)) => x == y
+        _ => false
+    }
+}
+
+/// Whether `head` is `TyHead::Array`.
+pub fn is_array_head(head: TyHead) -> Bool {
+    match head {
+        TyHeadArray => true
+        _ => false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ty's logic
+// ---------------------------------------------------------------------------
+
+/// `ty` with each `TyParam(i)` replaced by `args[i]`, `TyError` past
+/// `args`' end (`Ty::subst`).
+pub fn subst(ty: Ty, args: Vec<Ty>) -> Ty {
+    match ty {
+        TyParam(i) => if i >= 0 && i < args.len() { args.at(i) } else { TyError }
+        TyFn(params, ret) => TyFn(subst_all(params, args), subst(ret, args))
+        TySum(d, a) => TySum(d, subst_all(a, args))
+        TyRecord(d, a) => TyRecord(d, subst_all(a, args))
+        TyArray(e) => TyArray(subst(e, args))
+        TyTuple(es) => TyTuple(subst_all(es, args))
+        TyFuture(o) => TyFuture(subst(o, args))
+        TyAssoc(on, assoc) => TyAssoc(subst(on, args), assoc)
+        other => other
+    }
+}
+
+/// `subst` of each of `tys`.
+pub fn subst_all(tys: Vec<Ty>, args: Vec<Ty>) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new()
+    for t in tys.iter() { out.push(subst(t, args)) }
+    out
+}
+
+/// Whether `ty` mentions `TyParam(idx)` (`Ty::mentions_param`).
+pub fn mentions_param(ty: Ty, idx: Int) -> Bool {
+    match ty {
+        TyParam(k) => k == idx
+        TyFn(params, ret) => {
+            for p in params.iter() { if mentions_param(p, idx) { return true } }
+            mentions_param(ret, idx)
+        }
+        TySum(_, args) => any_mentions(args, idx)
+        TyRecord(_, args) => any_mentions(args, idx)
+        TyArray(e) => mentions_param(e, idx)
+        TyTuple(es) => any_mentions(es, idx)
+        TyFuture(o) => mentions_param(o, idx)
+        TyAssoc(on, _) => mentions_param(on, idx)
+        _ => false
+    }
+}
+
+fn any_mentions(tys: Vec<Ty>, idx: Int) -> Bool {
+    for t in tys.iter() { if mentions_param(t, idx) { return true } }
+    false
+}
+
+/// Whether `ty` holds a projection anywhere (`Ty::has_assoc`).
+pub fn has_assoc(ty: Ty) -> Bool {
+    match ty {
+        TyAssoc(_, _) => true
+        TyFn(params, ret) => {
+            for p in params.iter() { if has_assoc(p) { return true } }
+            has_assoc(ret)
+        }
+        TySum(_, args) => any_assoc(args)
+        TyRecord(_, args) => any_assoc(args)
+        TyArray(e) => has_assoc(e)
+        TyTuple(es) => any_assoc(es)
+        TyFuture(o) => has_assoc(o)
+        _ => false
+    }
+}
+
+fn any_assoc(tys: Vec<Ty>) -> Bool {
+    for t in tys.iter() { if has_assoc(t) { return true } }
+    false
+}
+
+/// Whether `ty` holds the error type anywhere (`Ty::has_error`).
+pub fn has_error(ty: Ty) -> Bool {
+    match ty {
+        TyError => true
+        TyFn(params, ret) => {
+            for p in params.iter() { if has_error(p) { return true } }
+            has_error(ret)
+        }
+        TySum(_, args) => any_error(args)
+        TyRecord(_, args) => any_error(args)
+        TyArray(e) => has_error(e)
+        TyTuple(es) => any_error(es)
+        TyFuture(o) => has_error(o)
+        TyAssoc(on, _) => has_error(on)
+        _ => false
+    }
+}
+
+fn any_error(tys: Vec<Ty>) -> Bool {
+    for t in tys.iter() { if has_error(t) { return true } }
+    false
+}
+
+/// The head of a type an impl can be written for (`Ty::head`).
+pub fn head(ty: Ty) -> Option<TyHead> {
+    match ty {
+        TyInt => Some(TyHeadInt)
+        TyFloat => Some(TyHeadFloat)
+        TyBool => Some(TyHeadBool)
+        TyChar => Some(TyHeadChar)
+        TyString => Some(TyHeadString)
+        TyBytes => Some(TyHeadBytes)
+        TyArray(_) => Some(TyHeadArray)
+        TySum(d, _) => Some(TyHeadSum(d))
+        TyRecord(d, _) => Some(TyHeadRecord(d))
+        _ => None
+    }
+}
+
+/// Match `pattern`, whose `TyParam`s are holes, against `ground`, filling
+/// `out[k]` with what hole `k` matched (`Ty::match_pattern`); `out` holds
+/// `None` for a hole not met yet.
+pub fn match_pattern(pattern: Ty, ground: Ty, mut out: Vec<Option<Ty>>) -> Bool {
+    match (pattern, ground) {
+        (TyParam(k), g) => {
+            while out.len() <= k { out.push(None) }
+            match out.at(k) {
+                Some(existing) => ty_eq(existing, g)
+                None => {
+                    out.set(k, Some(g))
+                    true
+                }
+            }
+        }
+        (TyRecord(d1, a1), TyRecord(d2, a2)) => d1 == d2 && match_all(a1, a2, out)
+        (TySum(d1, a1), TySum(d2, a2)) => d1 == d2 && match_all(a1, a2, out)
+        (TyArray(e1), TyArray(e2)) => match_pattern(e1, e2, out)
+        (TyTuple(t1), TyTuple(t2)) => match_all(t1, t2, out)
+        (TyFuture(o1), TyFuture(o2)) => match_pattern(o1, o2, out)
+        (TyFn(p1, r1), TyFn(p2, r2)) => match_all(p1, p2, out) && match_pattern(r1, r2, out)
+        (TyAssoc(p, pa), TyAssoc(g, ga)) => pa == ga && match_pattern(p, g, out)
+        (a, b) => ty_eq(a, b)
+    }
+}
+
+// Equal lengths and each pair matching, stopping at the first that does
+// not, as `zip(…).all(…)` does.
+fn match_all(ps: Vec<Ty>, gs: Vec<Ty>, out: Vec<Option<Ty>>) -> Bool {
+    if ps.len() != gs.len() { return false }
+    let mut i = 0
+    while i < ps.len() {
+        if !match_pattern(ps.at(i), gs.at(i), out) { return false }
+        i += 1
+    }
+    true
+}
+
+/// The impl's type arguments that make its self type `concrete`, a hole
+/// not met `TyError` (`ImplInfo::match_args`).
+pub fn match_args(imp: ImplInfo, concrete: Ty) -> Option<Vec<Ty>> {
+    let out: Vec<Option<Ty>> = Vec::new()
+    if !match_pattern(imp.self_ty, concrete, out) { return None }
+    let mut args: Vec<Ty> = Vec::new()
+    let mut i = 0
+    while i < imp.generics {
+        let t = if i < out.len() {
+            match out.at(i) {
+                Some(t) => t
+                None => TyError
+            }
+        } else {
+            TyError
+        }
+        args.push(t)
+        i += 1
+    }
+    Some(args)
+}
+
+// ---------------------------------------------------------------------------
+// normalize_ty
+// ---------------------------------------------------------------------------
+
+/// How deep a chain of associated-type bindings may go
+/// (`NORMALIZE_DEPTH_LIMIT`).
+pub const NORMALIZE_DEPTH_LIMIT: Int = 64
+
+/// How many type nodes one normalization may visit
+/// (`NORMALIZE_STEP_LIMIT`).
+pub const NORMALIZE_STEP_LIMIT: Int = 10000
+
+/// Which limit a normalization ran out on (`NormalizeLimit`).
+pub type NormalizeLimit = | NormalizeLimitDepth | NormalizeLimitSteps
+
+// The steps a normalization has left, shared by its recursion.
+record Steps { left: Int }
+
+/// `ty` with every projection that an impl of `impls` binds replaced by
+/// the binding, its arguments substituted, again until none is left
+/// (`normalize_ty`); `Err` with the limit it ran out on, for which the
+/// caller names `ty`.
+pub fn normalize_ty(ty: Ty, impls: Vec<ImplInfo>) -> Result<Ty, NormalizeLimit> {
+    let steps = Steps { left: NORMALIZE_STEP_LIMIT }
+    normalize_within(ty, impls, NORMALIZE_DEPTH_LIMIT, steps)
+}
+
+fn normalize_within(
+    ty: Ty,
+    impls: Vec<ImplInfo>,
+    depth: Int,
+    mut steps: Steps,
+) -> Result<Ty, NormalizeLimit> {
+    if steps.left == 0 { return Err(NormalizeLimitSteps) }
+    steps.left -= 1
+    match ty {
+        TyAssoc(on, assoc) => {
+            if depth == 0 { return Err(NormalizeLimitDepth) }
+            let depth = depth - 1
+            let on = normalize_within(on, impls, depth, steps)?
+            let h = match head(on) {
+                Some(h) => h
+                None => return Ok(TyAssoc(on, assoc))
+            }
+            let mut bound: Option<Ty> = None
+            for i in impls.iter() {
+                if !head_eq(i.self_head, h) { continue }
+                let mut binding: Option<Ty> = None
+                for (d, t) in i.assoc_bindings.iter() {
+                    if d == assoc {
+                        binding = Some(t)
+                        break
+                    }
+                }
+                let b = match binding {
+                    Some(b) => b
+                    None => continue
+                }
+                match match_args(i, on) {
+                    Some(args) => {
+                        bound = Some(subst(b, args))
+                        break
+                    }
+                    None => continue
+                }
+            }
+            match bound {
+                Some(b) => normalize_within(b, impls, depth, steps)
+                None => Ok(TyAssoc(on, assoc))
+            }
+        }
+        TyFn(params, ret) => {
+            let ps = normalize_all(params, impls, depth, steps)?
+            let r = normalize_within(ret, impls, depth, steps)?
+            Ok(TyFn(ps, r))
+        }
+        TySum(d, args) => Ok(TySum(d, normalize_all(args, impls, depth, steps)?))
+        TyRecord(d, args) => Ok(TyRecord(d, normalize_all(args, impls, depth, steps)?))
+        TyArray(e) => Ok(TyArray(normalize_within(e, impls, depth, steps)?))
+        TyTuple(es) => Ok(TyTuple(normalize_all(es, impls, depth, steps)?))
+        TyFuture(o) => Ok(TyFuture(normalize_within(o, impls, depth, steps)?))
+        other => Ok(other)
+    }
+}
+
+fn normalize_all(
+    tys: Vec<Ty>,
+    impls: Vec<ImplInfo>,
+    depth: Int,
+    steps: Steps,
+) -> Result<Vec<Ty>, NormalizeLimit> {
+    let mut out: Vec<Ty> = Vec::new()
+    for t in tys.iter() { out.push(normalize_within(t, impls, depth, steps)?) }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// self_types_overlap
+// ---------------------------------------------------------------------------
+
+/// Whether two impls' self types, with `a_generics` and `b_generics`
+/// parameters, share a ground instance (`self_types_overlap`); a
+/// projection is taken to overlap anything but a projection onto another
+/// associated type.
+pub fn self_types_overlap(a: Ty, a_generics: Int, b: Ty, b_generics: Int) -> Bool {
+    match (a, b) {
+        (TyAssoc(a1, x), TyAssoc(b1, y)) => x != y || self_types_overlap(a1, a_generics, b1, b_generics)
+        (TyAssoc(_, _), _) => true
+        (_, TyAssoc(_, _)) => true
+        _ => {
+            let shifted = shift_params(b, a_generics)
+            let mut s: Vec<Option<Ty>> = Vec::new()
+            let mut i = 0
+            while i < a_generics + b_generics {
+                s.push(None)
+                i += 1
+            }
+            unify_patterns(a, shifted, s)
+        }
+    }
+}
+
+fn shift_params(t: Ty, by: Int) -> Ty {
+    match t {
+        TyParam(k) => TyParam(k + by)
+        TyFn(params, ret) => TyFn(shift_all(params, by), shift_params(ret, by))
+        TySum(d, args) => TySum(d, shift_all(args, by))
+        TyRecord(d, args) => TyRecord(d, shift_all(args, by))
+        TyArray(e) => TyArray(shift_params(e, by))
+        TyTuple(es) => TyTuple(shift_all(es, by))
+        TyFuture(o) => TyFuture(shift_params(o, by))
+        other => other
+    }
+}
+
+fn shift_all(tys: Vec<Ty>, by: Int) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new()
+    for t in tys.iter() { out.push(shift_params(t, by)) }
+    out
+}
+
+fn walk_param(t: Ty, s: Vec<Option<Ty>>) -> Ty {
+    match t {
+        TyParam(k) => {
+            if k >= 0 && k < s.len() {
+                match s.at(k) {
+                    Some(bound) => walk_param(bound, s)
+                    None => t
+                }
+            } else {
+                t
+            }
+        }
+        _ => t
+    }
+}
+
+fn occurs(k: Int, t: Ty, s: Vec<Option<Ty>>) -> Bool {
+    match walk_param(t, s) {
+        TyParam(j) => j == k
+        TyFn(params, ret) => {
+            for p in params.iter() { if occurs(k, p, s) { return true } }
+            occurs(k, ret, s)
+        }
+        TySum(_, args) => any_occurs(k, args, s)
+        TyRecord(_, args) => any_occurs(k, args, s)
+        TyArray(e) => occurs(k, e, s)
+        TyTuple(es) => any_occurs(k, es, s)
+        TyFuture(o) => occurs(k, o, s)
+        _ => false
+    }
+}
+
+fn any_occurs(k: Int, tys: Vec<Ty>, s: Vec<Option<Ty>>) -> Bool {
+    for t in tys.iter() { if occurs(k, t, s) { return true } }
+    false
+}
+
+fn unify_patterns(a: Ty, b: Ty, mut s: Vec<Option<Ty>>) -> Bool {
+    let a = walk_param(a, s)
+    let b = walk_param(b, s)
+    match (a, b) {
+        (TyParam(i), TyParam(j)) => {
+            if i == j { return true }
+            if occurs(i, b, s) { return false }
+            s.set(i, Some(b))
+            true
+        }
+        (TyParam(i), _) => {
+            if occurs(i, b, s) { return false }
+            s.set(i, Some(b))
+            true
+        }
+        (_, TyParam(j)) => {
+            if occurs(j, a, s) { return false }
+            s.set(j, Some(a))
+            true
+        }
+        (TyRecord(d1, a1), TyRecord(d2, a2)) => d1 == d2 && unify_all(a1, a2, s)
+        (TySum(d1, a1), TySum(d2, a2)) => d1 == d2 && unify_all(a1, a2, s)
+        (TyArray(e1), TyArray(e2)) => unify_patterns(e1, e2, s)
+        (TyTuple(t1), TyTuple(t2)) => unify_all(t1, t2, s)
+        (TyFuture(o1), TyFuture(o2)) => unify_patterns(o1, o2, s)
+        (TyFn(p1, r1), TyFn(p2, r2)) => unify_all(p1, p2, s) && unify_patterns(r1, r2, s)
+        (x, y) => ty_eq(x, y)
+    }
+}
+
+fn unify_all(xs: Vec<Ty>, ys: Vec<Ty>, s: Vec<Option<Ty>>) -> Bool {
+    if xs.len() != ys.len() { return false }
+    let mut i = 0
+    while i < xs.len() {
+        if !unify_patterns(xs.at(i), ys.at(i), s) { return false }
+        i += 1
+    }
+    true
+}

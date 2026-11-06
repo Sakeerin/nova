@@ -33,6 +33,9 @@ import ast_dump
 import builtins
 import diagnostic
 import dump
+import fixes
+import hir
+import hir_dump
 import lexer
 import lexer_tests
 import loader
@@ -43,12 +46,16 @@ import resolution_dump
 import resolver
 import resolver_tests
 import token
+import typeck
+import typeck_tests
+import typeck_traits
+import typeck_ty
 
 async fn main() {
     let argv = args()
     let command = if argv.len() < 2 { "" } else { argv.at(1) }
-    if command == "resolve" {
-        resolve_command(argv).await
+    if command == "resolve" || command == "hir" {
+        dump_command(argv, command).await
         return
     }
     // No file is refused, as S0's clap refuses it.
@@ -90,8 +97,12 @@ async fn main() {
 // package's manifest N's reader refuses, or whose package graph would
 // give an M-code, S0's alone, stops the run: N says why on stderr and
 // exits 1, printing nothing of that root's part.
-async fn resolve_command(argv: Vec<String>) {
-    let usage = "usage: selfhost resolve --std DIR [--target native|wasm] [--test] (--std-part | FILE...)"
+//
+// `selfhost hir` takes the same arguments and refuses the same shapes, as
+// S0's `check --dump-hir` shares `check --dump-resolution`'s parser, and
+// prints the HIR dump in place of the resolution dump.
+async fn dump_command(argv: Vec<String>, command: String) {
+    let usage = "usage: selfhost ${command} --std DIR [--target native|wasm] [--test] (--std-part | FILE...)"
     let mut std_dir = ""
     let mut target_name = ""
     let mut target_given = false
@@ -150,7 +161,7 @@ async fn resolve_command(argv: Vec<String>) {
         return
     }
     if test && target_name == "wasm" {
-        eprintln("error: selfhost resolve --test is native only, as nova test is")
+        eprintln("error: selfhost ${command} --test is native only, as nova test is")
         exit(2)
         return
     }
@@ -162,23 +173,47 @@ async fn resolve_command(argv: Vec<String>) {
             return
         }
     }
+    let hir = command == "hir"
     if std_part {
         let resolved = resolve_program_for(target, Vec::new(), std_set)
-        print(dump_std(target, test, resolved, std_set.builtins))
+        if hir {
+            let (labels, texts) = labels_and_texts(Vec::new(), std_set)
+            let tables = check_items(resolved.items, resolved.definitions, labels, texts)
+            let mut diagnostics: Vec<Diagnostic> = Vec::new()
+            for d in resolved.diagnostics.iter() { diagnostics.push(d) }
+            for d in tables.diagnostics.iter() { diagnostics.push(d) }
+            print(dump_hir_std(target, test, resolved, tables, diagnostics))
+        } else {
+            print(dump_std(target, test, resolved, std_set.builtins))
+        }
         return
     }
-    // std is resolved once, and every root reads it (ADR 0054 §9).
+    // std is resolved once, and every root reads it (ADR 0054 §9); for the
+    // HIR dump std's items are collected once too, from the resolution of
+    // a program of no module of its own (ADR 0055).
     let shared = share_std(target, std_set)
+    let mut items: Option<SharedItems> = None
+    if hir {
+        let (labels, texts) = labels_and_texts(Vec::new(), std_set)
+        let alone = shared.alone
+        let s = share_items(alone.items, alone.definitions, labels, texts)
+        if shared.shareable && s.shareable { items = Some(s) }
+    }
     let mut failed = false
     for path in files.iter() {
-        match dump_resolution(path, target, test, shared).await {
+        let dumped = if hir {
+            dump_hir(path, target, test, shared, items).await
+        } else {
+            dump_resolution(path, target, test, shared).await
+        }
+        match dumped {
             DumpedText(out) => print("== ${path}\n${out}")
             DumpedIoError(e) => {
                 print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
                 failed = true
             }
             DumpedRefused(why) => {
-                eprintln("error: selfhost resolve cannot dump ${path}: ${why}")
+                eprintln("error: selfhost ${command} cannot dump ${path}: ${why}")
                 exit(1)
                 return
             }
@@ -303,6 +338,97 @@ async fn dump_resolution(
     name_tests(resolved.tests, resolved.definitions, modules)
     for d in resolved.diagnostics.iter() { diagnostics.push(d) }
     DumpedText(dump_program(target, test, sources, Some(resolved), diagnostics, std_set.builtins))
+}
+
+// The HIR dump of the program whose root is `path` (nova-driver's
+// `HirDumps::dump`): `dump_resolution`'s pipeline, then, when it stopped
+// on no error, the type checker's item passes. With std's tables `items`,
+// the program is resolved with std's definitions after its own and reads
+// std's tables rebased past them; without, because std alone gave a
+// diagnostic or holds a test, it is resolved and checked in full, as
+// `check` does. The dump holds the item tables and every diagnostic so
+// far, or, for a program that stopped before the type checker,
+// `checked=false` and the diagnostics.
+async fn dump_hir(
+    path: String,
+    target: CompileTarget,
+    test: Bool,
+    shared: SharedStd,
+    items: Option<SharedItems>,
+) -> Dumped {
+    let std_set = shared.std_set
+    let mut graph: Option<Graph> = None
+    let mut kind = RootLoose
+    match package_of(path).await {
+        Some((dir, k)) => {
+            match read_graph(dir).await {
+                Ok(g) => graph = Some(g)
+                Err(why) => return DumpedRefused(why)
+            }
+            kind = k
+        }
+        None => ()
+    }
+    let load = match load_program(graph, path, kind).await {
+        Ok(l) => l
+        Err(e) => return DumpedIoError(e)
+    }
+    let modules = load.modules
+    let mut diagnostics = load.diagnostics
+    let mut failed = false
+    for d in diagnostics.iter() { if d.is_error() { failed = true } }
+    if !failed { strip_test_functions(modules, test) }
+    let mut sources: Vec<ModuleSource> = Vec::new()
+    for m in modules.iter() {
+        sources.push(
+            ModuleSource {
+                name: m.name,
+                label: m.name,
+                file: m.ast,
+                imports: m.imports,
+                text: Some(m.text),
+                package: m.package,
+                importable: m.importable,
+            },
+        )
+    }
+    if failed { return DumpedText(dump_hir_program(target, test, None, diagnostics)) }
+    let resolved = match items {
+        Some(_) => resolve_program_shared_for_check(sources, shared)
+        None => resolve_program_for(target, sources, std_set)
+    }
+    name_tests(resolved.tests, resolved.definitions, modules)
+    for d in resolved.diagnostics.iter() {
+        diagnostics.push(d)
+        if d.is_error() { failed = true }
+    }
+    if failed { return DumpedText(dump_hir_program(target, test, None, diagnostics)) }
+    let (labels, texts) = labels_and_texts(sources, std_set)
+    let tables = match items {
+        Some(s) => check_items_shared(resolved.items, resolved.definitions, labels, texts, s)
+        None => check_items(resolved.items, resolved.definitions, labels, texts)
+    }
+    for d in tables.diagnostics.iter() { diagnostics.push(d) }
+    DumpedText(dump_hir_program(target, test, Some((resolved, tables)), diagnostics))
+}
+
+// Each module's file label, the program's `sources` then std's modules
+// that parsed, as the resolver numbers them, and each program module's
+// source text, for a fix's edit; std's have none.
+fn labels_and_texts(sources: Vec<ModuleSource>, std_set: StdSet) -> (Vec<String>, Vec<Option<String>>) {
+    let mut labels: Vec<String> = Vec::new()
+    let mut texts: Vec<Option<String>> = Vec::new()
+    for m in sources.iter() {
+        labels.push(m.label)
+        texts.push(m.text)
+    }
+    for s in std_set.modules.iter() {
+        if s.file.is_some() {
+            labels.push(s.label)
+            texts.push(None)
+        }
+    }
+    (labels, texts)
 }
 
 // Name each test of a module of a package's `tests/`

@@ -1,0 +1,984 @@
+// The type checker's traits and impls: a port of check.rs's
+// `collect_traits`, `collect_impls` and the impl checks it runs
+// (`check_impl_conformance`, `check_assoc_binding_cycles`,
+// `check_impl_method_signatures`, `check_impl_coherence`,
+// `check_hidden_trait_methods`, `check_supertrait_impls`,
+// `render_bound_set`), function by function (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §3.1, ADR 0055). typeck.nova gives the idioms.
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import resolver
+import token
+import typeck
+
+// A composite key `(item, method)` as one `Int`.
+fn item_method_key(item: Int, method: Int) -> Int { item * 1048576 + method }
+
+impl Checker {
+    // The methods owned by `trait_default`'s kind, by `(item, method)`:
+    // the default bodies' or the impls' method `DefId`s.
+    fn methods_by_place(self, trait_default: Bool) -> Map<Int, Int> {
+        let mut out: Map<Int, Int> = Map::new()
+        for i in 0..self.defs.defs.len() {
+            match self.defs.defs.at(i).kind {
+                DefKindMethod(item, method, owner) => {
+                    let is_default = match owner {
+                        MethodOwnerTraitDefault => true
+                        MethodOwnerImpl => false
+                    }
+                    if is_default == trait_default {
+                        let _ = out.insert(item_method_key(item, method), i)
+                    }
+                }
+                _ => ()
+            }
+        }
+        out
+    }
+
+    // The program's traits, as `(id, item_index)`.
+    fn own_traits(self) -> Vec<(Int, Int)> {
+        let mut out: Vec<(Int, Int)> = Vec::new()
+        for i in 0..self.own_defs {
+            match self.defs.defs.at(i).kind {
+                DefKindTrait(item) => out.push((i, item))
+                _ => ()
+            }
+        }
+        out
+    }
+
+    /// The traits and their methods' signatures, `Self` as `TyParam(0)`,
+    /// then the default bodies' signatures (`collect_traits`).
+    pub fn collect_traits(mut self) {
+        let default_defs = self.methods_by_place(true)
+        for (def_id, item_index) in self.own_traits().iter() {
+            let decl = match self.items.at(item_index).value {
+                ItemTrait(t) => t
+                _ => continue
+            }
+            self.enter_item(item_index)
+            if !decl.generics.is_empty() { self.unsupported(decl.name.span, "generic traits") }
+            if !decl.where_clause.is_empty() {
+                self.unsupported(decl.name.span, "`where` clauses on trait declarations")
+            }
+            let self_scope = self_generic_scope()
+            let mut methods: Vec<TraitMethod> = Vec::new()
+            // This trait's associated types' ids, in the order the resolver
+            // made them, drained one per associated type.
+            let assoc_ids = match self.assoc_of.get(def_id) {
+                Some(l) => l
+                None => Vec::new()
+            }
+            let mut next_assoc = 0
+            let mut assoc_types: Vec<(String, Int)> = Vec::new()
+            for mi in 0..decl.items.len() {
+                let item = decl.items.at(mi)
+                let mut name = Spanned::new("", Span::point(0))
+                let mut generics: Vec<TypeParam> = Vec::new()
+                let mut where_clause: Vec<WhereBound> = Vec::new()
+                let mut params: Vec<Param> = Vec::new()
+                let mut ret: Option<Spanned<Type>> = None
+                let mut is_default = false
+                let mut is_async = false
+                match item {
+                    TraitItemRequired(sig) => {
+                        name = sig.name
+                        generics = sig.generics
+                        where_clause = sig.where_clause
+                        params = sig.params
+                        ret = sig.return_ty
+                        is_async = sig.is_async
+                    }
+                    TraitItemProvided(f) => {
+                        name = f.name
+                        generics = f.generics
+                        where_clause = f.where_clause
+                        params = f.params
+                        ret = f.return_ty
+                        is_default = true
+                        is_async = f.is_async
+                    }
+                    TraitItemAssocType(_, aname, bounds) => {
+                        if !bounds.is_empty() {
+                            self.unsupported(aname.span, "trait bounds on an associated type")
+                        }
+                        let assoc_def_id = if next_assoc < assoc_ids.len() { assoc_ids.at(next_assoc) } else { -1 }
+                        next_assoc += 1
+                        let mut dup = false
+                        for (n, _) in assoc_types.iter() { if n == aname.value { dup = true } }
+                        if dup {
+                            self.error(
+                                "E0403",
+                                "the name `${aname.value}` is already used for an associated type of this trait",
+                                aname.span,
+                            )
+                            continue
+                        }
+                        if assoc_def_id >= 0 { assoc_types.push((aname.value, assoc_def_id)) }
+                        continue
+                    }
+                }
+                let mut dup = false
+                for m in methods.iter() { if m.name == name.value { dup = true } }
+                if dup {
+                    self.error(
+                        "E0403",
+                        "the name `${name.value}` is already used for a method of this trait",
+                        name.span,
+                    )
+                    continue
+                }
+                if is_async { self.unsupported(name.span, "async methods") }
+                if !where_clause.is_empty() {
+                    self.error("E0900", "`where` clauses on trait methods are not supported yet", name.span)
+                }
+                self.check_duplicate_generics(generics, "method")
+                let mut m_scope = copy_scope(self_scope)
+                for j in 0..generics.len() { let _ = m_scope.insert(generics.at(j).name.value, 1 + j) }
+                let mut sig_bounds: Vec<Vec<Int>> = Vec::new()
+                let mut first: Vec<Int> = Vec::new()
+                first.push(def_id)
+                sig_bounds.push(first)
+                for b in self.resolve_bounds(generics).iter() { sig_bounds.push(b) }
+                self.expand_bounds(sig_bounds)
+                let (m_params, m_ret) = self.method_sig_parts(params, ret, m_scope, sig_bounds)
+                let mut m_bounds: Vec<Vec<Int>> = Vec::new()
+                for k in 1..sig_bounds.len() { m_bounds.push(sig_bounds.at(k)) }
+                let mut default_def = -1
+                if is_default {
+                    match default_defs.get(item_method_key(item_index, mi)) {
+                        Some(d) => default_def = d
+                        None => ()
+                    }
+                }
+                methods.push(
+                    TraitMethod {
+                        name: name.value,
+                        params: m_params,
+                        ret: m_ret,
+                        has_self: self_param(params, false),
+                        mut_self: self_param(params, true),
+                        generics: generics.len(),
+                        bounds: m_bounds,
+                        default_def: default_def,
+                    },
+                )
+            }
+            let supers = match self.supertraits.at(def_id) {
+                Some(s) => s
+                None => Vec::new()
+            }
+            self.traits.push(
+                TraitDef {
+                    def_id: def_id,
+                    name: self.name_of(def_id),
+                    supertraits: supers,
+                    methods: methods,
+                    assoc_types: assoc_types,
+                },
+            )
+        }
+        self.splice_traits()
+        // The default bodies' signatures: generic over `Self`, bounded by
+        // the trait.
+        for (trait_id, item_index) in self.own_traits().iter() {
+            let decl = match self.items.at(item_index).value {
+                ItemTrait(t) => t
+                _ => continue
+            }
+            self.enter_item(item_index)
+            let self_scope = self_generic_scope()
+            for mi in 0..decl.items.len() {
+                let f = match decl.items.at(mi) {
+                    TraitItemProvided(f) => f
+                    _ => continue
+                }
+                let def_id = match default_defs.get(item_method_key(item_index, mi)) {
+                    Some(d) => d
+                    None => continue
+                }
+                if f.is_async { continue }
+                if !f.where_clause.is_empty() { continue }
+                let mut scope = copy_scope(self_scope)
+                for j in 0..f.generics.len() { let _ = scope.insert(f.generics.at(j).name.value, 1 + j) }
+                let mut bounds: Vec<Vec<Int>> = Vec::new()
+                let mut first: Vec<Int> = Vec::new()
+                first.push(trait_id)
+                bounds.push(first)
+                for b in self.resolve_bounds(f.generics).iter() { bounds.push(b) }
+                self.expand_bounds(bounds)
+                let (ps, ret) = self.method_sig_parts(f.params, f.return_ty, scope, bounds)
+                let mut params: Vec<Ty> = Vec::new()
+                if self_param(f.params, false) { params.push(TyParam(0)) }
+                for p in ps.iter() { params.push(p) }
+                self.sigs.set(
+                    def_id,
+                    Some(FnSig { generics: 1 + f.generics.len(), bounds: bounds, params: params, ret: ret }),
+                )
+                self.method_locs.set(
+                    def_id,
+                    Some(MethodLoc { item_index: item_index, method_index: mi, owner: MethodOwnerTraitDefault }),
+                )
+            }
+        }
+        self.splice_methods(true)
+    }
+
+    /// The impl blocks into the impl table and their methods' signatures,
+    /// then the checks that need the whole table (`collect_impls`).
+    pub fn collect_impls(mut self) {
+        let impl_methods = self.methods_by_place(false)
+        let mut impl_spans: Vec<FileSpan> = Vec::new()
+        let mut impl_in_std: Vec<Bool> = Vec::new()
+        let mut impl_method_spans: Vec<Vec<FileSpan>> = Vec::new()
+        let mut impl_param_names: Vec<Vec<String>> = Vec::new()
+        for item_index in 0..self.items.len() {
+            let block = match self.items.at(item_index).value {
+                ItemImpl(b) => b
+                _ => continue
+            }
+            self.enter_item(item_index)
+            self.impl_self = None
+            self.check_duplicate_generics(block.generics, "impl")
+            let impl_generics = generic_scope(block.generics)
+            let impl_bounds = self.resolve_bounds(block.generics)
+            self.apply_where(impl_bounds, block.where_clause, impl_generics)
+            self.expand_bounds(impl_bounds)
+            let self_ty = self.convert_ty(block.ty, impl_generics, impl_bounds)
+            if has_assoc(self_ty) {
+                let tystr = display_ty(self_ty, self.defs)
+                let mut d = error_at(
+                    "E0900",
+                    "an associated-type projection in an impl's self type (`${tystr}`) is not supported yet",
+                    self.cur_file,
+                    block.ty.span,
+                    "not supported yet",
+                )
+                d.add_note(
+                    "an impl's type arguments are recovered by matching its self type against a concrete one, which cannot invert a projection, so this impl could never be selected — and overlap checking cannot see through the projection either, so it would not conflict with an impl that does apply",
+                )
+                d.add_note(MVP_NOTE)
+                self.diagnostics.push(d)
+                continue
+            }
+            let self_head = match head(self_ty) {
+                Some(h) => h
+                None => {
+                    self.error("E0010", "impl blocks are only supported on named types", block.ty.span)
+                    continue
+                }
+            }
+            let mut has_unused = false
+            for i in 0..block.generics.len() {
+                if !mentions_param(self_ty, i) {
+                    has_unused = true
+                    let g = block.generics.at(i)
+                    self.error(
+                        "E0073",
+                        "impl type parameter `${g.name.value}` is not used in the self type `${display_ty(self_ty, self.defs)}`",
+                        g.name.span,
+                    )
+                }
+            }
+            if has_unused { continue }
+            let mut trait_id = -1
+            match block.trait_ {
+                Some(tr) => {
+                    let segs = tr.value.segments
+                    let name = if segs.is_empty() { "" } else { segs.last().value }
+                    let id = self.resolve_trait_in(self.cur_module, name)
+                    if id >= 0 {
+                        trait_id = id
+                    } else {
+                        if !self.missing_on_target(name, tr.span) {
+                            self.error("E0001", "cannot find trait `${name}`", tr.span)
+                            if !segs.is_empty() { self.name_fixes(segs.last(), NeedTrait, Vec::new()) }
+                        }
+                        continue
+                    }
+                }
+                None => ()
+            }
+            if trait_id >= 0 && is_array_head(self_head) {
+                let mut d = error_at(
+                    "E0010",
+                    "a trait cannot be implemented for an array",
+                    self.cur_file,
+                    block.ty.span,
+                    "an array type",
+                )
+                d.add_note(
+                    "an array takes inherent impls only, `impl<T> [T] { … }` or `impl [Int] { … }`; wrap the array in a record to implement a trait for it",
+                )
+                self.diagnostics.push(d)
+                continue
+            }
+            let imp_self = ImplSelf { ty: self_ty, trait_id: trait_id }
+            let _ = self.impl_selves.insert(item_index, imp_self)
+            self.impl_self = Some(imp_self)
+            let impl_count = block.generics.len()
+            let mut assoc_bindings: Vec<(Int, Ty)> = Vec::new()
+            let mut assoc_spans: Vec<Span> = Vec::new()
+            for c in block.consts.iter() {
+                self.unsupported(c.name.span, "associated constants like `${c.name.value}`")
+            }
+            for b in block.assoc_types.iter() {
+                let ty = self.convert_ty(b.ty, impl_generics, impl_bounds)
+                let assoc = if trait_id >= 0 { self.find_assoc_type(trait_id, b.name.value) } else { -1 }
+                if assoc < 0 {
+                    if trait_id < 0 {
+                        self.error(
+                            "E0071",
+                            "associated type `${b.name.value}` cannot be bound by an inherent impl, which implements no trait",
+                            b.name.span,
+                        )
+                    }
+                    continue
+                }
+                let mut dup = false
+                for (d, _) in assoc_bindings.iter() { if d == assoc { dup = true } }
+                if dup {
+                    self.error(
+                        "E0403",
+                        "the associated type `${b.name.value}` is already bound by this impl",
+                        b.name.span,
+                    )
+                    continue
+                }
+                assoc_bindings.push((assoc, ty))
+                assoc_spans.push(b.name.span)
+            }
+            self.check_assoc_binding_cycles(assoc_bindings, assoc_spans, self_ty)
+            let mut methods: Vec<(String, Int)> = Vec::new()
+            let mut method_spans: Vec<FileSpan> = Vec::new()
+            for mi in 0..block.functions.len() {
+                let f = block.functions.at(mi)
+                let def_id = match impl_methods.get(item_method_key(item_index, mi)) {
+                    Some(d) => d
+                    None => continue
+                }
+                let mut scope = copy_scope(impl_generics)
+                let mut bounds = copy_bounds(impl_bounds)
+                let mut seen: Vec<String> = Vec::new()
+                for j in 0..f.generics.len() {
+                    let g = f.generics.at(j)
+                    let gname = g.name.value
+                    if impl_generics.contains_key(gname) {
+                        self.error("E0403", "the name `${gname}` shadows the impl's generic parameter", g.name.span)
+                    } else if holds(seen.to_array(), gname) {
+                        self.error(
+                            "E0403",
+                            "the name `${gname}` is already used for a generic parameter of this method",
+                            g.name.span,
+                        )
+                    }
+                    seen.push(gname)
+                    let _ = scope.insert(gname, impl_count + j)
+                }
+                for b in self.resolve_bounds(f.generics).iter() { bounds.push(b) }
+                let method_generic_count = f.generics.len()
+                self.apply_where(bounds, f.where_clause, scope)
+                self.expand_bounds(bounds)
+                let (ps, r) = self.method_sig_parts(f.params, f.return_ty, scope, bounds)
+                let ret = if f.is_async { TyFuture(r) } else { r }
+                let mut params: Vec<Ty> = Vec::new()
+                if self_param(f.params, false) {
+                    params.push(self_ty)
+                } else {
+                    self.selfless.set(def_id, true)
+                }
+                for p in ps.iter() { params.push(p) }
+                if self_param(f.params, true) { self.mut_self.set(def_id, true) }
+                self.sigs.set(
+                    def_id,
+                    Some(
+                        FnSig {
+                            generics: impl_count + method_generic_count,
+                            bounds: bounds,
+                            params: params,
+                            ret: ret,
+                        },
+                    ),
+                )
+                self.method_locs.set(
+                    def_id,
+                    Some(MethodLoc { item_index: item_index, method_index: mi, owner: MethodOwnerImpl }),
+                )
+                methods.push((f.name.value, def_id))
+                method_spans.push(FileSpan { file: self.cur_file, span: f.name.span })
+            }
+            if trait_id >= 0 {
+                self.check_impl_conformance(trait_id, methods, block.assoc_types, block.ty.span)
+            }
+            self.impls.push(
+                ImplInfo {
+                    trait_id: trait_id,
+                    self_head: self_head,
+                    self_ty: self_ty,
+                    generics: block.generics.len(),
+                    bounds: impl_bounds,
+                    methods: methods,
+                    assoc_bindings: assoc_bindings,
+                },
+            )
+            impl_spans.push(FileSpan { file: self.cur_file, span: block.ty.span })
+            impl_in_std.push(self.is_std_module(self.cur_module))
+            impl_method_spans.push(method_spans)
+            let mut names: Vec<String> = Vec::new()
+            for g in block.generics.iter() { names.push(g.name.value) }
+            impl_param_names.push(names)
+        }
+        self.impl_self = None
+        self.impl_spans = impl_spans
+        self.impl_in_std = impl_in_std
+        self.impl_method_spans = impl_method_spans
+        self.impl_param_names = impl_param_names
+        self.splice_impls()
+        self.check_impl_method_signatures()
+        self.check_impl_coherence()
+        self.check_hidden_trait_methods()
+        self.check_supertrait_impls()
+    }
+
+    // The trait whose id is `tid` in the table.
+    fn trait_by_id(self, tid: Int) -> Option<TraitDef> {
+        for t in self.traits.iter() { if t.def_id == tid { return Some(t) } }
+        None
+    }
+
+    // E0105, a warning: a program's trait impl's method that one of std's
+    // inherent impls on an overlapping type also defines, which a call
+    // reaches first (`check_hidden_trait_methods`).
+    fn check_hidden_trait_methods(mut self) {
+        let mut found: Vec<Diagnostic> = Vec::new()
+        let spans = self.impl_spans
+        let in_std = self.impl_in_std
+        for i in 0..self.impls.len() {
+            let a = self.impls.at(i)
+            if a.trait_id < 0 { continue }
+            if i >= in_std.len() || in_std.at(i) { continue }
+            let tr = match self.trait_by_id(a.trait_id) {
+                Some(t) => t
+                None => continue
+            }
+            let mut names: Vec<(String, FileSpan, Bool)> = Vec::new()
+            for k in 0..a.methods.len() {
+                let (n, d) = a.methods.at(k)
+                let span = if i < self.impl_method_spans.len() && k < self.impl_method_spans.at(i).len() {
+                    self.impl_method_spans.at(i).at(k)
+                } else {
+                    spans.at(i)
+                }
+                names.push((n, span, !self.selfless.at(d)))
+            }
+            for m in tr.methods.iter() {
+                let mut overridden = false
+                for (n, _) in a.methods.iter() { if n == m.name { overridden = true } }
+                if m.default_def >= 0 && !overridden { names.push((m.name, spans.at(i), m.has_self)) }
+            }
+            let own: Vec<String> = if i < self.impl_param_names.len() { self.impl_param_names.at(i) } else { Vec::new() }
+            for j in 0..self.impls.len() {
+                let b = self.impls.at(j)
+                if b.trait_id >= 0 || !(j < in_std.len() && in_std.at(j)) { continue }
+                if !head_eq(a.self_head, b.self_head)
+                    || !self_types_overlap(a.self_ty, a.generics, b.self_ty, b.generics) {
+                    continue
+                }
+                for (name, span, has_self) in names.iter() {
+                    let mut std_def = -1
+                    for (n, d) in b.methods.iter() {
+                        if n == name && std_def < 0 { std_def = d }
+                    }
+                    if std_def < 0 { continue }
+                    let std_has_self = !self.selfless.at(std_def)
+                    if std_has_self != has_self { continue }
+                    let ty = display_ty_named(a.self_ty, self.defs, own)
+                    let declared = match self.sigs.at(std_def) {
+                        Some(s) => s.params.len()
+                        None => 0
+                    }
+                    let args = if declared > (if std_has_self { 1 } else { 0 }) { "(…)" } else { "()" }
+                    let trait_name = tr.name
+                    let mut trait_extra = 0
+                    let mut met = false
+                    for m in tr.methods.iter() {
+                        if !met && m.name == name {
+                            trait_extra = m.params.len()
+                            met = true
+                        }
+                    }
+                    let mut trait_args = "()"
+                    let mut path_args = "()"
+                    if has_self {
+                        if trait_extra == 0 {
+                            trait_args = "()"
+                            path_args = "(x)"
+                        } else {
+                            trait_args = "(…)"
+                            path_args = "(x, …)"
+                        }
+                    } else if trait_extra != 0 {
+                        trait_args = "(…)"
+                        path_args = "(…)"
+                    }
+                    let param = fresh_param_name(own)
+                    if has_self {
+                        let mut d = Diagnostic::warning(
+                            "E0105",
+                            "std's inherent method `${name}` on `${ty}` hides `${trait_name}::${name}`",
+                        )
+                        d.add_primary(span.file, span.span, "`x.${name}${args}` on a `${ty}` runs std's method, not this one")
+                        d.add_note(
+                            "a method call takes an inherent method before a trait's; Nova has no `${trait_name}::${name}${path_args}` call, so reach this one through a function generic over `${param}: ${trait_name}`, whose `x.${name}${trait_args}` is the trait's, or rename it",
+                        )
+                        found.push(d)
+                    } else {
+                        let head_name = ty.split("<")[0]
+                        let mut d = Diagnostic::warning(
+                            "E0105",
+                            "std's inherent function `${name}` on `${ty}` hides `${trait_name}::${name}`",
+                        )
+                        d.add_primary(span.file, span.span, "`${head_name}::${name}${args}` runs std's function, not this one")
+                        d.add_note(
+                            "a path takes an inherent function before a trait's, so `${head_name}::${name}${args}` is std's; reach this one through a function generic over `${param}: ${trait_name}`, whose `${param}::${name}${path_args}` is the trait's, or rename it",
+                        )
+                        found.push(d)
+                    }
+                }
+            }
+        }
+        for d in found.iter() { self.diagnostics.push(d) }
+    }
+
+    // E0077 for an associated type this impl binds in terms of itself, the
+    // binding poisoned to `TyError` (`check_assoc_binding_cycles`).
+    fn check_assoc_binding_cycles(mut self, mut bindings: Vec<(Int, Ty)>, spans: Vec<Span>, self_ty: Ty) {
+        let mut edges: Map<Int, Vec<Int>> = Map::new()
+        for (d, ty) in bindings.iter() {
+            let refs: Vec<Int> = Vec::new()
+            collect_self_projections(ty, self_ty, refs)
+            let _ = edges.insert(d, refs)
+        }
+        let mut k = 0
+        while k < bindings.len() && k < spans.len() {
+            let (d, _) = bindings.at(k)
+            let span = spans.at(k)
+            k += 1
+            if !reaches_self(d, edges) { continue }
+            let name = self.name_of(d)
+            bindings.set(k - 1, (d, TyError))
+            let mut diag = error_at(
+                "E0077",
+                "the associated type `${name}` is defined in terms of itself",
+                self.cur_file,
+                span,
+                "cyclic associated type",
+            )
+            diag.add_note(
+                "an associated type's binding may name another of this impl's associated types, but the references must bottom out in a concrete type",
+            )
+            self.diagnostics.push(diag)
+        }
+    }
+
+    // E0072 for each trait impl whose self type lacks an impl of one of
+    // the trait's direct supertraits (`check_supertrait_impls`).
+    fn check_supertrait_impls(mut self) {
+        let mut errors: Vec<(String, FileSpan)> = Vec::new()
+        let mut i = 0
+        while i < self.impls.len() && i < self.impl_spans.len() {
+            let imp = self.impls.at(i)
+            let span = self.impl_spans.at(i)
+            i += 1
+            if imp.trait_id < 0 { continue }
+            let tr = match self.trait_by_id(imp.trait_id) {
+                Some(t) => t
+                None => continue
+            }
+            for super_id in tr.supertraits.iter() {
+                let mut satisfied = false
+                for other in self.impls.iter() {
+                    if !satisfied && other.trait_id == super_id && match_args(other, imp.self_ty).is_some() {
+                        satisfied = true
+                    }
+                }
+                if satisfied { continue }
+                let sname = match self.trait_by_id(super_id) {
+                    Some(t) => t.name
+                    None => "?"
+                }
+                errors.push(
+                    (
+                        "the trait `${tr.name}` requires `${sname}`, which `${display_ty(imp.self_ty, self.defs)}` does not implement",
+                        span,
+                    ),
+                )
+            }
+        }
+        for (msg, span) in errors.iter() { self.error_in("E0072", msg, span.file, span.span) }
+    }
+
+    // E0074 for overlapping impls: two of one trait on types that share an
+    // instance, two inherent ones defining one method, and a program's
+    // `len` on arrays (`check_impl_coherence`).
+    fn check_impl_coherence(mut self) {
+        let mut conflicts: Vec<Diagnostic> = Vec::new()
+        let spans = self.impl_spans
+        let in_std = self.impl_in_std
+        for i in 0..self.impls.len() {
+            let a = self.impls.at(i)
+            let mut j = i + 1
+            while j < self.impls.len() && j < spans.len() {
+                let b = self.impls.at(j)
+                let b_span = spans.at(j)
+                j += 1
+                if !head_eq(a.self_head, b.self_head) || a.trait_id != b.trait_id { continue }
+                if !self_types_overlap(a.self_ty, a.generics, b.self_ty, b.generics) { continue }
+                if a.trait_id >= 0 {
+                    let tname = match self.trait_by_id(a.trait_id) {
+                        Some(t) => t.name
+                        None => "?"
+                    }
+                    let mut d = Diagnostic::error(
+                        "E0074",
+                        "conflicting implementations of trait `${tname}` for overlapping types",
+                    )
+                    d.add_primary(b_span.file, b_span.span, "here")
+                    conflicts.push(d)
+                } else {
+                    let mut dup = ""
+                    let mut has_dup = false
+                    for (n, _) in a.methods.iter() {
+                        if !has_dup {
+                            for (m, _) in b.methods.iter() { if m == n { has_dup = true } }
+                            if has_dup { dup = n }
+                        }
+                    }
+                    if has_dup {
+                        let jj = j - 1
+                        let std_b = (jj < in_std.len() && in_std.at(jj)) && !(i < in_std.len() && in_std.at(i))
+                        let a_known = i < spans.len()
+                        let mut d = Diagnostic::error(
+                            "E0074",
+                            "method `${dup}` is defined by multiple overlapping inherent impls",
+                        )
+                        if a_known && std_b {
+                            let a_span = spans.at(i)
+                            d.add_primary(a_span.file, a_span.span, "here")
+                            d.add_secondary(b_span.file, b_span.span, "`${dup}` is also defined by std's impl")
+                        } else {
+                            d.add_primary(b_span.file, b_span.span, "here")
+                            if a_known {
+                                let a_span = spans.at(i)
+                                d.add_secondary(a_span.file, a_span.span, "`${dup}` is also defined by this impl")
+                            }
+                        }
+                        conflicts.push(d)
+                    }
+                }
+            }
+        }
+        let mut std_arrays: Option<FileSpan> = None
+        let mut k = 0
+        while k < self.impls.len() && k < spans.len() && k < in_std.len() {
+            let imp = self.impls.at(k)
+            if std_arrays.is_none() && in_std.at(k) && imp.trait_id < 0 && is_array_head(imp.self_head) {
+                std_arrays = Some(spans.at(k))
+            }
+            k += 1
+        }
+        k = 0
+        while k < self.impls.len() && k < spans.len() && k < in_std.len() {
+            let imp = self.impls.at(k)
+            let span = spans.at(k)
+            let std = in_std.at(k)
+            k += 1
+            if std { continue }
+            let mut has_len = false
+            for (n, _) in imp.methods.iter() { if n == "len" { has_len = true } }
+            if imp.trait_id >= 0 || !is_array_head(imp.self_head) || !has_len { continue }
+            let mut d = Diagnostic::error("E0074", "method `len` is defined by multiple overlapping inherent impls")
+            d.add_primary(span.file, span.span, "here")
+            match std_arrays {
+                Some(s) => d.add_secondary(s.file, s.span, "`len` is also defined by std, for every array")
+                None => ()
+            }
+            conflicts.push(d)
+        }
+        for d in conflicts.iter() { self.diagnostics.push(d) }
+    }
+
+    // A set of bounds for a diagnostic, `` `Show + Ord` ``, or `(none)`
+    // (`render_bound_set`).
+    fn render_bound_set(self, bounds: Vec<Int>) -> String {
+        if bounds.is_empty() { return "(none)" }
+        let mut names: Vec<String> = Vec::new()
+        for d in bounds.iter() {
+            match self.trait_by_id(d) {
+                Some(t) => names.push(t.name)
+                None => names.push("DefId(${d})")
+            }
+        }
+        "`${" + ".join(names.to_array())}`"
+    }
+
+    // E0070 and E0071: a trait impl must provide exactly the trait's items
+    // that lack a default, and nothing foreign (`check_impl_conformance`).
+    fn check_impl_conformance(
+        mut self,
+        trait_id: Int,
+        provided: Vec<(String, Int)>,
+        provided_assoc: Vec<AssocTypeBinding>,
+        span: Span,
+    ) {
+        let tr = match self.trait_by_id(trait_id) {
+            Some(t) => t
+            None => return
+        }
+        for (name, _) in provided.iter() {
+            let mut member = false
+            for m in tr.methods.iter() { if m.name == name { member = true } }
+            if !member {
+                self.error("E0071", "method `${name}` is not a member of trait `${tr.name}`", span)
+            }
+        }
+        for b in provided_assoc.iter() {
+            let mut member = false
+            for (n, _) in tr.assoc_types.iter() { if n == b.name.value { member = true } }
+            if !member {
+                self.error(
+                    "E0071",
+                    "associated type `${b.name.value}` is not a member of trait `${tr.name}`",
+                    b.name.span,
+                )
+            }
+        }
+        let mut missing: Vec<String> = Vec::new()
+        for m in tr.methods.iter() {
+            let mut given = false
+            for (n, _) in provided.iter() { if n == m.name { given = true } }
+            if m.default_def < 0 && !given { missing.push("`${m.name}`") }
+        }
+        let mut missing_assoc: Vec<String> = Vec::new()
+        for (n, _) in tr.assoc_types.iter() {
+            let mut given = false
+            for b in provided_assoc.iter() { if b.name.value == n { given = true } }
+            if !given { missing_assoc.push("`${n}`") }
+        }
+        let mut kinds: Vec<String> = Vec::new()
+        if !missing.is_empty() { kinds.push("method(s): ${", ".join(missing.to_array())}") }
+        if !missing_assoc.is_empty() {
+            kinds.push("associated type(s): ${", ".join(missing_assoc.to_array())}")
+        }
+        if !kinds.is_empty() {
+            self.error(
+                "E0070",
+                "impl of trait `${tr.name}` is missing ${" and ".join(kinds.to_array())}",
+                span,
+            )
+        }
+    }
+
+    // E0072: each impl method's signature against the trait's, `Self` the
+    // impl's self type and both sides normalized, once the whole table is
+    // built (`check_impl_method_signatures`).
+    fn check_impl_method_signatures(mut self) {
+        let impls = self.impls
+        let spans = self.impl_spans
+        let mut i = 0
+        while i < impls.len() && i < spans.len() {
+            let imp = impls.at(i)
+            let place = spans.at(i)
+            i += 1
+            if imp.trait_id < 0 { continue }
+            let tr = match self.trait_by_id(imp.trait_id) {
+                Some(t) => t
+                None => continue
+            }
+            for (name, def_id) in imp.methods.iter() {
+                let mut found: Option<TraitMethod> = None
+                for m in tr.methods.iter() {
+                    if found.is_none() && m.name == name { found = Some(m) }
+                }
+                let trait_method = match found {
+                    Some(m) => m
+                    None => continue
+                }
+                let impl_sig = match self.sigs.at(def_id) {
+                    Some(s) => s
+                    None => continue
+                }
+                self.check_impl_method(imp, tr, name, def_id, trait_method, impl_sig, place)
+            }
+        }
+    }
+
+    // One method of `check_impl_method_signatures`.
+    fn check_impl_method(
+        mut self,
+        imp: ImplInfo,
+        tr: TraitDef,
+        name: String,
+        def_id: Int,
+        trait_method: TraitMethod,
+        impl_sig: FnSig,
+        place: FileSpan,
+    ) {
+        let file = place.file
+        let span = place.span
+        let impl_count = imp.generics
+        let impl_has_self = !self.selfless.at(def_id)
+        if impl_has_self != trait_method.has_self {
+            let want = if trait_method.has_self { "a `self` receiver" } else { "no `self` receiver" }
+            let got = if trait_method.has_self { "none" } else { "one" }
+            self.error_in(
+                "E0072",
+                "method `${name}` has ${got} but trait `${tr.name}` declares ${want}",
+                file,
+                span,
+            )
+            return
+        }
+        let impl_mut_self = self.mut_self.at(def_id)
+        if impl_mut_self != trait_method.mut_self {
+            let want = if trait_method.mut_self { "a `mut self` receiver" } else { "a plain `self` receiver" }
+            let got = if trait_method.mut_self { "a plain `self` receiver" } else { "a `mut self` receiver" }
+            self.error_in(
+                "E0072",
+                "method `${name}` has ${got} but trait `${tr.name}` declares ${want}",
+                file,
+                span,
+            )
+        }
+        let impl_method_generics = if impl_sig.generics > impl_count { impl_sig.generics - impl_count } else { 0 }
+        if impl_method_generics != trait_method.generics {
+            self.error_in(
+                "E0072",
+                "method `${name}` has ${impl_method_generics} generic parameter(s) but trait `${tr.name}` declares ${trait_method.generics}",
+                file,
+                span,
+            )
+            return
+        }
+        for k in 0..trait_method.generics {
+            let want = trait_method.bounds.at(k)
+            let got: Vec<Int> = if impl_count + k < impl_sig.bounds.len() { impl_sig.bounds.at(impl_count + k) } else { Vec::new() }
+            if !same_bound_set(want, got) {
+                let want_str = self.render_bound_set(want)
+                let got_str = self.render_bound_set(got)
+                self.error_in(
+                    "E0072",
+                    "generic parameter ${k + 1} of method `${name}` has bound(s) ${got_str} but trait `${tr.name}` declares ${want_str}",
+                    file,
+                    span,
+                )
+            }
+        }
+        let mut s: Vec<Ty> = Vec::new()
+        s.push(imp.self_ty)
+        for k in 0..trait_method.generics { s.push(TyParam(impl_count + k)) }
+        let mut impl_params: Vec<Ty> = Vec::new()
+        if self.selfless.at(def_id) {
+            impl_params = impl_sig.params
+        } else {
+            for k in 1..impl_sig.params.len() { impl_params.push(impl_sig.params.at(k)) }
+        }
+        if impl_params.len() != trait_method.params.len() {
+            self.error_in(
+                "E0072",
+                "method `${name}` has ${impl_params.len()} parameter(s) but trait `${tr.name}` declares ${trait_method.params.len()}",
+                file,
+                span,
+            )
+            return
+        }
+        let mut expected: Vec<Ty> = Vec::new()
+        for p in trait_method.params.iter() { expected.push(self.normalize(subst(p, s), file, span)) }
+        let mut got_params: Vec<Ty> = Vec::new()
+        for p in impl_params.iter() { got_params.push(self.normalize(p, file, span)) }
+        for k in 0..got_params.len() {
+            let got = got_params.at(k)
+            let want = expected.at(k)
+            if has_error(got) || has_error(want) { continue }
+            if !ty_eq(got, want) {
+                self.error_in(
+                    "E0072",
+                    "parameter ${k + 1} of method `${name}` has type `${display_ty(got, self.defs)}` but trait `${tr.name}` declares `${display_ty(want, self.defs)}`",
+                    file,
+                    span,
+                )
+            }
+        }
+        let expected_ret = self.normalize(subst(trait_method.ret, s), file, span)
+        let impl_ret = self.normalize(impl_sig.ret, file, span)
+        if has_error(impl_ret) || has_error(expected_ret) { return }
+        if !ty_eq(impl_ret, expected_ret) {
+            self.error_in(
+                "E0072",
+                "method `${name}` returns `${display_ty(impl_ret, self.defs)}` but trait `${tr.name}` declares `${display_ty(expected_ret, self.defs)}`",
+                file,
+                span,
+            )
+        }
+    }
+}
+
+// The generic function's type parameter in E0105's note: the first of
+// `T`, `U`, `V`, `W`, `T1`, `T2`, … the impl does not use.
+fn fresh_param_name(own: Vec<String>) -> String {
+    for p in ["T", "U", "V", "W"].iter() { if !holds(own.to_array(), p) { return p } }
+    let mut k = 1
+    while true {
+        let p = "T${k}"
+        if !holds(own.to_array(), p) { return p }
+        k += 1
+    }
+    ""
+}
+
+// The associated types `ty` projects onto `self_ty`'s, each once
+// (`collect_self_projections`).
+fn collect_self_projections(ty: Ty, self_ty: Ty, mut out: Vec<Int>) {
+    match ty {
+        TyAssoc(on, assoc) => {
+            if ty_eq(on, self_ty) && !int_in(out, assoc) { out.push(assoc) }
+            collect_self_projections(on, self_ty, out)
+        }
+        TyFn(params, ret) => {
+            for p in params.iter() { collect_self_projections(p, self_ty, out) }
+            collect_self_projections(ret, self_ty, out)
+        }
+        TySum(_, args) => for a in args.iter() { collect_self_projections(a, self_ty, out) }
+        TyRecord(_, args) => for a in args.iter() { collect_self_projections(a, self_ty, out) }
+        TyArray(e) => collect_self_projections(e, self_ty, out)
+        TyTuple(es) => for e in es.iter() { collect_self_projections(e, self_ty, out) }
+        TyFuture(o) => collect_self_projections(o, self_ty, out)
+        _ => ()
+    }
+}
+
+// Whether `start` reaches itself through `edges` (`reaches_self`).
+fn reaches_self(start: Int, edges: Map<Int, Vec<Int>>) -> Bool {
+    let mut stack: Vec<Int> = Vec::new()
+    match edges.get(start) {
+        Some(l) => for n in l.iter() { stack.push(n) }
+        None => ()
+    }
+    let mut seen: Set<Int> = Set::new()
+    while !stack.is_empty() {
+        let n = stack.pop().unwrap()
+        if n == start { return true }
+        if !seen.insert(n) { continue }
+        match edges.get(n) {
+            Some(succ) => for s in succ.iter() { stack.push(s) }
+            None => ()
+        }
+    }
+    false
+}
