@@ -80,7 +80,9 @@ pub fn dump_hir_std(
     let mut impls = 0
     for s in tables.impl_in_std.iter() { if s { impls += 1 } }
     let mut sigs = 0
-    for id in 0..tables.sigs.len() { if id >= std_def && tables.sigs.at(id).is_some() { sigs += 1 } }
+    for id in 0..tables.sigs.len() {
+        if id >= std_def && tables.sigs.at(id).is_some() { sigs += 1 }
+    }
     let mut externs = 0
     for e in tables.externs.iter() { if e.def_id >= std_def { externs += 1 } }
     d.field("records", "${records}")
@@ -157,7 +159,10 @@ impl HirDump {
             TyString => "String"
             TyBytes => "Bytes"
             TyUnit => "()"
-            TyFn(params, ret) => "fn(${", ".join(self.list(params).to_array())}) -> ${self.ty_text(ret)}"
+            TyFn(
+                params,
+                ret,
+            ) => "fn(${", ".join(self.list(params).to_array())}) -> ${self.ty_text(ret)}"
             TyFuture(o) => "Future<${self.ty_text(o)}>"
             TySum(d, args) => self.named(d, args)
             TyRecord(d, args) => self.named(d, args)
@@ -178,7 +183,11 @@ impl HirDump {
     }
 
     fn named(self, d: Int, args: Vec<Ty>) -> String {
-        if args.is_empty() { self.id(d) } else { "${self.id(d)}<${", ".join(self.list(args).to_array())}>" }
+        if args.is_empty() {
+            self.id(d)
+        } else {
+            "${self.id(d)}<${", ".join(self.list(args).to_array())}>"
+        }
     }
 
     fn head_text(self, h: TyHead) -> String {

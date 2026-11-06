@@ -19,7 +19,12 @@ impl Checker {
     /// An AST type as a `Ty`, its names resolved (`convert_ty`): `generics`
     /// maps the parameters in scope to their indices, and `bounds[i]` is
     /// parameter `i`'s bounds, for a projection on it.
-    pub fn convert_ty(mut self, ty: Spanned<Type>, generics: Map<String, Int>, bounds: Vec<Vec<Int>>) -> Ty {
+    pub fn convert_ty(
+        mut self,
+        ty: Spanned<Type>,
+        generics: Map<String, Int>,
+        bounds: Vec<Vec<Int>>,
+    ) -> Ty {
         match ty.value {
             TypePath(path, args) => self.convert_path(ty.span, path, args, generics, bounds)
             TypeTuple(items) => {
@@ -156,7 +161,11 @@ impl Checker {
                 DefKindRecord(_) => true
                 _ => false
             }
-            let expected = if def_id < self.type_arity.len() { self.type_arity.at(def_id) } else { 0 }
+            let expected = if def_id < self.type_arity.len() {
+                self.type_arity.at(def_id)
+            } else {
+                0
+            }
             let mut converted: Vec<Ty> = Vec::new()
             for a in args.iter() { converted.push(self.convert_ty(a, generics, bounds)) }
             if converted.len() != expected {
@@ -193,7 +202,11 @@ impl Checker {
         }
         if found.len() == 1 { return TyAssoc(on, found.at(0)) }
         if found.is_empty() {
-            self.error("E0001", "no associated type `${assoc_name}` on any bound of `${base}`", span)
+            self.error(
+                "E0001",
+                "no associated type `${assoc_name}` on any bound of `${base}`",
+                span,
+            )
         } else {
             self.error(
                 "E0015",
@@ -266,13 +279,22 @@ impl Checker {
 
     /// A `where` clause folded into `bounds`, each bound on one of the
     /// item's own parameters (`apply_where`).
-    pub fn apply_where(mut self, bounds: Vec<Vec<Int>>, where_clause: Vec<WhereBound>, scope: Map<String, Int>) {
+    pub fn apply_where(
+        mut self,
+        bounds: Vec<Vec<Int>>,
+        where_clause: Vec<WhereBound>,
+        scope: Map<String, Int>,
+    ) {
         for wb in where_clause.iter() {
             let idx = match self.convert_ty(wb.ty, scope, bounds) {
                 TyParam(i) => i
                 TyError => continue
                 _ => {
-                    self.error("E0900", "a `where` clause may only constrain a type parameter", wb.ty.span)
+                    self.error(
+                        "E0900",
+                        "a `where` clause may only constrain a type parameter",
+                        wb.ty.span,
+                    )
                     continue
                 }
             }
@@ -332,7 +354,9 @@ impl Checker {
             if f.is_async { ret = TyFuture(ret) }
             self.sigs.set(
                 def_id,
-                Some(FnSig { generics: f.generics.len(), bounds: bounds, params: params, ret: ret }),
+                Some(
+                    FnSig { generics: f.generics.len(), bounds: bounds, params: params, ret: ret },
+                ),
             )
         }
         for (def_id, item_index) in self.defs_of_kind(true).iter() {
@@ -397,7 +421,11 @@ impl Checker {
             self.enter_item(item_index)
             let name = sig.name.value
             if name == "main" || name.starts_with("nova_") {
-                self.error("E0900", "extern symbol `${name}` is reserved by the compiler", sig.name.span)
+                self.error(
+                    "E0900",
+                    "extern symbol `${name}` is reserved by the compiler",
+                    sig.name.span,
+                )
                 continue
             }
             let abi = match block.abi {
@@ -408,7 +436,10 @@ impl Checker {
                 CompileTargetWasm => true
                 CompileTargetNative => false
             }
-            let js = block.abi.is_some() && abi == "js" && self.is_std_module(self.cur_module) && wasm
+            let js = block.abi.is_some()
+                && abi == "js"
+                && self.is_std_module(self.cur_module)
+                && wasm
             if !js && block.abi.is_some() && abi != "C" {
                 self.error(
                     "E0900",

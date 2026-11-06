@@ -471,7 +471,8 @@ fn normalize_all(
 /// associated type.
 pub fn self_types_overlap(a: Ty, a_generics: Int, b: Ty, b_generics: Int) -> Bool {
     match (a, b) {
-        (TyAssoc(a1, x), TyAssoc(b1, y)) => x != y || self_types_overlap(a1, a_generics, b1, b_generics)
+        (TyAssoc(a1, x), TyAssoc(b1, y)) => x != y
+            || self_types_overlap(a1, a_generics, b1, b_generics)
         (TyAssoc(_, _), _) => true
         (_, TyAssoc(_, _)) => true
         _ => {

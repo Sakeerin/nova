@@ -155,7 +155,9 @@ impl Checker {
         let here = self.cur_module
         let file = self.cur_file
         let mut items: Vec<Spanned<Item>> = Vec::new()
-        for i in 0..self.items.len() { if self.module_of(i) == here { items.push(self.items.at(i)) } }
+        for i in 0..self.items.len() {
+            if self.module_of(i) == here { items.push(self.items.at(i)) }
+        }
         let mut k = items.len()
         while k > 0 {
             k -= 1
@@ -174,7 +176,11 @@ impl Checker {
                 _ => ()
             }
         }
-        let text = if here >= 0 && here < self.texts.len() { self.texts.at(here)? } else { return None }
+        let text = if here >= 0 && here < self.texts.len() {
+            self.texts.at(here)?
+        } else {
+            return None
+        }
         let line = "import ${imp}::{${x}}"
         let mut last_import = -1
         for it in items.iter() {
@@ -282,11 +288,7 @@ pub fn line_after(text: String, at: Int, line: String) -> (Int, String) {
         i = past_block_end(text, i + 2)
     }
     let next = next_line_start(text, i)
-    if next == n && !text.ends_with("\n") {
-        (next, "${nl}${line}")
-    } else {
-        (next, "${line}${nl}")
-    }
+    if next == n && !text.ends_with("\n") { (next, "${nl}${line}") } else { (next, "${line}${nl}") }
 }
 
 /// The edit adding `line` and a blank line before the item starting at

@@ -42,12 +42,7 @@ import token
 // ---------------------------------------------------------------------------
 
 /// A collected function's or method's signature (`FnSig`).
-pub record FnSig {
-    pub generics: Int,
-    pub bounds: Vec<Vec<Int>>,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-}
+pub record FnSig { pub generics: Int, pub bounds: Vec<Vec<Int>>, pub params: Vec<Ty>, pub ret: Ty }
 
 /// Where a method's body is (`MethodLoc`).
 pub record MethodLoc { pub item_index: Int, pub method_index: Int, pub owner: MethodOwner }
@@ -125,11 +120,7 @@ pub fn share_items(
     texts: Vec<Option<String>>,
 ) -> SharedItems {
     let tables = check_items(items, defs, labels, texts)
-    SharedItems {
-        tables: tables,
-        defs: defs.defs.len(),
-        shareable: tables.diagnostics.is_empty(),
-    }
+    SharedItems { tables: tables, defs: defs.defs.len(), shareable: tables.diagnostics.is_empty() }
 }
 
 /// `check_items` reading std's tables from `shared` (`check_items_shared`):
@@ -357,7 +348,11 @@ impl Checker {
     /// does not compile (`missing_on_target`); whether it reported one.
     pub fn missing_on_target(mut self, name: String, span: Span) -> Bool {
         let owner = match self.defs.missing.get(name) {
-            Some(m) => if m.starts_with("$std.") { "std/${m.byte_slice(5, m.byte_len())}" } else { m }
+            Some(m) => if m.starts_with("$std.") {
+                "std/${m.byte_slice(5, m.byte_len())}"
+            } else {
+                m
+            }
             None => return false
         }
         let target = compile_target_name(self.defs.target)
@@ -375,7 +370,13 @@ impl Checker {
 
     /// E0900 for `what`, a plural phrase, at `span` (`unsupported`).
     pub fn unsupported(mut self, span: Span, what: String) {
-        let mut d = error_at("E0900", "${what} are not supported yet", self.cur_file, span, "not supported yet")
+        let mut d = error_at(
+            "E0900",
+            "${what} are not supported yet",
+            self.cur_file,
+            span,
+            "not supported yet",
+        )
         d.add_note(MVP_NOTE)
         self.diagnostics.push(d)
     }
@@ -395,7 +396,10 @@ impl Checker {
                     self.reject_self_generic_name(t.generics, file)
                     for ti in t.items.iter() {
                         match ti {
-                            TraitItemRequired(sig) => self.reject_self_generic_name(sig.generics, file)
+                            TraitItemRequired(sig) => self.reject_self_generic_name(
+                                sig.generics,
+                                file,
+                            )
                             TraitItemProvided(f) => self.reject_self_generic_name(f.generics, file)
                             TraitItemAssocType(_, _, _) => ()
                         }
@@ -489,10 +493,17 @@ impl Checker {
             self.expand_bounds(bounds)
             let mut fields: Vec<HirField> = Vec::new()
             for f in decl.fields.iter() {
-                fields.push(HirField { name: f.name.value, ty: self.convert_ty(f.ty, generics, bounds) })
+                fields.push(
+                    HirField { name: f.name.value, ty: self.convert_ty(f.ty, generics, bounds) },
+                )
             }
             self.records.push(
-                RecordType { def_id: i, name: def.name, generics: decl.generics.len(), fields: fields },
+                RecordType {
+                    def_id: i,
+                    name: def.name,
+                    generics: decl.generics.len(),
+                    fields: fields,
+                },
             )
         }
     }
@@ -624,7 +635,9 @@ impl Checker {
             None => return
         }
         for id in 0..std.type_arity.len() {
-            if std.type_arity.at(id) != 0 { self.type_arity.set(id + self.rebase_def, std.type_arity.at(id)) }
+            if std.type_arity.at(id) != 0 {
+                self.type_arity.set(id + self.rebase_def, std.type_arity.at(id))
+            }
         }
     }
 
@@ -635,7 +648,10 @@ impl Checker {
         }
         for id in 0..std.supertraits.len() {
             match std.supertraits.at(id) {
-                Some(ids) => self.supertraits.set(id + self.rebase_def, Some(rebase_ids(ids, self.rebase_def)))
+                Some(ids) => self.supertraits.set(
+                    id + self.rebase_def,
+                    Some(rebase_ids(ids, self.rebase_def)),
+                )
                 None => ()
             }
         }
@@ -649,9 +665,16 @@ impl Checker {
         let r = self.rebase_def
         for rec in std.records.iter() {
             let mut fields: Vec<HirField> = Vec::new()
-            for f in rec.fields.iter() { fields.push(HirField { name: f.name, ty: rebase_ty(f.ty, r) }) }
+            for f in rec.fields.iter() {
+                fields.push(HirField { name: f.name, ty: rebase_ty(f.ty, r) })
+            }
             self.records.push(
-                RecordType { def_id: rec.def_id + r, name: rec.name, generics: rec.generics, fields: fields },
+                RecordType {
+                    def_id: rec.def_id + r,
+                    name: rec.name,
+                    generics: rec.generics,
+                    fields: fields,
+                },
             )
         }
     }
@@ -668,7 +691,12 @@ impl Checker {
                 variants.push(HirVariant { name: v.name, fields: rebase_tys(v.fields, r) })
             }
             self.sums.push(
-                SumType { def_id: s.def_id + r, name: s.name, generics: s.generics, variants: variants },
+                SumType {
+                    def_id: s.def_id + r,
+                    name: s.name,
+                    generics: s.generics,
+                    variants: variants,
+                },
             )
         }
     }
@@ -956,9 +984,7 @@ pub fn same_bound_set(a: Vec<Int>, b: Vec<Int>) -> Bool {
 
 /// Whether some parameter is named `self`, and whether a `mut` one is.
 pub fn self_param(params: Vec<Param>, need_mut: Bool) -> Bool {
-    for p in params.iter() {
-        if p.name.value == "self" && (!need_mut || p.is_mut) { return true }
-    }
+    for p in params.iter() { if p.name.value == "self" && (!need_mut || p.is_mut) { return true } }
     false
 }
 
@@ -1011,7 +1037,10 @@ pub fn tuple_text(elems: Vec<String>) -> String {
 /// unsolved variable or an error as `_` (`display_ty_named`).
 pub fn display_ty_named(ty: Ty, defs: Definitions, names: Vec<String>) -> String {
     match ty {
-        TyFn(params, ret) => "fn(${join_named(params, defs, names)}) -> ${display_ty_named(ret, defs, names)}"
+        TyFn(
+            params,
+            ret,
+        ) => "fn(${join_named(params, defs, names)}) -> ${display_ty_named(ret, defs, names)}"
         TySum(d, args) => named_ty_named(defs.defs.at(d).name, args, defs, names)
         TyRecord(d, args) => named_ty_named(defs.defs.at(d).name, args, defs, names)
         TyArray(e) => "[${display_ty_named(e, defs, names)}]"

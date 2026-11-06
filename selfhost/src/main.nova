@@ -415,7 +415,10 @@ async fn dump_hir(
 // Each module's file label, the program's `sources` then std's modules
 // that parsed, as the resolver numbers them, and each program module's
 // source text, for a fix's edit; std's have none.
-fn labels_and_texts(sources: Vec<ModuleSource>, std_set: StdSet) -> (Vec<String>, Vec<Option<String>>) {
+fn labels_and_texts(
+    sources: Vec<ModuleSource>,
+    std_set: StdSet,
+) -> (Vec<String>, Vec<Option<String>>) {
     let mut labels: Vec<String> = Vec::new()
     let mut texts: Vec<Option<String>> = Vec::new()
     for m in sources.iter() {

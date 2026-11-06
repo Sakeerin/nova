@@ -948,19 +948,37 @@ fn both_sides_refuse_no_file() {
         s0: leak_args(&[wasm_test.s0, &["--std"]].concat()),
         n: leak_args(&[wasm_test.n, &["--std-part"]].concat()),
     };
+    // The HIR dump's (5.3a): S0's `check --dump-hir` shares the resolution
+    // dump's parser, N's `hir` the resolution dump's.
+    let hir_wasm_test = Dump {
+        s0: leak_args(&[HIR_S0, &["--test", "--target", "wasm"]].concat()),
+        n: leak_args(&["hir", "--std", &std_dir(), "--test", "--target", "wasm"]),
+    };
+    let hir_wasm_test_std = Dump {
+        s0: leak_args(&[hir_wasm_test.s0, &["--std"]].concat()),
+        n: leak_args(&[hir_wasm_test.n, &["--std-part"]].concat()),
+    };
     for dump in [
         &TOKENS,
         &AST,
         resolution(),
         resolution_in(Mode::Wasm),
         resolution_in(Mode::Test),
+        hir_in(Mode::Check),
+        hir_in(Mode::Wasm),
+        hir_in(Mode::Test),
     ] {
         let out = compare_batch(dump, &root(), &[], 2, &nova(), selfhost());
         assert_eq!(out, Ok(String::new()));
     }
     let main = ["tests/runtime/array_helpers.nova".to_string()];
     assert!(root().join(&main[0]).is_file());
-    for (dump, files) in [(&wasm_test, &main[..]), (&wasm_test_std, &[])] {
+    for (dump, files) in [
+        (&wasm_test, &main[..]),
+        (&wasm_test_std, &[]),
+        (&hir_wasm_test, &main[..]),
+        (&hir_wasm_test_std, &[]),
+    ] {
         let out = compare_batch(dump, &root(), files, 2, &nova(), selfhost());
         assert_eq!(out, Ok(String::new()));
     }
@@ -998,8 +1016,13 @@ fn both_sides_take_test_in_every_position_alike() {
         (&["--target=wasm", "--target", "wasm", "--std"], 2),
         (&["--target=bogus", file], 2),
     ];
-    for (args, code) in shapes {
-        let n: Vec<&str> = ["resolve", "--std", std.as_str()]
+    // Both dumps: the HIR dump's forms take what the resolution dump's
+    // take (5.3a, ADR 0055).
+    for ((args, code), (s0, command)) in shapes
+        .iter()
+        .flat_map(|shape| [(shape, (RESOLUTION_S0, "resolve")), (shape, (HIR_S0, "hir"))])
+    {
+        let n: Vec<&str> = [command, "--std", std.as_str()]
             .into_iter()
             .chain(
                 args.iter()
@@ -1007,11 +1030,11 @@ fn both_sides_take_test_in_every_position_alike() {
             )
             .collect();
         let dump = Dump {
-            s0: leak_args(&[RESOLUTION_S0, args].concat()),
+            s0: leak_args(&[s0, *args].concat()),
             n: leak_args(&n),
         };
-        if let Err(report) = compare_batch(&dump, &root(), &[], code, &nova(), selfhost()) {
-            panic!("{args:?}: {report}");
+        if let Err(report) = compare_batch(&dump, &root(), &[], *code, &nova(), selfhost()) {
+            panic!("{command} {args:?}: {report}");
         }
     }
 }
@@ -3751,6 +3774,7 @@ fn the_hir_dump_has_a_header_per_root_and_std_its_own_part() {
         .expect("write a.nova");
     std::fs::write(dir.join("b.nova"), "fn g( {").expect("write b.nova");
     std::fs::write(dir.join("c.nova"), "fn f(x: Nope) {}\nfn f() {}\n").expect("write c.nova");
+    std::fs::write(dir.join("latin1.nova"), b"fn \xe9() {}\n").expect("write latin1.nova");
     std::fs::create_dir_all(dir.join("pkg").join("src")).expect("create pkg/src");
     std::fs::write(dir.join("pkg").join("nova.toml"), MANIFEST).expect("write nova.toml");
     std::fs::write(
@@ -3768,12 +3792,17 @@ fn the_hir_dump_has_a_header_per_root_and_std_its_own_part() {
         "missing.nova",
         "b.nova",
         "c.nova",
+        "latin1.nova",
         "pkg/src/main.nova",
     ]
     .iter()
     .map(|f| f.to_string())
     .collect();
     let out = agree_on_hir_in(Mode::Check, &dir, &files, 2);
+    assert!(
+        out.contains("== latin1.nova\nIOERR InvalidData\n== pkg/src/main.nova\n"),
+        "{out}"
+    );
     let headers: Vec<&str> = out.lines().filter(|l| l.starts_with("== ")).collect();
     assert_eq!(
         headers,
@@ -3863,6 +3892,12 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
     let packages = package_corpus();
     let wasm = wasm_corpus();
     let tests = test_corpus();
+    // The resolution dump's floors (5.2b): 251 loose programs, 67 package
+    // files, 39 WASM programs and 9 files with tests at 5.3a.
+    assert!(loose.len() >= 240, "only {} loose programs", loose.len());
+    assert!(packages.len() >= 60, "only {} package files", packages.len());
+    assert!(wasm.len() >= 35, "only {} WASM programs", wasm.len());
+    assert!(tests.len() >= 8, "only {} files with tests", tests.len());
     let (check, wasm_dumps, test_dumps, counts) = std::thread::scope(|scope| {
         let cases: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
             .into_iter()
@@ -4008,6 +4043,58 @@ fn the_hir_dumps_agree_on_the_cases_with_windows_line_endings() {
             assert_eq!(parts, count, "{mode:?}");
         }
     });
+}
+
+/// N shares std's item tables only when std alone gives no diagnostic, as
+/// S0 does (5.3a, spec 5.3 §3.4): with a std whose `core` names a type it
+/// lacks, an item E0001 and no resolver diagnostic, N checks std again
+/// for each program, so each program that reaches the type checker keeps
+/// std's E0001 among its diagnostics, and its dump is otherwise S0's,
+/// whose std is built in (the driver's test pins S0's fallback); std's
+/// part holds it too. The roots are the first eight loose cases of
+/// `cases/check/`.
+#[test]
+fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
+    let std = std_copy("item-error-std");
+    let file = "core/lib.nova";
+    let (old, new) = ("fn mix64(x: Int) -> Int {", "fn mix64(x: Intt) -> Int {");
+    let text = std::fs::read_to_string(std.join(file))
+        .expect("read the std file")
+        .replace("\r\n", "\n");
+    assert_eq!(text.matches(old).count(), 1, "{file}: {old}");
+    std::fs::write(std.join(file), text.replacen(old, new, 1)).expect("alter the std file");
+    let mark = "(Error \"E0001\" \"cannot find type `Intt`\"";
+    let std = std.display().to_string();
+    let cases = hir_cases_dir(Mode::Check);
+    let roots: Vec<String> = case_roots(&cases).loose[..8].to_vec();
+    let s0 = run(&nova(), HIR_S0, &cases, &roots).expect("run S0");
+    let n = run(selfhost(), &["hir", "--std", &std], &cases, &roots).expect("run N");
+    assert_eq!((s0.code, n.code), (Some(0), Some(0)), "{}", n.stderr);
+    let (s0, n) = (
+        String::from_utf8_lossy(&s0.stdout).into_owned(),
+        String::from_utf8_lossy(&n.stdout).into_owned(),
+    );
+    let (s0_parts, n_parts) = (parts_of(&s0), parts_of(&n));
+    assert_eq!(n_parts.len(), roots.len(), "{n}");
+    let mut checked = 0;
+    for (s0_part, n_part) in s0_parts.iter().zip(&n_parts) {
+        if !s0_part.contains(" checked=true\n") {
+            assert_eq!(n_part, s0_part);
+            continue;
+        }
+        checked += 1;
+        assert_eq!(n_part.matches(mark).count(), 1, "{n_part}");
+        assert_eq!(
+            without_parens(&without_block(n_part, mark)),
+            without_parens(s0_part),
+            "{n_part}"
+        );
+    }
+    assert!(checked >= 6, "{checked} of {} checked", roots.len());
+    let part = run(selfhost(), &["hir", "--std", &std, "--std-part"], &cases, &[])
+        .expect("run N's std part");
+    assert_eq!(part.code, Some(0));
+    assert_eq!(String::from_utf8_lossy(&part.stdout).matches(mark).count(), 1);
 }
 
 /// The type fuzzer's seeds (5.3a): its own, past the name fuzzer's.
