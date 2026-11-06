@@ -23,12 +23,13 @@ import loader
 import resolver
 import token
 
-/// A program's part for `target`: its `modules` as the loader gave them,
-/// its resolution once it got that far, and every diagnostic, the
-/// loader's and the resolver's, in order (`dump_program`); `table` names
-/// the builtins.
+/// A program's part for `target`, under test mode when `test`: its
+/// `modules` as the loader gave them, its resolution once it got that far,
+/// and every diagnostic, the loader's and the resolver's, in order
+/// (`dump_program`); `table` names the builtins.
 pub fn dump_program(
     target: CompileTarget,
+    test: Bool,
     modules: Vec<ModuleSource>,
     resolution: Option<ProgramResolution>,
     diagnostics: Vec<Diagnostic>,
@@ -42,6 +43,7 @@ pub fn dump_program(
     }
     d.open(0, "Program")
     d.field("target", compile_target_name(target))
+    d.mode(test)
     d.bool_field("resolved", resolution.is_some())
     let mut index = 0
     for m in modules.iter() {
@@ -105,10 +107,11 @@ pub fn dump_program(
     d.out.to_string()
 }
 
-/// std's part for `target`, from the resolution of a program of no module
-/// of its own (`dump_std`).
+/// std's part for `target`, under test mode when `test`, from the
+/// resolution of a program of no module of its own (`dump_std`).
 pub fn dump_std(
     target: CompileTarget,
+    test: Bool,
     resolution: ProgramResolution,
     table: BuiltinTable,
 ) -> String {
@@ -118,7 +121,7 @@ pub fn dump_std(
         fresh: true,
         variants: table.variants,
     }
-    d.std_part(target, resolution.definitions, 0, 0, 0)
+    d.std_part(target, test, resolution.definitions, 0, 0, 0)
     d.newline()
     d.diagnostics(resolution.diagnostics)
     d.out.to_string()
@@ -226,6 +229,10 @@ impl ResDump {
     // ` key=value`.
     fn field(mut self, key: String, value: String) { self.out.push(" ${key}=${value}") }
 
+    // ` mode=test` under test mode, and nothing under `check`'s, so that
+    // a part `check` prints is 5.2a's (`mode`).
+    fn mode(mut self, test: Bool) { if test { self.out.push(" mode=test") } }
+
     fn bool_field(mut self, key: String, value: Bool) { self.out.push(" ${key}=${value}") }
 
     // ` ` and `text` quoted.
@@ -251,6 +258,7 @@ impl ResDump {
     fn std_part(
         mut self,
         target: CompileTarget,
+        test: Bool,
         defs: Definitions,
         std_module: Int,
         std_def: Int,
@@ -258,6 +266,7 @@ impl ResDump {
     ) {
         self.open(0, "Std")
         self.field("target", compile_target_name(target))
+        self.mode(test)
         self.field("modules", "${defs.modules.len() - std_module}")
         self.field("defs", "${defs.defs.len() - std_def}")
         self.field("items", "${defs.item_module.len() - std_item}")
