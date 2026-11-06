@@ -7,7 +7,8 @@
 //! It carries no stability promise: it changes whenever resolution does, on
 //! both sides in one pull request. `nova check --dump-resolution FILE…`
 //! prints a program's part after a `== FILE` header, and `nova check
-//! --dump-resolution --std` std's part.
+//! --dump-resolution --std` std's part; `--target wasm` resolves for the
+//! WASM target, and `--test` as `nova test` resolves (ADR 0054).
 //!
 //! - It follows the AST dump's conventions (ADR 0052 §1): a line is its
 //!   indentation, two spaces per depth, `(` and its kind, then its values
@@ -99,11 +100,12 @@ pub const KINDS: &[&str] = &[
 
 /// The forms a loose program does not print natively outside test mode:
 /// 5.2b's packages (a module's package key), its WASM target (`missing`)
-/// and its test mode (`@test` functions are stripped under `check`), and
-/// the two severities the resolver never gives.
+/// and its test mode (` mode=test`; `@test` functions are stripped under
+/// `check`), and the two severities the resolver never gives.
 pub const LATER_KINDS: &[&str] = &[
     "target=wasm",
     "package=<n>",
+    "mode=test",
     "(Test",
     "(Test should_panic=true",
     "(Test should_panic=false",
@@ -116,12 +118,14 @@ pub const LATER_KINDS: &[&str] = &[
 /// label, and std's modules' names in the file database, as `<std/core>`.
 pub type Labels = [(FileId, String)];
 
-/// A program's part (module docs) for `target`: its `modules` as the loader
-/// gave them, the files' `labels`, its resolution once it got that far, and
-/// every diagnostic, the loader's and the resolver's, in order. Without a
+/// A program's part (module docs) for `target`, under test mode when
+/// `test`: its `modules` as the loader gave them, the files' `labels`, its
+/// resolution once it got that far, and every diagnostic, the package
+/// graph's, the loader's and the resolver's, in order. Without a
 /// resolution the part holds the modules loaded and the diagnostics.
 pub fn dump_program(
     target: CompileTarget,
+    test: bool,
     modules: &[ModuleSource],
     labels: &Labels,
     resolution: Option<&ProgramResolution>,
@@ -130,6 +134,7 @@ pub fn dump_program(
     let mut d = Dump::new(labels, u32::MAX);
     d.open(0, "Program");
     d.field("target", target.name());
+    d.mode(test);
     d.bool_field("resolved", resolution.is_some());
     for (index, m) in modules.iter().enumerate() {
         d.open(1, "Module");
@@ -197,11 +202,17 @@ pub fn dump_program(
     d.out
 }
 
-/// std's part (module docs) for `target`, from the resolution of a program
-/// of no module of its own, whose std files have `labels`.
-pub fn dump_std(target: CompileTarget, labels: &Labels, resolution: &ProgramResolution) -> String {
+/// std's part (module docs) for `target`, under test mode when `test`,
+/// from the resolution of a program of no module of its own, whose std
+/// files have `labels`.
+pub fn dump_std(
+    target: CompileTarget,
+    test: bool,
+    labels: &Labels,
+    resolution: &ProgramResolution,
+) -> String {
     let mut d = Dump::new(labels, 0);
-    d.std_part(target, &resolution.definitions, 0, 0, 0);
+    d.std_part(target, test, &resolution.definitions, 0, 0, 0);
     d.out.push('\n');
     d.diagnostics(&resolution.diagnostics);
     d.out
@@ -212,6 +223,7 @@ pub fn dump_std(target: CompileTarget, labels: &Labels, resolution: &ProgramReso
 /// every program for one target, which a test checks.
 pub fn std_part_of(
     target: CompileTarget,
+    test: bool,
     labels: &Labels,
     resolution: &ProgramResolution,
 ) -> String {
@@ -224,7 +236,7 @@ pub fn std_part_of(
         .unwrap_or(defs.item_module.len());
     let std_def = first_std_def(defs, std_item);
     let mut d = Dump::new(labels, std_def);
-    d.std_part(target, defs, std_module, std_def, std_item);
+    d.std_part(target, test, defs, std_module, std_def, std_item);
     d.out.push('\n');
     d.out
 }
@@ -407,6 +419,14 @@ impl<'a> Dump<'a> {
         let _ = write!(self.out, " {key}={value}");
     }
 
+    /// ` mode=test` under test mode, and nothing under `check`'s, so that
+    /// 5.2a's dumps are as they were.
+    fn mode(&mut self, test: bool) {
+        if test {
+            self.field("mode", "test");
+        }
+    }
+
     fn bool_field(&mut self, key: &str, value: bool) {
         let _ = write!(self.out, " {key}={value}");
     }
@@ -444,6 +464,7 @@ impl<'a> Dump<'a> {
     fn std_part(
         &mut self,
         target: CompileTarget,
+        test: bool,
         defs: &Definitions,
         std_module: usize,
         std_def: u32,
@@ -451,6 +472,7 @@ impl<'a> Dump<'a> {
     ) {
         self.open(0, "Std");
         self.field("target", target.name());
+        self.mode(test);
         let modules = defs.modules.len() - std_module;
         self.field("modules", &modules.to_string());
         self.field("defs", &(defs.defs.len() as u32 - std_def).to_string());
@@ -757,12 +779,13 @@ mod tests {
         labels.push((lib_id, "lib".to_string()));
         let program = dump_program(
             CompileTarget::Native,
+            false,
             &sources,
             &labels,
             Some(&r),
             &r.diagnostics,
         );
-        let std = std_part_of(CompileTarget::Native, &labels, &r);
+        let std = std_part_of(CompileTarget::Native, false, &labels, &r);
         (program, std, std_labels, std_ids)
     }
 
@@ -819,20 +842,75 @@ mod tests {
             .imports
             .insert("ui".to_string(), ImportTarget::Reported);
         let labels = [(id, "main".to_string())];
-        let stopped = dump_program(CompileTarget::Native, &[module], &labels, None, &[]);
+        let stopped = dump_program(CompileTarget::Native, false, &[module], &labels, None, &[]);
         assert_eq!(
             stopped,
             "(Program target=native resolved=false\n  (Module 0 \"main\" package=None\n    \
              (Import \"ui\" Reported)))\n(Diagnostics)\n"
         );
+        let later = the_5_2b_forms();
         let mut found = std::collections::BTreeSet::new();
-        for line in program.lines().chain(std.lines()).chain(stopped.lines()) {
+        for line in program
+            .lines()
+            .chain(std.lines())
+            .chain(stopped.lines())
+            .chain(later.lines())
+        {
             found.extend(forms_on(line));
         }
         let missing: Vec<&&str> = KINDS.iter().filter(|k| !found.contains(**k)).collect();
         assert!(missing.is_empty(), "{missing:?}");
         let unlisted: Vec<&String> = found.iter().filter(|f| !listed(f)).collect();
         assert!(unlisted.is_empty(), "{unlisted:?}");
+    }
+
+    /// What only 5.2b's programs print (ADR 0054): a package's module keys,
+    /// in a test-mode program whose module keeps two tests, then std's part
+    /// for the WASM target, with its `missing` names.
+    fn the_5_2b_forms() -> String {
+        let src = "@test\nfn plain() {}\n@test(should_panic)\nfn panics() {}\n";
+        let mut db = FileDb::new();
+        let main_id = db.add("main.nova", src);
+        let (mut std_ids, mut labels) = std_files(&mut db);
+        let (name, text) = crate::STD_TEST_MODULE;
+        let test_id = db.add("<std/test>", text);
+        labels.push((test_id, "<std/test>".to_string()));
+        let main = parse(src, main_id);
+        let mut module = ModuleSource::new("main", &main);
+        module.package = Some(0);
+        let r = resolve_program_for(
+            CompileTarget::Native,
+            std::slice::from_ref(&module),
+            &std_ids,
+            Some(((name, text), test_id)),
+        );
+        labels.push((main_id, "main".to_string()));
+        let mut out = dump_program(
+            CompileTarget::Native,
+            true,
+            &[module],
+            &labels,
+            Some(&r),
+            &r.diagnostics,
+        );
+        assert!(
+            out.starts_with(
+                "(Program target=native mode=test resolved=true\n  (Module 0 \"main\" package=0)"
+            ),
+            "{out}"
+        );
+        std_ids.clear();
+        let mut db = FileDb::new();
+        let mut labels = Vec::new();
+        for &(name, src) in &crate::WASM_STD_MODULES {
+            let label = format!("<std/{}>", name.strip_prefix("$std.").unwrap_or(name));
+            let id = db.add(label.clone(), src);
+            std_ids.push(id);
+            labels.push((id, label));
+        }
+        let wasm = resolve_program_for(CompileTarget::Wasm, &[], &std_ids, None);
+        out.push_str(&dump_std(CompileTarget::Wasm, false, &labels, &wasm));
+        out
     }
 
     /// std's part of a program's resolution is std's part of a program of
@@ -842,14 +920,56 @@ mod tests {
     fn std_part_is_the_same_in_every_program() {
         let (_, std, std_labels, std_ids) = the_program();
         let alone = resolve_program_for(CompileTarget::Native, &[], &std_ids, None);
-        assert_eq!(std, std_part_of(CompileTarget::Native, &std_labels, &alone));
-        let full = dump_std(CompileTarget::Native, &std_labels, &alone);
+        assert_eq!(
+            std,
+            std_part_of(CompileTarget::Native, false, &std_labels, &alone)
+        );
+        let full = dump_std(CompileTarget::Native, false, &std_labels, &alone);
         assert_eq!(full, std.clone() + "(Diagnostics)\n");
         assert!(
             std.starts_with("(Std target=native modules=21 "),
             "{}",
             &std[..80]
         );
+        assert!(!std.contains(" u"), "std's part names a user definition");
+    }
+
+    /// Under test mode too, std's part of a program's resolution is std's
+    /// part of a program of no module of its own: `std/test` joins std,
+    /// after its other modules, and its names are globbed into theirs, but
+    /// a user module's are not.
+    #[test]
+    fn std_part_is_the_same_in_every_test_mode_program() {
+        let src = "@test\nfn plain() {}\n";
+        let mut db = FileDb::new();
+        let main_id = db.add("main.nova", src);
+        let (std_ids, mut labels) = std_files(&mut db);
+        let (name, text) = crate::STD_TEST_MODULE;
+        let test_id = db.add("<std/test>", text);
+        labels.push((test_id, "<std/test>".to_string()));
+        let extra = Some(((name, text), test_id));
+        let main = parse(src, main_id);
+        let module = ModuleSource::new("main", &main);
+        let r = resolve_program_for(
+            CompileTarget::Native,
+            std::slice::from_ref(&module),
+            &std_ids,
+            extra,
+        );
+        let alone = resolve_program_for(CompileTarget::Native, &[], &std_ids, extra);
+        let std = std_part_of(CompileTarget::Native, true, &labels, &r);
+        assert_eq!(
+            std,
+            std_part_of(CompileTarget::Native, true, &labels, &alone)
+        );
+        let full = dump_std(CompileTarget::Native, true, &labels, &alone);
+        assert_eq!(full, std.clone() + "(Diagnostics)\n");
+        assert!(
+            std.starts_with("(Std target=native mode=test modules=22 "),
+            "{}",
+            &std[..80]
+        );
+        assert!(std.contains("\n  (Module 21 \"$std.test\" package=None)"));
         assert!(!std.contains(" u"), "std's part names a user definition");
     }
 
@@ -947,6 +1067,92 @@ mod tests {
             Severity::Help,
         ] {
             assert!(listed(severity_kind(severity)), "{severity:?}");
+        }
+    }
+
+    /// std resolved once ([`crate::SharedStd`], 5.2b, ADR 0054 §9) is
+    /// shared only when std alone gives no diagnostic and holds no `@test`
+    /// function, either of which the shared path would drop: with a std
+    /// whose `core` defines a name twice (E0002), or whose `ui` marks a
+    /// function `@test`, each program is resolved in full, and its dump,
+    /// under `check` and under test mode, is the full path's, std's E0002
+    /// or std's test kept.
+    #[test]
+    fn std_with_a_diagnostic_or_a_test_is_resolved_for_each_program() {
+        let alterations = [
+            (
+                "$std.core",
+                "fn mix64(x: Int) -> Int {",
+                "fn escape_common(x: Int) -> Int {",
+                "(Error \"E0002\" \"duplicate definition of `escape_common`\"",
+            ),
+            (
+                "$std.ui",
+                "\nfn flush() {",
+                "\n@test\nfn flush() {",
+                " \"flush\" should_panic=false)",
+            ),
+        ];
+        for (module, old, new, mark) in alterations {
+            let mut db = FileDb::new();
+            let main_id = db.add("main.nova", MAIN);
+            let lib_id = db.add("lib.nova", LIB);
+            let mut labels = vec![(main_id, "main".to_string()), (lib_id, "lib".to_string())];
+            let mut texts = Vec::new();
+            for &(name, src) in &STD_MODULES {
+                let text = if name == module {
+                    assert_eq!(src.matches(old).count(), 1, "{module}: {old}");
+                    src.replacen(old, new, 1)
+                } else {
+                    src.to_string()
+                };
+                let label = format!("<std/{}>", name.strip_prefix("$std.").unwrap_or(name));
+                let id = db.add(label.clone(), text.clone());
+                labels.push((id, label));
+                texts.push((name, text, id));
+            }
+            let mut diagnostics = Vec::new();
+            let modules = texts
+                .iter()
+                .map(|(name, text, id)| {
+                    let (file, diags) = crate::std_module(text, *id);
+                    diagnostics.extend(diags);
+                    (name.to_string(), file)
+                })
+                .collect();
+            let parsed = crate::ParsedStd {
+                modules,
+                diagnostics,
+            };
+            let shared = crate::SharedStd::new(CompileTarget::Native, parsed);
+            assert!(!shared.shareable, "{module}");
+            let main = parse(MAIN, main_id);
+            let lib = parse(LIB, lib_id);
+            let mut sources = [
+                ModuleSource::new("main", &main),
+                ModuleSource::new("lib", &lib),
+            ];
+            name_imports(&mut sources);
+            sources[0].text = Some(MAIN);
+            sources[1].text = Some(LIB);
+            let full =
+                crate::resolve_program_with_std(CompileTarget::Native, &sources, shared.parsed());
+            let once = crate::resolve_program_with_shared_std(&sources, &shared);
+            for test in [false, true] {
+                let dump = |r: &crate::ProgramResolution| {
+                    dump_program(
+                        CompileTarget::Native,
+                        test,
+                        &sources,
+                        &labels,
+                        Some(r),
+                        &r.diagnostics,
+                    )
+                };
+                let (want, got) = (dump(&full), dump(&once));
+                assert!(want.contains(mark), "{module}: {want}");
+                assert_eq!(got, want, "{module}, test mode {test}");
+            }
         }
     }
 }

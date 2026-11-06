@@ -89,10 +89,20 @@ impl Program {
     /// package when it is directly in a package's `src/` or `tests/`, and
     /// otherwise loose, reading no manifest.
     pub fn for_file(path: &Path) -> Program {
+        Program::for_file_with(path, FileDb::new())
+    }
+
+    /// [`Program::for_file`], adding the manifests it reads to `db`, which
+    /// may hold files already: the resolution dump registers std's modules
+    /// first, so that their ids are the same in every program (ADR 0053
+    /// §9).
+    pub fn for_file_with(path: &Path, mut db: FileDb) -> Program {
         let Some((root, kind)) = package_of(path) else {
-            return Program::loose(path);
+            return Program {
+                db,
+                ..Program::loose(path)
+            };
         };
-        let mut db = FileDb::new();
         let (graph, diagnostics) = nova_pm::graph(&root, &mut db);
         let runs = kind == RootKind::Src && path.file_stem().is_some_and(|stem| stem == "main");
         Program {
