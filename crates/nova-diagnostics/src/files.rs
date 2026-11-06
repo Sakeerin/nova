@@ -12,13 +12,13 @@ impl FileId {
 }
 
 /// Database of source files, keyed by `FileId`.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct FileDb {
     files: Vec<SourceFile>,
     by_name: HashMap<String, FileId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SourceFile {
     name: String,
     source: String,

@@ -1426,6 +1426,10 @@ fn nova_run_runs_the_program_on_the_main_thread() {
 /// program's root.
 const RESOLUTION_S0: &[&str] = &["check", "--dump-resolution"];
 
+/// A package's `nova.toml` with what the package graph requires and
+/// nothing else: the tests' packages (5.2b, ADR 0054).
+const MANIFEST: &str = "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+
 /// The error cases of the resolver (spec §3.5): the inline sources of
 /// `nova-resolver`'s tests and of the type checker's tests that reach the
 /// resolver, each a file, or a directory whose `main.nova` is the root of
@@ -1566,6 +1570,21 @@ fn agree_on_resolution(dir: &Path, files: &[String], code: i32) -> String {
     all
 }
 
+/// S0's resolution dump of `files` from `dir`, which must exit with
+/// `code`: what a package's roots are checked by until N dumps packages
+/// (ADR 0054).
+fn s0_resolution(dir: &Path, files: &[String], code: i32) -> String {
+    let out = Command::new(nova())
+        .current_dir(dir)
+        .args(RESOLUTION_S0)
+        .args(files)
+        .output()
+        .expect("run nova check --dump-resolution");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert_eq!(out.status.code(), Some(code), "{stdout}");
+    stdout
+}
+
 /// `nova check`'s help names neither hidden flag, and every `nova check`
 /// command line whose first argument after `check` is not
 /// `--dump-resolution` is parsed as before the flags (ADR 0053 §1): each
@@ -1694,16 +1713,18 @@ fn the_resolution_dump_flags_are_hidden_and_refused_as_before() {
 
 /// Each root's part follows a header with its path as given; a root that
 /// cannot be read is `IOERR` and its kind, the rest are dumped, and the
-/// exit code is 2; a root in a package is `UNSUPPORTED package`; a program
-/// that fails to load holds the diagnostics so far; `--std` prints std's
-/// part for the target. N prints the same for the same roots.
+/// exit code is 2; a root in a package is a module of the package (ADR
+/// 0054); a program that fails to load holds the diagnostics so far;
+/// `--std` prints std's part for the target. N prints the same for the
+/// same roots but the package's, whose part S0 alone is checked for until
+/// N dumps packages.
 #[test]
 fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
     let dir = fresh_dir("resolution-headers");
     std::fs::write(dir.join("a.nova"), "fn main() {}\n").expect("write a.nova");
     std::fs::write(dir.join("b.nova"), "fn g( {").expect("write b.nova");
     std::fs::create_dir_all(dir.join("pkg").join("src")).expect("create pkg/src");
-    std::fs::write(dir.join("pkg").join("nova.toml"), "").expect("write nova.toml");
+    std::fs::write(dir.join("pkg").join("nova.toml"), MANIFEST).expect("write nova.toml");
     std::fs::write(
         dir.join("pkg").join("src").join("main.nova"),
         "fn main() {}\n",
@@ -1729,7 +1750,14 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
         stdout.contains(
             "  (Items 0..1 0))\n(Diagnostics)\n\
              == missing.nova\nIOERR NotFound\n\
-             == pkg/src/main.nova\nUNSUPPORTED package\n\
+             == pkg/src/main.nova\n(Program target=native resolved=true\n  \
+             (Module 0 \"main\" package=0)\n"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "  (Items 0..1 0))\n(Diagnostics)\n\
              == b.nova\n(Program target=native resolved=false\n  \
              (Module 0 \"b\" package=None))\n(Diagnostics\n  \
              (Error \"P0001\" \"expected identifier (in parameter name), found `{`\"\n    \
@@ -1750,7 +1778,6 @@ fn the_resolution_dump_has_a_header_per_root_and_std_its_own_part() {
     let files = [
         "a.nova",
         "missing.nova",
-        "pkg/src/main.nova",
         "b.nova",
         "dirpkg/src/main.nova",
         "latin1.nova",
@@ -1975,8 +2002,9 @@ fn a_root_spelled_any_way_names_its_siblings_alike() {
 /// directory both sides list for the root's siblings is then `.`, so a
 /// directory named `ui.nova` beside `main.nova` is E0093's, though it
 /// cannot be read, and a root directly in a package's `src/` or `tests/`,
-/// named from the package's directory, is `UNSUPPORTED package`, as one
-/// named from outside it is. An empty root is a file that is not there.
+/// named from the package's directory, is a module of the package, as one
+/// named from outside it is (ADR 0054; S0's part alone until N dumps
+/// packages). An empty root is a file that is not there.
 #[test]
 fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
     let dir = fresh_dir("resolution-roots");
@@ -1993,19 +2021,30 @@ fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
         std::fs::create_dir_all(pkg.join(sub)).expect("create a package's directory");
         std::fs::write(pkg.join(sub).join("main.nova"), "fn main() {}\n").expect("write main.nova");
     }
-    std::fs::write(pkg.join("nova.toml"), "").expect("write nova.toml");
+    std::fs::write(pkg.join("nova.toml"), MANIFEST).expect("write nova.toml");
     let roots = ["src/main.nova", "tests/main.nova"].map(String::from);
-    let out = agree_on_resolution(&pkg, &roots, 0);
-    assert_eq!(
-        out,
-        "== src/main.nova\nUNSUPPORTED package\n== tests/main.nova\nUNSUPPORTED package\n"
-    );
+    let out = s0_resolution(&pkg, &roots, 0);
+    for (root, label) in [("src/main.nova", "main"), ("tests/main.nova", "tests/main")] {
+        assert!(
+            out.contains(&format!(
+                "== {root}\n(Program target=native resolved=true\n  \
+                 (Module 0 \"{label}\" package=0)\n"
+            )),
+            "{out}"
+        );
+    }
     let roots = ["pkg/tests/main.nova", ""].map(String::from);
-    let out = agree_on_resolution(&dir, &roots, 2);
-    assert_eq!(
-        out,
-        "== pkg/tests/main.nova\nUNSUPPORTED package\n== \nIOERR NotFound\n"
+    let out = s0_resolution(&dir, &roots, 2);
+    assert!(
+        out.starts_with(
+            "== pkg/tests/main.nova\n(Program target=native resolved=true\n  \
+             (Module 0 \"tests/main\" package=0)\n"
+        ),
+        "{out}"
     );
+    assert!(out.ends_with("\n== \nIOERR NotFound\n"), "{out}");
+    let out = agree_on_resolution(&dir, &["".to_string()], 2);
+    assert_eq!(out, "== \nIOERR NotFound\n");
 }
 
 /// A root's package is found as S0's `package_of` finds it (ADR 0053 §3):
@@ -2017,6 +2056,8 @@ fn a_root_with_no_directory_part_or_in_a_package_loads_alike() {
 /// link none, and a directory that can be searched but not listed still
 /// holds its `nova.toml` for both (as root, which lists it anyway, that
 /// part is any other package). The test asks the disk whether it folds case.
+/// S0's parts are checked, and N's of the roots in no package until N
+/// dumps packages.
 #[test]
 fn a_package_is_found_by_its_manifests_path_on_both_sides() {
     #[cfg(unix)]
@@ -2035,15 +2076,15 @@ fn a_package_is_found_by_its_manifests_path_on_both_sides() {
         .expect("write main.nova");
         dir.join(name)
     };
-    std::fs::write(package("cased").join("Nova.toml"), "").expect("write Nova.toml");
+    std::fs::write(package("cased").join("Nova.toml"), MANIFEST).expect("write Nova.toml");
     let folds = dir.join("cased").join("nova.toml").is_file();
     #[cfg(unix)]
     let (more, _relisted) = {
         use std::os::unix::fs::{symlink, PermissionsExt};
-        std::fs::write(dir.join("real.toml"), "").expect("write real.toml");
+        std::fs::write(dir.join("real.toml"), MANIFEST).expect("write real.toml");
         symlink("../real.toml", package("linked").join("nova.toml")).expect("link nova.toml");
         symlink("missing.toml", package("dangling").join("nova.toml")).expect("link nova.toml");
-        std::fs::write(package("locked").join("nova.toml"), "").expect("write nova.toml");
+        std::fs::write(package("locked").join("nova.toml"), MANIFEST).expect("write nova.toml");
         let relisted = Relisted(dir.join("locked"));
         std::fs::set_permissions(dir.join("locked"), std::fs::Permissions::from_mode(0o311))
             .expect("make locked/ unlistable");
@@ -2059,12 +2100,19 @@ fn a_package_is_found_by_its_manifests_path_on_both_sides() {
         .iter()
         .map(|(name, _)| format!("{name}/src/main.nova"))
         .collect();
-    let out = agree_on_resolution(&dir, &roots, 0);
+    let loose: Vec<String> = roots
+        .iter()
+        .zip(&cases)
+        .filter(|(_, (_, package))| !*package)
+        .map(|(root, _)| root.clone())
+        .collect();
+    agree_on_resolution(&dir, &loose, 0);
+    let out = s0_resolution(&dir, &roots, 0);
     for (root, (_, package)) in roots.iter().zip(&cases) {
         let part = if *package {
-            "UNSUPPORTED package\n"
+            "(Program target=native resolved=true\n  (Module 0 \"main\" package=0)\n"
         } else {
-            "(Program target=native resolved=true\n"
+            "(Program target=native resolved=true\n  (Module 0 \"main\" package=None)\n"
         };
         assert!(
             out.contains(&format!("== {root}\n{part}")),

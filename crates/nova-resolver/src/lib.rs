@@ -1875,6 +1875,38 @@ impl Exports {
         }
     }
 
+    /// These exports with every definition's id `offset` higher, as they
+    /// are when `offset` definitions come before their module's
+    /// ([`resolve_program_with_shared_std`]).
+    fn rebased(&self, offset: u32) -> Exports {
+        let def = |id: DefId| DefId(id.0 + offset);
+        let res = |r: Res| match r {
+            Res::Def(id) => Res::Def(def(id)),
+            Res::Variant(sum, index) => Res::Variant(def(sum), index),
+            Res::Builtin(b) => Res::Builtin(b),
+        };
+        Exports {
+            values: self
+                .values
+                .iter()
+                .map(|(k, r)| (k.clone(), res(*r)))
+                .collect(),
+            types: self
+                .types
+                .iter()
+                .map(|(k, id)| (k.clone(), def(*id)))
+                .collect(),
+            traits: self
+                .traits
+                .iter()
+                .map(|(k, id)| (k.clone(), def(*id)))
+                .collect(),
+            value_names: self.value_names.clone(),
+            type_names: self.type_names.clone(),
+            trait_names: self.trait_names.clone(),
+        }
+    }
+
     /// The exported values, in the order they were exported.
     fn values_in_order(&self) -> Vec<(String, Res)> {
         self.value_names
@@ -2296,6 +2328,234 @@ pub fn resolve_program_with_std(
     }
 }
 
+/// std resolved once for many programs, for the hidden resolution dump
+/// alone (5.2b, ADR 0054 §9): the resolution of a program of no module of
+/// its own, from which each program takes std's exports, its globbed
+/// variants and its `missing` names, unchanged. A program's resolution
+/// never changes it.
+pub struct SharedStd {
+    target: CompileTarget,
+    std: ParsedStd,
+    /// Each std module's exports, its definitions numbered from 0.
+    exports: Vec<Exports>,
+    /// [`std_globbed_variants`] of std.
+    variants: FxHashMap<String, String>,
+    missing: FxHashMap<String, &'static str>,
+    /// Whether resolving std gave no diagnostic of its own, beyond parsing
+    /// it, and found no `@test` function: a diagnostic would come between
+    /// a program's, and a test would be listed with a program's, which the
+    /// shared path drops, so a program is then resolved by
+    /// [`resolve_program_with_std`].
+    shareable: bool,
+}
+
+impl SharedStd {
+    /// std as parsed, which [`resolve_program_with_std`] takes.
+    pub fn parsed(&self) -> &ParsedStd {
+        &self.std
+    }
+
+    /// `std`, parsed for `target`, resolved once.
+    pub fn new(target: CompileTarget, std: ParsedStd) -> SharedStd {
+        let alone = resolve_program_with_std(target, &[], &std);
+        let all: Vec<ModuleSource> = std
+            .modules
+            .iter()
+            .filter_map(|(name, file)| {
+                file.as_ref()
+                    .map(|file| ModuleSource::new(name.clone(), file))
+            })
+            .collect();
+        let variants =
+            std_globbed_variants(&alone.definitions, &alone.definitions.exports, &all, 0);
+        let shareable = alone.diagnostics.len() == std.diagnostics.len() && alone.tests.is_empty();
+        SharedStd {
+            target,
+            exports: alone.definitions.exports,
+            variants,
+            missing: alone.definitions.missing,
+            shareable,
+            std,
+        }
+    }
+}
+
+/// [`resolve_program_with_std`] with std resolved once ([`SharedStd`]),
+/// for the hidden resolution dump alone (5.2b, ADR 0054 §9): the user's
+/// modules go through the same steps, in the same order, and read std's
+/// exports, rebased past the user's definitions, where the full
+/// resolution reads std's own; std's modules are not resolved again, and
+/// the result holds the user's definitions, scopes and items, and every
+/// module's exports, which is what the dump prints. Not for the type
+/// checker: std's definitions, scopes, items and import occurrences are
+/// not in it. A program whose resolution would differ, because std's gave
+/// a diagnostic or holds a `@test` function, is resolved in full.
+pub fn resolve_program_with_shared_std(
+    modules: &[ModuleSource],
+    shared: &SharedStd,
+) -> ProgramResolution {
+    let target = shared.target;
+    if !shared.shareable {
+        return resolve_program_with_std(target, modules, &shared.std);
+    }
+    let mut definitions = Definitions::default();
+    let mut diagnostics = shared.std.diagnostics.clone();
+    let mut merged = Vec::new();
+    let mut tests = Vec::new();
+    let mut imports: Vec<Occurrence> = Vec::new();
+    let user_count = modules.len();
+    let all: Vec<ModuleSource> = modules
+        .iter()
+        .map(|m| ModuleSource {
+            name: m.name.clone(),
+            file: m.file,
+            imports: m.imports.clone(),
+            text: m.text,
+            package: m.package,
+            importable: m.importable.clone(),
+        })
+        .chain(shared.std.modules.iter().filter_map(|(name, file)| {
+            file.as_ref()
+                .map(|file| ModuleSource::new(name.clone(), file))
+        }))
+        .collect();
+    let std_start = user_count;
+    let mut exports: Vec<Exports> = Vec::new();
+    for m in &all[..std_start] {
+        let mut scope = ModuleScope {
+            name: m.name.clone(),
+            ..Default::default()
+        };
+        for b in Builtin::GLOBAL {
+            scope.values.insert(b.name().to_string(), Res::Builtin(b));
+        }
+        definitions.modules.push(scope);
+        exports.push(Exports::default());
+    }
+    let owned = |mid: usize| mid < std_start && matches!(all[mid].package, None | Some(0));
+    for (mid, m) in all.iter().enumerate().take(std_start) {
+        let mut first_value: IndexMap<String, Span> = IndexMap::new();
+        let mut first_type: IndexMap<String, Span> = IndexMap::new();
+        let before = diagnostics.len();
+        for item in &m.file.items {
+            let item_index = merged.len();
+            definitions.item_module.push(mid as u32);
+            collect_item(
+                &mut definitions.defs,
+                &mut definitions.modules[mid],
+                &mut exports[mid],
+                &mut first_value,
+                &mut first_type,
+                &mut diagnostics,
+                &mut tests,
+                item_index,
+                &item.value,
+            );
+            merged.push(item.clone());
+        }
+        if !owned(mid) {
+            diagnostics[before..]
+                .iter_mut()
+                .for_each(|d| d.fixes.clear());
+        }
+    }
+    // std's definitions come after the user's.
+    let offset = definitions.defs.len() as u32;
+    exports.extend(shared.exports.iter().map(|e| e.rebased(offset)));
+    if target == CompileTarget::Wasm {
+        for m in &all[..std_start] {
+            for item in &m.file.items {
+                if let Item::Extern(_) = &item.value {
+                    diagnostics.push(
+                        Diagnostic::error(
+                            "E0090",
+                            "extern functions are not available on target wasm",
+                        )
+                        .with_primary_label(item.span, "this `extern` block"),
+                    );
+                }
+            }
+        }
+    }
+    let mut public_fixes: Vec<(usize, usize, String)> = Vec::new();
+    for (mid, m) in all.iter().enumerate().take(std_start) {
+        let before = diagnostics.len();
+        for item in &m.file.items {
+            if let Item::Import(imp) = &item.value {
+                resolve_import(
+                    &mut definitions,
+                    &exports,
+                    &all,
+                    target,
+                    mid,
+                    imp,
+                    &mut diagnostics,
+                    &mut imports,
+                    &mut public_fixes,
+                );
+            }
+        }
+        if !owned(mid) {
+            diagnostics[before..]
+                .iter_mut()
+                .for_each(|d| d.fixes.clear());
+        }
+    }
+    // No std module imports a user's, so none would receive a name.
+    for (at, fix_target, name) in public_fixes {
+        let clash = all[..std_start].iter().enumerate().any(|(g, m)| {
+            g != fix_target
+                && would_receive(m, fix_target, &name)
+                && binds(&definitions.modules[g], &name)
+        });
+        if clash {
+            diagnostics[at].fixes.clear();
+        }
+    }
+    // std's glob into the user's modules; `definitions.modules` holds no
+    // std module's scope, so a glob into std's alone binds nothing.
+    for (mid, std_exports) in exports.iter().enumerate().skip(std_start) {
+        let name = all[mid].name.as_str();
+        if IMPORTED_STD.iter().any(|&(_, m)| m == name) {
+            continue;
+        }
+        let from = if STD_INTERNAL.contains(&name) {
+            std_start
+        } else {
+            0
+        };
+        import_std_module(&mut definitions, std_exports, mid, from);
+    }
+    diagnostics.extend(variant_shadowing_of(&shared.variants, &all[..std_start]));
+    definitions.importable = all
+        .iter()
+        .map(|m| {
+            m.importable
+                .iter()
+                .map(|(n, i)| (n.clone(), ModuleId(*i as u32)))
+                .collect()
+        })
+        .collect();
+    definitions.packages = all.iter().map(|m| m.package).collect();
+    definitions.std_start = std_start;
+    definitions.exports = exports;
+    definitions.target = target;
+    definitions.missing = shared.missing.clone();
+    ProgramResolution {
+        file: File {
+            items: merged,
+            newline_splits: all[..std_start]
+                .iter()
+                .flat_map(|m| m.file.newline_splits.iter().copied())
+                .collect(),
+        },
+        definitions,
+        diagnostics,
+        tests,
+        imports,
+    }
+}
+
 /// The variants std brings into every module, by name: each public variant
 /// of a std module whose names glob into user modules, with its sum's name.
 /// The first module to export a name wins, as std's glob does.
@@ -2333,8 +2593,18 @@ fn variant_shadowing(
     std_start: usize,
 ) -> Vec<Diagnostic> {
     let std_variants = std_globbed_variants(definitions, exports, all, std_start);
+    variant_shadowing_of(&std_variants, &all[..std_start.min(all.len())])
+}
+
+/// [`variant_shadowing`]'s warnings for `user`, the program's own modules,
+/// from `std_variants`, the variants std globs into them, each with its
+/// sum's name ([`std_globbed_variants`]).
+fn variant_shadowing_of(
+    std_variants: &FxHashMap<String, String>,
+    user: &[ModuleSource],
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
-    for m in &all[..std_start.min(all.len())] {
+    for m in user {
         for item in &m.file.items {
             let Item::Type(t) = &item.value else {
                 continue;

@@ -486,10 +486,11 @@ pub fn check(cmd: CheckCmd) -> Result<()> {
 /// ([`DumpResolutionCmd::from_args`]), and then parsed by this parser of
 /// its own: so [`CheckCmd`] stays as it was, and every other `nova check`
 /// command line is parsed, refused, suggested and helped exactly as
-/// before the flag. After the flag it takes `--std`, `--target native|wasm`
-/// and files, `--` before a file that starts with `-`, each option once;
-/// it refuses everything else, `--help` and `-h` included, in clap's words
-/// under the usage `nova check --dump-resolution`.
+/// before the flag. After the flag it takes `--std`, `--target native|wasm`,
+/// `--test` (5.2b, ADR 0054) and files, `--` before a file that starts
+/// with `-`, each option once; it refuses everything else, `--help` and
+/// `-h` included, in clap's words under the usage `nova check
+/// --dump-resolution`.
 #[derive(clap::Parser)]
 #[command(
     name = "nova check --dump-resolution",
@@ -507,6 +508,11 @@ pub struct DumpResolutionCmd {
     /// The target whose std and rules the programs are resolved with.
     #[arg(long, value_enum, default_value_t = TargetArg::Native)]
     target: TargetArg,
+
+    /// Resolve as `nova test` does: the root package's `@test` functions
+    /// kept, and `std/test` in std. Native only, as `nova test` is.
+    #[arg(long)]
+    test: bool,
 
     /// Each a program's root. Taken as they are, so that an empty one is a
     /// file that is not there.
@@ -532,9 +538,10 @@ impl DumpResolutionCmd {
 /// otherwise, for each file, `== FILE` (the path as given), then its
 /// program's part, or `IOERR` and the error's kind for a root that cannot
 /// be read, after which the rest are dumped and the exit code is 2, as
-/// `parse --dump-ast` does. With neither a file nor `--std`, or with both,
-/// it prints one line to stderr, nothing to stdout, and exits 2, as N
-/// does.
+/// `parse --dump-ast` does; with `--test`, each as `nova test` resolves
+/// it. With `--test` and `--target wasm`, with neither a file nor `--std`,
+/// or with both, it prints one line to stderr, nothing to stdout, and
+/// exits 2, as N does.
 pub fn dump_resolution(cmd: DumpResolutionCmd) -> Result<()> {
     let code = dump_resolution_code(&cmd)?;
     if code != 0 {
@@ -547,12 +554,16 @@ fn dump_resolution_code(cmd: &DumpResolutionCmd) -> Result<i32> {
     let target: nova_driver::Target = cmd.target.into();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    if cmd.test && target == nova_driver::Target::Wasm {
+        eprintln!("error: --dump-resolution --test is native only, as nova test is");
+        return Ok(2);
+    }
     if cmd.std {
         if !cmd.files.is_empty() {
             eprintln!("error: --dump-resolution --std takes no FILE");
             return Ok(2);
         }
-        out.write_all(nova_driver::dump_std_resolution(target).as_bytes())?;
+        out.write_all(nova_driver::dump_std_resolution(target, cmd.test).as_bytes())?;
         out.flush()?;
         return Ok(0);
     }
@@ -561,7 +572,7 @@ fn dump_resolution_code(cmd: &DumpResolutionCmd) -> Result<i32> {
         return Ok(2);
     }
     // std is parsed once for every program, as N parses it.
-    let dumps = nova_driver::ResolutionDumps::new(target);
+    let dumps = nova_driver::ResolutionDumps::new(target, cmd.test);
     let mut code = 0;
     for file in &cmd.files {
         writeln!(out, "== {}", file.display())?;
