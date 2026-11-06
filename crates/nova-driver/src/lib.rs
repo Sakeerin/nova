@@ -179,6 +179,32 @@ impl ResolutionDumps {
     /// dump holds what was built and every diagnostic so far. `Err` when the
     /// root cannot be read.
     pub fn dump(&self, path: &Path) -> std::io::Result<String> {
+        let resolve = if self.shared {
+            Resolve::Shared
+        } else {
+            Resolve::Full
+        };
+        self.front(path, resolve, |front| {
+            nova_resolver::dump::dump_program(
+                self.target,
+                self.test,
+                front.sources,
+                front.labels,
+                front.resolved,
+                &front.diagnostics,
+            )
+        })
+    }
+
+    /// The pipeline [`ResolutionDumps::dump`] describes, up to the
+    /// resolver, resolving as `resolve` says, handed to `then`. `Err` when
+    /// the root cannot be read.
+    fn front<R>(
+        &self,
+        path: &Path,
+        resolve: Resolve,
+        then: impl FnOnce(Front<'_>) -> R,
+    ) -> std::io::Result<R> {
         let db = self.std_db.clone();
         let mut labels = self.std_labels.clone();
         let Program {
@@ -191,14 +217,14 @@ impl ResolutionDumps {
         labels.extend(manifest_labels(graph.as_ref(), &graph_diagnostics));
         let has_error = |ds: &[Diagnostic]| ds.iter().any(|d| d.severity == Severity::Error);
         if has_error(&graph_diagnostics) {
-            return Ok(nova_resolver::dump::dump_program(
-                self.target,
-                self.test,
-                &[],
-                &labels,
-                None,
-                &graph_diagnostics,
-            ));
+            return Ok(then(Front {
+                db: &db,
+                sources: &[],
+                labels: &labels,
+                resolved: None,
+                diagnostics: graph_diagnostics,
+                registry: &HashSet::new(),
+            }));
         }
         let load = program::load_program(graph.as_ref(), &roots, &DiskSources, &mut db)?;
         let mut modules = load.modules;
@@ -228,10 +254,12 @@ impl ResolutionDumps {
                 importable: m.importable.clone(),
             })
             .collect();
-        let mut resolved = (!failed).then(|| {
-            if self.shared {
-                nova_resolver::resolve_program_with_shared_std(&sources, &self.std)
-            } else {
+        let mut resolved = (!failed).then(|| match resolve {
+            Resolve::Shared => nova_resolver::resolve_program_with_shared_std(&sources, &self.std),
+            Resolve::SharedForCheck => {
+                nova_resolver::resolve_program_with_shared_std_for_check(&sources, &self.std)
+            }
+            Resolve::Full => {
                 nova_resolver::resolve_program_with_std(self.target, &sources, self.std.parsed())
             }
         });
@@ -239,15 +267,164 @@ impl ResolutionDumps {
             name_tests(&mut resolved.tests, &resolved.definitions, &modules);
             diagnostics.extend(shown(&resolved.diagnostics));
         }
-        Ok(nova_resolver::dump::dump_program(
-            self.target,
-            self.test,
-            &sources,
-            &labels,
-            resolved.as_ref(),
-            &diagnostics,
-        ))
+        Ok(then(Front {
+            db: &db,
+            sources: &sources,
+            labels: &labels,
+            resolved: resolved.as_ref(),
+            diagnostics,
+            registry: &registry,
+        }))
     }
+}
+
+/// How [`ResolutionDumps::front`] resolves a program: with std resolved
+/// once, for the resolution dump or, with std's definitions, for the type
+/// checker; or in full, as `check` does.
+#[derive(Clone, Copy)]
+enum Resolve {
+    Shared,
+    SharedForCheck,
+    Full,
+}
+
+/// What [`ResolutionDumps::front`] built: the files, the modules, their
+/// labels, the resolution once it got that far, every diagnostic so far,
+/// and the registry packages' files, whose warnings are not shown.
+struct Front<'a> {
+    db: &'a FileDb,
+    sources: &'a [ModuleSource<'a>],
+    labels: &'a [(FileId, String)],
+    resolved: Option<&'a nova_resolver::ProgramResolution>,
+    diagnostics: Vec<Diagnostic>,
+    registry: &'a HashSet<FileId>,
+}
+
+/// The HIR dumps of programs for one target and mode (`nova_typeck::dump`;
+/// spec
+/// `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
+/// §3.3 and §3.4, ADR 0055): [`ResolutionDumps`]'s pipeline, then, when it
+/// stopped on no error, the type checker's item passes with `check`'s
+/// options (the sources, no probe, no index). std is parsed, resolved and
+/// its items collected once, and each program reads std's tables rebased
+/// past its own ([`nova_typeck::check_items_shared`]); should std alone give
+/// a diagnostic or hold a test, every program is checked in full.
+pub struct HirDumps {
+    front: ResolutionDumps,
+    items: nova_typeck::SharedItems,
+    shared: bool,
+}
+
+impl HirDumps {
+    /// std's modules for `target`, parsed, resolved and their items
+    /// collected once, under test mode with `std/test` (`test`).
+    pub fn new(target: Target, test: bool) -> HirDumps {
+        let front = ResolutionDumps::new(target, test);
+        let alone = front.std.alone();
+        let items = nova_typeck::SharedItems::new(
+            &alone.file,
+            &alone.definitions,
+            &nova_typeck::CheckOptions {
+                sources: Some(&front.std_db),
+                ..Default::default()
+            },
+        );
+        let shared = front.std.shareable() && items.shareable();
+        HirDumps {
+            front,
+            items,
+            shared,
+        }
+    }
+
+    /// [`HirDumps::new`], each program resolving and checking std again,
+    /// as `check` does: the dumps are the same, which a test checks.
+    pub fn unshared(target: Target, test: bool) -> HirDumps {
+        HirDumps {
+            shared: false,
+            ..HirDumps::new(target, test)
+        }
+    }
+
+    /// The HIR dump of the program whose root is `path`, taken as
+    /// [`ResolutionDumps::dump`] takes it: the type checker's item tables
+    /// and every diagnostic so far, or, for a program that stopped before
+    /// the type checker, `checked=false` and the diagnostics. `Err` when
+    /// the root cannot be read.
+    pub fn dump(&self, path: &Path) -> std::io::Result<String> {
+        let resolve = if self.shared {
+            Resolve::SharedForCheck
+        } else {
+            Resolve::Full
+        };
+        let target = self.front.target;
+        let test = self.front.test;
+        self.front.front(path, resolve, |front| {
+            let stopped = front
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Error);
+            let Some(resolved) = front.resolved.filter(|_| !stopped) else {
+                return nova_typeck::dump::dump_program(
+                    target,
+                    test,
+                    front.labels,
+                    None,
+                    &front.diagnostics,
+                );
+            };
+            let options = nova_typeck::CheckOptions {
+                sources: Some(front.db),
+                ..Default::default()
+            };
+            let tables = if self.shared {
+                nova_typeck::check_items_shared(
+                    &resolved.file,
+                    &resolved.definitions,
+                    &options,
+                    &self.items,
+                )
+            } else {
+                nova_typeck::check_items(&resolved.file, &resolved.definitions, &options)
+            };
+            let mut diagnostics = front.diagnostics;
+            diagnostics.extend(
+                tables
+                    .diagnostics
+                    .iter()
+                    .filter(|d| !program::a_dependencys_warning(d, front.registry))
+                    .cloned(),
+            );
+            nova_typeck::dump::dump_program(
+                target,
+                test,
+                front.labels,
+                Some((resolved, &tables)),
+                &diagnostics,
+            )
+        })
+    }
+}
+
+/// std's part of the HIR dump for `target`, under test mode with `std/test`
+/// (`test`): the item tables of a program of no module of its own, which
+/// are std's in every program, and every diagnostic, the resolver's and the
+/// item passes'.
+pub fn dump_std_hir(target: Target, test: bool) -> String {
+    let mut db = FileDb::new();
+    let (std_files, extra, labels) = register_std_for(&mut db, target, test);
+    let resolved = nova_resolver::resolve_program_for(target, &[], &std_files, extra);
+    let tables = nova_typeck::check_items(
+        &resolved.file,
+        &resolved.definitions,
+        &nova_typeck::CheckOptions {
+            sources: Some(&db),
+            ..Default::default()
+        },
+    );
+    let mut diagnostics = resolved.diagnostics.clone();
+    diagnostics.extend(tables.diagnostics.iter().cloned());
+    nova_typeck::dump::dump_std(target, test, &labels, &resolved, &tables, &diagnostics)
 }
 
 /// The label of each manifest a program's graph read (ADR 0054 §1):
@@ -1540,6 +1717,172 @@ mod resolution_dumps {
                 );
             }
         });
+    }
+
+    /// The HIR dump's roots of each mode (5.3a): the corpus's and the
+    /// cases' of the resolution dump and of the type checker, as the
+    /// harness takes them.
+    fn hir_sets() -> Vec<(Target, bool, Vec<std::path::PathBuf>)> {
+        let root = repository();
+        let cases = root.join("crates/nova-cli/tests/selfhost/cases");
+        let mut corpus = Vec::new();
+        nova_files(&root, &cases, &mut corpus);
+        let has_test = |p: &std::path::PathBuf| {
+            std::fs::read_to_string(p)
+                .unwrap_or_default()
+                .lines()
+                .any(|l| l.trim_start().starts_with("@test"))
+        };
+        let under = |p: &std::path::PathBuf, dir: &str| p.starts_with(root.join(dir));
+        let cases_of = |dirs: &[&str]| -> Vec<std::path::PathBuf> {
+            dirs.iter()
+                .flat_map(|d| case_roots(&cases.join(d)))
+                .collect()
+        };
+        vec![
+            (
+                Target::Native,
+                false,
+                corpus
+                    .iter()
+                    .cloned()
+                    .chain(cases_of(&["resolve", "check"]))
+                    .collect(),
+            ),
+            (
+                Target::Wasm,
+                false,
+                corpus
+                    .iter()
+                    .filter(|p| under(p, "tests/dom") || under(p, "tests/wasm"))
+                    .cloned()
+                    .chain(cases_of(&["resolve-wasm", "check-wasm"]))
+                    .collect(),
+            ),
+            (
+                Target::Native,
+                true,
+                corpus
+                    .iter()
+                    .filter(|p| has_test(p))
+                    .cloned()
+                    .chain(cases_of(&["resolve-test", "check-test"]))
+                    .collect(),
+            ),
+        ]
+    }
+
+    /// std's item tables built once and shared by every program of a
+    /// process (5.3a, spec 5.3 §3.4) dump what checking std again for each
+    /// program dumps, byte for byte, under `check`, for the WASM target and
+    /// under test mode: on the corpus and the cases of each mode, in their
+    /// order and again in reverse, so that nothing a program leaves in the
+    /// shared state reaches the next.
+    #[test]
+    fn std_checked_once_dumps_what_std_checked_for_each_program_dumps() {
+        let sets = hir_sets();
+        std::thread::scope(|scope| {
+            let runs: Vec<_> = sets
+                .iter()
+                .map(|(target, test, roots)| {
+                    scope.spawn(move || {
+                        let dump_all = |dumps: &HirDumps, roots: &[std::path::PathBuf]| {
+                            roots
+                                .iter()
+                                .map(|r| dumps.dump(r).map_err(|e| e.kind()))
+                                .collect::<Vec<_>>()
+                        };
+                        let unshared = dump_all(&HirDumps::unshared(*target, *test), roots);
+                        let shared = HirDumps::new(*target, *test);
+                        assert!(shared.shared, "std is shared");
+                        let forward = dump_all(&shared, roots);
+                        let reversed: Vec<std::path::PathBuf> =
+                            roots.iter().rev().cloned().collect();
+                        let mut backward = dump_all(&shared, &reversed);
+                        backward.reverse();
+                        for (i, r) in roots.iter().enumerate() {
+                            assert_eq!(
+                                forward[i],
+                                unshared[i],
+                                "{target:?} {test}: {}",
+                                r.display()
+                            );
+                            assert_eq!(
+                                backward[i],
+                                unshared[i],
+                                "{target:?} {test}, reversed: {}",
+                                r.display()
+                            );
+                        }
+                        let checked = unshared
+                            .iter()
+                            .filter(|d| d.as_ref().is_ok_and(|d| d.contains(" checked=true")))
+                            .count();
+                        (roots.len(), checked)
+                    })
+                })
+                .collect();
+            for (run, floor) in runs.into_iter().zip([400, 60, 120]) {
+                let (roots, checked) = run.join().expect("a mode's thread");
+                assert!(
+                    roots >= floor && checked * 2 > roots,
+                    "{roots} roots, {checked} checked"
+                );
+            }
+        });
+    }
+
+    /// std's part of the HIR dump is the same in every program: std's
+    /// entries of a two-module program's check print as std's part of a
+    /// program of no module (5.3a, spec 5.3 §3.3), in each mode.
+    #[test]
+    fn std_part_of_a_programs_check_is_std_part() {
+        for (target, test) in [
+            (Target::Native, false),
+            (Target::Wasm, false),
+            (Target::Native, true),
+        ] {
+            let mut db = FileDb::new();
+            let (std_files, extra, mut labels) = register_std_for(&mut db, target, test);
+            let main_src = "import shapes\nrecord P { x: Int }\n\
+                impl Eq for P {\n    fn eq(self, other: P) -> Bool { true }\n}\n\
+                fn main() {}\n";
+            let lib_src = "pub type Shape = | Dot\npub trait Area {\n    fn area(self) -> Int\n}\n\
+                impl Area for Shape {\n    fn area(self) -> Int { 0 }\n}\n";
+            let main_id = db.add("main.nova", main_src);
+            let lib_id = db.add("shapes.nova", lib_src);
+            labels.push((main_id, "main".to_string()));
+            labels.push((lib_id, "shapes".to_string()));
+            let parse = |src: &str, id: FileId| {
+                let (tokens, _) = nova_lexer::lex(src, id);
+                nova_parser::parse_recovering(&tokens, id).file
+            };
+            let main = parse(main_src, main_id);
+            let lib = parse(lib_src, lib_id);
+            let mut sources = vec![
+                ModuleSource::new("main", &main),
+                ModuleSource::new("shapes", &lib),
+            ];
+            sources[0]
+                .imports
+                .insert("shapes".to_string(), nova_resolver::ImportTarget::Module(1));
+            let resolved = nova_resolver::resolve_program_for(target, &sources, &std_files, extra);
+            assert!(
+                resolved.diagnostics.is_empty(),
+                "{:?}",
+                resolved.diagnostics
+            );
+            let options = nova_typeck::CheckOptions {
+                sources: Some(&db),
+                ..Default::default()
+            };
+            let tables = nova_typeck::check_items(&resolved.file, &resolved.definitions, &options);
+            assert!(tables.diagnostics.is_empty(), "{:?}", tables.diagnostics);
+            let part = nova_typeck::dump::std_part_of(target, test, &labels, &resolved, &tables);
+            let std = dump_std_hir(target, test);
+            assert!(std.starts_with(&part), "{target:?} {test}");
+            assert_eq!(&std[part.len()..], "(Diagnostics)\n");
+        }
     }
 }
 

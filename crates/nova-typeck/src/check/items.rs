@@ -549,3 +549,130 @@ fn sorted<K: Ord + Copy, V: Clone>(map: &FxHashMap<K, V>) -> Vec<(K, V)> {
     entries.sort_by_key(|(k, _)| *k);
     entries
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nova_diagnostics::FileId;
+    use nova_resolver::{ModuleSource, ParsedStd, ProgramResolution, SharedStd};
+
+    fn parse(src: &str) -> ast::File {
+        let (tokens, _) = nova_lexer::lex(src, FileId::DUMMY);
+        let parsed = nova_parser::parse_recovering(&tokens, FileId::DUMMY);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        parsed.file
+    }
+
+    /// std for the native target, `extra` (a module's name and text) after
+    /// its modules.
+    fn std_with(extra: Option<(&'static str, &'static str)>) -> ParsedStd {
+        let ids: Vec<FileId> = CompileTarget::Native
+            .std_modules()
+            .iter()
+            .map(|_| FileId::DUMMY)
+            .collect();
+        nova_resolver::parse_std(
+            CompileTarget::Native,
+            &ids,
+            extra.map(|e| (e, FileId::DUMMY)),
+        )
+    }
+
+    /// The text of a program's part, from its resolution and tables.
+    fn shown(r: &ProgramResolution, t: &ItemTables) -> String {
+        let labels = [(FileId::DUMMY, "main".to_string())];
+        let mut diagnostics = r.diagnostics.clone();
+        diagnostics.extend(t.diagnostics.iter().cloned());
+        crate::dump::dump_program(
+            CompileTarget::Native,
+            false,
+            &labels,
+            Some((r, t)),
+            &diagnostics,
+        )
+    }
+
+    const PROGRAMS: &[&str] = &[
+        "fn main() {}\n",
+        "record P<T> { x: T }\ntype S = | A(Int) | B\ntrait Show {\n    type Item\n    \
+         fn show(self) -> String\n}\nimpl<T> Show for P<T> {\n    type Item = T\n    \
+         fn show(self) -> String { \"p\" }\n}\nfn f<T: Show>(x: T) -> T::Item { panic(\"\") }\n\
+         fn main() {}\n",
+        "fn f<T: Nope, T>(x: Missing) -> Int { 1 }\nimpl Eq for Int {\n    \
+         fn eq(self, other: Int) -> Bool { true }\n}\nimpl [Int] {\n    fn len(self) -> Int { 0 }\n}\n\
+         trait A: B {}\nimpl A for Bool {}\nextern \"C\" {\n    fn nova_x(a: String) -> [Int]\n}\n\
+         fn main() {}\n",
+        "impl<T> Ord for [T] {}\ntrait It {\n    type Item\n    type Item\n    fn g(self)\n    \
+         fn g(self)\n}\nimpl It for Int {\n    type Item = Self::Item\n    fn h(self) {}\n}\n\
+         fn main() {}\n",
+    ];
+
+    /// `check_items` is the item stage of `check_with`: its diagnostics are
+    /// the prefix of `check_with`'s, and its tables the module's.
+    #[test]
+    fn check_items_is_the_prefix_of_check_with() {
+        for src in PROGRAMS {
+            let ast = parse(src);
+            let r = nova_resolver::resolve(&ast);
+            let options = CheckOptions::default();
+            let items = check_items(&r.file, &r.definitions, &options);
+            let all = check_with(&r.file, &r.definitions, &options);
+            let n = items.diagnostics.len();
+            assert!(all.diagnostics.len() >= n, "{src}");
+            assert_eq!(
+                format!("{:?}", &all.diagnostics[..n]),
+                format!("{:?}", items.diagnostics),
+                "{src}"
+            );
+            let m = &all.module;
+            assert_eq!(format!("{:?}", m.sums), format!("{:?}", items.sums));
+            assert_eq!(format!("{:?}", m.records), format!("{:?}", items.records));
+            assert_eq!(format!("{:?}", m.traits), format!("{:?}", items.traits));
+            assert_eq!(format!("{:?}", m.impls), format!("{:?}", items.impls));
+            assert_eq!(format!("{:?}", m.externs), format!("{:?}", items.externs));
+        }
+    }
+
+    /// The shared path gives a program what the full check gives it, with a
+    /// std of one more module whose trait and impl a program's items pair
+    /// with (E0074, E0105's kin and conformance), and std alone with an
+    /// item diagnostic is not shareable, so the driver checks in full.
+    #[test]
+    fn shared_items_check_what_the_full_check_does() {
+        let extra = (
+            "$std.zz",
+            "pub trait Zed {\n    fn z(self) -> Int\n}\nimpl Zed for Int {\n    \
+             fn z(self) -> Int { 1 }\n}\nimpl Bool {\n    pub fn z(self) -> Int { 2 }\n}\n",
+        );
+        let program = "impl Zed for Int {\n    fn z(self) -> Int { 3 }\n}\n\
+                       impl Zed for Bool {\n    fn z(self) -> Int { 4 }\n}\n\
+                       record R { z: Option<Int> }\nfn main() {}\n";
+        let std = std_with(Some(extra));
+        let shared_std = SharedStd::new(CompileTarget::Native, std_with(Some(extra)));
+        assert!(shared_std.shareable());
+        let alone = shared_std.alone();
+        let options = CheckOptions::default();
+        let items = SharedItems::new(&alone.file, &alone.definitions, &options);
+        assert!(items.shareable());
+        let ast = parse(program);
+        let sources = [ModuleSource::new("main", &ast)];
+        let full = nova_resolver::resolve_program_with_std(CompileTarget::Native, &sources, &std);
+        let full_tables = check_items(&full.file, &full.definitions, &options);
+        let shared =
+            nova_resolver::resolve_program_with_shared_std_for_check(&sources, &shared_std);
+        let shared_tables = check_items_shared(&shared.file, &shared.definitions, &options, &items);
+        let text = shown(&full, &full_tables);
+        assert!(text.contains("E0074"), "{text}");
+        assert!(text.contains("E0105"), "{text}");
+        assert_eq!(text, shown(&shared, &shared_tables));
+
+        let broken = ("$std.zz", "pub record Bad { x: Missing }\n");
+        let alone = nova_resolver::resolve_program_with_std(
+            CompileTarget::Native,
+            &[],
+            &std_with(Some(broken)),
+        );
+        let items = SharedItems::new(&alone.file, &alone.definitions, &options);
+        assert!(!items.shareable());
+    }
+}

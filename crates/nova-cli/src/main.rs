@@ -99,16 +99,17 @@ enum Ran {
 }
 
 /// What a command line asks for: a command [`Cli`] parses, or the hidden
-/// `nova check --dump-resolution`, which has a parser of its own, so that
-/// `check`'s is as it was ([`cmd::run::DumpResolutionCmd`]).
+/// `nova check --dump-resolution` or `nova check --dump-hir`, which have a
+/// parser of their own, so that `check`'s is as it was
+/// ([`cmd::run::DumpCmd`]).
 enum Job {
     Cli(Command),
-    DumpResolution(cmd::run::DumpResolutionCmd),
+    Dump(cmd::run::DumpCmd),
 }
 
 fn main() -> Result<()> {
-    let job = match cmd::run::DumpResolutionCmd::from_args(std::env::args_os()) {
-        Some(cmd) => Job::DumpResolution(cmd),
+    let job = match cmd::run::DumpCmd::from_args(std::env::args_os()) {
+        Some(cmd) => Job::Dump(cmd),
         None => Job::Cli(Cli::parse().command),
     };
     let filter = tracing_subscriber::EnvFilter::from_default_env()
@@ -141,7 +142,7 @@ fn main() -> Result<()> {
         .stack_size(nova_driver::PIPELINE_STACK)
         .spawn(move || match job {
             Job::Cli(command) => dispatch(command),
-            Job::DumpResolution(cmd) => Ran::Done(cmd::run::dump_resolution(cmd)),
+            Job::Dump(cmd) => Ran::Done(cmd::run::dump(cmd)),
         });
     let ran = match thread {
         Ok(thread) => thread.join(),

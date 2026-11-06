@@ -238,6 +238,37 @@ pub fn std_part_of(
     d.out
 }
 
+/// Where std begins in `defs`, as `(StdStart …)` prints it: the first std
+/// module, the first std definition and the first item of a std module.
+/// The HIR dump repeats it (5.3a, ADR 0055).
+pub fn std_start(defs: &Definitions) -> (usize, u32, usize) {
+    let std_module = defs.std_start;
+    let std_item = defs
+        .item_module
+        .iter()
+        .position(|&m| m as usize >= std_module)
+        .unwrap_or(defs.item_module.len());
+    (std_module, first_std_def(defs, std_item), std_item)
+}
+
+/// `diagnostics` as `(Diagnostics …)` prints them, after `out`, each place
+/// under its file's label in `labels`: the HIR dump prints them so too
+/// (5.3a, ADR 0055).
+pub fn write_diagnostics(out: &mut String, labels: &Labels, diagnostics: &[Diagnostic]) {
+    let mut d = Dump::new(labels, u32::MAX);
+    d.out = std::mem::take(out);
+    d.diagnostics(diagnostics);
+    *out = d.out;
+}
+
+/// ` ` and a place, as the dump prints one, after `out`.
+pub fn write_place(out: &mut String, labels: &Labels, span: Span) {
+    let mut d = Dump::new(labels, u32::MAX);
+    d.out = std::mem::take(out);
+    d.place(span);
+    *out = d.out;
+}
+
 /// The first std definition's index: the first definition of an item of a
 /// std module. The user's definitions all come before std's, since pass 1
 /// collects the modules in order, and every kind of definition but an

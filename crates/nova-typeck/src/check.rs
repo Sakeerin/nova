@@ -14820,7 +14820,7 @@ mod tests {
             impl_spans: Vec::new(),
             impl_in_std: Vec::new(),
             impl_method_spans: Vec::new(),
-            own_defs: defs.defs().len() as u32,
+            own_defs: u32::MAX,
             shared: None,
         };
         let mut fcx = FnCtx {
@@ -14905,7 +14905,7 @@ mod tests {
             impl_spans: Vec::new(),
             impl_in_std: Vec::new(),
             impl_method_spans: Vec::new(),
-            own_defs: defs.defs().len() as u32,
+            own_defs: u32::MAX,
             shared: None,
         };
         let mut fcx = FnCtx {

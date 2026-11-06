@@ -14,6 +14,7 @@
 //! rather than panicking.
 
 mod check;
+pub mod dump;
 mod infer;
 mod usefulness;
 
