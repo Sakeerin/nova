@@ -797,6 +797,17 @@ resolver's error cases and a name-level fuzzer's programs. From here a
 change to how names resolve changes both compilers in one pull request.
 5.2b adds packages, the WASM target and test mode.
 
+**Amended 2026-11-04 (branch `claude/loving-archimedes-frtf5q-52b`, ADR
+0054):** `selfhost/` also loads a package's module, a file directly in its
+`src/` or `tests/`, with its path dependencies' libraries, reading
+`nova.toml` through a minimal reader of its own (the package graph's
+M-codes stay S0's), and resolves for the WASM target (`--target wasm`) and
+under test mode (`--test`, as `nova test` resolves); the differential
+compares both compilers on the corpus's packages, WASM programs and files
+with tests, the cases of each mode and the name fuzzer's package, WASM and
+test-mode programs. The live heap of N resolving its largest inputs is
+recorded in ADR 0054 §10.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)

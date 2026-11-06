@@ -81,6 +81,11 @@ part plus the program's `item` is its merged item index.
 module's label (a loose file's stem), or a std module's name in the file
 database, `<std/core>`. A file with no label prints `?`.
 
+*(2026-11-04: 5.2b extends this grammar, ADR 0054 §1: a package's root is
+dumped, not `UNSUPPORTED package`; ` mode=test` and `(Test` come with
+`--test`; `target=wasm` and `(Missing` are compared. The example of
+`UNSUPPORTED` below is 5.2a's.)*
+
 **The grammar.** Every line ends with `\n`, the last included. `I(d)` is
 `d` times two spaces. As in ADR 0052, a line's `)` comes right after its
 last child's.

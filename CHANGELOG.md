@@ -197,7 +197,10 @@ resolver for loose programs and the resolution dump (spec
   part, the same in every native program, is printed once by `--std`, and
   a program's part names std's definitions by std-relative ids. A root
   that cannot be read is `IOERR` and its kind, and the exit code 2; a root
-  in a package's `src/` or `tests/` is `UNSUPPORTED package` until 5.2b.
+  in a package's `src/` or `tests/` is a module of its package, with the
+  package graph's diagnostics first, and `--target wasm` and `--test` (as
+  `nova test` resolves) dump the WASM target's and test mode's resolution
+  (5.2b, ADR 0054).
   std is parsed once for all the roots. It is absent from `--help` and
   carries no stability promise. It is taken only when `--dump-resolution`
   comes first after `check`, and parsed apart, so every other `nova check`
@@ -217,7 +220,13 @@ resolver for loose programs and the resolution dump (spec
   `check` gives natively occurs. A change to how names resolve now
   changes both compilers in one pull request. With the debug runtime N
   resolves and dumps the corpus's loose programs 1.5 to 2.0× as slowly as
-  S0's debug build (ADR 0053).
+  S0's debug build (ADR 0053). From 5.2b N also loads a package's module
+  with its path dependencies, reading `nova.toml` with a minimal reader
+  of its own, and resolves for `--target wasm` and under `--test`, compared
+  with S0 on the corpus's packages, WASM programs and tests, the cases of
+  each mode and the fuzzer's (ADR 0054). Nothing a user sees changes with
+  5.2b: `nova check`, `nova test` and `nova build` give what they gave,
+  byte for byte, on every file and package of the repository.
 
 ### Changed
 
