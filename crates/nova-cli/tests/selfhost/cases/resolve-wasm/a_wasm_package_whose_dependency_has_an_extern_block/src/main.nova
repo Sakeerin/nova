@@ -1,0 +1,4 @@
+import native
+import dom
+
+fn main() {}

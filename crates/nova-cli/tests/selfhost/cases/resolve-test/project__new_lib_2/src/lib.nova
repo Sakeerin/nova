@@ -1,0 +1,4 @@
+pub fn greeting() -> String { "Hello, Nova!" }
+
+@test
+fn greeting_says_hello() { assert_eq(greeting(), "Hello, Nova!") }

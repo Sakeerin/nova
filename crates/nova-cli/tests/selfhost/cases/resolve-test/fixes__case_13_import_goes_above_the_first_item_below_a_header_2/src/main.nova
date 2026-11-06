@@ -1,0 +1,8 @@
+// A header.
+
+import geometry::{one}
+
+// What main does.
+fn main() {
+    println("${twice()} ${one()}")
+}

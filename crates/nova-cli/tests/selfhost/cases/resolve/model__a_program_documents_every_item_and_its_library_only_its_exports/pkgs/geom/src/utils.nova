@@ -1,0 +1,2 @@
+/// Three.
+pub fn width() -> Int { 3 }

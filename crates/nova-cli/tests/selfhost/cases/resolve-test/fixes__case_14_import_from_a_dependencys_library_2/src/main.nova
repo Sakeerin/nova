@@ -1,0 +1,6 @@
+import geom
+import shapes
+
+fn main() {
+    println("${area()} ${twice()}")
+}

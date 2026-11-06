@@ -1,0 +1,20 @@
+import utils
+
+/// A point.
+pub record Point {
+    /// Across.
+    pub x: Int,
+    y: Int,
+}
+
+/// The area of a square of side `width()`.
+pub fn area() -> Int { width() * width() }
+
+fn secret() -> Int { 1 }
+
+record Hidden {
+    n: Int,
+}
+
+/// Makes a thing of a private type.
+pub fn make() -> Hidden { Hidden { n: 1 } }

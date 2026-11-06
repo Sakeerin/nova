@@ -1,0 +1,8 @@
+//! Units of nothing.
+//!
+//! ```
+//! assert_eq(twice(0), 0)
+//! ```
+
+/// Zero.
+pub fn zero() -> Int { 0 }

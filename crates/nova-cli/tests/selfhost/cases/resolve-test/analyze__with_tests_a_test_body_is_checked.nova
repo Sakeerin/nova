@@ -1,0 +1,5 @@
+@test
+fn t() {
+    let x: Int = "s"
+}
+fn main() {}

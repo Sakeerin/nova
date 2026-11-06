@@ -1,0 +1,11 @@
+import units
+import base
+
+pub type Shape = | Dot | Ok(Int)
+
+pub fn area(s: Shape) -> Int {
+    unit() + zero()
+}
+
+@tset
+fn hidden() {}

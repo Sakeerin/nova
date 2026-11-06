@@ -1,0 +1,4 @@
+import ui
+import ui::ssr::{Page, page}
+fn f(p: Page) -> Int { 0 }
+fn main() { println("x") }

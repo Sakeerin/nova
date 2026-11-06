@@ -1,0 +1,7 @@
+import ui
+import ui::html::{text}
+
+fn main() {
+    hydrate("#nope", | | text("x"))
+    println("not reached")
+}

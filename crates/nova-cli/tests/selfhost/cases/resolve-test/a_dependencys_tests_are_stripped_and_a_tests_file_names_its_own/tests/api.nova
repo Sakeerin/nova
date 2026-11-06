@@ -1,0 +1,11 @@
+import app
+
+@test
+fn first() {
+    assert_eq(twice(1), 2)
+}
+
+@test(should_panic)
+fn second() {
+    panic("no")
+}

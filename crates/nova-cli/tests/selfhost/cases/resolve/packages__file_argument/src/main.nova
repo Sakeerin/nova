@@ -1,0 +1,7 @@
+import geom
+import utils
+
+fn main() {
+    println("area ${area()}")
+    println(label())
+}

@@ -1,0 +1,4 @@
+@test
+fn ne_pass() { assert_ne(1, 2) }
+@test
+fn ne_fail() { assert_ne(1, 1) }

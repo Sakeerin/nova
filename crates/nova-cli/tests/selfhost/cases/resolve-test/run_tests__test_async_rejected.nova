@@ -1,0 +1,3 @@
+async fn helper() -> Int { 41 }
+@test
+async fn t() { assert_eq(helper().await, 999) }

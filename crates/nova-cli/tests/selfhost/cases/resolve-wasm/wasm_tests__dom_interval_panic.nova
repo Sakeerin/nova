@@ -1,0 +1,5 @@
+import dom
+fn main() {
+    let _ = set_interval(1, | | panic("tick"))
+    println("main done")
+}

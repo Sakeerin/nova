@@ -1,0 +1,4 @@
+extern "js" {
+    fn now() -> Int
+}
+fn main() { println("${now()}") }

@@ -1,0 +1,7 @@
+pub fn origin() -> Int {
+    1
+}
+
+pub fn manhattan( -> Int {
+    2
+}

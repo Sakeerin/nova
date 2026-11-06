@@ -1,0 +1,13 @@
+/// Twice `x`:
+///
+/// ```text
+/// twice(3) is 6
+/// ```
+///
+/// ```ignore
+/// assert_eq(twice(3), 7)
+/// ```
+pub fn twice(x: Int) -> Int { x * 2 }
+
+@test
+fn twice_doubles() { assert_eq(twice(1), 3) }

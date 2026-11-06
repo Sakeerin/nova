@@ -1,0 +1,26 @@
+fn count(name: String) -> Int {
+    let path = "${temp_dir()}/${name}"
+    let before = match block_on(read_to_string(path)) {
+        Ok(s) => s.parse_int().unwrap_or(0)
+        Err(_) => 0
+    }
+    block_on(write_string(path, "${before + 1}")).unwrap()
+    before + 1
+}
+
+@test
+fn run_starts_its_binary_once() {
+    if count("run-count") < 3 {
+        let out = run(current_exe().unwrap(), ["child"]).unwrap()
+        assert_eq(out.status, 0)
+        let listed = out.stdout.to_string().unwrap_or("")
+        assert(listed.contains("status_starts_its_binary_once"), listed)
+    }
+}
+
+@test
+fn status_starts_its_binary_once() {
+    if count("status-count") < 3 {
+        assert_eq(status(current_exe().unwrap(), ["child"]).unwrap(), 0)
+    }
+}

@@ -1,0 +1,6 @@
+import geom
+
+@test
+fn parses() {
+    assert_eq(area(), 9)
+}

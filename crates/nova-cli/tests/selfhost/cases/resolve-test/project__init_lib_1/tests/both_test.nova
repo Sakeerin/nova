@@ -1,0 +1,4 @@
+import both
+
+@test
+fn greeting_is_public() { assert_eq(greeting(), "Hello, Nova!") }

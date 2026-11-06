@@ -160,3 +160,35 @@ pub fn report(m: &Mismatch, dump: &Dump, dir: &Path, nova: &Path, selfhost: &Pat
         selfhost = selfhost.display(),
     )
 }
+
+/// A resolution dump as both sides are compared on `windows` (ADR 0054
+/// §7, and decision 4 of its §8): each `\` of E0004's and E0093's messages, the
+/// two that print a path, read as `/`. S0 writes such a path as
+/// `Path::join` does, with `\` on Windows, which the dump escapes as
+/// `\x5c`, where N writes `/`. Every other line, and every line elsewhere,
+/// is kept as it is.
+pub fn settle_paths(dump: &[u8], windows: bool) -> Vec<u8> {
+    if !windows {
+        return dump.to_vec();
+    }
+    let mut out = Vec::with_capacity(dump.len());
+    for line in dump.split_inclusive(|&b| b == b'\n') {
+        let path_message =
+            line.starts_with(b"  (Error \"E0004\" ") || line.starts_with(b"  (Error \"E0093\" ");
+        if !path_message {
+            out.extend_from_slice(line);
+            continue;
+        }
+        let mut rest = line;
+        while !rest.is_empty() {
+            if rest.starts_with(b"\\x5c") {
+                out.push(b'/');
+                rest = &rest[4..];
+            } else {
+                out.push(rest[0]);
+                rest = &rest[1..];
+            }
+        }
+    }
+    out
+}

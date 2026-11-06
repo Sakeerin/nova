@@ -1,0 +1,10 @@
+import utils
+
+pub fn area() -> Int {
+    width() * width()
+}
+
+@test
+fn area_is_nine() {
+    assert_eq(area(), 9)
+}

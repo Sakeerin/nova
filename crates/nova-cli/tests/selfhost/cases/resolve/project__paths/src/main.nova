@@ -1,0 +1,7 @@
+fn main() {
+    let argv = args()
+    match argv.get(0) {
+        Some(s) => println(s)
+        None => println("no arguments")
+    }
+}

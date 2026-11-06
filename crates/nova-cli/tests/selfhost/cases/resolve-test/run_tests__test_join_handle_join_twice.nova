@@ -1,0 +1,12 @@
+async fn spin() -> Int { 1 }
+async fn run_join_twice() -> Int {
+  let h = spawn(spin())
+  let a = h.join().await
+  let b = h.join().await
+  a + b
+}
+
+@test
+fn joining_a_handle_twice_returns_the_same_value_twice() {
+  assert_eq(block_on(run_join_twice()), 2)
+}

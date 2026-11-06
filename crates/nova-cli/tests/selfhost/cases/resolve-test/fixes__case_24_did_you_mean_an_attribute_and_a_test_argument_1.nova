@@ -1,0 +1,4 @@
+@tset
+fn t() {}
+
+fn main() {}

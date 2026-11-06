@@ -1,0 +1,13 @@
+async fn spin() -> Int { 1 }
+async fn run_two_spawns() -> Int {
+  let a = spawn(spin())
+  let b = spawn(spin())
+  let ra = a.join().await
+  let rb = b.join().await
+  ra + rb
+}
+
+@test
+fn spawning_two_distinct_futures_still_works() {
+  assert_eq(block_on(run_two_spawns()), 2)
+}
