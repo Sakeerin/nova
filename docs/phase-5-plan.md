@@ -496,6 +496,14 @@ and 810 with 30 in `nova-hir`.
 - **5.4's input** is the HIR the dump shows, before the driver's
   `keep_the_entry_main`.
 
+**Prototyped 2026-11-06 (5.3a, branch `proto/5-3a-whole`, ADR 0055):** N's
+item stage (`selfhost/src/hir.nova`, `typeck*.nova`, `fixes.nova`,
+`hir_dump.nova`, `selfhost hir`) gives S0's HIR dump byte for byte on
+std's three parts, every corpus root in the three modes, the cases (both
+line endings) and the type fuzzer's 120 inputs. `selfhost.rs` went from
+22.5-23.2 s to 33.8-34.0 s locally; CI is to be measured on the user's
+word before the plan (ADR 0055 §11).
+
 - **Needs first:** 5.2; tuples and nested patterns throughout.
 - **Gate:**
   - N type-checks all of std and the corpus;

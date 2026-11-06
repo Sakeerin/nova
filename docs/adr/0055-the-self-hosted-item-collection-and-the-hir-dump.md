@@ -2,17 +2,19 @@
 
 ## Status
 
-Proposed (2026-11-06), being written: the 5.3a prototype's part A (S0's
-side) wrote §1 to §6; part B (N's side, the comparison, the figures)
-finishes it. Branch `proto/5-3a-whole`
+Proposed (2026-11-06). Written by the 5.3a prototype on branch
+`proto/5-3a-whole`
 (`docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
-§3). §1 is S0's item stage as a function; §2 the HIR dump's grammar, with
-one example of every form; §3 the hidden flag; §4 std's item tables
-shared, its fallback and its guard; §5 the cases; §6 the type fuzzer's
-item mutations; §7 the decisions part A took. Part B adds N's code and
-idioms, the differential on both sides, CI's figures, N's stack and
-memory, and the rule that a change to item collection changes both
-compilers. 5.3b (the bodies, the full dump) writes ADR 0056.
+§3): part A (S0's side) wrote §1 to §7, part B (N's side, the
+comparison, the figures) §8 to §14. §1 is S0's item stage as a function;
+§2 the HIR dump's grammar, with one example of every form; §3 the hidden
+flag; §4 std's item tables shared, its fallback and its guard; §5 the
+cases; §6 the type fuzzer's item mutations; §7 the decisions part A took;
+§8 N's code and idioms; §9 the differential; §10 the decisions part B
+took; §11 the time, and CI's projection; §12 N's stack; §13 N's memory;
+§14 the rule that a change to item collection changes both compilers.
+CI's real figures wait for the user's word (spec §3.7). 5.3b (the
+bodies, the full dump) writes ADR 0056.
 
 ## Decision
 
@@ -317,3 +319,224 @@ E0072 21, E0073 18, E0074 23, E0076 5, E0077 20, E0078 19, E0105 4, E0403
 6. **The sharing splices per pass** (§4) rather than seeding std's tables
    first, which would change the tables' order and what a pass sees.
 7. **Item-level tests** are chosen by S0's dumps, a rule 5.3b can re-run.
+8. **A record prints no bounds:** a record's bounds are a resolution
+   scope for its fields' projections, not a constraint, and `RecordType`
+   keeps none; its fields' types show what they resolved to.
+9. **`abi=Js` occurs only in std's WASM part:** a program's `extern "js"`
+   is E0900, so no program part prints it.
+10. **E0099's note is a body diagnostic,** 5.3b's: test mode changes no
+    item diagnostic, and `cases/check-test/` holds tests beside items.
+
+### 8. N's code
+
+| File | Lines | Code | What it ports |
+|---|---:|---:|---|
+| `selfhost/src/hir.nova` | 585 | 455 | `nova-hir`'s `Ty` (18 variants), `TyHead`, the tables, `subst`, the queries, `match_pattern`, `match_args`, `normalize_ty` with its two limits, `self_types_overlap`; `ty_eq`, `head_eq` |
+| `selfhost/src/typeck.nova` | 1,071 | 860 | the state (`Checker`), `check_items`, `share_items`, `check_items_shared` and the splices, pass 2, arities, supertraits, records, sums, `display_ty`, `display_ty_named`, the message helpers |
+| `selfhost/src/typeck_traits.nova` | 1,094 | 1,032 | `collect_traits`, `collect_impls` and its six checks |
+| `selfhost/src/typeck_ty.nova` | 511 | 455 | `convert_ty`, projections, `find_assoc_type`, `normalize`, bounds, `where`, signatures, `component_ret`, externs and FFI |
+| `selfhost/src/fixes.nova` | 346 | 275 | `push_fix`, `name_fixes` for a type and a trait, the import fix and its edit, did-you-mean; lines.rs's placing |
+| `selfhost/src/hir_dump.nova` | 354 | 299 | `dump.rs` |
+| `selfhost/src/typeck_tests.nova` | 359 | 309 | N's 12 tests of the item passes' edges |
+
+Beside them `main.nova` gains `selfhost hir` (the resolution dump's
+command, generalised: `dump_command`, `dump_hir`, `labels_and_texts`),
+`resolver.nova` keeps std's resolution whole in `SharedStd` (`alone`) and
+gains `resolve_program_shared_for_check`, and `resolution_dump.nova`
+shares `std_start_of` and `diagnostics_text`. Code lines as 5.1 and 5.2
+counted them, no blank and no comment line: 3,376 without the tests,
+about the 2,900 the spec projected plus the dump and the command.
+
+**The idioms,** beyond ADR 0053's (an id an `Int`, -1 for none; a record
+a reference):
+
+- **Equality:** `ty_eq`, `tys_eq`, `head_eq` and `res_eq` where Rust
+  compares with the derived `==`, which a user sum lacks (E0013).
+- **Maps by `DefId`** (`sigs`, `method_locs`, `selfless`, `mut_self`,
+  `supertraits`, `type_arity`) are lists as long as the definitions,
+  indexed by the id: looked up as the maps are, and read in id order
+  where the dump sorts a map's keys, so no map's order reaches output.
+  `impl_selves` stays a `Map` (looked up only); each trait's associated
+  types are listed once (`assoc_of`), which `find_assoc_type` reads in
+  place of a scan of every definition.
+- **Composite keys:** `(item, method)` is `item * 2^20 + method`.
+- **Files:** a span carries no file in N, so the checker keeps the
+  current module's label (`cur_file`) beside `cur_module`, a span kept in
+  a table is a `FileSpan`, and a check that reads a table's spans (the
+  signature, coherence, hidden-method and supertrait checks, `normalize`
+  from them, pass 2) names the file of each diagnostic (`error_in`).
+- **Copies:** a record is a reference, so where Rust clones a scope or a
+  bound list before adding to it (`collect_impls`' methods, a trait
+  method's scope) N copies it (`copy_scope`, `copy_bounds`), and a
+  binding poisoned to `{error}` is set in the impl's own list.
+- **Not ported:** the language server's index (`note_*`,
+  `enter_type_params`, `type_param_target`) and probe; the fixes for
+  needs other than a type and a trait (5.3b's).
+- **std shared:** `share_items` checks std alone once per process and
+  mode; each program is resolved by `resolve_program_shared_for_check`
+  (std's definitions rebased and appended, `rebased_def`; std's module
+  scopes appended as they are, read with std's offset, `scope_offset`,
+  §10.1) and checked by `check_items_shared`, whose splices add std's
+  part of each table where S0's do. When std's resolution or items give a
+  diagnostic, every program is resolved and checked in full, as S0 does.
+
+### 9. The differential
+
+`N_HIR` is set: every HIR set of `crates/nova-cli/tests/selfhost.rs` is
+compared byte for byte, exit codes included, through `compare_batch`,
+and every comparison goes through `run`:
+
+- std's part natively, for the WASM target and under test mode;
+- the corpus: 251 loose programs and 74 package files natively, 39 WASM
+  programs for the WASM target, 10 files with tests under test mode, held
+  to 5.2b's floors (240, 60, 35, 8);
+- the cases: 159 under `check`, 2 for the WASM target, 1 under test
+  mode, and all of them again with `\r\n`;
+- the type fuzzer's 120 inputs (seeds 401 to 403), part A's floors held
+  on N's dumps, which are S0's: E0001 30, E0010 16, E0012 50, E0015 11,
+  E0070 10, E0071 14, E0072 21, E0073 18, E0074 23, E0076 5, E0077 20,
+  E0078 19, E0105 4, E0403 17, E0900 46;
+- the refusals: no root under each mode, test mode for the WASM target
+  with a root or std's part, and the 15 argument shapes of
+  `both_sides_take_test_in_every_position_alike`, each through both
+  dumps; an unreadable root (`IOERR NotFound`, `IOERR InvalidData`);
+- the fallback: with a std copy whose `core` names a missing type (an
+  item E0001, no resolver diagnostic), N checks std for each program, and
+  each checked program's dump is S0's plus std's E0001.
+
+**What the comparison found:** nothing. N's first build gave S0's bytes
+on std's three parts, the cases, the corpus and the fuzzer's inputs; the
+port's only faults were compile errors (`import` and `module` are
+keywords, Nova has no `loop`). Each of the 16 item codes occurs in the
+inputs. N's own 44 tests pass (`the_selfhost_tests_pass`), 12 of them the
+item passes'.
+
+### 10. The decisions part B took
+
+The spec does not settle these; each with its cost if wrong.
+
+1. **std's module scopes are not rebased per program.** S0 appends std's
+   scopes rebased (`ModuleScope::rebased`); N appends them as they are and
+   adds std's offset where it reads one (`resolve_type_in`,
+   `resolve_trait_in`, `resolve_value_in`). Rebasing would copy std's 25
+   scopes of about a thousand names each for every program. If wrong: a
+   read of a std scope by another path would miss the offset; the
+   differential shows it at once (`component_ret` is the only reader of a
+   std scope today).
+2. **Lists by `DefId` in place of maps** (§8). If wrong: memory of a few
+   lists as long as the definitions (about 1,500 entries) per program.
+3. **`selfhost hir` shares `selfhost resolve`'s parser and refusals**, as
+   S0's two hidden flags share theirs, so the shapes compare alike.
+4. **No unshared mode in N's command line:** N's sharing was measured
+   (§11) from a temporary build that never shares, not from a flag.
+5. **The files** follow spec §3.5 (`typeck`, `typeck_traits`,
+   `typeck_ty`, `fixes`, `hir_dump`), none past 1,100 lines.
+6. **N's tests resolve their sources without std** (`check_sources`), so
+   their expected values are S0's for the same source wherever std adds
+   nothing; the import fix's test makes every module importable, which a
+   loose program's loader does not.
+
+### 11. The time, and CI's projection
+
+Measured locally on 2026-11-06, debug S0 and N with the debug runtime,
+one process a side over the loose corpus (251 roots), three runs:
+
+| Run | Wall | User |
+|---|---:|---:|
+| S0 `check --dump-hir` | 1.17-1.25 s | 1.14-1.18 s |
+| N `hir` (std shared) | 3.12-3.29 s | 3.06-3.14 s |
+| N `hir`, std resolved and checked per program | 7.47-7.72 s | 7.39-7.65 s |
+| S0 `check --dump-resolution` | 0.35-0.39 s | 0.32-0.34 s |
+| N `resolve` | 1.78-1.94 s | 1.72-1.83 s |
+
+N's HIR dump runs **2.6×** as long as S0's (the resolver's ratio is 5.3×
+here, as the research measured): the item stage itself costs N about
+1.3 s over the corpus (5 ms a root) and S0 about 0.85 s (3.4 ms a root).
+On the 74 package files N takes 9.8 s against S0's 1.6 s, as its
+resolution dump does (9.7 s against 1.4 s): 30 of them are N's own
+modules, each loading all of N, and parsing dominates.
+
+**Sharing, both sides:** N 3.1-3.3 s shared against 7.5-7.7 s unshared
+(2.4×); S0 1.25 s against 3.03 s (part A, in process, before the splice
+fix that brought shared to 1.21 s). Unshared, N spends about 17 ms more
+a root, resolving std and checking its items again; checking std's items
+once costs N about 0.02 s a process (one root's HIR dump 0.305 s against
+its resolution dump's 0.289 s). On both sides most of the saving is the
+resolution's (5.2b's): S0 measured item-level sharing alone, std's
+resolution shared either way, as roughly break-even (part A).
+
+**`selfhost.rs`, three runs each:** before part B (`819b9224`, 50 tests)
+22.87, 22.48, 23.17 s, user 72.8-73.5 s; after (51 tests) 33.77, 33.98,
+33.82 s, user 109.2-109.9 s: **+11 s wall (+48%), +36 s CPU**. Run alone,
+the HIR corpus test went from 4.8 s CPU to 27.9 s, the CRLF cases from
+0.8 to 6.6 s, the type fuzzer from 1.9 to 7.4 s, the header test from
+0.2 to 4.9 s (N's build in it); the rest is unchanged.
+
+**CI, projected (not measured):** today's CI-to-local factors, from run
+42171538582 (52.6 / 53.3 / 61.6 s against 20.5 s), are 2.57 on Linux,
+2.60 on macOS and 3.00 on Windows, which put `selfhost.rs` after 5.3a at
+about **87 s on Linux, 88 s on macOS and 102 s on Windows**, Windows past
+5.2b's 70 s line. 5.2b's lesson holds: its local projection undershot CI
+(Linux 24 to 25 s projected, 37.90 s measured), so these are a floor.
+The real figures come from the measurement branch on the user's word,
+and the user is asked with them (spec §3.7).
+
+### 12. N's stack
+
+N runs on its main thread, 1 MB on Windows; measured on Linux under
+`ulimit -s` with inputs built for it (`$P/proto53a/b-stack.py`, not
+committed), each compared with S0's dump:
+
+- **Every written nesting at 128 levels** (the parser's limit): arrays,
+  a generic record's arguments, `fn` types, tuples, an E0072 between two
+  128-level types and an E0073 naming a 127-level self type: identical to
+  S0's on 1 MB, and still on 256 KB.
+- **A type built by normalization,** deeper than any written one: 64
+  chained associated types, each binding `k` arrays around the next
+  (64 × `k` levels, within the 10,000 steps), which E0072 then shows. On
+  1 MB N survives `k` up to 126 (8,064 levels) and overflows (SIGSEGV,
+  exit 139) at `k` = 127 (8,128 levels, the deepest the limits admit)
+  when its output goes to a file or a pipe, as the harness's does; to
+  `/dev/null` it survives, a margin of a few frames. On 512 KB it fails
+  from 4,096 levels, on 256 KB from 2,048. S0 checks all of them on its
+  64 MB thread.
+- **A 2,000-trait supertrait chain** (`with_supertraits` is a loop): on
+  256 KB.
+
+So N overflows where S0 does not, but only on that construct, 64 linked
+associated types each nesting 127 arrays; nothing in the corpus, the
+cases or the fuzzer comes near. The user is asked (spec §3.7, risk 2).
+
+### 13. N's memory
+
+ADR 0054 §10's method (`$P/proto53a/b-heap.sh`, after 5.2b's): peak RSS
+and wall best of three, GC pauses from `nova_gc_collect_roots` to the end
+of the sweep under gdb, and `NOVA_GC_DEBUG`'s largest live heap:
+
+| Runtime | Input | Wall | Peak RSS | Pauses (median / p95 / max, total) | Max live |
+|---|---|---:|---:|---|---:|
+| debug | `resolve` N's root | 1.08 s | 45.6 MB | 12.9 / 69.3 / 83.1 ms, 376 ms | 13.3 MB |
+| debug | `hir` N's root | 1.07 s | 40.1 MB | 13.5 / 69.8 / 92.0 ms, 392 ms | 13.6 MB |
+| debug | `hir --std-part` | 0.29 s | 15.0 MB | 5.9 / 24.3 / 24.3 ms, 102 ms | 3.9 MB |
+| debug | `hir --target wasm --std-part` | 0.37 s | 18.0 MB | 7.9 / 24.1 / 32.3 ms, 130 ms | 5.6 MB |
+| debug | `hir` the loose corpus | 3.12 s | 26.2 MB | 28.3 / 32.9 / 41.8 ms, 1,140 ms | 6.8 MB |
+| release | `resolve` N's root | 0.25 s | 44.6 MB | 4.0 / 21.1 / 25.0 ms, 113 ms | 13.3 MB |
+| release | `hir` N's root | 0.26 s | 39.2 MB | 3.7 / 20.1 / 23.8 ms, 107 ms | 13.6 MB |
+| release | `hir --std-part` | 0.07 s | 14.1 MB | 1.7 / 6.8 / 6.8 ms, 27 ms | 3.9 MB |
+| release | `hir --target wasm --std-part` | 0.09 s | 17.1 MB | 2.0 / 6.5 / 9.1 ms, 35 ms | 5.6 MB |
+| release | `hir` the loose corpus | 0.76 s | 25.2 MB | 8.2 / 9.1 / 11.7 ms, 325 ms | 6.8 MB |
+
+std's item tables add little to the live heap (N's root: 13.6 MB against
+the resolution's 13.3 MB); over the corpus, std's shared state alive
+throughout, the live heap stays at 6.8 MB, but the debug runtime spends
+over a third of the run (1.14 of 3.12 s) in 46 collections. Recorded, no
+threshold (spec §3.7).
+
+### 14. The rule
+
+From 5.3a item collection exists twice, in `nova-typeck` (`check_items`,
+passes 2 to 5) and in `selfhost/` (§8): a change to either (a pass, a
+table, a diagnostic's words, order or fixes, `convert_ty`, normalization)
+changes both in one pull request, and the HIR dump's differential (§9)
+holds them equal (phase plan decision 6). The dump's grammar (§2) changes
+with them, on both sides.

@@ -1,5 +1,6 @@
 // N, the self-hosted Nova compiler, so far its lexer, its parser, its
-// loader of programs and packages and its resolver (spec
+// loader of programs and packages, its resolver and its type checker's
+// item stage (spec
 // docs/superpowers/specs/2026-10-30-phase-5-1-the-lexer-the-parser-and-the-ast-design.md
 // §3.2 and §4.3, ADR 0051 and ADR 0052; spec
 // docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md
@@ -23,6 +24,14 @@
 //   selfhost resolve --std DIR [--target native|wasm] [--test] --std-part
 //                             prints std's part, as `nova check
 //                             --dump-resolution --std` does
+//   selfhost hir --std DIR [--target native|wasm] [--test] FILE...
+//   selfhost hir --std DIR [--target native|wasm] [--test] --std-part
+//                             the same, with the HIR dump of the type
+//                             checker's item stage, as `nova check
+//                             --dump-hir` prints it, std's item tables
+//                             collected once (spec
+//                             docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+//                             §3.3, ADR 0055)
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its

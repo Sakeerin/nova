@@ -808,6 +808,19 @@ with tests, the cases of each mode and the name fuzzer's package, WASM and
 test-mode programs. The live heap of N resolving its largest inputs is
 recorded in ADR 0054 §10.
 
+**Amended 2026-11-06 (branch `proto/5-3a-whole`, the 5.3a prototype; ADR
+0055):** step 4's 5.3 is split by stage
+(`docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`).
+5.3a: `selfhost/` collects the items as `nova-typeck`'s item stage does
+(records, sums, traits, impls and their checks, signatures, externs, the
+16 item codes with their fixes) and `selfhost hir` prints the HIR dump
+S0's hidden `nova check --dump-hir` prints, items only, with std's item
+tables built once per process and mode on both sides; the differential
+compares them on std's three parts, every corpus root in each mode, the
+type checker's cases and a type-level fuzzer's programs. From here a
+change to item collection changes both compilers in one pull request.
+5.3b ports the bodies and the full HIR.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)

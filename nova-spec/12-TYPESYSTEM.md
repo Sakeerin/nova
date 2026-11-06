@@ -49,6 +49,18 @@ ADR 0053) and HIR with the type checker (5.3).
 - Resolves trait method calls
 - Outputs: `TypedHir` where every expression has a `Type`
 
+**Amended 2026-11-06 (branch `proto/5-3a-whole`, the 5.3a prototype; ADR
+0055):** the checker runs in two stages. The item stage
+(`nova_typeck::check_items`) rejects a generic parameter named `Self`,
+then collects the record and sum arities, the supertraits, records, sums,
+traits, impls (with conformance, the method signatures against the
+trait's, coherence, std's methods hiding a trait's, supertrait impls and
+cyclic associated types), every function's, method's and constant's
+signature and the externs, in that order, which is the order of its
+diagnostics; the bodies follow. The self-hosted compiler ports the item
+stage first (5.3a, `selfhost hir`, compared with the hidden `nova check
+--dump-hir`) and the bodies in 5.3b.
+
 ---
 
 ## 3. Core Type Representation
