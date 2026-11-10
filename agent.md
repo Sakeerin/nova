@@ -45,11 +45,14 @@ See `nova-spec/00-MASTER-SPEC.md` §3 for subsequent phase order.
 # Build everything
 cargo build --workspace
 
-# Run all tests
+# Run all tests: the second runs the self-hosting differential, which
+# the first skips (`test = false`; CI runs it in a job of its own, ADR 0055 §15)
 cargo test --workspace
+cargo test --workspace --test selfhost
 
-# Lint (must pass — CI enforces this)
+# Lint (must pass — CI enforces this); `--all-targets` skips the selfhost target
 cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-features --test selfhost -- -D warnings
 
 # Format check
 cargo fmt --check

@@ -60,6 +60,11 @@
 //! directory, so the source tree gets no `target/`, and writes its inputs to
 //! fixed directories there too. `nova build`, `nova test` and each side on
 //! each batch are killed if they run past [`CHILD_LIMIT`].
+//!
+//! The target says `test = false`: `cargo test --workspace` skips this
+//! file and `cargo test --workspace --test selfhost` runs it. CI runs it in
+//! a job of its own on each system, N linked against a release runtime,
+//! and N's own tests once more on the debug runtime (ADR 0055 §15).
 
 #[path = "selfhost/compare.rs"]
 mod compare;

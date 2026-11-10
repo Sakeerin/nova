@@ -13,8 +13,10 @@ cases; §6 the type fuzzer's item mutations; §7 the decisions part A took;
 §8 N's code and idioms; §9 the differential; §10 the decisions part B
 took; §11 the time, and CI's projection; §12 N's stack; §13 N's memory;
 §14 the rule that a change to item collection changes both compilers.
-CI's real figures wait for the user's word (spec §3.7). 5.3b (the
-bodies, the full dump) writes ADR 0056.
+Part C wrote §15, CI's figures and the user's choice: `selfhost.rs` in a
+job of its own on each system, N on a release runtime; and §12's
+release-runtime figures. 5.3b (the bodies, the full dump) writes ADR
+0056.
 
 ## Decision
 
@@ -478,8 +480,8 @@ the HIR corpus test went from 4.8 s CPU to 27.9 s, the CRLF cases from
 about **87 s on Linux, 88 s on macOS and 102 s on Windows**, Windows past
 5.2b's 70 s line. 5.2b's lesson holds: its local projection undershot CI
 (Linux 24 to 25 s projected, 37.90 s measured), so these are a floor.
-The real figures come from the measurement branch on the user's word,
-and the user is asked with them (spec §3.7).
+The real figures came from the measurement branch on the user's word,
+and the user was asked with them (spec §3.7): §15.
 
 ### 12. N's stack
 
@@ -506,6 +508,27 @@ committed), each compared with S0's dump:
 So N overflows where S0 does not, but only on that construct, 64 linked
 associated types each nesting 127 arrays; nothing in the corpus, the
 cases or the fuzzer comes near. The user is asked (spec §3.7, risk 2).
+
+**On the release runtime** (part C, 2026-11-10), since the Selfhost job
+links N against one (§15): measured on Linux, 1 MB, output to a file,
+with the construct rebuilt (`$P/proto53a/stack/c-stack.py`, not
+committed; part B's script was lost with the container) on a new
+container, so both runtimes were measured again side by side:
+
+| N linked against | Survives | Overflows | Least stack, `k` = 64 (4,096 levels) | Least stack, `k` = 124 (7,936 levels) |
+|---|---:|---:|---:|---:|
+| the debug runtime | `k` = 124 (7,936 levels) | `k` = 125 (8,000) | 540 KB | 1,020 KB |
+| the release runtime | `k` = 124 (7,936 levels) | `k` = 125 (8,000) | 540 KB | 1,024 KB |
+
+The least stack is found to 4 KB, each run's dump compared with S0's.
+The depth is the same: the frames are N's own, Cranelift's code for
+`normalize_ty` and `display_ty`, at about 128 bytes a level; the
+runtime's are leaves above them, the release runtime's at most 4 KB
+more on this input. The rebuilt construct overflows two arrays a link
+earlier than part B's (124 against 126 on the debug runtime), a
+difference of input or container, not of runtime. The harness's
+`n_parses_128_levels_of_every_kind_on_a_1_mb_main_thread` passes on
+both runtimes.
 
 ### 13. N's memory
 
@@ -540,3 +563,110 @@ table, a diagnostic's words, order or fixes, `convert_ty`, normalization)
 changes both in one pull request, and the HIR dump's differential (§9)
 holds them equal (phase plan decision 6). The dump's grammar (§2) changes
 with them, on both sides.
+
+### 15. CI: `selfhost.rs` in a job of its own, on a release runtime
+
+**Measured:** CI run 42201484370 (draft PR #136, head `d8016169`,
+closed unmerged; every check green) put `selfhost.rs` at **70.80 s on
+Linux (51 tests), 86.85 s on macOS (49) and 92.54 s on Windows (45)**,
+against PR #135's 52.60, 53.25 and 61.58 s and §11's projection of 87,
+88 and 102 s: Windows past the 70 s line 5.2b set. The Test jobs took
+525, 485 and 751 s (82, 73 and 167 s of them `cargo build`), the
+Browser job 752 s.
+
+**The options measured** (2026-11-06): (a) fewer corpus roots, those
+that cover the rest; (b) fewer fuzzer inputs; (c) `selfhost.rs` in a CI
+job of its own on each system, out of the Test job; (d) N linked against
+a release runtime. For (d), `NOVA_EMBED_RUNTIME=1` makes nova-cli's
+build script build the runtime with `--release` in a nested cargo and
+embed it in the debug `nova`, which links every program it builds
+against it (`nova build --release` is LLVM through `clang`, with the
+same runtime, so it would not do): locally `selfhost.rs` went from
+33.7 s to 17.3 s (108 s to 47 s of CPU), for about 18 s more of a cold
+build (8 s the nested build, 8 s gzip of the 28.8 MB library, 2 s
+relinking `nova`), with nothing CI lacks and no change to `Cargo.lock`.
+(c) and (d) together were projected at about **36, 45 and 48 s** for
+the file in its own job, and a Test job shorter by 70 to 93 s. The
+figures of (a) and (b) were in the measurement's scratch files, lost
+with the container; neither was chosen.
+
+**The user's choice** (2026-11-06): (c) and (d), and no coverage cut:
+every root, every fuzzer input and every test of the file still run, on
+each system.
+
+**The job** (`.github/workflows/ci.yml`, `selfhost`): the Test job's
+three systems, toolchain and cache; `NOVA_EMBED_RUNTIME=1` set for the
+job alone, since in the Test job it would move `run_tests` and every
+other test that links a program onto the release runtime; `cargo build
+--locked --workspace`, then `cargo test --locked --workspace
+--all-features --no-fail-fast --test selfhost`, then N's own tests on
+the debug runtime (below). Swatinem/rust-cache keys its cache by the
+job's id, so this job's `target/`, which holds the embedded runtime,
+never reaches the Test job's.
+
+**Out of the Test job:** the target says `test = false`
+(`crates/nova-cli/Cargo.toml`), so `cargo test --workspace` skips it and
+`cargo test --workspace --test selfhost` runs it, with `Cargo.lock`
+unchanged. The other ways were worse: cargo has no way to exclude one
+test target from `cargo test --workspace` (`--exclude` drops a whole
+package, all of nova-cli's tests); libtest's `--skip` filters names
+across every binary, still builds and starts this one, and would skip
+a namesake elsewhere; and a variable that returns early would make the
+file pass without running. The cost is local: `cargo test --workspace`
+no longer runs the file, so `CONTRIBUTING.md`, `agent.md` and the pull
+request template add `cargo test --workspace --test selfhost`, and
+`cargo clippy --all-features --test selfhost -- -D warnings` beside
+their clippy command. A
+`test = false` target is also skipped by `--all-targets`, so the clippy
+job lints it by name in a second command (one command with both flags
+does not: `--all-targets` wins). The ignored-tests step loses nothing:
+the file has no `#[ignore]`d test.
+
+**Totals:** `cargo test --locked --workspace --all-features -- --list`
+on Linux went from 2,891 tests in 112 binaries to **2,840 in 111**; the
+binary gone is nova-cli's `tests/selfhost.rs`, with its 51 tests (49 on
+macOS, 45 on Windows). A plan that counts the suite's totals (`S`)
+counts them without it from here, and counts `selfhost.rs`'s (`SH`,
+`cargo test --locked --workspace --test selfhost`) apart; a list
+compared binary by binary, as 5.2b's `names.py` compares them, shows the
+binary removed with its 51 tests and nothing else.
+
+**N on the debug runtime:** the Selfhost job runs N on the release
+runtime only, and every other test that links a program runs on the
+debug runtime in the Test job; what the move alone would lose is N, a
+large program, under the debug runtime's assertions (5 `debug_assert`s,
+the collector's pages and the executor's among them) and overflow
+checks. One cheap check keeps it: the job's last step runs
+`the_selfhost_tests_pass` (`nova test` builds N with its 44 tests and
+runs them) with `NOVA_RUNTIME_LIB` naming the debug runtime that
+`cargo build --workspace` leaves beside `nova` (`libnova_runtime.a`,
+`nova_runtime.lib` on Windows), a variable that outranks the embedded
+runtime (a path that does not exist fails the test, which shows it is
+read). Measured locally (2026-11-10, debug runtime):
+
+| Check | Where | Cost |
+|---|---|---:|
+| `the_selfhost_tests_pass` | the Test job: `selfhost.rs` built there again (2.3 s) and the test | 8.2 s |
+| `the_corpus_dumps_agree` | the Test job, the same | 13.7 s |
+| both | the Test job, the same | 13.9 s |
+| `the_selfhost_tests_pass` | the Selfhost job, after its test step: nothing to build | 5.8 s |
+
+In the Test job each would put back part of what the choice took out of
+it (about 20 to 40 s on CI at §11's factors), so it runs in the Selfhost
+job, which builds nothing more for it. Not chosen: a corpus comparison
+on the debug runtime, which would build N a second time and double the
+step. If wrong: a fault only N's corpus-sized heaps reach under the
+debug runtime's checks goes unseen in CI; the release runtime runs
+those heaps every time.
+
+**The 1 MB stack test** (`n_parses_128_levels_of_every_kind_on_a_1_mb_main_thread`)
+now runs on the release runtime's frames; N's depth there is the debug
+runtime's (§12).
+
+**Locally** (2026-11-10, a new container, slower than 11-06's): `SH`
+before the change 57.25 and 62.54 s (182.4 and 202.0 s of CPU); the
+job's command after it, without `NOVA_EMBED_RUNTIME`, 63.00 and 60.49 s
+(198.2 and 195.7 s), and with it 31.36, 29.04 and 28.49 s (86.5, 80.6
+and 78.5 s), **0.48 to 0.50×**, as on 11-06 (0.51×). A cold build of the
+job's test, a fresh target directory, the nested build included: 73.3 s
+(212 s of CPU). CI's figures for the job come from its first run.

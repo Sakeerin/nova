@@ -501,8 +501,12 @@ item stage (`selfhost/src/hir.nova`, `typeck*.nova`, `fixes.nova`,
 `hir_dump.nova`, `selfhost hir`) gives S0's HIR dump byte for byte on
 std's three parts, every corpus root in the three modes, the cases (both
 line endings) and the type fuzzer's 120 inputs. `selfhost.rs` went from
-22.5-23.2 s to 33.8-34.0 s locally; CI is to be measured on the user's
-word before the plan (ADR 0055 §11).
+22.5-23.2 s to 33.8-34.0 s locally; on CI (run 42201484370) to 70.80 s on
+Linux, 86.85 s on macOS and 92.54 s on Windows. The user chose
+(2026-11-06) to run it in a CI job of its own on each system, N linked
+against a release runtime, with no coverage cut: `cargo test --workspace`
+skips it (`test = false`), `cargo test --workspace --test selfhost` runs
+it (ADR 0055 §15).
 
 - **Needs first:** 5.2; tuples and nested patterns throughout.
 - **Gate:**
