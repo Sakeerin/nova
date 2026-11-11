@@ -1,0 +1,359 @@
+// N's own tests of the type checker's item passes' edges (5.3a): HIR's
+// logic (equality, substitution, matching an impl, overlap, the
+// normalization limit), the generic-parameter checks, arities, impl
+// conformance, cyclic bindings, coherence's labels, a method's signature
+// against its trait's, the fixes of an unknown type and where an import's
+// edit goes. Each expected value is what S0's type checker gives for the
+// same source (its tests in crates/nova-typeck, or `nova check --dump-hir`,
+// whose std adds nothing to these); the differential compares every other
+// input, std's items included, which these leave out.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import lexer
+import loader
+import parser
+import resolver
+import token
+import typeck
+
+// The program of `sources`, each `(name, source)` a module in that order,
+// resolved natively with no std module, each module importing the others
+// by name as its imports say and able to import every other, then its
+// items checked.
+fn check_sources(sources: [(String, String)]) -> Checker {
+    let mut names: Vec<String> = Vec::new()
+    for (name, _) in sources.iter() { names.push(name) }
+    let mut modules: Vec<ModuleSource> = Vec::new()
+    let mut labels: Vec<String> = Vec::new()
+    let mut texts: Vec<Option<String>> = Vec::new()
+    let mut i = 0
+    for (name, source) in sources.iter() {
+        let (tokens, _) = lex(source)
+        let (file, errors) = parse(tokens)
+        if !errors.is_empty() { panic("a test source does not parse") }
+        let mut m = module_source(name, name, file)
+        m.text = Some(source)
+        for item in file.items.iter() {
+            match item.value {
+                ItemImport(imp) => {
+                    let first = imp.path.value.segments.at(0).value
+                    let mut j = 0
+                    while j < names.len() {
+                        if names.at(j) == first {
+                            let _ = m.imports.insert(first, ImportTargetModule(j))
+                        }
+                        j += 1
+                    }
+                }
+                _ => ()
+            }
+        }
+        let mut j = 0
+        while j < names.len() {
+            if j != i { m.importable.push((names.at(j), j)) }
+            j += 1
+        }
+        modules.push(m)
+        labels.push(name)
+        texts.push(Some(source))
+        i += 1
+    }
+    let std_set = StdSet { modules: Vec::new(), natives: Vec::new(), builtins: builtin_table() }
+    let r = resolve_program_for(CompileTargetNative, modules, std_set)
+    if !r.diagnostics.is_empty() {
+        panic("a test source does not resolve: ${r.diagnostics.at(0).message}")
+    }
+    check_items(r.items, r.definitions, labels, texts)
+}
+
+// The texts, one to a line, to compare.
+fn lines(texts: [String]) -> String { "\n".join(texts) }
+
+// Each diagnostic's code and message, in order.
+fn messages(c: Checker) -> String {
+    let mut out: Vec<String> = Vec::new()
+    for d in c.diagnostics.iter() { out.push("${d.code} ${d.message}") }
+    lines(out.to_array())
+}
+
+fn tys(list: [Ty]) -> Vec<Ty> { Vec::from_array(list) }
+
+@test
+fn types_compare_substitute_and_match_by_structure() {
+    let pair = TyRecord(4, tys([TyParam(0), TyArray(TyParam(1))]))
+    assert(ty_eq(pair, TyRecord(4, tys([TyParam(0), TyArray(TyParam(1))]))), "it holds")
+    assert(!ty_eq(pair, TySum(4, tys([TyParam(0), TyArray(TyParam(1))]))), "it holds")
+    assert(!ty_eq(TyFn(tys([TyInt]), TyUnit), TyFn(tys([]), TyUnit)), "it holds")
+    // `Ty::subst`: a parameter past the arguments is the error type.
+    let s = subst(pair, tys([TyBool]))
+    assert(ty_eq(s, TyRecord(4, tys([TyBool, TyArray(TyError)]))), "it holds")
+    // `ImplInfo::match_args`: a hole the self type never meets is the error
+    // type; a hole met twice must match the same type both times.
+    let imp = ImplInfo {
+        trait_id: -1,
+        self_head: TyHeadRecord(4),
+        self_ty: TyRecord(4, tys([TyParam(1), TyParam(1)])),
+        generics: 3,
+        bounds: Vec::new(),
+        methods: Vec::new(),
+        assoc_bindings: Vec::new(),
+    }
+    match match_args(imp, TyRecord(4, tys([TyInt, TyInt]))) {
+        Some(args) => assert(tys_eq(args, tys([TyError, TyInt, TyError])), "it holds")
+        None => assert(false, "the impl matches")
+    }
+    assert(match_args(imp, TyRecord(4, tys([TyInt, TyBool]))).is_none(), "it holds")
+    assert(mentions_param(TyAssoc(TyParam(2), 9), 2), "it holds")
+    assert(has_assoc(TyFuture(TyAssoc(TyParam(0), 9))), "it holds")
+    assert(!has_assoc(TyArray(TyParam(0))), "it holds")
+    assert(has_error(TyTuple(tys([TyInt, TyError]))), "it holds")
+}
+
+@test
+fn self_types_overlap_when_some_instance_is_both() {
+    // `[T]` and `[Int]`; `W<T, Int>` and `W<Bool, U>`; not `W<Int>` and
+    // `W<Bool>`; `W<T, T>` and `W<Int, Bool>` share no instance.
+    assert(self_types_overlap(TyArray(TyParam(0)), 1, TyArray(TyInt), 0), "it holds")
+    let w = |a: Ty, b: Ty| TyRecord(7, tys([a, b]))
+    assert(self_types_overlap(w(TyParam(0), TyInt), 1, w(TyBool, TyParam(0)), 1), "it holds")
+    assert(
+        !self_types_overlap(TyRecord(7, tys([TyInt])), 0, TyRecord(7, tys([TyBool])), 0),
+        "it holds",
+    )
+    assert(!self_types_overlap(w(TyParam(0), TyParam(0)), 1, w(TyInt, TyBool), 0), "it holds")
+    // A projection overlaps anything but a projection onto another
+    // associated type.
+    assert(self_types_overlap(TyAssoc(TyParam(0), 3), 1, TyInt, 0), "it holds")
+    assert(self_types_overlap(TyAssoc(TyParam(0), 3), 1, TyAssoc(TyInt, 4), 0), "it holds")
+}
+
+@test
+fn normalize_follows_a_chain_of_bindings_to_its_depth_limit() {
+    // `type A(k) = Self::A(k+1)`, the last bound to `Int`: 63 links resolve,
+    // 64 meet `NORMALIZE_DEPTH_LIMIT`.
+    let on = TyRecord(1, Vec::new())
+    for links in [63, 64].iter() {
+        let mut bindings: Vec<(Int, Ty)> = Vec::new()
+        for k in 0..links { bindings.push((100 + k, TyAssoc(on, 101 + k))) }
+        bindings.push((100 + links, TyInt))
+        let imp = ImplInfo {
+            trait_id: 2,
+            self_head: TyHeadRecord(1),
+            self_ty: on,
+            generics: 0,
+            bounds: Vec::new(),
+            methods: Vec::new(),
+            assoc_bindings: bindings,
+        }
+        let mut impls: Vec<ImplInfo> = Vec::new()
+        impls.push(imp)
+        match normalize_ty(TyArray(TyAssoc(on, 100)), impls) {
+            Ok(t) => {
+                assert_eq(links, 63)
+                assert(ty_eq(t, TyArray(TyInt)), "it holds")
+            }
+            Err(NormalizeLimitDepth) => assert_eq(links, 64)
+            Err(NormalizeLimitSteps) => assert(false, "the depth limit comes first")
+        }
+    }
+}
+
+@test
+fn generic_parameters_named_self_or_twice_are_reported_by_pass() {
+    // E0076 comes from pass 2, before every other; a record's duplicate
+    // from pass 3, a function's from pass 5.
+    let c = check_sources(
+        [
+            (
+                "main",
+                "fn f<T, T>(x: T) {}\nrecord R<U, U> { x: Int }\nfn g<Self>() {}\nfn main() {}\n",
+            ),
+        ],
+    )
+    assert_eq(
+        messages(c),
+        lines(
+            [
+                "E0076 a generic parameter may not be named `Self`: in a trait `Self` is the implementing type, and in an impl it is that impl's self type",
+                "E0403 the name `U` is already used for a generic parameter of this type",
+                "E0403 the name `T` is already used for a generic parameter of this function",
+            ],
+        ),
+    )
+    assert_eq(c.diagnostics.at(0).labels.at(0).span.start, 51)
+}
+
+@test
+fn a_types_arguments_are_counted() {
+    let c = check_sources(
+        [
+            (
+                "main",
+                "record P<T> { x: T }\nfn f(p: P, q: Int<Bool>, r: Future, s: P<Int>) {}\nfn main() {}\n",
+            ),
+        ],
+    )
+    assert_eq(
+        messages(c),
+        lines(
+            [
+                "E0012 type `P` expects 1 type argument(s), found 0",
+                "E0012 `Int` takes no type arguments",
+                "E0012 `Future` takes exactly one type argument, found 0",
+            ],
+        ),
+    )
+    let sig = c.sigs.at(1).unwrap()
+    assert(ty_eq(sig.params.at(1), TyInt), "it holds")
+    assert(ty_eq(sig.params.at(3), TyRecord(0, tys([TyInt]))), "it holds")
+}
+
+@test
+fn an_impl_missing_items_names_each_kind_and_a_foreign_one() {
+    let c = check_sources(
+        [
+            (
+                "main",
+                "trait Tr {\n    type Item\n    fn a(self) -> Int\n    fn b(self) -> Int { 1 }\n}\nrecord R { x: Int }\nimpl Tr for R {\n    type Other = Int\n    fn c(self) {}\n}\nfn main() {}\n",
+            ),
+        ],
+    )
+    assert_eq(
+        messages(c),
+        lines(
+            [
+                "E0071 method `c` is not a member of trait `Tr`",
+                "E0071 associated type `Other` is not a member of trait `Tr`",
+                "E0070 impl of trait `Tr` is missing method(s): `a` and associated type(s): `Item`",
+            ],
+        ),
+    )
+}
+
+@test
+fn a_binding_in_terms_of_itself_is_e0077_and_poisoned() {
+    let c = check_sources(
+        [
+            (
+                "main",
+                "trait It {\n    type A\n    type B\n}\nrecord W { x: Int }\nimpl It for W {\n    type A = [Self::B]\n    type B = Self::A\n}\nfn main() {}\n",
+            ),
+        ],
+    )
+    assert_eq(
+        messages(c),
+        lines(
+            [
+                "E0077 the associated type `A` is defined in terms of itself",
+                "E0077 the associated type `B` is defined in terms of itself",
+            ],
+        ),
+    )
+    let imp = c.impls.at(0)
+    assert_eq(imp.assoc_bindings.len(), 2)
+    let (_, a) = imp.assoc_bindings.at(0)
+    assert(ty_eq(a, TyError), "it holds")
+}
+
+@test
+fn overlapping_inherent_impls_are_labelled_at_both() {
+    let c = check_sources(
+        [
+            (
+                "main",
+                "record W<T> { x: T }\nimpl<T> W<T> {\n    fn get(self) -> Int { 1 }\n}\nimpl W<Int> {\n    fn get(self) -> Int { 2 }\n}\nfn main() {}\n",
+            ),
+        ],
+    )
+    assert_eq(messages(c), "E0074 method `get` is defined by multiple overlapping inherent impls")
+    let labels = c.diagnostics.at(0).labels
+    assert_eq(labels.len(), 2)
+    assert(labels.at(0).primary, "it holds")
+    assert_eq(labels.at(0).span.start, 73)
+    assert(!labels.at(1).primary, "it holds")
+    assert_eq(labels.at(1).message, "`get` is also defined by this impl")
+    assert_eq(labels.at(1).span.start, 29)
+}
+
+@test
+fn a_methods_signature_is_compared_with_its_traits() {
+    let c = check_sources(
+        [
+            (
+                "main",
+                "trait Tr {\n    fn m(self, x: Int) -> Self\n    fn n(mut self)\n    fn o<U>(self, u: U)\n}\nrecord R { x: Int }\nimpl Tr for R {\n    fn m(self, x: Bool) -> Int { 1 }\n    fn n(self) {}\n    fn o(self, u: Int) {}\n}\nfn main() {}\n",
+            ),
+        ],
+    )
+    assert_eq(
+        messages(c),
+        lines(
+            [
+                "E0072 parameter 1 of method `m` has type `Bool` but trait `Tr` declares `Int`",
+                "E0072 method `m` returns `Int` but trait `Tr` declares `R`",
+                "E0072 method `n` has a plain `self` receiver but trait `Tr` declares a `mut self` receiver",
+                "E0072 method `o` has 0 generic parameter(s) but trait `Tr` declares 1",
+            ],
+        ),
+    )
+}
+
+@test
+fn an_unknown_type_offers_an_import_or_the_nearest_name() {
+    let c = check_sources(
+        [
+            ("main", "// a comment\n\nfn f(s: Shape) {}\nfn g(x: Boool) {}\nfn main() {}\n"),
+            ("shapes", "pub type Shape = | Dot\n"),
+        ],
+    )
+    assert_eq(
+        messages(c),
+        lines(["E0001 cannot find type `Shape`", "E0001 cannot find type `Boool`"]),
+    )
+    let fix = c.diagnostics.at(0).fixes.at(0)
+    assert_eq(fix.title, "import `Shape` from `shapes`")
+    assert_eq(fix.edits.at(0).file, "main")
+    assert_eq(fix.edits.at(0).span.start, 14)
+    assert_eq(fix.edits.at(0).text, "import shapes::{Shape}\n\n")
+    assert_eq(c.diagnostics.at(0).fixes.len(), 1)
+    let change = c.diagnostics.at(1).fixes.at(0)
+    assert_eq(change.title, "change `Boool` to `Bool`")
+    assert_eq(change.edits.at(0).text, "Bool")
+}
+
+@test
+fn an_imports_edit_goes_after_the_last_import_or_above_the_comments() {
+    // `line_after`: past spaces and a whole block comment, in the text's
+    // own line ending, and at the end of a last line with no break.
+    let (at, text) = line_after("import a\r\nfn f() {}\r\n", 8, "import b::{x}")
+    assert_eq(at, 10)
+    assert_eq(text, "import b::{x}\r\n")
+    let (at, text) = line_after("import a /* one\ntwo */ x\nfn f() {}", 8, "import b::{x}")
+    assert_eq(at, 25)
+    assert_eq(text, "import b::{x}\n")
+    let (at, text) = line_after("import a", 8, "import b::{x}")
+    assert_eq(at, 8)
+    assert_eq(text, "\nimport b::{x}")
+    // `line_before_item`: above the comments directly over the item, below
+    // one a blank line separates from it.
+    let source = "// apart\n\n// over\n/* also */\nfn f() {}\n"
+    let (at, text) = line_before_item(source, 30, "import b::{x}")
+    assert_eq(at, 10)
+    assert_eq(text, "import b::{x}\n\n")
+}
+
+@test
+fn an_impls_type_is_shown_with_its_own_parameter_names() {
+    let c = check_sources([("main", "record W<T> { x: T }\nfn main() {}\n")])
+    let ty = TyRecord(0, tys([TyArray(TyParam(0)), TyParam(1), TyVar(3)]))
+    assert_eq(display_ty_named(ty, c.defs, Vec::from_array(["A"])), "W<[A], T1, _>")
+    assert_eq(display_ty(ty, c.defs), "W<[T0], T1, ?3>")
+    assert_eq(display_ty(TyTuple(tys([TyInt])), c.defs), "(Int,)")
+}

@@ -1,0 +1,511 @@
+// The type checker's types: a port of check.rs's `convert_ty`,
+// `resolve_projection`, `find_assoc_type`, `normalize`, `resolve_bounds`,
+// `apply_where`, `method_sig_parts`, `collect_signatures`,
+// `collect_externs`, `require_ffi_safe` and view.rs's `component_ret`,
+// function by function (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §3.1, ADR 0055). typeck.nova gives the idioms.
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import resolver
+import token
+import typeck
+
+impl Checker {
+    /// An AST type as a `Ty`, its names resolved (`convert_ty`): `generics`
+    /// maps the parameters in scope to their indices, and `bounds[i]` is
+    /// parameter `i`'s bounds, for a projection on it.
+    pub fn convert_ty(
+        mut self,
+        ty: Spanned<Type>,
+        generics: Map<String, Int>,
+        bounds: Vec<Vec<Int>>,
+    ) -> Ty {
+        match ty.value {
+            TypePath(path, args) => self.convert_path(ty.span, path, args, generics, bounds)
+            TypeTuple(items) => {
+                if items.is_empty() { return TyUnit }
+                let mut out: Vec<Ty> = Vec::new()
+                for t in items.iter() { out.push(self.convert_ty(t, generics, bounds)) }
+                TyTuple(out)
+            }
+            TypeFn(params, ret) => {
+                let mut ps: Vec<Ty> = Vec::new()
+                for p in params.iter() { ps.push(self.convert_ty(p, generics, bounds)) }
+                let r = self.convert_ty(ret, generics, bounds)
+                TyFn(ps, r)
+            }
+            TypeRef(_, _) => {
+                self.unsupported(ty.span, "reference and pointer types")
+                TyError
+            }
+            TypePtr(_, _) => {
+                self.unsupported(ty.span, "reference and pointer types")
+                TyError
+            }
+            TypeArray(elem) => TyArray(self.convert_ty(elem, generics, bounds))
+            TypeOptional(_) => {
+                self.unsupported(ty.span, "the `T?` optional sugar")
+                TyError
+            }
+            TypeInfer => {
+                self.unsupported(ty.span, "`_` type placeholders")
+                TyError
+            }
+        }
+    }
+
+    // `convert_ty` of a path type.
+    fn convert_path(
+        mut self,
+        span: Span,
+        path: Path,
+        args: Vec<Spanned<Type>>,
+        generics: Map<String, Int>,
+        bounds: Vec<Vec<Int>>,
+    ) -> Ty {
+        let segs = path.segments
+        if segs.len() == 2 {
+            let base = segs.at(0).value
+            let assoc_name = segs.at(1).value
+            // A projection on a parameter in scope, or on `Self` in an impl;
+            // a module-qualified path otherwise.
+            let by_index = generics.get(base)
+            let in_impl = by_index.is_none() && base == "Self"
+            if by_index.is_some() || (in_impl && self.impl_self.is_some()) {
+                if !args.is_empty() {
+                    self.error("E0012", "`${base}::${assoc_name}` takes no type arguments", span)
+                }
+                let mut on = TyError
+                let mut candidates: Vec<Int> = Vec::new()
+                match by_index {
+                    Some(idx) => {
+                        on = TyParam(idx)
+                        if idx < bounds.len() { candidates = bounds.at(idx) }
+                    }
+                    None => {
+                        let imp = match self.impl_self {
+                            Some(imp) => imp
+                            None => return TyError
+                        }
+                        if imp.trait_id < 0 {
+                            let shown = display_ty(imp.ty, self.defs)
+                            self.error(
+                                "E0001",
+                                "no associated type `${assoc_name}` on `${shown}`: an inherent impl implements no trait, so nothing declares one",
+                                span,
+                            )
+                            return TyError
+                        }
+                        on = imp.ty
+                        let mut one: Vec<Int> = Vec::new()
+                        one.push(imp.trait_id)
+                        candidates = self.with_supertraits(one)
+                    }
+                }
+                return self.resolve_projection(on, base, assoc_name, candidates, span)
+            }
+            self.unsupported(span, "module-qualified type paths")
+            return TyError
+        }
+        if segs.len() != 1 {
+            self.unsupported(span, "module-qualified type paths")
+            return TyError
+        }
+        let name = segs.at(0).value
+        match generics.get(name) {
+            Some(idx) => {
+                if !args.is_empty() {
+                    self.error("E0012", "generic parameter `${name}` takes no type arguments", span)
+                }
+                return TyParam(idx)
+            }
+            None => ()
+        }
+        if name == "Future" {
+            if args.len() != 1 {
+                self.error(
+                    "E0012",
+                    "`Future` takes exactly one type argument, found ${args.len()}",
+                    span,
+                )
+                return TyError
+            }
+            return TyFuture(self.convert_ty(args.at(0), generics, bounds))
+        }
+        let prim = match name {
+            "Int" => Some(TyInt)
+            "Float" => Some(TyFloat)
+            "Bool" => Some(TyBool)
+            "Char" => Some(TyChar)
+            "String" => Some(TyString)
+            "Bytes" => Some(TyBytes)
+            _ => None
+        }
+        match prim {
+            Some(p) => {
+                if !args.is_empty() {
+                    self.error("E0012", "`${name}` takes no type arguments", span)
+                }
+                return p
+            }
+            None => ()
+        }
+        let def_id = self.resolve_type_in(self.cur_module, name)
+        if def_id >= 0 {
+            let is_record = match self.kind_of(def_id) {
+                DefKindRecord(_) => true
+                _ => false
+            }
+            let expected = if def_id < self.type_arity.len() {
+                self.type_arity.at(def_id)
+            } else {
+                0
+            }
+            let mut converted: Vec<Ty> = Vec::new()
+            for a in args.iter() { converted.push(self.convert_ty(a, generics, bounds)) }
+            if converted.len() != expected {
+                self.error(
+                    "E0012",
+                    "type `${name}` expects ${expected} type argument(s), found ${converted.len()}",
+                    span,
+                )
+                return TyError
+            }
+            return if is_record { TyRecord(def_id, converted) } else { TySum(def_id, converted) }
+        }
+        if !self.missing_on_target(name, span) {
+            self.error("E0001", "cannot find type `${name}`", span)
+            self.name_fixes(segs.at(0), NeedType, Vec::from_array(generics.keys()))
+        }
+        TyError
+    }
+
+    // `<base>::<assoc_name>` as a projection on `on`, the one of
+    // `candidate_traits` that declares it (`resolve_projection`).
+    fn resolve_projection(
+        mut self,
+        on: Ty,
+        base: String,
+        assoc_name: String,
+        candidate_traits: Vec<Int>,
+        span: Span,
+    ) -> Ty {
+        let mut found: Vec<Int> = Vec::new()
+        for t in candidate_traits.iter() {
+            let a = self.find_assoc_type(t, assoc_name)
+            if a >= 0 { found.push(a) }
+        }
+        if found.len() == 1 { return TyAssoc(on, found.at(0)) }
+        if found.is_empty() {
+            self.error(
+                "E0001",
+                "no associated type `${assoc_name}` on any bound of `${base}`",
+                span,
+            )
+        } else {
+            self.error(
+                "E0015",
+                "ambiguous associated type `${base}::${assoc_name}`: more than one bound of `${base}` declares it",
+                span,
+            )
+        }
+        TyError
+    }
+
+    /// The associated type `name` that trait `trait_id` declares, or -1
+    /// (`find_assoc_type`), read from the resolution, so that a trait's own
+    /// signatures can name it before its table entry exists.
+    pub fn find_assoc_type(self, trait_id: Int, name: String) -> Int {
+        match self.assoc_of.get(trait_id) {
+            Some(list) => {
+                for id in list.iter() { if self.defs.defs.at(id).name == name { return id } }
+                -1
+            }
+            None => -1
+        }
+    }
+
+    /// `ty` with its projections resolved through the impl table
+    /// (`normalize`); E0078 at `span` of `file` when a limit is met.
+    pub fn normalize(mut self, ty: Ty, file: String, span: Span) -> Ty {
+        match normalize_ty(ty, self.impls) {
+            Ok(t) => t
+            Err(limit) => {
+                let detail = match limit {
+                    NormalizeLimitDepth => "the chain of bindings is more than ${NORMALIZE_DEPTH_LIMIT} deep, or does not terminate"
+                    NormalizeLimitSteps => "it resolves to more than ${NORMALIZE_STEP_LIMIT} type nodes"
+                }
+                self.error_in(
+                    "E0078",
+                    "could not resolve the associated types in `${display_ty(ty, self.defs)}`: ${detail}",
+                    file,
+                    span,
+                )
+                TyError
+            }
+        }
+    }
+
+    /// Each generic parameter's bounds as trait ids, each once
+    /// (`resolve_bounds`).
+    pub fn resolve_bounds(mut self, generics: Vec<TypeParam>) -> Vec<Vec<Int>> {
+        let mut out: Vec<Vec<Int>> = Vec::new()
+        for g in generics.iter() {
+            let mut ids: Vec<Int> = Vec::new()
+            for b in g.bounds.iter() { self.add_bound(ids, b) }
+            out.push(ids)
+        }
+        out
+    }
+
+    // The trait `b` names added to `slot`, once, or E0092 or E0001 with
+    // its fixes.
+    fn add_bound(mut self, mut slot: Vec<Int>, b: Spanned<Path>) {
+        let segs = b.value.segments
+        let name = if segs.is_empty() { "" } else { segs.last().value }
+        let id = self.resolve_trait_in(self.cur_module, name)
+        if id >= 0 {
+            if !int_in(slot, id) { slot.push(id) }
+        } else if !self.missing_on_target(name, b.span) {
+            self.error("E0001", "cannot find trait `${name}`", b.span)
+            if !segs.is_empty() { self.name_fixes(segs.last(), NeedTrait, Vec::new()) }
+        }
+    }
+
+    /// A `where` clause folded into `bounds`, each bound on one of the
+    /// item's own parameters (`apply_where`).
+    pub fn apply_where(
+        mut self,
+        bounds: Vec<Vec<Int>>,
+        where_clause: Vec<WhereBound>,
+        scope: Map<String, Int>,
+    ) {
+        for wb in where_clause.iter() {
+            let idx = match self.convert_ty(wb.ty, scope, bounds) {
+                TyParam(i) => i
+                TyError => continue
+                _ => {
+                    self.error(
+                        "E0900",
+                        "a `where` clause may only constrain a type parameter",
+                        wb.ty.span,
+                    )
+                    continue
+                }
+            }
+            if idx < 0 || idx >= bounds.len() { continue }
+            let slot = bounds.at(idx)
+            for b in wb.bounds.iter() { self.add_bound(slot, b) }
+        }
+    }
+
+    /// A method's parameter types but `self`'s, and its return type
+    /// (`method_sig_parts`).
+    pub fn method_sig_parts(
+        mut self,
+        params: Vec<Param>,
+        ret: Option<Spanned<Type>>,
+        scope: Map<String, Int>,
+        bounds: Vec<Vec<Int>>,
+    ) -> (Vec<Ty>, Ty) {
+        let mut converted: Vec<Ty> = Vec::new()
+        for p in params.iter() {
+            if p.name.value != "self" { converted.push(self.convert_ty(p.ty, scope, bounds)) }
+        }
+        let r = match ret {
+            Some(t) => self.convert_ty(t, scope, bounds)
+            None => TyUnit
+        }
+        (converted, r)
+    }
+
+    // --- Pass 5: signatures and externs ---
+
+    /// Every function's and constant's signature (`collect_signatures`);
+    /// an async function's returns `Future<T>`.
+    pub fn collect_signatures(mut self) {
+        for (def_id, item_index) in self.defs_of_kind(false).iter() {
+            if !self.own(def_id) { continue }
+            let f = match self.items.at(item_index).value {
+                ItemFunction(f) => f
+                _ => continue
+            }
+            self.enter_item(item_index)
+            self.check_duplicate_generics(f.generics, "function")
+            let generics = generic_scope(f.generics)
+            let bounds = self.resolve_bounds(f.generics)
+            self.apply_where(bounds, f.where_clause, generics)
+            self.expand_bounds(bounds)
+            let mut params: Vec<Ty> = Vec::new()
+            for p in f.params.iter() { params.push(self.convert_ty(p.ty, generics, bounds)) }
+            let mut ret = if f.is_component {
+                self.component_ret()
+            } else {
+                match f.return_ty {
+                    Some(t) => self.convert_ty(t, generics, bounds)
+                    None => TyUnit
+                }
+            }
+            if f.is_async { ret = TyFuture(ret) }
+            self.sigs.set(
+                def_id,
+                Some(
+                    FnSig { generics: f.generics.len(), bounds: bounds, params: params, ret: ret },
+                ),
+            )
+        }
+        for (def_id, item_index) in self.defs_of_kind(true).iter() {
+            if !self.own(def_id) { continue }
+            let c = match self.items.at(item_index).value {
+                ItemConst(c) => c
+                _ => continue
+            }
+            self.enter_item(item_index)
+            let ret = self.convert_ty(c.ty, Map::new(), Vec::new())
+            self.sigs.set(
+                def_id,
+                Some(FnSig { generics: 0, bounds: Vec::new(), params: Vec::new(), ret: ret }),
+            )
+        }
+    }
+
+    /// `std/ui`'s `View`, a component's return type (`component_ret`).
+    pub fn component_ret(self) -> Ty {
+        let ui = self.module_named("$std.ui")
+        let html = self.module_named("$std.ui.html")
+        if ui < 0 || html < 0 { return TyError }
+        let view = self.resolve_type_in(ui, "View")
+        let attr = self.resolve_type_in(ui, "Attr")
+        if view < 0 || attr < 0 { return TyError }
+        if !self.is_def_value(html, "on") || !self.is_def_value(html, "text") { return TyError }
+        TySum(view, Vec::new())
+    }
+
+    // The first module named `name`, or -1.
+    fn module_named(self, name: String) -> Int {
+        for m in 0..self.defs.modules.len() { if self.defs.modules.at(m).name == name { return m } }
+        -1
+    }
+
+    // Whether the value `name` in module `m` is a definition.
+    fn is_def_value(self, m: Int, name: String) -> Bool {
+        match self.resolve_value_in(m, name) {
+            Some(ResDef(_)) => true
+            _ => false
+        }
+    }
+
+    /// Every `extern` function's signature and table entry, the C ABI and
+    /// FFI-safe types only, or `"js"` in a std module of a WASM build
+    /// (`collect_externs`).
+    pub fn collect_externs(mut self) {
+        for i in 0..self.defs.defs.len() {
+            let (item_index, fn_index) = match self.defs.defs.at(i).kind {
+                DefKindExternFn(item, f) => (item, f)
+                _ => continue
+            }
+            let def_id = i
+            if !self.own(def_id) { continue }
+            let block = match self.items.at(item_index).value {
+                ItemExtern(b) => b
+                _ => continue
+            }
+            let sig = match block.items.at(fn_index) {
+                ExternItemFn(s) => s
+            }
+            self.enter_item(item_index)
+            let name = sig.name.value
+            if name == "main" || name.starts_with("nova_") {
+                self.error(
+                    "E0900",
+                    "extern symbol `${name}` is reserved by the compiler",
+                    sig.name.span,
+                )
+                continue
+            }
+            let abi = match block.abi {
+                Some(a) => a
+                None => ""
+            }
+            let wasm = match self.defs.target {
+                CompileTargetWasm => true
+                CompileTargetNative => false
+            }
+            let js = block.abi.is_some()
+                && abi == "js"
+                && self.is_std_module(self.cur_module)
+                && wasm
+            if !js && block.abi.is_some() && abi != "C" {
+                self.error(
+                    "E0900",
+                    "extern ABI `\"${abi}\"` is not supported; only the C ABI is supported",
+                    sig.name.span,
+                )
+            }
+            if sig.is_async { self.unsupported(sig.name.span, "async extern functions") }
+            if !sig.where_clause.is_empty() {
+                self.unsupported(sig.name.span, "`where` clauses on extern functions")
+            }
+            if !sig.generics.is_empty() {
+                self.unsupported(sig.name.span, "generic extern functions")
+                continue
+            }
+            let empty: Map<String, Int> = Map::new()
+            let mut params: Vec<Ty> = Vec::new()
+            for p in sig.params.iter() {
+                let t = self.convert_ty(p.ty, empty, Vec::new())
+                self.require_ffi_safe(t, p.ty.span, false, js)
+                params.push(t)
+            }
+            let ret = match sig.return_ty {
+                Some(t) => {
+                    let r = self.convert_ty(t, empty, Vec::new())
+                    self.require_ffi_safe(r, t.span, true, js)
+                    r
+                }
+                None => TyUnit
+            }
+            self.sigs.set(
+                def_id,
+                Some(FnSig { generics: 0, bounds: Vec::new(), params: params, ret: ret }),
+            )
+            self.externs.push(
+                ExternFn {
+                    def_id: def_id,
+                    symbol: name,
+                    abi: if js { ExternAbiJs } else { ExternAbiC },
+                    params: params,
+                    ret: ret,
+                    span: FileSpan { file: self.cur_file, span: sig.name.span },
+                },
+            )
+        }
+    }
+
+    // E0900 for a type an extern signature cannot carry
+    // (`require_ffi_safe`).
+    fn require_ffi_safe(mut self, ty: Ty, span: Span, is_return: Bool, js: Bool) {
+        let ok = match ty {
+            TyInt => true
+            TyFloat => true
+            TyBool => true
+            TyString => js
+            TyUnit => is_return
+            TyError => true
+            _ => false
+        }
+        if !ok {
+            let extra = if js { ", and String for extern \"js\"" } else { "" }
+            self.error(
+                "E0900",
+                "`${display_ty(ty, self.defs)}` is not FFI-safe in an extern signature yet; only Int, Float, and Bool (and a unit return) are supported${extra}",
+                span,
+            )
+        }
+    }
+}

@@ -527,6 +527,11 @@ pub record SharedStd {
     // no `@test` function, which the shared path would drop; else a program
     // is resolved in full.
     pub shareable: Bool,
+    // The resolution of a program of no module of its own: std's
+    // definitions, scopes, items and exports, numbered from 0, which the
+    // type checker's shared path reads too (5.3a,
+    // `resolve_program_shared_for_check`).
+    pub alone: ProgramResolution,
 }
 
 /// std for `target`, resolved once (`SharedStd::new`).
@@ -560,6 +565,7 @@ pub fn share_std(target: CompileTarget, std_set: StdSet) -> SharedStd {
         missing: alone.definitions.missing,
         globs: globs,
         shareable: alone.diagnostics.len() == parsed && alone.tests.is_empty(),
+        alone: alone,
     }
 }
 
@@ -751,6 +757,51 @@ pub fn resolve_program_shared(modules: Vec<ModuleSource>, shared: SharedStd) -> 
         diagnostics: diagnostics,
         tests: tests,
     }
+}
+
+/// `resolve_program_shared` for the type checker's shared path (5.3a,
+/// the HIR dump alone; nova-resolver's
+/// `resolve_program_with_shared_std_for_check`): std's definitions and its
+/// items' modules follow the program's, rebased past them, as the full
+/// resolution numbers them, so that the type checker can read std's
+/// definitions; std's items are not in `items`, since std's item tables
+/// are shared too (typeck.nova's `check_items_shared`). std's module
+/// scopes follow the program's as they are, their ids std's own: the type
+/// checker adds the offset where it reads one, rather than every program
+/// copying them. A program resolved in full, because std's resolution gave
+/// a diagnostic or holds a `@test` function, is returned as
+/// `resolve_program_for` gives it.
+pub fn resolve_program_shared_for_check(
+    modules: Vec<ModuleSource>,
+    shared: SharedStd,
+) -> ProgramResolution {
+    let resolved = resolve_program_shared(modules, shared)
+    if !shared.shareable { return resolved }
+    let mut defs = resolved.definitions
+    let def_offset = defs.defs.len()
+    let item_offset = resolved.items.len()
+    let module_offset = defs.std_start
+    let std = shared.alone.definitions
+    for d in std.defs.iter() { defs.defs.push(rebased_def(d, def_offset, item_offset)) }
+    for m in std.modules.iter() { defs.modules.push(m) }
+    for m in std.item_module.iter() { defs.item_module.push(m + module_offset) }
+    resolved
+}
+
+// `d` with every definition's id `def` higher and every item's index
+// `item` higher (`Def::rebased`).
+fn rebased_def(d: Def, def: Int, item: Int) -> Def {
+    let kind = match d.kind {
+        DefKindFn(i) => DefKindFn(i + item)
+        DefKindSum(i, variants) => DefKindSum(i + item, variants)
+        DefKindRecord(i) => DefKindRecord(i + item)
+        DefKindConst(i) => DefKindConst(i + item)
+        DefKindTrait(i) => DefKindTrait(i + item)
+        DefKindMethod(i, method, owner) => DefKindMethod(i + item, method, owner)
+        DefKindExternFn(i, f) => DefKindExternFn(i + item, f)
+        DefKindAssocType(t) => DefKindAssocType(t + def)
+    }
+    Def { name: d.name, file: d.file, span: d.span, kind: kind }
 }
 
 // Bind each builtin of `builtins` by its name in `scope`'s values.

@@ -1,0 +1,354 @@
+// The HIR dump: what the type checker built for one program, as text, one
+// entry per line, exactly as S0's `nova check --dump-hir` prints it: a
+// port of crates/nova-typeck/src/dump.rs, function by function (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §3.3). ADR 0055 writes the grammar out, with an example of every form.
+//
+// - Two parts: std's, printed once (`dump_hir_std`), and a program's
+//   (`dump_hir_program`), which prints only the program's own entries and
+//   `(StdStart …)` as the resolution dump does.
+// - Ids are the resolution dump's, `u<n>` and `s<n>`; an impl is numbered
+//   from 0 within its part.
+// - Types print by structure, with ids (`ty_text`).
+// - Tables print in the order the type checker collected them; the
+//   signatures, a map in S0, by id.
+
+import builtins
+import diagnostic
+import dump
+import hir
+import resolution_dump
+import resolver
+import token
+import typeck
+
+/// A program's part for `target`, under test mode when `test`: when the
+/// program reached the type checker, its resolution and item tables, and
+/// every diagnostic so far, in order (`dump_program`).
+pub fn dump_hir_program(
+    target: CompileTarget,
+    test: Bool,
+    checked: Option<(ProgramResolution, Checker)>,
+    diagnostics: Vec<Diagnostic>,
+) -> String {
+    let mut d = HirDump { out: StringBuilder::new(), std_def: 9223372036854775807, fresh: true }
+    d.open(0, "Hir")
+    d.field("target", compile_target_name(target))
+    d.mode(test)
+    d.bool_field("checked", checked.is_some())
+    match checked {
+        Some((resolution, tables)) => {
+            let (std_module, def, item) = std_start_of(resolution.definitions)
+            d.std_def = def
+            d.open(1, "StdStart")
+            d.field("module", "${std_module}")
+            d.field("def", "${def}")
+            d.field("item", "${item}")
+            d.close()
+            d.tables(resolution.definitions, tables, false)
+        }
+        None => ()
+    }
+    d.close()
+    d.out.push("\n")
+    d.out.push(diagnostics_text(diagnostics))
+    d.out.to_string()
+}
+
+/// std's part for `target`, under test mode when `test`, from the check
+/// of a program of no module of its own: its tables and every diagnostic,
+/// the resolver's and the item passes' (`dump_std`).
+pub fn dump_hir_std(
+    target: CompileTarget,
+    test: Bool,
+    resolution: ProgramResolution,
+    tables: Checker,
+    diagnostics: Vec<Diagnostic>,
+) -> String {
+    let defs = resolution.definitions
+    let (_, std_def, _) = std_start_of(defs)
+    let mut d = HirDump { out: StringBuilder::new(), std_def: std_def, fresh: true }
+    d.open(0, "HirStd")
+    d.field("target", compile_target_name(target))
+    d.mode(test)
+    let mut records = 0
+    for r in tables.records.iter() { if r.def_id >= std_def { records += 1 } }
+    let mut sums = 0
+    for s in tables.sums.iter() { if s.def_id >= std_def { sums += 1 } }
+    let mut traits = 0
+    for t in tables.traits.iter() { if t.def_id >= std_def { traits += 1 } }
+    let mut impls = 0
+    for s in tables.impl_in_std.iter() { if s { impls += 1 } }
+    let mut sigs = 0
+    for id in 0..tables.sigs.len() {
+        if id >= std_def && tables.sigs.at(id).is_some() { sigs += 1 }
+    }
+    let mut externs = 0
+    for e in tables.externs.iter() { if e.def_id >= std_def { externs += 1 } }
+    d.field("records", "${records}")
+    d.field("sums", "${sums}")
+    d.field("traits", "${traits}")
+    d.field("impls", "${impls}")
+    d.field("sigs", "${sigs}")
+    d.field("externs", "${externs}")
+    d.tables(defs, tables, true)
+    d.close()
+    d.out.push("\n")
+    d.out.push(diagnostics_text(diagnostics))
+    d.out.to_string()
+}
+
+// The text being written, the first std definition's id, from which ids
+// print as `s<n>`, and whether the text is empty or ends a line (`Dump`).
+record HirDump { out: StringBuilder, std_def: Int, fresh: Bool }
+
+impl HirDump {
+    // A line, up to its kind (`open`).
+    fn open(mut self, depth: Int, kind: String) {
+        if !self.fresh { self.out.push("\n") }
+        self.fresh = false
+        for _ in 0..depth { self.out.push("  ") }
+        self.out.push("(")
+        self.out.push(kind)
+    }
+
+    fn close(mut self) { self.out.push(")") }
+
+    // ` key=value`.
+    fn field(mut self, key: String, value: String) { self.out.push(" ${key}=${value}") }
+
+    // ` mode=test` under test mode (`mode`).
+    fn mode(mut self, test: Bool) { if test { self.out.push(" mode=test") } }
+
+    fn bool_field(mut self, key: String, value: Bool) { self.out.push(" ${key}=${value}") }
+
+    // ` ` and `text` quoted.
+    fn string(mut self, text: String) {
+        self.out.push(" \"")
+        push_escaped(self.out, text, true)
+        self.out.push("\"")
+    }
+
+    // ` ` and a value.
+    fn value(mut self, text: String) {
+        self.out.push(" ")
+        self.out.push(text)
+    }
+
+    // ` ` and a place: the file's label quoted, `:`, the span
+    // (`write_place`).
+    fn place(mut self, at: FileSpan) {
+        self.string(at.file)
+        self.out.push(":${at.span.start}..${at.span.end}")
+    }
+
+    // A definition's id: `u<n>` for the program's own, `s<n>` for std's.
+    fn id(self, id: Int) -> String {
+        if id >= self.std_def { "s${id - self.std_def}" } else { "u${id}" }
+    }
+
+    fn opt_id(self, id: Int) -> String { if id < 0 { "None" } else { self.id(id) } }
+
+    // A type, by structure (`ty`).
+    fn ty_text(self, ty: Ty) -> String {
+        match ty {
+            TyInt => "Int"
+            TyFloat => "Float"
+            TyBool => "Bool"
+            TyChar => "Char"
+            TyString => "String"
+            TyBytes => "Bytes"
+            TyUnit => "()"
+            TyFn(
+                params,
+                ret,
+            ) => "fn(${", ".join(self.list(params).to_array())}) -> ${self.ty_text(ret)}"
+            TyFuture(o) => "Future<${self.ty_text(o)}>"
+            TySum(d, args) => self.named(d, args)
+            TyRecord(d, args) => self.named(d, args)
+            TyArray(e) => "[${self.ty_text(e)}]"
+            TyTuple(es) => tuple_text(self.list(es))
+            TyParam(i) => "T${i}"
+            TyAssoc(on, assoc) => "${self.ty_text(on)}::${self.id(assoc)}"
+            TyVar(v) => "?${v}"
+            TyNever => "!"
+            TyError => "{error}"
+        }
+    }
+
+    fn list(self, tys: Vec<Ty>) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new()
+        for t in tys.iter() { out.push(self.ty_text(t)) }
+        out
+    }
+
+    fn named(self, d: Int, args: Vec<Ty>) -> String {
+        if args.is_empty() {
+            self.id(d)
+        } else {
+            "${self.id(d)}<${", ".join(self.list(args).to_array())}>"
+        }
+    }
+
+    fn head_text(self, h: TyHead) -> String {
+        match h {
+            TyHeadInt => "Int"
+            TyHeadFloat => "Float"
+            TyHeadBool => "Bool"
+            TyHeadChar => "Char"
+            TyHeadString => "String"
+            TyHeadBytes => "Bytes"
+            TyHeadArray => "Array"
+            TyHeadSum(d) => self.id(d)
+            TyHeadRecord(d) => self.id(d)
+        }
+    }
+
+    // `(Bound k id…)` for each generic parameter's bounds, at `depth`.
+    fn bounds(mut self, depth: Int, bounds: Vec<Vec<Int>>) {
+        for k in 0..bounds.len() {
+            self.open(depth, "Bound")
+            self.out.push(" ${k}")
+            for id in bounds.at(k).iter() { self.value(self.id(id)) }
+            self.close()
+        }
+    }
+
+    // `(Param ty)` for each parameter, then `(Ret ty)`, at `depth`.
+    fn signature(mut self, depth: Int, params: Vec<Ty>, ret: Ty) {
+        for p in params.iter() {
+            self.open(depth, "Param")
+            self.value(self.ty_text(p))
+            self.close()
+        }
+        self.open(depth, "Ret")
+        self.value(self.ty_text(ret))
+        self.close()
+    }
+
+    // The entries of std's part (`std`) or of the program's (`tables`).
+    fn tables(mut self, defs: Definitions, t: Checker, std: Bool) {
+        for r in t.records.iter() {
+            if (r.def_id >= self.std_def) != std { continue }
+            self.open(1, "Record")
+            self.value(self.id(r.def_id))
+            self.string(r.name)
+            self.field("generics", "${r.generics}")
+            for f in r.fields.iter() {
+                self.open(2, "Field")
+                self.string(f.name)
+                self.value(self.ty_text(f.ty))
+                self.close()
+            }
+            self.close()
+        }
+        for s in t.sums.iter() {
+            if (s.def_id >= self.std_def) != std { continue }
+            self.open(1, "Sum")
+            self.value(self.id(s.def_id))
+            self.string(s.name)
+            self.field("generics", "${s.generics}")
+            for v in s.variants.iter() {
+                self.open(2, "Variant")
+                self.string(v.name)
+                for f in v.fields.iter() { self.value(self.ty_text(f)) }
+                self.close()
+            }
+            self.close()
+        }
+        for tr in t.traits.iter() {
+            if (tr.def_id >= self.std_def) != std { continue }
+            self.open(1, "Trait")
+            self.value(self.id(tr.def_id))
+            self.string(tr.name)
+            for s in tr.supertraits.iter() {
+                self.open(2, "Supertrait")
+                self.value(self.id(s))
+                self.close()
+            }
+            for (name, assoc) in tr.assoc_types.iter() {
+                self.open(2, "AssocType")
+                self.string(name)
+                self.value(self.id(assoc))
+                self.close()
+            }
+            for m in tr.methods.iter() {
+                self.open(2, "Method")
+                self.string(m.name)
+                self.bool_field("has_self", m.has_self)
+                self.bool_field("mut_self", m.mut_self)
+                self.field("generics", "${m.generics}")
+                self.field("default", self.opt_id(m.default_def))
+                self.bounds(3, m.bounds)
+                self.signature(3, m.params, m.ret)
+                self.close()
+            }
+            self.close()
+        }
+        let mut index = 0
+        for k in 0..t.impls.len() {
+            let in_std = k < t.impl_in_std.len() && t.impl_in_std.at(k)
+            if in_std != std { continue }
+            let imp = t.impls.at(k)
+            self.open(1, "Impl")
+            self.out.push(" ${index}")
+            index += 1
+            self.field("trait", self.opt_id(imp.trait_id))
+            self.field("head", self.head_text(imp.self_head))
+            self.field("generics", "${imp.generics}")
+            if k < t.impl_spans.len() { self.place(t.impl_spans.at(k)) }
+            self.open(2, "SelfType")
+            self.value(self.ty_text(imp.self_ty))
+            self.close()
+            self.bounds(2, imp.bounds)
+            for (name, def) in imp.methods.iter() {
+                self.open(2, "Method")
+                self.string(name)
+                self.value(self.id(def))
+                self.close()
+            }
+            for (assoc, ty) in imp.assoc_bindings.iter() {
+                self.open(2, "AssocBinding")
+                self.value(self.id(assoc))
+                self.value(self.ty_text(ty))
+                self.close()
+            }
+            self.close()
+        }
+        for id in 0..t.sigs.len() {
+            if (id >= self.std_def) != std { continue }
+            let sig = match t.sigs.at(id) {
+                Some(s) => s
+                None => continue
+            }
+            self.open(1, "Sig")
+            self.value(self.id(id))
+            self.field("generics", "${sig.generics}")
+            let impl_method = match defs.defs.at(id).kind {
+                DefKindMethod(_, _, MethodOwnerImpl) => true
+                _ => false
+            }
+            if impl_method {
+                self.bool_field("selfless", t.selfless.at(id))
+                self.bool_field("mut_self", t.mut_self.at(id))
+            }
+            self.bounds(2, sig.bounds)
+            self.signature(2, sig.params, sig.ret)
+            self.close()
+        }
+        for e in t.externs.iter() {
+            if (e.def_id >= self.std_def) != std { continue }
+            self.open(1, "Extern")
+            self.value(self.id(e.def_id))
+            self.string(e.symbol)
+            let abi = match e.abi {
+                ExternAbiC => "C"
+                ExternAbiJs => "Js"
+            }
+            self.field("abi", abi)
+            self.place(e.span)
+            self.signature(2, e.params, e.ret)
+            self.close()
+        }
+    }
+}

@@ -67,7 +67,9 @@ jobs:
         run: cargo build --locked --workspace
       # On Linux, `NOVA_REQUIRE_CLANG=1` makes `release_golden_suite` run, and
       # fail if `clang-18` cannot; elsewhere it skips, and `NOVA_CLANG` is
-      # the `clang` nova uses anyway.
+      # the `clang` nova uses anyway. `tests/selfhost.rs` is not among what
+      # this runs: its target says `test = false`, and the Selfhost job
+      # below runs it.
       - name: cargo test
         env:
           NOVA_REQUIRE_NODE: "1"
@@ -117,6 +119,73 @@ jobs:
       - name: cargo test (ignored GC scan tests; advisory, may flake)
         continue-on-error: true
         run: cargo test --locked --workspace --all-features --no-fail-fast -- --ignored
+
+  # The self-hosting differential, `crates/nova-cli/tests/selfhost.rs`
+  # (ADR 0051 to ADR 0055): N, the Nova package in `selfhost/`, built by
+  # `nova build`, must print what S0 prints, byte for byte, on std, the
+  # corpus, the cases and the fuzzers' inputs. It ran in the Test job until
+  # 5.3a, when N's item stage took it, in run 42201484370, to 70.80 s on
+  # Linux, 86.85 s on macOS and 92.54 s on Windows, in Test jobs of 525,
+  # 485 and 751 s; Windows had passed the 70 s line 5.2b set. Of the
+  # options measured, the user chose, on 2026-11-06, this job and the
+  # release runtime, and no coverage cut: no fewer roots, no fewer fuzzer
+  # inputs (ADR 0055 §15).
+  #
+  # The release runtime: N's Cranelift code calls the runtime for every
+  # allocation, string operation and collection, and with the debug
+  # runtime over a third of its time went to the collector (ADR 0055
+  # §13). `NOVA_EMBED_RUNTIME=1` makes nova-cli's build script build the
+  # runtime with `--release` (a nested cargo, into its own `OUT_DIR`) and
+  # embed it in this debug `nova`, which links it into every program it
+  # builds, N included; locally that halved the file's time (33.7 s to
+  # 17.3 s, 108 s to 47 s of CPU) for about 18 s of build. `nova build
+  # --release` would not do it: that is LLVM through `clang`, with the
+  # same runtime. The variable is set for this job only: in the Test job
+  # it would move `run_tests` and every other test that links a program
+  # onto the release runtime. Swatinem/rust-cache keys its cache by the
+  # job's id, so this job's `target/`, which holds the embedded runtime,
+  # is never the Test job's; it keeps none of the workspace's own build
+  # outputs, nova-cli's build script's among them, so the nested build
+  # runs on every run.
+  #
+  # What this job does not cover: N on the debug runtime, except for its
+  # own `@test`s, which the last step runs with `NOVA_RUNTIME_LIB` naming
+  # the debug runtime `cargo build` leaves beside `nova` (that variable
+  # outranks the embedded runtime): the runtime's debug assertions and
+  # overflow checks still run under N, and every other test that links a
+  # program still runs on the debug runtime in the Test job. The two 1 MB
+  # stack tests, of N's parser and of its item passes, run on release
+  # frames; N's depth there is the debug runtime's within 4 KB (ADR 0055
+  # §12). Clippy lints the file in its
+  # own job, by name, since `--all-targets` skips a `test = false` target.
+  selfhost:
+    name: Selfhost (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-24.04
+            runtime_lib: libnova_runtime.a
+          - os: macos-latest
+            runtime_lib: libnova_runtime.a
+          - os: windows-latest
+            runtime_lib: nova_runtime.lib
+    env:
+      NOVA_EMBED_RUNTIME: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build (a release runtime embedded in nova)
+        run: cargo build --locked --workspace
+      - name: cargo test --test selfhost (N on the release runtime)
+        run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost
+      - name: N's own tests on the debug runtime
+        env:
+          NOVA_RUNTIME_LIB: ${{ github.workspace }}/target/debug/${{ matrix.runtime_lib }}
+        run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost -- --exact the_selfhost_tests_pass
 
   # 4.2's and 4.3's gates in a real browser (spec
   # docs/superpowers/specs/2026-10-16-phase-4-2-std-dom-and-the-shim-design.md
@@ -269,6 +338,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      # `--all-targets` takes only the targets `cargo test` runs, so it
+      # skips `tests/selfhost.rs`, whose target says `test = false` (the
+      # Selfhost job runs it); naming it lints it. Passing both flags in
+      # one command would not: `--all-targets` wins.
+      - run: cargo clippy --locked --all-features --test selfhost -- -D warnings
 
   msrv:
     name: MSRV (1.78)

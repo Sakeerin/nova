@@ -1,0 +1,1071 @@
+// The type checker's item stage: a port of crates/nova-typeck's
+// `check_items` (check/items.rs) and of passes 2 to 5 of `check_with`
+// (check.rs), function by function and with the same names, so that the
+// two read side by side (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §3.1 and §3.2, ADR 0055). It builds what S0's builds, the item tables
+// (records, sums, traits, impls, every signature, externs), and gives every
+// item diagnostic in S0's order, fixes included; the HIR dump
+// (hir_dump.nova) prints them, and the differential in
+// crates/nova-cli/tests/selfhost.rs holds them equal to S0's. A change to
+// how items are collected changes both type checkers in one pull request.
+//
+// This file holds the state, `check_items`, std's shared tables, the
+// generic-parameter checks, the arities, supertraits, records and sums,
+// and the message helpers; typeck_traits.nova the traits, the impls and
+// their checks; typeck_ty.nova `convert_ty`, projections, `normalize`,
+// bounds, `where`, the signatures and the externs; fixes.nova the fixes.
+// The Rust's idioms, beyond hir.nova's:
+//
+// - The checker's maps keyed by `DefId` (`sigs`, `method_locs`,
+//   `selfless`, `mut_self`, `supertraits`, `type_arity`) are lists indexed
+//   by the id, as long as the definitions: looked up as the maps are, and
+//   read in id order where the dump sorts the map's keys.
+// - A composite key, `(item, method)`, is one `Int`, `item * 2^20 + method`.
+// - A span carries no file in N, so the checker keeps the label of the
+//   module whose item it is checking (`cur_file`) beside `cur_module`, and a
+//   span kept in a table is a `FileSpan`. A check that reads a table's spans
+//   says which file each diagnostic is in.
+// - The language server's index (`note_*`, `enter_type_params`) is not
+//   built: nothing the dump prints reads it.
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import resolver
+import token
+
+// ---------------------------------------------------------------------------
+// The state
+// ---------------------------------------------------------------------------
+
+/// A collected function's or method's signature (`FnSig`).
+pub record FnSig { pub generics: Int, pub bounds: Vec<Vec<Int>>, pub params: Vec<Ty>, pub ret: Ty }
+
+/// Where a method's body is (`MethodLoc`).
+pub record MethodLoc { pub item_index: Int, pub method_index: Int, pub owner: MethodOwner }
+
+/// The `Self` of an impl block (`ImplSelf`); `trait_id` -1 for an inherent
+/// impl.
+pub record ImplSelf { pub ty: Ty, pub trait_id: Int }
+
+/// The checker (`Checker`), and what passes 2 to 5 leave in it, which is
+/// what S0's `ItemTables` holds: the item tables, the item diagnostics in
+/// the order the passes emitted them, and the state the bodies start from.
+pub record Checker {
+    pub items: Vec<Spanned<Item>>,
+    pub defs: Definitions,
+    // Each module's file label and, for a program's own, its source text.
+    pub labels: Vec<String>,
+    pub texts: Vec<Option<String>>,
+    pub cur_module: Int,
+    pub cur_file: String,
+    pub sigs: Vec<Option<FnSig>>,
+    pub method_locs: Vec<Option<MethodLoc>>,
+    pub selfless: Vec<Bool>,
+    pub mut_self: Vec<Bool>,
+    pub sums: Vec<SumType>,
+    pub records: Vec<RecordType>,
+    pub supertraits: Vec<Option<Vec<Int>>>,
+    pub traits: Vec<TraitDef>,
+    pub impls: Vec<ImplInfo>,
+    pub impl_param_names: Vec<Vec<String>>,
+    pub impl_self: Option<ImplSelf>,
+    pub impl_selves: Map<Int, ImplSelf>,
+    pub type_arity: Vec<Int>,
+    pub externs: Vec<ExternFn>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub impl_spans: Vec<FileSpan>,
+    pub impl_in_std: Vec<Bool>,
+    pub impl_method_spans: Vec<Vec<FileSpan>>,
+    // Each trait's associated types, in definition order, by the trait's id.
+    pub assoc_of: Map<Int, Vec<Int>>,
+    // The definitions the passes collect, `0..own_defs`; std's, after them,
+    // are read from `shared` when it is given, rebased by `rebase_def` and
+    // `rebase_item`. std's module scopes are then the shared resolution's,
+    // whose ids are std's own: a lookup in one adds `scope_offset`.
+    pub own_defs: Int,
+    pub shared: Option<SharedItems>,
+    pub rebase_def: Int,
+    pub rebase_item: Int,
+    pub scope_offset: Int,
+}
+
+/// std's item tables, built once from the check of a program of no module
+/// of its own (`SharedItems`): `defs` is how many definitions std has, and
+/// `shareable` whether its items gave no diagnostic.
+pub record SharedItems { pub tables: Checker, pub defs: Int, pub shareable: Bool }
+
+/// Passes 2 to 5 over `items` and `defs` (`check_items`), each module's
+/// file label in `labels` and a program module's source in `texts`.
+pub fn check_items(
+    items: Vec<Spanned<Item>>,
+    defs: Definitions,
+    labels: Vec<String>,
+    texts: Vec<Option<String>>,
+) -> Checker {
+    let mut c = new_checker(items, defs, labels, texts, None, 0)
+    c.collect_items()
+    c
+}
+
+/// std's item tables from the resolution of a program of no module of its
+/// own (`SharedItems::new`).
+pub fn share_items(
+    items: Vec<Spanned<Item>>,
+    defs: Definitions,
+    labels: Vec<String>,
+    texts: Vec<Option<String>>,
+) -> SharedItems {
+    let tables = check_items(items, defs, labels, texts)
+    SharedItems { tables: tables, defs: defs.defs.len(), shareable: tables.diagnostics.is_empty() }
+}
+
+/// `check_items` reading std's tables from `shared` (`check_items_shared`):
+/// `items` holds the program's own items only, and `defs` its definitions
+/// followed by std's, rebased (resolver.nova's
+/// `resolve_program_shared_for_check`), whose module scopes are std's as
+/// they are. Each pass runs over the program's items, and std's part of
+/// each table is added where the full check would have collected it.
+pub fn check_items_shared(
+    items: Vec<Spanned<Item>>,
+    defs: Definitions,
+    labels: Vec<String>,
+    texts: Vec<Option<String>>,
+    shared: SharedItems,
+) -> Checker {
+    let own = defs.defs.len() - shared.defs
+    let mut c = new_checker(items, defs, labels, texts, Some(shared), own)
+    c.collect_items()
+    c
+}
+
+// A checker with empty tables (`Checker::new`).
+fn new_checker(
+    items: Vec<Spanned<Item>>,
+    defs: Definitions,
+    labels: Vec<String>,
+    texts: Vec<Option<String>>,
+    shared: Option<SharedItems>,
+    own: Int,
+) -> Checker {
+    let n = defs.defs.len()
+    let mut sigs: Vec<Option<FnSig>> = Vec::new()
+    let mut locs: Vec<Option<MethodLoc>> = Vec::new()
+    let mut selfless: Vec<Bool> = Vec::new()
+    let mut mut_self: Vec<Bool> = Vec::new()
+    let mut supers: Vec<Option<Vec<Int>>> = Vec::new()
+    let mut arity: Vec<Int> = Vec::new()
+    let mut assoc_of: Map<Int, Vec<Int>> = Map::new()
+    for i in 0..n {
+        sigs.push(None)
+        locs.push(None)
+        selfless.push(false)
+        mut_self.push(false)
+        supers.push(None)
+        arity.push(0)
+        match defs.defs.at(i).kind {
+            DefKindAssocType(t) => {
+                match assoc_of.get(t) {
+                    Some(list) => {
+                        let mut l = list
+                        l.push(i)
+                    }
+                    None => {
+                        let mut l: Vec<Int> = Vec::new()
+                        l.push(i)
+                        let _ = assoc_of.insert(t, l)
+                    }
+                }
+            }
+            _ => ()
+        }
+    }
+    let is_shared = shared.is_some()
+    Checker {
+        items: items,
+        defs: defs,
+        labels: labels,
+        texts: texts,
+        cur_module: 0,
+        cur_file: if labels.is_empty() { "" } else { labels.at(0) },
+        sigs: sigs,
+        method_locs: locs,
+        selfless: selfless,
+        mut_self: mut_self,
+        sums: Vec::new(),
+        records: Vec::new(),
+        supertraits: supers,
+        traits: Vec::new(),
+        impls: Vec::new(),
+        impl_param_names: Vec::new(),
+        impl_self: None,
+        impl_selves: Map::new(),
+        type_arity: arity,
+        externs: Vec::new(),
+        diagnostics: Vec::new(),
+        impl_spans: Vec::new(),
+        impl_in_std: Vec::new(),
+        impl_method_spans: Vec::new(),
+        assoc_of: assoc_of,
+        own_defs: if is_shared { own } else { n },
+        shared: shared,
+        rebase_def: own,
+        rebase_item: items.len(),
+        scope_offset: if is_shared { own } else { 0 },
+    }
+}
+
+impl Checker {
+    // Passes 2 to 5 (`collect_items`); pass 1 is the language server's
+    // index alone.
+    fn collect_items(mut self) {
+        self.reject_self_type_params()
+        self.collect_type_arities()
+        self.splice_arities()
+        self.collect_supertraits()
+        self.splice_supertraits()
+        self.collect_records()
+        self.splice_records()
+        self.collect_sums()
+        self.splice_sums()
+        self.collect_traits()
+        self.collect_impls()
+        self.collect_signatures()
+        self.splice_signatures()
+        self.collect_externs()
+        self.splice_externs()
+    }
+
+    /// Whether the definition `id` is the program's own, which the passes
+    /// collect (`own`).
+    pub fn own(self, id: Int) -> Bool { id < self.own_defs }
+
+    /// Make the item at `item_index`'s module the current one.
+    pub fn enter_item(mut self, item_index: Int) {
+        self.cur_module = self.module_of(item_index)
+        self.cur_file = self.label_of(self.cur_module)
+    }
+
+    /// The file label of module `m`.
+    pub fn label_of(self, m: Int) -> String {
+        if m >= 0 && m < self.labels.len() { self.labels.at(m) } else { "" }
+    }
+
+    // --- The resolution, as `Definitions`' methods read it ---
+
+    /// The module of the item at `item_index` (`module_of`).
+    pub fn module_of(self, item_index: Int) -> Int {
+        if item_index >= 0 && item_index < self.defs.item_module.len() {
+            self.defs.item_module.at(item_index)
+        } else {
+            0
+        }
+    }
+
+    /// What definition `id` is.
+    pub fn kind_of(self, id: Int) -> DefKind { self.defs.defs.at(id).kind }
+
+    /// Definition `id`'s name.
+    pub fn name_of(self, id: Int) -> String { self.defs.defs.at(id).name }
+
+    /// The type `name` in module `m`'s scope, or -1 (`resolve_type`).
+    pub fn resolve_type_in(self, m: Int, name: String) -> Int {
+        if m < 0 || m >= self.defs.modules.len() { return -1 }
+        match self.defs.modules.at(m).types.get(name) {
+            Some(id) => id + self.offset_of(m)
+            None => -1
+        }
+    }
+
+    /// The trait `name` in module `m`'s scope, or -1 (`resolve_trait`).
+    pub fn resolve_trait_in(self, m: Int, name: String) -> Int {
+        if m < 0 || m >= self.defs.modules.len() { return -1 }
+        match self.defs.modules.at(m).traits.get(name) {
+            Some(id) => id + self.offset_of(m)
+            None => -1
+        }
+    }
+
+    /// What the value `name` in module `m`'s scope resolves to
+    /// (`resolve_value`).
+    pub fn resolve_value_in(self, m: Int, name: String) -> Option<Res> {
+        if m < 0 || m >= self.defs.modules.len() { return None }
+        match self.defs.modules.at(m).values.get(name) {
+            Some(r) => Some(shift_res(r, self.offset_of(m)))
+            None => None
+        }
+    }
+
+    // What a lookup in module `m`'s scope adds to an id: std's scopes are
+    // the shared resolution's on the shared path.
+    pub fn offset_of(self, m: Int) -> Int {
+        if m >= self.defs.std_start { self.scope_offset } else { 0 }
+    }
+
+    /// Whether module `m` is one of std's (`is_std_module`).
+    pub fn is_std_module(self, m: Int) -> Bool {
+        m >= self.defs.std_start && m < self.defs.modules.len()
+    }
+
+    /// Whether a fix may edit module `m` (`owned`): the root package's or
+    /// a loose program's, and not std's.
+    pub fn owned(self, m: Int) -> Bool {
+        if self.is_std_module(m) || m < 0 || m >= self.defs.packages.len() { return false }
+        let p = self.defs.packages.at(m)
+        p == -1 || p == 0
+    }
+
+    /// The definitions of each kind, as `(id, item_index)`
+    /// (`functions`, `const_ids`).
+    pub fn defs_of_kind(self, want_const: Bool) -> Vec<(Int, Int)> {
+        let mut out: Vec<(Int, Int)> = Vec::new()
+        for i in 0..self.defs.defs.len() {
+            match self.defs.defs.at(i).kind {
+                DefKindFn(item) => if !want_const { out.push((i, item)) }
+                DefKindConst(item) => if want_const { out.push((i, item)) }
+                _ => ()
+            }
+        }
+        out
+    }
+
+    // --- Diagnostics ---
+
+    /// An error labelled "here" at `span` of the current file (`error`).
+    pub fn error(mut self, code: String, message: String, span: Span) {
+        self.diagnostics.push(error_at(code, message, self.cur_file, span, "here"))
+    }
+
+    /// An error labelled "here" at `span` of `file`.
+    pub fn error_in(mut self, code: String, message: String, file: String, span: Span) {
+        self.diagnostics.push(error_at(code, message, file, span, "here"))
+    }
+
+    /// E0092 at `span`, when `name` is exported by a std module the target
+    /// does not compile (`missing_on_target`); whether it reported one.
+    pub fn missing_on_target(mut self, name: String, span: Span) -> Bool {
+        let owner = match self.defs.missing.get(name) {
+            Some(m) => if m.starts_with("$std.") {
+                "std/${m.byte_slice(5, m.byte_len())}"
+            } else {
+                m
+            }
+            None => return false
+        }
+        let target = compile_target_name(self.defs.target)
+        self.diagnostics.push(
+            error_at(
+                "E0092",
+                "`${name}` is in `${owner}`, which target ${target} does not have",
+                self.cur_file,
+                span,
+                "not on target ${target}",
+            ),
+        )
+        true
+    }
+
+    /// E0900 for `what`, a plural phrase, at `span` (`unsupported`).
+    pub fn unsupported(mut self, span: Span, what: String) {
+        let mut d = error_at(
+            "E0900",
+            "${what} are not supported yet",
+            self.cur_file,
+            span,
+            "not supported yet",
+        )
+        d.add_note(MVP_NOTE)
+        self.diagnostics.push(d)
+    }
+
+    // --- Pass 2: the generic parameters ---
+
+    // E0076 for every generic parameter named `Self`, over every item's
+    // six kinds of generic list (`reject_self_type_params`).
+    fn reject_self_type_params(mut self) {
+        for i in 0..self.items.len() {
+            let file = self.label_of(self.module_of(i))
+            match self.items.at(i).value {
+                ItemFunction(f) => self.reject_self_generic_name(f.generics, file)
+                ItemRecord(r) => self.reject_self_generic_name(r.generics, file)
+                ItemType(t) => self.reject_self_generic_name(t.generics, file)
+                ItemTrait(t) => {
+                    self.reject_self_generic_name(t.generics, file)
+                    for ti in t.items.iter() {
+                        match ti {
+                            TraitItemRequired(sig) => self.reject_self_generic_name(
+                                sig.generics,
+                                file,
+                            )
+                            TraitItemProvided(f) => self.reject_self_generic_name(f.generics, file)
+                            TraitItemAssocType(_, _, _) => ()
+                        }
+                    }
+                }
+                ItemImpl(b) => {
+                    self.reject_self_generic_name(b.generics, file)
+                    for f in b.functions.iter() { self.reject_self_generic_name(f.generics, file) }
+                }
+                ItemExtern(b) => {
+                    for ei in b.items.iter() {
+                        match ei {
+                            ExternItemFn(sig) => self.reject_self_generic_name(sig.generics, file)
+                        }
+                    }
+                }
+                _ => ()
+            }
+        }
+    }
+
+    fn reject_self_generic_name(mut self, generics: Vec<TypeParam>, file: String) {
+        for g in generics.iter() {
+            if g.name.value == "Self" {
+                self.error_in(
+                    "E0076",
+                    "a generic parameter may not be named `Self`: in a trait `Self` is the implementing type, and in an impl it is that impl's self type",
+                    file,
+                    g.name.span,
+                )
+            }
+        }
+    }
+
+    /// E0403 for each generic parameter whose name repeats in one
+    /// declaration (`check_duplicate_generics`).
+    pub fn check_duplicate_generics(mut self, generics: Vec<TypeParam>, owner: String) {
+        let mut seen: Vec<String> = Vec::new()
+        for g in generics.iter() {
+            let name = g.name.value
+            if holds(seen.to_array(), name) {
+                self.error(
+                    "E0403",
+                    "the name `${name}` is already used for a generic parameter of this ${owner}",
+                    g.name.span,
+                )
+            } else {
+                seen.push(name)
+            }
+        }
+    }
+
+    // E0900 for a bound on a sum type's own parameter
+    // (`reject_type_param_bounds`).
+    fn reject_type_param_bounds(mut self, generics: Vec<TypeParam>, owner: String) {
+        for g in generics.iter() {
+            if g.bounds.is_empty() { continue }
+            let mut span = g.name.span
+            for b in g.bounds.iter() { span = span.merge(b.span) }
+            let mut d = error_at(
+                "E0900",
+                "trait bounds on ${owner} are not supported yet",
+                self.cur_file,
+                span,
+                "bound on the type parameter `${g.name.value}`",
+            )
+            d.add_note(
+                "this bound is not enforced, so it is rejected rather than silently ignored; write it on an `impl` block instead, where it is enforced",
+            )
+            self.diagnostics.push(d)
+        }
+    }
+
+    // --- Pass 3: arities, supertraits, records, sums ---
+
+    fn collect_records(mut self) {
+        for i in 0..self.own_defs {
+            let def = self.defs.defs.at(i)
+            let item_index = match def.kind {
+                DefKindRecord(item) => item
+                _ => continue
+            }
+            let decl = match self.items.at(item_index).value {
+                ItemRecord(r) => r
+                _ => continue
+            }
+            self.enter_item(item_index)
+            self.check_duplicate_generics(decl.generics, "type")
+            let generics = generic_scope(decl.generics)
+            let bounds = self.resolve_bounds(decl.generics)
+            self.expand_bounds(bounds)
+            let mut fields: Vec<HirField> = Vec::new()
+            for f in decl.fields.iter() {
+                fields.push(
+                    HirField { name: f.name.value, ty: self.convert_ty(f.ty, generics, bounds) },
+                )
+            }
+            self.records.push(
+                RecordType {
+                    def_id: i,
+                    name: def.name,
+                    generics: decl.generics.len(),
+                    fields: fields,
+                },
+            )
+        }
+    }
+
+    // Every record's and sum's arity, from the tree, before any type is
+    // converted (`collect_type_arities`).
+    fn collect_type_arities(mut self) {
+        for i in 0..self.own_defs {
+            let n = match self.defs.defs.at(i).kind {
+                DefKindRecord(item) => {
+                    match self.items.at(item).value {
+                        ItemRecord(r) => r.generics.len()
+                        _ => continue
+                    }
+                }
+                DefKindSum(item, _) => {
+                    match self.items.at(item).value {
+                        ItemType(t) => t.generics.len()
+                        _ => continue
+                    }
+                }
+                _ => continue
+            }
+            self.type_arity.set(i, n)
+        }
+    }
+
+    fn collect_sums(mut self) {
+        for i in 0..self.own_defs {
+            let def = self.defs.defs.at(i)
+            let item_index = match def.kind {
+                DefKindSum(item, _) => item
+                _ => continue
+            }
+            let decl = match self.items.at(item_index).value {
+                ItemType(t) => t
+                _ => continue
+            }
+            let variants = match decl.def {
+                TypeDefSum(vs) => vs
+                _ => continue
+            }
+            self.enter_item(item_index)
+            self.check_duplicate_generics(decl.generics, "type")
+            self.reject_type_param_bounds(decl.generics, "sum type parameters")
+            let generics = generic_scope(decl.generics)
+            let mut out: Vec<HirVariant> = Vec::new()
+            for v in variants.iter() {
+                let mut fields: Vec<Ty> = Vec::new()
+                for t in v.fields.iter() { fields.push(self.convert_ty(t, generics, Vec::new())) }
+                out.push(HirVariant { name: v.name.value, fields: fields })
+            }
+            self.sums.push(
+                SumType { def_id: i, name: def.name, generics: decl.generics.len(), variants: out },
+            )
+        }
+    }
+
+    // Every trait's declared supertraits, before any bound list is
+    // expanded (`collect_supertraits`), each once.
+    fn collect_supertraits(mut self) {
+        for trait_id in 0..self.own_defs {
+            let item_index = match self.defs.defs.at(trait_id).kind {
+                DefKindTrait(item) => item
+                _ => continue
+            }
+            if item_index >= self.items.len() { continue }
+            let decl = match self.items.at(item_index).value {
+                ItemTrait(t) => t
+                _ => continue
+            }
+            self.enter_item(item_index)
+            let mut ids: Vec<Int> = Vec::new()
+            for path in decl.supertraits.iter() {
+                let segs = path.value.segments
+                let name = if segs.is_empty() { "" } else { segs.last().value }
+                let id = self.resolve_trait_in(self.cur_module, name)
+                if id >= 0 {
+                    if !int_in(ids, id) { ids.push(id) }
+                } else if !self.missing_on_target(name, path.span) {
+                    self.error("E0001", "cannot find trait `${name}`", path.span)
+                    if !segs.is_empty() { self.name_fixes(segs.last(), NeedTrait, Vec::new()) }
+                }
+            }
+            self.supertraits.set(trait_id, Some(ids))
+        }
+    }
+
+    /// `bounds` and each one's transitive supertraits, each once, the
+    /// declared first in order (`with_supertraits`).
+    pub fn with_supertraits(self, bounds: Vec<Int>) -> Vec<Int> {
+        let mut out: Vec<Int> = Vec::new()
+        for id in bounds.iter() { if !int_in(out, id) { out.push(id) } }
+        let mut i = 0
+        while i < out.len() {
+            let id = out.at(i)
+            i += 1
+            let supers = if id >= 0 && id < self.supertraits.len() {
+                match self.supertraits.at(id) {
+                    Some(s) => s
+                    None => continue
+                }
+            } else {
+                continue
+            }
+            for s in supers.iter() { if !int_in(out, s) { out.push(s) } }
+        }
+        out
+    }
+
+    /// `with_supertraits` of every slot, in place (`expand_bounds`).
+    pub fn expand_bounds(self, mut bounds: Vec<Vec<Int>>) {
+        for k in 0..bounds.len() { bounds.set(k, self.with_supertraits(bounds.at(k))) }
+    }
+
+    // --- std's shared tables, spliced in (`splice`) ---
+
+    // The tables of std's shared check, when given.
+    fn std_tables(self) -> Option<Checker> {
+        match self.shared {
+            Some(s) => Some(s.tables)
+            None => None
+        }
+    }
+
+    fn splice_arities(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        for id in 0..std.type_arity.len() {
+            if std.type_arity.at(id) != 0 {
+                self.type_arity.set(id + self.rebase_def, std.type_arity.at(id))
+            }
+        }
+    }
+
+    fn splice_supertraits(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        for id in 0..std.supertraits.len() {
+            match std.supertraits.at(id) {
+                Some(ids) => self.supertraits.set(
+                    id + self.rebase_def,
+                    Some(rebase_ids(ids, self.rebase_def)),
+                )
+                None => ()
+            }
+        }
+    }
+
+    fn splice_records(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        let r = self.rebase_def
+        for rec in std.records.iter() {
+            let mut fields: Vec<HirField> = Vec::new()
+            for f in rec.fields.iter() {
+                fields.push(HirField { name: f.name, ty: rebase_ty(f.ty, r) })
+            }
+            self.records.push(
+                RecordType {
+                    def_id: rec.def_id + r,
+                    name: rec.name,
+                    generics: rec.generics,
+                    fields: fields,
+                },
+            )
+        }
+    }
+
+    fn splice_sums(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        let r = self.rebase_def
+        for s in std.sums.iter() {
+            let mut variants: Vec<HirVariant> = Vec::new()
+            for v in s.variants.iter() {
+                variants.push(HirVariant { name: v.name, fields: rebase_tys(v.fields, r) })
+            }
+            self.sums.push(
+                SumType {
+                    def_id: s.def_id + r,
+                    name: s.name,
+                    generics: s.generics,
+                    variants: variants,
+                },
+            )
+        }
+    }
+
+    /// std's traits, rebased (`Splice::Traits`).
+    pub fn splice_traits(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        let r = self.rebase_def
+        for t in std.traits.iter() {
+            let mut methods: Vec<TraitMethod> = Vec::new()
+            for m in t.methods.iter() {
+                methods.push(
+                    TraitMethod {
+                        name: m.name,
+                        params: rebase_tys(m.params, r),
+                        ret: rebase_ty(m.ret, r),
+                        has_self: m.has_self,
+                        mut_self: m.mut_self,
+                        generics: m.generics,
+                        bounds: rebase_bounds(m.bounds, r),
+                        default_def: if m.default_def < 0 { -1 } else { m.default_def + r },
+                    },
+                )
+            }
+            let mut assoc: Vec<(String, Int)> = Vec::new()
+            for (n, d) in t.assoc_types.iter() { assoc.push((n, d + r)) }
+            self.traits.push(
+                TraitDef {
+                    def_id: t.def_id + r,
+                    name: t.name,
+                    supertraits: rebase_ids(t.supertraits, r),
+                    methods: methods,
+                    assoc_types: assoc,
+                },
+            )
+        }
+    }
+
+    /// std's methods whose bodies `trait_default` says, their signatures,
+    /// places and receivers (`splice_methods`).
+    pub fn splice_methods(mut self, trait_default: Bool) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        let r = self.rebase_def
+        for id in 0..std.method_locs.len() {
+            let loc = match std.method_locs.at(id) {
+                Some(l) => l
+                None => continue
+            }
+            let is_default = match loc.owner {
+                MethodOwnerTraitDefault => true
+                MethodOwnerImpl => false
+            }
+            if is_default != trait_default { continue }
+            let at = id + r
+            match std.sigs.at(id) {
+                Some(sig) => self.sigs.set(at, Some(rebase_sig(sig, r)))
+                None => ()
+            }
+            self.method_locs.set(
+                at,
+                Some(
+                    MethodLoc {
+                        item_index: loc.item_index + self.rebase_item,
+                        method_index: loc.method_index,
+                        owner: loc.owner,
+                    },
+                ),
+            )
+            if std.selfless.at(id) { self.selfless.set(at, true) }
+            if std.mut_self.at(id) { self.mut_self.set(at, true) }
+        }
+    }
+
+    /// std's impls and their methods (`Splice::Impls`).
+    pub fn splice_impls(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        self.splice_methods(false)
+        let r = self.rebase_def
+        for i in std.impls.iter() {
+            let mut methods: Vec<(String, Int)> = Vec::new()
+            for (n, d) in i.methods.iter() { methods.push((n, d + r)) }
+            let mut bindings: Vec<(Int, Ty)> = Vec::new()
+            for (d, t) in i.assoc_bindings.iter() { bindings.push((d + r, rebase_ty(t, r))) }
+            self.impls.push(
+                ImplInfo {
+                    trait_id: if i.trait_id < 0 { -1 } else { i.trait_id + r },
+                    self_head: rebase_head(i.self_head, r),
+                    self_ty: rebase_ty(i.self_ty, r),
+                    generics: i.generics,
+                    bounds: rebase_bounds(i.bounds, r),
+                    methods: methods,
+                    assoc_bindings: bindings,
+                },
+            )
+        }
+        for s in std.impl_spans.iter() { self.impl_spans.push(s) }
+        for s in std.impl_in_std.iter() { self.impl_in_std.push(s) }
+        for s in std.impl_method_spans.iter() { self.impl_method_spans.push(s) }
+        for s in std.impl_param_names.iter() { self.impl_param_names.push(s) }
+        for item in std.impl_selves.keys().iter() {
+            let s = std.impl_selves.get(item).unwrap()
+            let tid = if s.trait_id < 0 { -1 } else { s.trait_id + r }
+            let _ = self.impl_selves.insert(
+                item + self.rebase_item,
+                ImplSelf { ty: rebase_ty(s.ty, r), trait_id: tid },
+            )
+        }
+    }
+
+    fn splice_signatures(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        let r = self.rebase_def
+        for id in 0..std.sigs.len() {
+            let sig = match std.sigs.at(id) {
+                Some(s) => s
+                None => continue
+            }
+            match self.kind_of(id + r) {
+                DefKindFn(_) => self.sigs.set(id + r, Some(rebase_sig(sig, r)))
+                DefKindConst(_) => self.sigs.set(id + r, Some(rebase_sig(sig, r)))
+                _ => ()
+            }
+        }
+    }
+
+    fn splice_externs(mut self) {
+        let std = match self.std_tables() {
+            Some(t) => t
+            None => return
+        }
+        let r = self.rebase_def
+        for id in 0..std.sigs.len() {
+            let sig = match std.sigs.at(id) {
+                Some(s) => s
+                None => continue
+            }
+            match self.kind_of(id + r) {
+                DefKindExternFn(_, _) => self.sigs.set(id + r, Some(rebase_sig(sig, r)))
+                _ => ()
+            }
+        }
+        for e in std.externs.iter() {
+            self.externs.push(
+                ExternFn {
+                    def_id: e.def_id + r,
+                    symbol: e.symbol,
+                    abi: e.abi,
+                    params: rebase_tys(e.params, r),
+                    ret: rebase_ty(e.ret, r),
+                    span: e.span,
+                },
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rebasing std's tables (`Rebase`)
+// ---------------------------------------------------------------------------
+
+/// `ty` with every definition's id `by` higher (`Rebase::ty`).
+pub fn rebase_ty(ty: Ty, by: Int) -> Ty {
+    match ty {
+        TyFn(params, ret) => TyFn(rebase_tys(params, by), rebase_ty(ret, by))
+        TyFuture(o) => TyFuture(rebase_ty(o, by))
+        TySum(d, args) => TySum(d + by, rebase_tys(args, by))
+        TyRecord(d, args) => TyRecord(d + by, rebase_tys(args, by))
+        TyArray(e) => TyArray(rebase_ty(e, by))
+        TyTuple(es) => TyTuple(rebase_tys(es, by))
+        TyAssoc(on, assoc) => TyAssoc(rebase_ty(on, by), assoc + by)
+        other => other
+    }
+}
+
+/// `rebase_ty` of each of `tys`.
+pub fn rebase_tys(tys: Vec<Ty>, by: Int) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new()
+    for t in tys.iter() { out.push(rebase_ty(t, by)) }
+    out
+}
+
+fn rebase_ids(ids: Vec<Int>, by: Int) -> Vec<Int> {
+    let mut out: Vec<Int> = Vec::new()
+    for id in ids.iter() { out.push(id + by) }
+    out
+}
+
+fn rebase_bounds(bounds: Vec<Vec<Int>>, by: Int) -> Vec<Vec<Int>> {
+    let mut out: Vec<Vec<Int>> = Vec::new()
+    for b in bounds.iter() { out.push(rebase_ids(b, by)) }
+    out
+}
+
+fn rebase_head(h: TyHead, by: Int) -> TyHead {
+    match h {
+        TyHeadSum(d) => TyHeadSum(d + by)
+        TyHeadRecord(d) => TyHeadRecord(d + by)
+        other => other
+    }
+}
+
+fn rebase_sig(sig: FnSig, by: Int) -> FnSig {
+    FnSig {
+        generics: sig.generics,
+        bounds: rebase_bounds(sig.bounds, by),
+        params: rebase_tys(sig.params, by),
+        ret: rebase_ty(sig.ret, by),
+    }
+}
+
+/// `res` with its definition's id `by` higher.
+pub fn shift_res(res: Res, by: Int) -> Res {
+    match res {
+        ResDef(id) => ResDef(id + by)
+        ResVariant(sum, index) => ResVariant(sum + by, index)
+        ResBuiltin(b) => ResBuiltin(b)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// E0900's note for a feature not supported yet.
+pub const MVP_NOTE: String = "the Phase 1 MVP compiler supports a subset of Nova; this feature arrives in a later milestone"
+
+/// Each generic parameter's index by its name, a repeated name its last
+/// (`generic_scope`).
+pub fn generic_scope(generics: Vec<TypeParam>) -> Map<String, Int> {
+    let mut m: Map<String, Int> = Map::new()
+    for i in 0..generics.len() { let _ = m.insert(generics.at(i).name.value, i) }
+    m
+}
+
+/// The scope of a trait body: `Self` at 0 (`self_generic_scope`).
+pub fn self_generic_scope() -> Map<String, Int> {
+    let mut m: Map<String, Int> = Map::new()
+    let _ = m.insert("Self", 0)
+    m
+}
+
+/// A copy of `m`.
+pub fn copy_scope(m: Map<String, Int>) -> Map<String, Int> {
+    let mut out: Map<String, Int> = Map::new()
+    for k in m.keys().iter() { let _ = out.insert(k, m.get(k).unwrap()) }
+    out
+}
+
+/// A copy of `bounds`, each slot copied too, so that adding to one leaves
+/// the other as it was (`clone`).
+pub fn copy_bounds(bounds: Vec<Vec<Int>>) -> Vec<Vec<Int>> {
+    let mut out: Vec<Vec<Int>> = Vec::new()
+    for b in bounds.iter() {
+        let mut slot: Vec<Int> = Vec::new()
+        for id in b.iter() { slot.push(id) }
+        out.push(slot)
+    }
+    out
+}
+
+/// Whether `id` is in `ids`.
+pub fn int_in(ids: Vec<Int>, id: Int) -> Bool {
+    for x in ids.iter() { if x == id { return true } }
+    false
+}
+
+/// Set equality on two bound lists (`same_bound_set`).
+pub fn same_bound_set(a: Vec<Int>, b: Vec<Int>) -> Bool {
+    for d in a.iter() { if !int_in(b, d) { return false } }
+    for d in b.iter() { if !int_in(a, d) { return false } }
+    true
+}
+
+/// Whether some parameter is named `self`, and whether a `mut` one is.
+pub fn self_param(params: Vec<Param>, need_mut: Bool) -> Bool {
+    for p in params.iter() { if p.name.value == "self" && (!need_mut || p.is_mut) { return true } }
+    false
+}
+
+/// A type as a diagnostic shows it, with its definitions' names
+/// (`display_ty`).
+pub fn display_ty(ty: Ty, defs: Definitions) -> String {
+    match ty {
+        TyInt => "Int"
+        TyFloat => "Float"
+        TyBool => "Bool"
+        TyChar => "Char"
+        TyString => "String"
+        TyBytes => "Bytes"
+        TyUnit => "()"
+        TyFn(params, ret) => "fn(${join_tys(params, defs)}) -> ${display_ty(ret, defs)}"
+        TySum(d, args) => named_ty(defs.defs.at(d).name, args, defs)
+        TyRecord(d, args) => named_ty(defs.defs.at(d).name, args, defs)
+        TyArray(e) => "[${display_ty(e, defs)}]"
+        TyTuple(es) => {
+            let mut parts: Vec<String> = Vec::new()
+            for e in es.iter() { parts.push(display_ty(e, defs)) }
+            tuple_text(parts)
+        }
+        TyFuture(o) => "Future<${display_ty(o, defs)}>"
+        TyParam(i) => "T${i}"
+        TyAssoc(on, assoc) => "${display_ty(on, defs)}::${defs.defs.at(assoc).name}"
+        TyVar(v) => "?${v}"
+        TyNever => "!"
+        TyError => "{error}"
+    }
+}
+
+fn join_tys(tys: Vec<Ty>, defs: Definitions) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for t in tys.iter() { parts.push(display_ty(t, defs)) }
+    ", ".join(parts.to_array())
+}
+
+fn named_ty(name: String, args: Vec<Ty>, defs: Definitions) -> String {
+    if args.is_empty() { name } else { "${name}<${join_tys(args, defs)}>" }
+}
+
+/// A tuple type's text from its elements' texts, `(Int,)` for one
+/// (`tuple_text`).
+pub fn tuple_text(elems: Vec<String>) -> String {
+    if elems.len() == 1 { "(${elems.at(0)},)" } else { "(${", ".join(elems.to_array())})" }
+}
+
+/// `display_ty` with type parameter `i` shown as `names[i]`, and an
+/// unsolved variable or an error as `_` (`display_ty_named`).
+pub fn display_ty_named(ty: Ty, defs: Definitions, names: Vec<String>) -> String {
+    match ty {
+        TyFn(
+            params,
+            ret,
+        ) => "fn(${join_named(params, defs, names)}) -> ${display_ty_named(ret, defs, names)}"
+        TySum(d, args) => named_ty_named(defs.defs.at(d).name, args, defs, names)
+        TyRecord(d, args) => named_ty_named(defs.defs.at(d).name, args, defs, names)
+        TyArray(e) => "[${display_ty_named(e, defs, names)}]"
+        TyTuple(es) => {
+            let mut parts: Vec<String> = Vec::new()
+            for e in es.iter() { parts.push(display_ty_named(e, defs, names)) }
+            tuple_text(parts)
+        }
+        TyFuture(o) => "Future<${display_ty_named(o, defs, names)}>"
+        TyParam(i) => {
+            if i >= 0 && i < names.len() && names.at(i) != "" { names.at(i) } else { "T${i}" }
+        }
+        TyAssoc(on, assoc) => "${display_ty_named(on, defs, names)}::${defs.defs.at(assoc).name}"
+        TyVar(_) => "_"
+        TyError => "_"
+        other => display_ty(other, defs)
+    }
+}
+
+fn join_named(tys: Vec<Ty>, defs: Definitions, names: Vec<String>) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for t in tys.iter() { parts.push(display_ty_named(t, defs, names)) }
+    ", ".join(parts.to_array())
+}
+
+fn named_ty_named(name: String, args: Vec<Ty>, defs: Definitions, names: Vec<String>) -> String {
+    if args.is_empty() { name } else { "${name}<${join_named(args, defs, names)}>" }
+}
