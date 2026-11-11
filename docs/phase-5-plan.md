@@ -470,6 +470,45 @@ The largest part, 7,404 code lines; its spec may split it, for example:
 - **5.3b:** traits and associated types, generics and bounds, and async
   signatures.
 
+**Amended 2026-11-06 (5.3a; spec
+`docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
+§1, ADR 0055):** 5.3 is split **by stage**, not by feature, as the user
+decided on 2026-11-06. The split above cannot check one corpus program:
+every program type-checks all of std, std's bodies need the trait tables,
+impl lookup and `Iterator`, and even a user body needs std's typed impls
+(`for`, method calls, `?` on core's `Option`), so its first half would need
+a std-less mode in both compilers and a case set of its own. Item
+collection depends on nothing in bodies, so a split by stage checks all of
+std and every root at each step. The sizes are 9,246 code lines with 585
+inline tests in `nova-typeck` (not 7,404 and 394, which were v0.4.0's),
+and 810 with 30 in `nova-hir`.
+- **5.3a, the items:** passes 2 to 5 of `check_with` (S0's
+  `nova_typeck::check_items` runs passes 1 to 5, pass 1 being the language
+  server's index, which N does not port): the generic-parameter checks,
+  arities, supertraits, records, sums, traits, impls with their checks,
+  signatures, externs, bounds, `convert_ty` and `normalize`, the item
+  diagnostics (16 codes) with their fixes; HIR's types; compared through
+  the hidden `nova check --dump-hir`, items only, with std's item tables
+  built once per process and mode on both sides.
+- **5.3b, the bodies:** inference, expressions, patterns, exhaustiveness,
+  closures and the rest of the 38 codes; the full HIR dump; S0 checks
+  methods in `DefId` order.
+- **5.4's input** is the HIR the dump shows, before the driver's
+  `keep_the_entry_main`.
+
+**Done 2026-11-11 (5.3a, branch `claude/loving-archimedes-frtf5q-53a`, ADR
+0055):** N's
+item stage (`selfhost/src/hir.nova`, `typeck*.nova`, `fixes.nova`,
+`hir_dump.nova`, `selfhost hir`) gives S0's HIR dump byte for byte on
+std's three parts, every corpus root in the three modes, the cases (both
+line endings) and the type fuzzer's 120 inputs. `selfhost.rs` went from
+22.5-23.2 s to 33.8-34.0 s locally; on CI (run 42201484370) to 70.80 s on
+Linux, 86.85 s on macOS and 92.54 s on Windows. The user chose
+(2026-11-06) to run it in a CI job of its own on each system, N linked
+against a release runtime, with no coverage cut: `cargo test --workspace`
+skips it (`test = false`), `cargo test --workspace --test selfhost` runs
+it (ADR 0055 §15).
+
 - **Needs first:** 5.2; tuples and nested patterns throughout.
 - **Gate:**
   - N type-checks all of std and the corpus;

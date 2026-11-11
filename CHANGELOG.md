@@ -19,7 +19,10 @@ self-hosted lexer and the differential (spec
 depth limit (§4; ADR 0052). Phase 5.2a, the self-hosted loader and
 resolver for loose programs and the resolution dump (spec
 `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
-§3; ADR 0053).
+§3; ADR 0053). Phase 5.3a, the self-hosted item collection and the HIR
+dump (spec
+`docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
+§3; ADR 0055).
 
 ### Added
 
@@ -227,6 +230,30 @@ resolver for loose programs and the resolution dump (spec
   each mode and the fuzzer's (ADR 0054). Nothing a user sees changes with
   5.2b: `nova check`, `nova test` and `nova build` give what they gave,
   byte for byte, on every file and package of the repository.
+- **`nova check --dump-hir FILE…` and `--std`, hidden:** what the type
+  checker's item stage built for each program whose root is FILE, after
+  the resolution dump's pipeline: its records, sums, traits, impls, every
+  signature and its externs, by structure and with the resolution dump's
+  ids, then every diagnostic so far, fixes included; `--std` prints std's
+  part once, and `--target wasm` and `--test` as `--dump-resolution` takes
+  them. std's item tables are built once for all the roots. It is absent
+  from `--help`, carries no stability promise and is taken only when
+  `--dump-hir` comes first after `check`, by the resolution dump's own
+  parser (5.3a, ADR 0055).
+- **The self-hosted item collection, in `selfhost/`:** N collects a
+  program's items as `nova-typeck`'s item stage does, function for
+  function: the generic-parameter checks, arities, supertraits, records,
+  sums, traits, impls with their checks, signatures, externs, `convert_ty`
+  and the normalization of associated types, and the 16 item codes in
+  S0's order, word for word, with their import and "did you mean" fixes.
+  `selfhost hir --std DIR FILE…` prints the same dump as `nova check
+  --dump-hir`, and `--std-part` std's; the differential compares them on
+  std's three parts, every corpus root natively, for the WASM target and
+  under test mode, the type checker's cases and a type-level fuzzer's
+  programs. A change to how items are collected now changes both
+  compilers in one pull request (ADR 0055). Nothing a user sees changes
+  with 5.3a: `nova check`, `nova test` and `nova build` give what they
+  gave, byte for byte, on every file of the repository.
 
 ### Changed
 
