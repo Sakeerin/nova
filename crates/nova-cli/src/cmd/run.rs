@@ -478,7 +478,8 @@ pub fn check(cmd: CheckCmd) -> Result<()> {
     }
 }
 
-/// `nova check --dump-resolution …` (spec
+/// `nova check --dump-resolution …` and, with this parser's arguments,
+/// `nova check --dump-hir …` (5.3a, ADR 0055; [`DumpCmd`]) (spec
 /// `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
 /// §3.4, ADR 0053 §1): the resolution dump, for the self-hosted resolver's
 /// differential test. Hidden, with no stability promise. It is taken only
@@ -520,63 +521,129 @@ pub struct DumpResolutionCmd {
     files: Vec<PathBuf>,
 }
 
-impl DumpResolutionCmd {
-    /// The hidden command, parsed from `args` (a process's arguments,
-    /// `argv[0]` first), when they are `check --dump-resolution` and more;
-    /// `None` for every other command line, which the ordinary parser
-    /// takes. A misuse after the flag exits as clap's errors do.
-    pub fn from_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Self> {
-        let mut args = args.into_iter().skip(1);
-        if args.next()? != "check" || args.next()? != "--dump-resolution" {
-            return None;
+/// Which hidden dump a command line asks for: the resolution dump (5.2,
+/// ADR 0053) or the HIR dump (5.3a, ADR 0055), each with
+/// [`DumpResolutionCmd`]'s arguments and refusals.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum DumpKind {
+    Resolution,
+    Hir,
+}
+
+impl DumpKind {
+    /// The flag, as the form's errors name it.
+    fn flag(self) -> &'static str {
+        match self {
+            DumpKind::Resolution => "--dump-resolution",
+            DumpKind::Hir => "--dump-hir",
         }
-        Some(<Self as clap::Parser>::parse_from(args))
     }
 }
 
-/// Run [`DumpResolutionCmd`]: with `--std`, std's part for the target;
-/// otherwise, for each file, `== FILE` (the path as given), then its
-/// program's part, or `IOERR` and the error's kind for a root that cannot
-/// be read, after which the rest are dumped and the exit code is 2, as
-/// `parse --dump-ast` does; with `--test`, each as `nova test` resolves
-/// it. With `--test` and `--target wasm`, with neither a file nor `--std`,
-/// or with both, it prints one line to stderr, nothing to stdout, and
-/// exits 2, as N does.
-pub fn dump_resolution(cmd: DumpResolutionCmd) -> Result<()> {
-    let code = dump_resolution_code(&cmd)?;
+/// A hidden dump's command line: which dump, and its arguments.
+pub struct DumpCmd {
+    kind: DumpKind,
+    args: DumpResolutionCmd,
+}
+
+impl DumpCmd {
+    /// The hidden command, parsed from `args` (a process's arguments,
+    /// `argv[0]` first), when they are `check --dump-resolution` or `check
+    /// --dump-hir` and more; `None` for every other command line, which the
+    /// ordinary parser takes. A misuse after the flag exits as clap's
+    /// errors do, under the usage `nova check --dump-resolution` or `nova
+    /// check --dump-hir`.
+    pub fn from_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Self> {
+        let mut args = args.into_iter().skip(1);
+        if args.next()? != "check" {
+            return None;
+        }
+        let flag = args.next()?;
+        if flag == "--dump-resolution" {
+            return Some(DumpCmd {
+                kind: DumpKind::Resolution,
+                args: <DumpResolutionCmd as clap::Parser>::parse_from(args),
+            });
+        }
+        if flag != "--dump-hir" {
+            return None;
+        }
+        let name = "nova check --dump-hir";
+        let matches = <DumpResolutionCmd as clap::CommandFactory>::command()
+            .name(name)
+            .bin_name(name)
+            .get_matches_from(args);
+        let args = <DumpResolutionCmd as clap::FromArgMatches>::from_arg_matches(&matches)
+            .unwrap_or_else(|e| e.exit());
+        Some(DumpCmd {
+            kind: DumpKind::Hir,
+            args,
+        })
+    }
+}
+
+/// Run [`DumpCmd`]: with `--std`, std's part for the target; otherwise, for
+/// each file, `== FILE` (the path as given), then its program's part, or
+/// `IOERR` and the error's kind for a root that cannot be read, after
+/// which the rest are dumped and the exit code is 2, as `parse --dump-ast`
+/// does; with `--test`, each as `nova test` resolves and checks it. With
+/// `--test` and `--target wasm`, with neither a file nor `--std`, or with
+/// both, it prints one line to stderr, nothing to stdout, and exits 2, as
+/// N does.
+pub fn dump(cmd: DumpCmd) -> Result<()> {
+    let code = dump_code(&cmd)?;
     if code != 0 {
         std::process::exit(code);
     }
     Ok(())
 }
 
-fn dump_resolution_code(cmd: &DumpResolutionCmd) -> Result<i32> {
-    let target: nova_driver::Target = cmd.target.into();
+/// One program's part of a dump, from its root.
+type DumpOne = dyn Fn(&Path) -> std::io::Result<String>;
+
+fn dump_code(cmd: &DumpCmd) -> Result<i32> {
+    let flag = cmd.kind.flag();
+    let args = &cmd.args;
+    let target: nova_driver::Target = args.target.into();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    if cmd.test && target == nova_driver::Target::Wasm {
-        eprintln!("error: --dump-resolution --test is native only, as nova test is");
+    if args.test && target == nova_driver::Target::Wasm {
+        eprintln!("error: {flag} --test is native only, as nova test is");
         return Ok(2);
     }
-    if cmd.std {
-        if !cmd.files.is_empty() {
-            eprintln!("error: --dump-resolution --std takes no FILE");
+    if args.std {
+        if !args.files.is_empty() {
+            eprintln!("error: {flag} --std takes no FILE");
             return Ok(2);
         }
-        out.write_all(nova_driver::dump_std_resolution(target, cmd.test).as_bytes())?;
+        let std = match cmd.kind {
+            DumpKind::Resolution => nova_driver::dump_std_resolution(target, args.test),
+            DumpKind::Hir => nova_driver::dump_std_hir(target, args.test),
+        };
+        out.write_all(std.as_bytes())?;
         out.flush()?;
         return Ok(0);
     }
-    if cmd.files.is_empty() {
-        eprintln!("error: --dump-resolution needs a FILE, or --std");
+    if args.files.is_empty() {
+        eprintln!("error: {flag} needs a FILE, or --std");
         return Ok(2);
     }
-    // std is parsed once for every program, as N parses it.
-    let dumps = nova_driver::ResolutionDumps::new(target, cmd.test);
+    // std is parsed once for every program, as N parses it, and resolved
+    // and its items collected once.
+    let dumps: Box<DumpOne> = match cmd.kind {
+        DumpKind::Resolution => {
+            let dumps = nova_driver::ResolutionDumps::new(target, args.test);
+            Box::new(move |file| dumps.dump(file))
+        }
+        DumpKind::Hir => {
+            let dumps = nova_driver::HirDumps::new(target, args.test);
+            Box::new(move |file| dumps.dump(file))
+        }
+    };
     let mut code = 0;
-    for file in &cmd.files {
+    for file in &args.files {
         writeln!(out, "== {}", file.display())?;
-        match dumps.dump(file) {
+        match dumps(file) {
             Ok(dump) => out.write_all(dump.as_bytes())?,
             Err(e) => {
                 writeln!(out, "IOERR {}", crate::cmd::parse::io_kind_name(e.kind()))?;

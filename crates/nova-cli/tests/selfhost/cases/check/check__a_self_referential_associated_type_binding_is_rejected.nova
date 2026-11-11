@@ -1,0 +1,6 @@
+trait It { type Item
+ fn get(self) -> Self::Item }
+record W { v: Int }
+impl It for W { type Item = Self::Item
+fn get(self) -> Self::Item { 1 } }
+fn main() { }

@@ -1,0 +1,6 @@
+impl [Int] {
+    fn len(self) -> Int { 99 }
+}
+fn main() {
+    println("${[1, 2, 3].len()}")
+}

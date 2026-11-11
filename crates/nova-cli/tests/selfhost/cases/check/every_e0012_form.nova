@@ -1,0 +1,10 @@
+record Pair<T> { a: T, b: T }
+trait It {
+    type Item
+}
+fn bare(p: Pair) {}
+fn extra(p: Pair<Int, Int>) {}
+fn param<T>(x: T<Int>) {}
+fn projected<T: It>(x: T::Item<Int>) {}
+fn prim(x: Int<Bool>) {}
+fn future(x: Future<Int, Bool>) {}

@@ -1,0 +1,2 @@
+fn f(x: Future<Int, Bool>) -> Int { 1 }
+fn main() {}

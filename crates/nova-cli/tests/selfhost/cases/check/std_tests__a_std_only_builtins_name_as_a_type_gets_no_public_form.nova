@@ -1,0 +1,2 @@
+fn f(x: str_as_bytes) {}
+fn main() {}

@@ -1,0 +1,4 @@
+trait Mapper { fn remap(self) -> Int }
+record Box<T> { value: T }
+impl<T> Mapper for Box<T> { fn remap<U>(self, x: U) -> Int { 0 } }
+fn main() { }

@@ -1,0 +1,3 @@
+import shapes
+record Meter { n: Int }
+impl Meter for Int {}

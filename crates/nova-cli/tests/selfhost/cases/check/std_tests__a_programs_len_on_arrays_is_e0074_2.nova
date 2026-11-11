@@ -1,0 +1,4 @@
+impl<T> [T] {
+    fn len(self, n: Int) -> Int { n }
+}
+fn main() {}

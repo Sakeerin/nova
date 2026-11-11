@@ -1,0 +1,4 @@
+trait T { fn m(self) -> Int }
+record C { v: Int }
+impl T for C { async fn m(self) -> Int { self.v } }
+fn main() {}

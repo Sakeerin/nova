@@ -1,0 +1,2 @@
+pub trait Meter {}
+pub record Meter { n: Int }

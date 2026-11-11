@@ -1,0 +1,2 @@
+trait B: Nope { fn b(self) -> Int }
+fn main() { }

@@ -1,0 +1,4 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+record M<I, U> { it: I, f: fn(I::Item) -> U }
+fn main() { }

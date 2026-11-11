@@ -1,0 +1,4 @@
+trait Mapper { fn remap<U>(self, f: fn(Int) -> U) -> U }
+record Thing { v: Int }
+impl Mapper for Thing { fn remap(self, f: fn(Int) -> Int) -> Int { f(self.v) } }
+fn main() { }

@@ -1,0 +1,7 @@
+trait It { type Item
+ fn get(self) -> Int }
+record W { v: Int }
+impl It for W { type Item = Int
+ fn get(self) -> Int { 1 }
+ fn other(self) -> Self::Nope { panic("x") } }
+fn main() { }

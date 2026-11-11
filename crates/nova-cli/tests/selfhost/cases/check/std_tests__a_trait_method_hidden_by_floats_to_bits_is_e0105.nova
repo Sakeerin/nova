@@ -1,0 +1,7 @@
+trait Bits {
+    fn to_bits(self) -> Int
+}
+impl Bits for Float {
+    fn to_bits(self) -> Int { 42 }
+}
+fn main() {}

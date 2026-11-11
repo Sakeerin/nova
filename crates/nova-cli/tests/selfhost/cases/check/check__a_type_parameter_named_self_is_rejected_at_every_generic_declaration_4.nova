@@ -1,0 +1,2 @@
+trait Q<Self> { fn q(self) -> Int }
+fn main() { }

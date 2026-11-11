@@ -1,0 +1,136 @@
+record Pair<A, B> { a: A
+ b: B }
+trait Chain {
+ type A0
+ type A1
+ type A2
+ type A3
+ type A4
+ type A5
+ type A6
+ type A7
+ type A8
+ type A9
+ type A10
+ type A11
+ type A12
+ type A13
+ type A14
+ type A15
+ type A16
+ type A17
+ type A18
+ type A19
+ type A20
+ type A21
+ type A22
+ type A23
+ type A24
+ type A25
+ type A26
+ type A27
+ type A28
+ type A29
+ type A30
+ type A31
+ type A32
+ type A33
+ type A34
+ type A35
+ type A36
+ type A37
+ type A38
+ type A39
+ type A40
+ type A41
+ type A42
+ type A43
+ type A44
+ type A45
+ type A46
+ type A47
+ type A48
+ type A49
+ type A50
+ type A51
+ type A52
+ type A53
+ type A54
+ type A55
+ type A56
+ type A57
+ type A58
+ type A59
+ type A60
+ type A61
+ type A62
+ type A63
+ fn put(self, y: Self::A0) -> Int }
+record W { v: Int }
+impl Chain for W {
+ type A0 = Self::A1
+ type A1 = Self::A2
+ type A2 = Self::A3
+ type A3 = Self::A4
+ type A4 = Self::A5
+ type A5 = Self::A6
+ type A6 = Self::A7
+ type A7 = Self::A8
+ type A8 = Self::A9
+ type A9 = Self::A10
+ type A10 = Self::A11
+ type A11 = Self::A12
+ type A12 = Self::A13
+ type A13 = Self::A14
+ type A14 = Self::A15
+ type A15 = Self::A16
+ type A16 = Self::A17
+ type A17 = Self::A18
+ type A18 = Self::A19
+ type A19 = Self::A20
+ type A20 = Self::A21
+ type A21 = Self::A22
+ type A22 = Self::A23
+ type A23 = Self::A24
+ type A24 = Self::A25
+ type A25 = Self::A26
+ type A26 = Self::A27
+ type A27 = Self::A28
+ type A28 = Self::A29
+ type A29 = Self::A30
+ type A30 = Self::A31
+ type A31 = Self::A32
+ type A32 = Self::A33
+ type A33 = Self::A34
+ type A34 = Self::A35
+ type A35 = Self::A36
+ type A36 = Self::A37
+ type A37 = Self::A38
+ type A38 = Self::A39
+ type A39 = Self::A40
+ type A40 = Self::A41
+ type A41 = Self::A42
+ type A42 = Self::A43
+ type A43 = Self::A44
+ type A44 = Self::A45
+ type A45 = Self::A46
+ type A46 = Self::A47
+ type A47 = Self::A48
+ type A48 = Self::A49
+ type A49 = Self::A50
+ type A50 = Self::A51
+ type A51 = Self::A52
+ type A52 = Self::A53
+ type A53 = Self::A54
+ type A54 = Self::A55
+ type A55 = Self::A56
+ type A56 = Self::A57
+ type A57 = Self::A58
+ type A58 = Self::A59
+ type A59 = Self::A60
+ type A60 = Self::A61
+ type A61 = Self::A62
+ type A62 = Self::A63
+ type A63 = Int
+fn put(self, y: Self::A0) -> Int { 1 } }
+fn main() { }

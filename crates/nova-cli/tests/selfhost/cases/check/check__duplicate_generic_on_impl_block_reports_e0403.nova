@@ -1,0 +1,3 @@
+record Box<T> { value: T }
+impl<T, T> Box<T> { fn get(self) -> Int { 0 } }
+fn main() { }

@@ -1,0 +1,2 @@
+fn f(x: some_mod::Thing) -> Int { 1 }
+fn main() { }

@@ -1,0 +1,10 @@
+trait Zero { fn zero() -> Self }
+trait Widen { fn widen(self, k: Int) -> Int }
+impl Zero for Int { fn zero() -> Int { 0 } }
+impl Widen for Int { fn widen(self, k: Int) -> Int { k } }
+fn make<T: Zero>() -> T { T::zero() }
+fn main() {
+let n: Int = make()
+let m: Int = Int::zero()
+println("${n.widen(1)}${m}")
+}

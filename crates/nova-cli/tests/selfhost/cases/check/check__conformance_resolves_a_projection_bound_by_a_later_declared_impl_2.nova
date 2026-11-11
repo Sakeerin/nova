@@ -1,0 +1,6 @@
+trait Base { type Elem }
+trait Ext: Base { fn peek(self) -> Self::Elem }
+record W { v: Int }
+impl Base for W { type Elem = Int }
+impl Ext for W { fn peek(self) -> Int { self.v } }
+fn main() { }

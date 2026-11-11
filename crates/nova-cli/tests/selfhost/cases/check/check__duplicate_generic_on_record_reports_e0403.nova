@@ -1,0 +1,2 @@
+record R<T, T> { a: T }
+fn main() { }

@@ -1,0 +1,6 @@
+trait A { fn a(self) -> Int }
+trait B: A { fn b(self) -> Int }
+record R { v: Int }
+impl A for R { fn a(self) -> Int { 1 } }
+impl B for R { fn b(self) -> Int { 2 } }
+fn main() { }

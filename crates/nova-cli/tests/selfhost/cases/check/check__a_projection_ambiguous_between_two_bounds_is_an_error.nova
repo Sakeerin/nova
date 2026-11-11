@@ -1,0 +1,6 @@
+trait A { type Item
+ fn a(self) -> Int }
+trait B { type Item
+ fn b(self) -> Int }
+fn f<I: A + B>(x: I) -> I::Item { panic("unreachable") }
+fn main() { }

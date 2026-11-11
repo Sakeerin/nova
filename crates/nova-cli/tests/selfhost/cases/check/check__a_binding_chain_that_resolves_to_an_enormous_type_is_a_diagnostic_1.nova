@@ -1,0 +1,42 @@
+record Pair<A, B> { a: A
+ b: B }
+trait Chain {
+ type A0
+ type A1
+ type A2
+ type A3
+ type A4
+ type A5
+ type A6
+ type A7
+ type A8
+ type A9
+ type A10
+ type A11
+ type A12
+ type A13
+ type A14
+ type A15
+ type A16
+ fn put(self, y: Self::A0) -> Int }
+record W { v: Int }
+impl Chain for W {
+ type A0 = Pair<Self::A1, Self::A1>
+ type A1 = Pair<Self::A2, Self::A2>
+ type A2 = Pair<Self::A3, Self::A3>
+ type A3 = Pair<Self::A4, Self::A4>
+ type A4 = Pair<Self::A5, Self::A5>
+ type A5 = Pair<Self::A6, Self::A6>
+ type A6 = Pair<Self::A7, Self::A7>
+ type A7 = Pair<Self::A8, Self::A8>
+ type A8 = Pair<Self::A9, Self::A9>
+ type A9 = Pair<Self::A10, Self::A10>
+ type A10 = Pair<Self::A11, Self::A11>
+ type A11 = Pair<Self::A12, Self::A12>
+ type A12 = Pair<Self::A13, Self::A13>
+ type A13 = Pair<Self::A14, Self::A14>
+ type A14 = Pair<Self::A15, Self::A15>
+ type A15 = Pair<Self::A16, Self::A16>
+ type A16 = Int
+fn put(self, y: Self::A0) -> Int { 1 } }
+fn main() { }

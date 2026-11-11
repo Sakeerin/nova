@@ -1,0 +1,5 @@
+trait A { type Item
+ fn a(self) -> Int }
+trait B { type Item
+ fn b(self) -> Int }
+fn main() { }
