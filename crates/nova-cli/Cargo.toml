@@ -19,6 +19,16 @@ path = "src/main.rs"
 # workspace's only benchmark is `nova-lexer/benches/lex.rs`.
 bench = false
 
+# The self-hosting differential (ADR 0051 to 0055) runs in a CI job of its
+# own on each system, N linked against a release runtime, and not in the
+# Test job (ADR 0055 §15). `test = false` keeps it out of
+# `cargo test --workspace`; `cargo test --workspace --test selfhost` runs it,
+# here as in that job. Its source stays where cargo finds it.
+[[test]]
+name = "selfhost"
+path = "tests/selfhost.rs"
+test = false
+
 [dependencies]
 nova-diagnostics = { workspace = true }
 nova-lexer = { workspace = true }

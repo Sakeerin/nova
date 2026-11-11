@@ -127,6 +127,29 @@ pub fn dump_std(
     d.out.to_string()
 }
 
+/// Where std begins in `defs`, as `(StdStart …)` prints it: the first std
+/// module, the first std definition and the first item of a std module
+/// (`std_start`). The HIR dump repeats it (5.3a, ADR 0055).
+pub fn std_start_of(defs: Definitions) -> (Int, Int, Int) {
+    let std_module = defs.std_start
+    let std_item = first_item_of(defs, std_module)
+    (std_module, first_std_def(defs, std_item), std_item)
+}
+
+/// `diagnostics` as `(Diagnostics …)` prints them, each on lines of its
+/// own (`write_diagnostics`): the HIR dump prints them so too (5.3a, ADR
+/// 0055).
+pub fn diagnostics_text(diagnostics: Vec<Diagnostic>) -> String {
+    let mut d = ResDump {
+        out: StringBuilder::new(),
+        std_def: 9223372036854775807,
+        fresh: true,
+        variants: BUILTIN_VARIANTS,
+    }
+    d.diagnostics(diagnostics)
+    d.out.to_string()
+}
+
 // The index of the first merged item of a module from `std_module` on.
 fn first_item_of(defs: Definitions, std_module: Int) -> Int {
     let mut i = 0
