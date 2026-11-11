@@ -1,0 +1,7 @@
+import ui
+trait Reads: Read {}
+impl Write for Int {}
+fn bounded<T: Read>(x: T) {}
+fn clause<T>(x: T) where T: Write {}
+fn typed(f: File) -> IoError { panic("no") }
+fn main() {}

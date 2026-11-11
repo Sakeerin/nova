@@ -1,0 +1,11 @@
+trait Size {
+    fn byte_len(self) -> Int
+}
+impl Size for String {
+    fn byte_len(self) -> Int { self.len() }
+}
+trait Codes {
+    fn to_int(self) -> Int { 1000 }
+}
+impl Codes for Char {}
+fn main() {}

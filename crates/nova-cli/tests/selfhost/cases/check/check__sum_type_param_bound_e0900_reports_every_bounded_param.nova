@@ -1,0 +1,4 @@
+trait A { fn a(self) -> Int }
+trait B { fn b(self) -> Int }
+type Two<K: A, V: B> = | X(K) | Y(V)
+fn main() { }

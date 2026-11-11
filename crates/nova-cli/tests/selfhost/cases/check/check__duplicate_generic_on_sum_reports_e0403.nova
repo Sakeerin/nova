@@ -1,0 +1,2 @@
+type E<T, T> = | A(T) | B
+fn main() { }

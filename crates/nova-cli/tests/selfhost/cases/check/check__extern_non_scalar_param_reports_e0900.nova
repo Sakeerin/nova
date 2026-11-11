@@ -1,0 +1,2 @@
+extern "C" { fn puts(s: String) -> Int }
+fn main() { }

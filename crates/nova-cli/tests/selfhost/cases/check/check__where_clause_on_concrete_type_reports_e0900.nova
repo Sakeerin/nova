@@ -1,0 +1,3 @@
+trait Show { fn show(self) -> String }
+fn f<T>(x: T) -> Int where Int: Show { 0 }
+fn main() { }

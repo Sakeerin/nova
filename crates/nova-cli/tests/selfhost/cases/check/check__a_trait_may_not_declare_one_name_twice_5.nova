@@ -1,0 +1,9 @@
+trait It { type A
+ type A
+ type B
+fn g(self) -> Self::B }
+record W { v: Int }
+impl It for W { type A = Int
+ type B = Bool
+fn g(self) -> Bool { true } }
+fn main() { }

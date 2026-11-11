@@ -1,0 +1,6 @@
+trait Other { type Item
+ fn o(self) -> Int }
+trait Keeper { type Item
+ fn get(self) -> Int }
+fn first<I: Keeper>(x: I) -> I::Item { panic("unreachable") }
+fn main() { }

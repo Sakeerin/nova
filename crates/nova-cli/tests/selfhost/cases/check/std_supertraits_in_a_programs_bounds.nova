@@ -1,0 +1,4 @@
+record Ranked<T: Ord> { x: T }
+fn rank<T: Ord + Hash>(x: T) -> Bool { true }
+trait Graded: Ord {}
+fn grade<T: Graded>(x: T) -> Int { 1 }

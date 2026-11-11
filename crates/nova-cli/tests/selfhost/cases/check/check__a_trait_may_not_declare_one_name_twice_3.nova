@@ -1,0 +1,5 @@
+trait It { fn g(self) -> Int
+ fn g() -> Int }
+record W { v: Int }
+impl It for W { fn g(self) -> Int { 1 } }
+fn main() { }

@@ -1,0 +1,7 @@
+trait Top {
+    fn at(self) -> Int
+}
+impl Top for Vec<Int> {
+    fn at(self) -> Int { 0 }
+}
+fn main() {}

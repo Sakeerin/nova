@@ -1,0 +1,4 @@
+extern "C" { fn sqrt(x: Float) -> Float
+ fn llabs(x: Int) -> Int }
+fn main() { let r = sqrt(2.0)
+ println("${r}") }

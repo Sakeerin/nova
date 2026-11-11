@@ -1,0 +1,2 @@
+record W<Self> { v: Self }
+fn main() { }

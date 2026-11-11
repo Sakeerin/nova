@@ -1,0 +1,2 @@
+extern "stdcall" { fn foo() -> Int }
+fn main() { }

@@ -1,0 +1,5 @@
+record Box<T> { value: T }
+trait Kind { fn kind(self) -> String }
+impl<T> Kind for Box<T> { fn kind(self) -> String { "g" } }
+impl Kind for Box<Int> { fn kind(self) -> String { "i" } }
+fn main() { }

@@ -1,0 +1,7 @@
+trait A { fn a(self) -> Int }
+trait B: A + A { fn b(self) -> Int }
+record R { v: Int }
+impl A for R { fn a(self) -> Int { 1 } }
+impl B for R { fn b(self) -> Int { 2 } }
+fn only_a<T: B>(x: T) -> Int { x.a() }
+fn main() { println("${only_a(R { v: 0 })}") }

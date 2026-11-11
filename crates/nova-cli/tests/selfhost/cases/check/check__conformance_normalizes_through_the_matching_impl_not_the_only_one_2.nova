@@ -1,0 +1,9 @@
+trait It { type Item
+ fn peek(self) -> Self::Item }
+record W<T> { v: T }
+record K<T> { k: T }
+impl<T> It for W<T> { type Item = T
+ fn peek(self) -> [T] { [self.v] } }
+impl<T> It for K<T> { type Item = [T]
+ fn peek(self) -> T { self.k } }
+fn main() { }

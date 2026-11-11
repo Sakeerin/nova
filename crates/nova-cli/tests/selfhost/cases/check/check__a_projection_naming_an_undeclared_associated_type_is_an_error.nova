@@ -1,0 +1,4 @@
+trait It { type Item
+ fn get(self) -> Int }
+fn f<I: It>(x: I) -> I::Nope { panic("unreachable") }
+fn main() { }

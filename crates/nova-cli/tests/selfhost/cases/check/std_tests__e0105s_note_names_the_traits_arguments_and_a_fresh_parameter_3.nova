@@ -1,0 +1,7 @@
+trait Mk {
+    fn from_array(a: [Int]) -> Self
+}
+impl<T> Mk for Vec<T> {
+    fn from_array(a: [Int]) -> Vec<T> { Vec::new() }
+}
+fn main() {}

@@ -1,0 +1,4 @@
+impl Display for [Int] {
+    fn fmt(self) -> String { "a" }
+}
+fn main() {}

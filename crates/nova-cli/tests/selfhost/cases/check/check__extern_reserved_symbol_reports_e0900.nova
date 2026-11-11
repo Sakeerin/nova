@@ -1,0 +1,2 @@
+extern "C" { fn nova_rt_alloc(x: Int) -> Int }
+fn main() { }

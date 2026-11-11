@@ -1,0 +1,6 @@
+fn main() {
+let mut s = Set::new()
+println("${s.insert(1)} ${s.insert(1)}")
+println("${s.len()} ${s.contains(1)} ${s.contains(2)}")
+println("${s.remove(1)} ${s.len()}")
+}

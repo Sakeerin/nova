@@ -1,0 +1,4 @@
+trait Show { fn show(self) -> String }
+impl Show for (Int, Int) { fn show(self) -> String { "p" } }
+impl (Int, Bool) { fn f(self) -> Int { 1 } }
+fn main() {}

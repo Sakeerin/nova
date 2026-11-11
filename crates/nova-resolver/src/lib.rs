@@ -2336,11 +2336,13 @@ pub fn resolve_program_with_std(
 pub struct SharedStd {
     target: CompileTarget,
     std: ParsedStd,
-    /// Each std module's exports, its definitions numbered from 0.
-    exports: Vec<Exports>,
+    /// The resolution of a program of no module of its own: std's
+    /// definitions, scopes, items and exports, numbered from 0, which the
+    /// type checker's shared path reads too (5.3a,
+    /// [`resolve_program_with_shared_std_for_check`]).
+    alone: ProgramResolution,
     /// [`std_globbed_variants`] of std.
     variants: FxHashMap<String, String>,
-    missing: FxHashMap<String, &'static str>,
     /// Whether resolving std gave no diagnostic of its own, beyond parsing
     /// it, and found no `@test` function: a diagnostic would come between
     /// a program's, and a test would be listed with a program's, which the
@@ -2353,6 +2355,18 @@ impl SharedStd {
     /// std as parsed, which [`resolve_program_with_std`] takes.
     pub fn parsed(&self) -> &ParsedStd {
         &self.std
+    }
+
+    /// The resolution of a program of no module of its own, from which
+    /// std's item tables are built once (5.3a).
+    pub fn alone(&self) -> &ProgramResolution {
+        &self.alone
+    }
+
+    /// Whether a program reads std resolved once: resolving std gave no
+    /// diagnostic of its own and found no `@test` function.
+    pub fn shareable(&self) -> bool {
+        self.shareable
     }
 
     /// `std`, parsed for `target`, resolved once.
@@ -2371,9 +2385,8 @@ impl SharedStd {
         let shareable = alone.diagnostics.len() == std.diagnostics.len() && alone.tests.is_empty();
         SharedStd {
             target,
-            exports: alone.definitions.exports,
+            alone,
             variants,
-            missing: alone.definitions.missing,
             shareable,
             std,
         }
@@ -2461,7 +2474,14 @@ pub fn resolve_program_with_shared_std(
     }
     // std's definitions come after the user's.
     let offset = definitions.defs.len() as u32;
-    exports.extend(shared.exports.iter().map(|e| e.rebased(offset)));
+    exports.extend(
+        shared
+            .alone
+            .definitions
+            .exports
+            .iter()
+            .map(|e| e.rebased(offset)),
+    );
     if target == CompileTarget::Wasm {
         for m in &all[..std_start] {
             for item in &m.file.items {
@@ -2540,7 +2560,7 @@ pub fn resolve_program_with_shared_std(
     definitions.std_start = std_start;
     definitions.exports = exports;
     definitions.target = target;
-    definitions.missing = shared.missing.clone();
+    definitions.missing = shared.alone.definitions.missing.clone();
     ProgramResolution {
         file: File {
             items: merged,
@@ -2553,6 +2573,121 @@ pub fn resolve_program_with_shared_std(
         diagnostics,
         tests,
         imports,
+    }
+}
+
+/// [`resolve_program_with_shared_std`] for the type checker's shared path
+/// (5.3a, the hidden HIR dump alone): std's definitions, module scopes and
+/// items' modules follow the program's, rebased past them, as the full
+/// resolution numbers them, so the type checker can read std's
+/// definitions; std's items are not in `file`, since std's item tables
+/// are shared too (`nova_typeck::check_items_shared`). A program resolved
+/// in full, because std's gave a diagnostic or holds a `@test` function,
+/// is returned as [`resolve_program_with_std`] gives it.
+pub fn resolve_program_with_shared_std_for_check(
+    modules: &[ModuleSource],
+    shared: &SharedStd,
+) -> ProgramResolution {
+    let mut resolved = resolve_program_with_shared_std(modules, shared);
+    if !shared.shareable {
+        return resolved;
+    }
+    let defs = &mut resolved.definitions;
+    let def_offset = defs.defs.len() as u32;
+    let item_offset = resolved.file.items.len();
+    let module_offset = defs.std_start as u32;
+    let std = &shared.alone.definitions;
+    defs.defs
+        .extend(std.defs.iter().map(|d| d.rebased(def_offset, item_offset)));
+    defs.modules
+        .extend(std.modules.iter().map(|m| m.rebased(def_offset)));
+    defs.item_module
+        .extend(std.item_module.iter().map(|m| m + module_offset));
+    resolved
+}
+
+impl Def {
+    /// This definition with every definition's id `def` higher and every
+    /// item's index `item` higher, as std's are in a program whose own come
+    /// first.
+    fn rebased(&self, def: u32, item: usize) -> Def {
+        let kind = match &self.kind {
+            DefKind::Fn { item_index } => DefKind::Fn {
+                item_index: item_index + item,
+            },
+            DefKind::Sum {
+                item_index,
+                variants,
+            } => DefKind::Sum {
+                item_index: item_index + item,
+                variants: variants.clone(),
+            },
+            DefKind::Record { item_index } => DefKind::Record {
+                item_index: item_index + item,
+            },
+            DefKind::Const { item_index } => DefKind::Const {
+                item_index: item_index + item,
+            },
+            DefKind::Trait { item_index } => DefKind::Trait {
+                item_index: item_index + item,
+            },
+            DefKind::Method {
+                item_index,
+                method_index,
+                owner,
+            } => DefKind::Method {
+                item_index: item_index + item,
+                method_index: *method_index,
+                owner: *owner,
+            },
+            DefKind::ExternFn {
+                item_index,
+                fn_index,
+            } => DefKind::ExternFn {
+                item_index: item_index + item,
+                fn_index: *fn_index,
+            },
+            DefKind::AssocType { trait_def } => DefKind::AssocType {
+                trait_def: DefId(trait_def.0 + def),
+            },
+        };
+        Def {
+            name: self.name.clone(),
+            span: self.span,
+            kind,
+        }
+    }
+}
+
+impl ModuleScope {
+    /// This scope with every definition's id `offset` higher.
+    fn rebased(&self, offset: u32) -> ModuleScope {
+        let def = |id: DefId| DefId(id.0 + offset);
+        ModuleScope {
+            name: self.name.clone(),
+            values: self
+                .values
+                .iter()
+                .map(|(k, r)| {
+                    let r = match *r {
+                        Res::Def(id) => Res::Def(def(id)),
+                        Res::Variant(sum, index) => Res::Variant(def(sum), index),
+                        Res::Builtin(b) => Res::Builtin(b),
+                    };
+                    (k.clone(), r)
+                })
+                .collect(),
+            types: self
+                .types
+                .iter()
+                .map(|(k, id)| (k.clone(), def(*id)))
+                .collect(),
+            traits: self
+                .traits
+                .iter()
+                .map(|(k, id)| (k.clone(), def(*id)))
+                .collect(),
+        }
     }
 }
 
@@ -4989,5 +5124,44 @@ mod tests {
             .map(|d| d.message.as_str())
             .collect();
         assert_eq!(messages, ["variant `Ok` hides std's `Result::Ok`"]);
+    }
+
+    /// The shared path for the type checker (5.3a, ADR 0055 §4) gives a
+    /// program std's definitions, module scopes and items' modules rebased
+    /// past its own, numbered as the full path numbers them, though the item
+    /// passes read only part of them (a scope's values are the bodies',
+    /// 5.3b's): every definition, every scope's names and every item's
+    /// module are the full path's.
+    #[test]
+    fn std_shared_for_check_defines_what_the_full_path_does() {
+        fn scope(m: &ModuleScope) -> String {
+            let mut values: Vec<_> = m.values.iter().collect();
+            values.sort_by(|a, b| a.0.cmp(b.0));
+            let mut types: Vec<_> = m.types.iter().collect();
+            types.sort();
+            let mut traits: Vec<_> = m.traits.iter().collect();
+            traits.sort();
+            format!("{} {values:?} {types:?} {traits:?}", m.name)
+        }
+        let std = || {
+            let ids: Vec<FileId> = CompileTarget::Native
+                .std_modules()
+                .iter()
+                .map(|_| FileId::DUMMY)
+                .collect();
+            parse_std(CompileTarget::Native, &ids, None)
+        };
+        let shared = SharedStd::new(CompileTarget::Native, std());
+        assert!(shared.shareable());
+        let main =
+            parse_file("type Shape = | Dot | Line(Int)\nrecord P<T> { x: T }\nfn main() {}\n");
+        let sources = [ModuleSource::new("main", &main)];
+        let full = resolve_program_with_std(CompileTarget::Native, &sources, &std());
+        let ours = resolve_program_with_shared_std_for_check(&sources, &shared);
+        let (a, b) = (&full.definitions, &ours.definitions);
+        assert_eq!(format!("{:?}", a.defs), format!("{:?}", b.defs));
+        assert_eq!(a.item_module, b.item_module);
+        let scopes = |d: &Definitions| d.modules.iter().map(scope).collect::<Vec<_>>();
+        assert_eq!(scopes(a), scopes(b));
     }
 }

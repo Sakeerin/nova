@@ -1,0 +1,2 @@
+trait Tr { fn m<U, U>(self, a: U) -> U }
+fn main() { }

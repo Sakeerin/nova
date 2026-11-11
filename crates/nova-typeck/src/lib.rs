@@ -14,10 +14,11 @@
 //! rather than panicking.
 
 mod check;
+pub mod dump;
 mod infer;
 mod usefulness;
 
-pub use check::{check, check_with};
+pub use check::{check, check_items, check_items_shared, check_with, ItemTables, SharedItems};
 
 use nova_hir::Ty;
 use nova_resolver::Definitions;

@@ -1,0 +1,4 @@
+record W { v: Int }
+impl W { type Item = Int
+ fn get(self) -> Int { 1 } }
+fn main() { }

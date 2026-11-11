@@ -1,0 +1,2 @@
+fn f<U, U>(a: U, b: U) -> U { a }
+fn main() { }

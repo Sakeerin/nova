@@ -1,0 +1,4 @@
+record Box<T> { value: T }
+impl<T> Box<T> { fn weird<U, U>(self, a: U, b: U) -> U { a } }
+fn main() { let a = Box { value: 1 }
+ println("${a.value}") }
