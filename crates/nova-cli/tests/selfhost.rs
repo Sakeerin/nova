@@ -4895,8 +4895,8 @@ fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
     let listed = n_bodies_listed();
     let root = root();
     let mut sets: Vec<(Mode, PathBuf, Vec<String>, String)> = vec![
-        (Mode::Check, root.clone(), loose_corpus(), String::new()),
         (Mode::Check, root.clone(), package_corpus(), String::new()),
+        (Mode::Check, root.clone(), loose_corpus(), String::new()),
         (Mode::Wasm, root.clone(), wasm_corpus(), String::new()),
         (Mode::Test, root.clone(), test_corpus(), String::new()),
     ];
@@ -4924,15 +4924,44 @@ fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
             ));
         }
     }
+    // Each set's roots in batches, taken in turn by as many threads as there
+    // are cores; a set holding N's own package roots, each a dump of all of
+    // N, in batches of three, or its thread would be the test's long pole.
+    // Each of N's runs checks std's bodies once, so other sets keep whole
+    // batches.
+    let jobs: Vec<(Mode, &Path, &[String], &str)> = sets
+        .iter()
+        .flat_map(|(mode, dir, roots, prefix)| {
+            let size = if roots.iter().any(|r| r.starts_with("selfhost/")) {
+                3
+            } else {
+                BATCH
+            };
+            roots
+                .chunks(size)
+                .map(move |chunk| (*mode, dir.as_path(), chunk, prefix.as_str()))
+        })
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
     let compared: Vec<BodiesCompared> = std::thread::scope(|scope| {
-        let handles: Vec<_> = sets
-            .iter()
-            .map(|(mode, dir, roots, prefix)| {
-                let listed = &listed;
-                scope.spawn(move || n_bodies_on(*mode, dir, roots, prefix, listed))
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (jobs, next, listed) = (&jobs, &next, &listed);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(mode, dir, roots, prefix)) = jobs.get(i) else {
+                            break;
+                        };
+                        done.push(n_bodies_on(mode, dir, roots, prefix, listed));
+                    }
+                    done
+                })
             })
             .collect();
-        joined(handles)
+        joined(handles).into_iter().flatten().collect()
     });
     let mut all = BodiesCompared::default();
     for c in compared {
