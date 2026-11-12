@@ -400,13 +400,15 @@ which E0010 and E0900 refuse). The full check prints std's bodies'
 diagnostics among the program's, so the dump equals the full check's
 byte for byte.
 
-**Who takes it:** natively 51 roots: the corpus's six std files checked
+**Who takes it:** natively 76 roots: the corpus's six std files checked
 as programs (`std/{bytes,collections,core,fmt,json,strings}/lib.nova`),
 five programs
-(`tests/runtime/{generic_impls,hidden_trait_methods,method_generics,trait_assoc_fn,where_clauses}.nova`)
-and 40 cases (the research's twelve probes, now
-`cases/check/std_bodies_*`, which must take it, and 5.3a's and 5.2's
-impl cases); for the WASM target one case, under test mode one. A program
+(`tests/runtime/{generic_impls,hidden_trait_methods,method_generics,trait_assoc_fn,where_clauses}.nova`),
+62 of `cases/check/` (the research's twelve probes, now
+`cases/check/std_bodies_*`, which must take it, and 5.3a's, 5.2's and the
+body tests' impl cases) and three of `cases/resolve/`; for the WASM target
+one case, under test mode one (the driver's guard lists them; part 2
+corrected the count, which was taken before every case was in). A program
 that takes it costs a second resolution and a full check.
 
 **The guard:** the driver's
