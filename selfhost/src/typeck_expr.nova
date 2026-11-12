@@ -8,10 +8,12 @@
 // docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
 // §4.2, ADR 0056). typeck_body.nova gives the idioms.
 //
+// typeck_method.nova checks record literals, fields and methods,
+// typeck_place.nova assignments, typeck_closure.nova closures and
+// functions as values, typeck_call.nova calls and `?`.
+//
 // While 5.3b is being built, an expression whose checking a later part
-// ports (record literals, fields, method calls, `?`, closures and
-// functions as values, assignment, `for`, `match`, interpolation through
-// `Display`, views) is a stub, `unported_expr`, which keeps what it is
+// ports (`for`, `match`, views) is a stub, `unported_expr`, which keeps what it is
 // and makes N refuse the program (`Checker::unported`): N never prints a
 // body it has not checked as S0 does.
 
@@ -26,6 +28,9 @@ import token
 import typeck
 import typeck_body
 import typeck_call
+import typeck_closure
+import typeck_method
+import typeck_place
 
 impl Checker {
     /// An expression (`check_expr`).
@@ -70,7 +75,7 @@ impl Checker {
                 }
                 HirExpr { kind: EkReturn(checked), ty: TyNever, span: span }
             }
-            ExprAssign(_, _, _) => self.unported_expr("assignment (5.3b part 3)", span)
+            ExprAssign(op, lhs, rhs) => self.check_assign(fcx, op, lhs, rhs, span)
             ExprTuple(items) => {
                 if items.is_empty() { return HirExpr { kind: EkUnit, ty: TyUnit, span: span } }
                 // A tuple literal: its elements left to right, its type
@@ -107,10 +112,16 @@ impl Checker {
             ExprArray(elems) => self.check_array_literal(fcx, elems, span)
             ExprArrayRepeat(init, len) => self.check_array_repeat(fcx, init, len, span)
             ExprIndex(target, index) => self.check_index(fcx, target, index, span)
-            ExprClosure(_, _, _) => self.unported_expr("closures (5.3b part 3)", span)
-            ExprRecord(_, _, _) => self.unported_expr("record literals (5.3b part 3)", span)
-            ExprField(_, _) => self.unported_expr("fields (5.3b part 3)", span)
-            ExprTry(_) => self.unported_expr("`?` (5.3b part 3)", span)
+            ExprClosure(params, ret, body) => self.check_closure(fcx, params, ret, body, span)
+            ExprRecord(path, fields, base) => self.check_record_literal(
+                fcx,
+                path,
+                fields,
+                base,
+                span,
+            )
+            ExprField(target, field) => self.check_field(fcx, target, field, span)
+            ExprTry(inner) => self.check_try(fcx, inner, span)
             ExprAwait(inner) => self.check_await(fcx, inner, span)
             ExprCast(_, _) => self.unsupported_expr(span, "`as` casts")
             ExprView(_) => self.unported_expr("views (5.3b part 5)", span)
@@ -220,14 +231,31 @@ impl Checker {
                                 HirExpr { kind: EkToStr(value), ty: TyString, span: part_span },
                             )
                         }
-                        // 5.3b part 3: `try_display` looks `fmt` up as a
-                        // method, and E0013 follows when it finds none.
-                        _ => pieces.push(
-                            self.unported_expr(
-                                "interpolating a value through `Display` (5.3b part 3)",
-                                span,
-                            ),
-                        )
+                        other => {
+                            // A trait's `fmt(self) -> String` in scope for
+                            // the value's type: interpolation calls it.
+                            match self.try_display(fcx, value, e, other) {
+                                Some(fmt_call) => pieces.push(fmt_call)
+                                None => {
+                                    // An array cannot implement `Display`.
+                                    let is_array = match other {
+                                        TyArray(_) => true
+                                        _ => false
+                                    }
+                                    let advice = if is_array {
+                                        "an array cannot implement `Display`; interpolate its elements, or wrap it in a record that does"
+                                    } else {
+                                        "implement `Display` (fmt(self) -> String) for it"
+                                    }
+                                    self.error(
+                                        "E0013",
+                                        "`${self.show(other, fcx)}` cannot be interpolated into a string; ${advice}",
+                                        span,
+                                    )
+                                    self.note_tuple_has_no_impls(other)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -237,7 +265,7 @@ impl Checker {
 
     // A path as a value: a local, a constant, a variant, `Type::Variant`
     // (`check_path`).
-    fn check_path(mut self, mut fcx: FnCtx, path: Path, span: Span) -> HirExpr {
+    pub fn check_path(mut self, mut fcx: FnCtx, path: Path, span: Span) -> HirExpr {
         let callee_args = self.qualified_callee
         self.qualified_callee = -1
         let segs = path.segments
@@ -275,10 +303,18 @@ impl Checker {
             Some(ResDef(def_id)) => {
                 match self.kind_of(def_id) {
                     DefKindFn(_) => {
-                        if self.sigs.at(def_id).is_none() { return error_expr(span) }
-                        // 5.3b part 3: a function as a value is a wrapper,
-                        // a closure (`make_fn_wrapper`).
-                        self.unported_expr("functions as values (5.3b part 3)", span)
+                        let sig = match self.sigs.at(def_id) {
+                            Some(s) => s
+                            None => return error_expr(span)
+                        }
+                        let mut type_args: Vec<Ty> = Vec::new()
+                        for _ in 0..sig.generics { type_args.push(fcx.icx.fresh()) }
+                        let mut param_types: Vec<Ty> = Vec::new()
+                        for p in sig.params.iter() { param_types.push(subst(p, type_args)) }
+                        let ret = subst(sig.ret, type_args)
+                        // A bare function as a value is a closure, a
+                        // wrapper `(env, params) { def(params) }`.
+                        self.make_fn_wrapper(fcx, def_id, type_args, param_types, ret, span)
                     }
                     DefKindConst(_) => {
                         // A constant is a call of its function of no
@@ -348,7 +384,7 @@ impl Checker {
     // A binary operation's type, its operands' checked: E0010 when they
     // differ, E0013 when the operator is not defined on them
     // (`binary_result_ty`).
-    fn binary_result_ty(
+    pub fn binary_result_ty(
         mut self,
         mut fcx: FnCtx,
         op: HirBinOp,

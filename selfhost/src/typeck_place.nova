@@ -1,0 +1,403 @@
+// The type checker's assignments and places: a port of check.rs's
+// `check_assign`, `place_root`, `require_mutable_place`,
+// `check_index_set`, `compound_value` and `check_field_set`, with
+// `MutTarget` (`immutable_message`, `not_a_place_message`), `PlaceRoot`,
+// and the free `assign_binop`, `local_expr`, `let_expr` and `with_binds`,
+// function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_body.nova gives the idioms; fixes.nova holds
+// `mutable_fix` and `immutable_note`.
+//
+// The three ways to mutate through a place (`a[i] = v`, `r.f = v`, a call
+// of a method declaring `mut self`) share `require_mutable_place`, which
+// walks the place as written, its AST, to the binding at its root.
+
+import ast
+import diagnostic
+import fixes
+import hir
+import infer
+import resolver
+import token
+import typeck
+import typeck_body
+import typeck_expr
+import typeck_method
+
+/// What `require_mutable_place` is asked to mutate (`MutTarget`): an
+/// element, a field, or the receiver of the method its name names.
+pub type MutTarget = | MutTargetElement | MutTargetField | MutTargetReceiver(String)
+
+/// The binding at a place's root (`PlaceRoot`): a mutable local, an
+/// immutable one (its name and its declaration's span), or none.
+pub type PlaceRoot = | PlaceRootMutable | PlaceRootImmutableLocal(String, Span) | PlaceRootNotAPlace
+
+/// The message when the place's root is the immutable local `name`
+/// (`MutTarget::immutable_message`).
+pub fn immutable_message(what: MutTarget, name: String) -> String {
+    match what {
+        MutTargetElement => "cannot assign to an element of immutable `${name}`"
+        MutTargetField => "cannot assign to a field of immutable `${name}`"
+        MutTargetReceiver(m) => "`${m}` mutates its receiver, but `${name}` is immutable"
+    }
+}
+
+/// The message when the place has no assignable root
+/// (`MutTarget::not_a_place_message`).
+pub fn not_a_place_message(what: MutTarget) -> String {
+    match what {
+        MutTargetElement => "cannot assign to an element of a temporary or non-assignable value"
+        MutTargetField => "cannot assign to a field of a temporary or non-assignable value"
+        MutTargetReceiver(m) => "`${m}` mutates its receiver, which cannot be a temporary"
+    }
+}
+
+impl Checker {
+    /// `lhs = rhs` and `lhs op= rhs` (`check_assign`).
+    pub fn check_assign(
+        mut self,
+        mut fcx: FnCtx,
+        op: AssignOp,
+        lhs: Spanned<Expr>,
+        rhs: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        let path = match lhs.value {
+            // `arr[i] = v`.
+            ExprIndex(target, index) => return self.check_index_set(
+                fcx,
+                op,
+                target,
+                index,
+                rhs,
+                span,
+            )
+            // `rec.field = v`.
+            ExprField(target, field) => return self.check_field_set(
+                fcx,
+                op,
+                target,
+                field,
+                rhs,
+                span,
+            )
+            ExprPath(p) => p
+            _ => {
+                // A target with no assignable place: a call's result, a
+                // literal, a parenthesised expression.
+                self.unsupported(
+                    lhs.span,
+                    "assignments to anything but a local variable, array element, or record field",
+                )
+                return error_expr(span)
+            }
+        }
+        if path.segments.len() != 1 {
+            self.unsupported(lhs.span, "assignment to paths")
+            return error_expr(span)
+        }
+        let name = path.segments.at(0).value
+        let local = fcx.lookup(name)
+        if local < 0 {
+            self.error("E0001", "cannot find `${name}` in this scope", lhs.span)
+            let nearby = fcx.visible_locals()
+            self.push_fix(change_to(self.cur_file, path.segments.at(0), nearby.to_array()))
+            return error_expr(span)
+        }
+        let info = fcx.locals.at(local)
+        let info_ty = info.ty
+        let info_span = info.span
+        if !info.is_mut {
+            self.error("E0060", "cannot assign to immutable variable `${name}`", span)
+            // Where a fix is offered, it says what the note would.
+            match self.mutable_fix(name, info_span) {
+                Some(fix) => self.push_fix(Some(fix))
+                None => {
+                    let note = self.immutable_note(name, info_span, "assignment")
+                    let mut d = self.diagnostics.last()
+                    d.notes.push(note)
+                }
+            }
+        }
+        let value = self.check_expr(fcx, rhs)
+        // `x += e` is `x = x + e`.
+        let final_value = match assign_binop(op) {
+            None => value
+            Some(bin) => {
+                let lhs_read = HirExpr { kind: EkLocal(local), ty: info_ty, span: lhs.span }
+                let ty = self.binary_result_ty(fcx, bin, lhs_read, value, span)
+                HirExpr { kind: EkBinary(bin, lhs_read, value), ty: ty, span: span }
+            }
+        }
+        if !fcx.icx.unify(final_value.ty, info_ty) {
+            self.error(
+                "E0010",
+                "cannot assign `${self.show(final_value.ty, fcx)}` to `${name}` which has type `${self.show(info_ty, fcx)}`",
+                span,
+            )
+        }
+        HirExpr { kind: EkAssign(local, final_value), ty: TyUnit, span: span }
+    }
+
+    /// The binding at the root of a place, through its element and field
+    /// projections (`place_root`).
+    pub fn place_root(self, fcx: FnCtx, expr: Spanned<Expr>) -> PlaceRoot {
+        match expr.value {
+            ExprPath(p) => {
+                if p.segments.len() != 1 { return PlaceRootNotAPlace }
+                let l = fcx.lookup(p.segments.at(0).value)
+                // A constant, a path of more segments or an unknown name is
+                // no mutable place.
+                if l < 0 { return PlaceRootNotAPlace }
+                let local = fcx.locals.at(l)
+                if local.is_mut {
+                    PlaceRootMutable
+                } else {
+                    PlaceRootImmutableLocal(p.segments.at(0).value, local.span)
+                }
+            }
+            ExprIndex(target, _) => self.place_root(fcx, target)
+            ExprField(target, _) => self.place_root(fcx, target)
+            // A call's result, a literal, a block: a temporary.
+            _ => PlaceRootNotAPlace
+        }
+    }
+
+    /// E0060 unless `target`'s storage is reachable through a mutable
+    /// binding, `what` naming what is mutated (`require_mutable_place`).
+    pub fn require_mutable_place(
+        mut self,
+        fcx: FnCtx,
+        target: Spanned<Expr>,
+        span: Span,
+        what: MutTarget,
+    ) {
+        match self.place_root(fcx, target) {
+            PlaceRootMutable => ()
+            PlaceRootImmutableLocal(name, decl) => {
+                self.error("E0060", immutable_message(what, name), span)
+                // Where a fix is offered, it says what the note would.
+                match self.mutable_fix(name, decl) {
+                    Some(fix) => {
+                        self.push_fix(Some(fix))
+                        return
+                    }
+                    None => ()
+                }
+                // A receiver's mutability is declared in the signature, so
+                // a `self` root needs other advice.
+                let note = if name == "self" {
+                    "declare the enclosing method's receiver as `mut self` to allow mutation"
+                } else {
+                    self.immutable_note(name, decl, "mutation")
+                }
+                let mut d = self.diagnostics.last()
+                d.notes.push(note)
+            }
+            PlaceRootNotAPlace => self.error("E0060", not_a_place_message(what), span)
+        }
+    }
+
+    // `arr[index] = value`: `rhs` is checked on every early return
+    // (`check_index_set`).
+    fn check_index_set(
+        mut self,
+        mut fcx: FnCtx,
+        op: AssignOp,
+        target: Spanned<Expr>,
+        index: Spanned<Expr>,
+        rhs: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        // The whole index and field chain to its root local.
+        self.require_mutable_place(fcx, target, span, MutTargetElement)
+        let arr = self.check_expr(fcx, target)
+        let idx = self.check_expr(fcx, index)
+        self.expect_ty(fcx, idx, TyInt, "an array index")
+        let elem_ty = fcx.icx.fresh()
+        if !fcx.icx.unify(arr.ty, TyArray(elem_ty)) {
+            self.error(
+                "E0014",
+                "cannot index-assign a value of type `${self.show(arr.ty, fcx)}`",
+                target.span,
+            )
+            let _ = self.check_expr(fcx, rhs)
+            return error_expr(span)
+        }
+        // `a[i] op= e`: the array and the index into unscoped locals,
+        // evaluated once, then `a[k] = a[k] op e` stores.
+        let bin = assign_binop(op)
+        let mut place = -1
+        let mut key = -1
+        let mut arr_ty = TyError
+        match bin {
+            Some(_) => {
+                arr_ty = fcx.icx.apply(arr.ty)
+                place = fcx.new_local_unscoped("__place", arr_ty, false, span)
+                key = fcx.new_local_unscoped("__index", TyInt, false, span)
+            }
+            None => ()
+        }
+        let mut binds: Vec<HirExpr> = Vec::new()
+        let (arr, idx) = match bin {
+            None => (arr, idx)
+            Some(_) => {
+                binds.push(let_expr(place, arr, span))
+                binds.push(let_expr(key, idx, span))
+                (local_expr(place, arr_ty, target.span), local_expr(key, TyInt, index.span))
+            }
+        }
+        let value = self.check_expr(fcx, rhs)
+        let value = match bin {
+            None => value
+            Some(b) => {
+                let old = HirExpr {
+                    kind: EkIndex(
+                        local_expr(place, arr_ty, target.span),
+                        local_expr(key, TyInt, index.span),
+                    ),
+                    ty: elem_ty,
+                    span: target.span.merge(index.span),
+                }
+                self.compound_value(fcx, b, old, value, span)
+            }
+        }
+        if !fcx.icx.unify(value.ty, elem_ty) {
+            self.error(
+                "E0010",
+                "array element has type `${self.show(elem_ty, fcx)}` but `${self.show(value.ty, fcx)}` was assigned",
+                rhs.span,
+            )
+        }
+        let set = HirExpr { kind: EkIndexSet(arr, idx, value), ty: TyUnit, span: span }
+        with_binds(binds, set, span)
+    }
+
+    // `old op value`, what a compound assignment stores, by a binary
+    // expression's rules (`compound_value`).
+    fn compound_value(
+        mut self,
+        mut fcx: FnCtx,
+        bin: HirBinOp,
+        old: HirExpr,
+        value: HirExpr,
+        span: Span,
+    ) -> HirExpr {
+        let ty = self.binary_result_ty(fcx, bin, old, value, span)
+        HirExpr { kind: EkBinary(bin, old, value), ty: ty, span: span }
+    }
+
+    // `target.field = value`: `rhs` is checked on every early return
+    // (`check_field_set`).
+    fn check_field_set(
+        mut self,
+        mut fcx: FnCtx,
+        op: AssignOp,
+        target: Spanned<Expr>,
+        field: Spanned<String>,
+        rhs: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        // The whole field and index chain to its root local.
+        self.require_mutable_place(fcx, target, span, MutTargetField)
+        let rec = self.check_expr(fcx, target)
+        let recv_ty = fcx.icx.apply(rec.ty)
+        // A broken receiver reported its own error.
+        match recv_ty {
+            TyError => {
+                let _ = self.check_expr(fcx, rhs)
+                return error_expr(span)
+            }
+            _ => ()
+        }
+        // The same lookup reads use, so reads and writes agree on layout.
+        let (index, field_ty) = match self.record_field_index_and_ty(
+            fcx,
+            recv_ty,
+            field.value,
+            span,
+        ) {
+            Some(found) => found
+            None => {
+                if self.tuple_index_on_unknown(fcx, recv_ty, field) {
+                    let _ = self.check_expr(fcx, rhs)
+                    return error_expr(span)
+                }
+                self.error("E0014", self.no_field_message(fcx, recv_ty, field.value), field.span)
+                let fix = self.field_fix(recv_ty, field)
+                self.push_fix(fix)
+                let _ = self.check_expr(fcx, rhs)
+                return error_expr(span)
+            }
+        }
+        // `r.f op= e`: the receiver into an unscoped local, evaluated once,
+        // then `t.f = t.f op e` stores.
+        let bin = assign_binop(op)
+        let mut place = -1
+        let mut binds: Vec<HirExpr> = Vec::new()
+        let rec = match bin {
+            None => rec
+            Some(_) => {
+                place = fcx.new_local_unscoped("__place", recv_ty, false, span)
+                binds.push(let_expr(place, rec, span))
+                local_expr(place, recv_ty, target.span)
+            }
+        }
+        let value = self.check_expr(fcx, rhs)
+        let value = match bin {
+            None => value
+            Some(b) => {
+                let old = HirExpr {
+                    kind: EkFieldGet(local_expr(place, recv_ty, target.span), index),
+                    ty: field_ty,
+                    span: target.span.merge(field.span),
+                }
+                self.compound_value(fcx, b, old, value, span)
+            }
+        }
+        if !fcx.icx.unify(value.ty, field_ty) {
+            self.error(
+                "E0010",
+                "field `${field.value}` has type `${self.show(field_ty, fcx)}` but `${self.show(value.ty, fcx)}` was assigned",
+                rhs.span,
+            )
+        }
+        let set = HirExpr { kind: EkFieldSet(rec, index, value), ty: TyUnit, span: span }
+        with_binds(binds, set, span)
+    }
+}
+
+/// A compound assignment's operator, `None` for `=` (`assign_binop`).
+pub fn assign_binop(op: AssignOp) -> Option<HirBinOp> {
+    match op {
+        AssignOpAssign => None
+        AssignOpAddAssign => Some(OpAdd)
+        AssignOpSubAssign => Some(OpSub)
+        AssignOpMulAssign => Some(OpMul)
+        AssignOpDivAssign => Some(OpDiv)
+        AssignOpRemAssign => Some(OpRem)
+        AssignOpBitOrAssign => Some(OpBitOr)
+        AssignOpBitAndAssign => Some(OpBitAnd)
+        AssignOpBitXorAssign => Some(OpBitXor)
+        AssignOpShlAssign => Some(OpShl)
+        AssignOpShrAssign => Some(OpShr)
+    }
+}
+
+/// A read of `local` (`local_expr`).
+pub fn local_expr(local: Int, ty: Ty, span: Span) -> HirExpr {
+    HirExpr { kind: EkLocal(local), ty: ty, span: span }
+}
+
+/// `let local = init`, of type `()` (`let_expr`).
+pub fn let_expr(local: Int, init: HirExpr, span: Span) -> HirExpr {
+    HirExpr { kind: EkLet(local, init), ty: TyUnit, span: span }
+}
+
+/// `expr` after `binds`, in one block of type `()`; `expr` alone when
+/// there are none (`with_binds`).
+pub fn with_binds(mut binds: Vec<HirExpr>, expr: HirExpr, span: Span) -> HirExpr {
+    if binds.is_empty() { return expr }
+    binds.push(expr)
+    HirExpr { kind: EkBlock(binds, None), ty: TyUnit, span: span }
+}

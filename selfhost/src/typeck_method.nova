@@ -1,0 +1,857 @@
+// The type checker's members: a port of check.rs's `check_record_literal`,
+// `check_field`, `tuple_index_on_unknown`, `no_field_message`,
+// `record_field_index_and_ty`, `resolve_method_on`, `trait_method_index`,
+// `trait_assoc_fn_index`, `find_inherent_method`, `qualifier_self_ty`,
+// `find_trait_assoc_fns`, `check_method_call`, `check_mutable_receiver`,
+// `emit_inherent_call`, `emit_assoc_call`, `emit_trait_call`,
+// `try_display` and `shown_method`, with `MethodRes` and `TraitCallSelf`,
+// function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_body.nova gives the idioms; fixes.nova's
+// `find_assoc_fns` serves this file too.
+//
+// - A field initializer's or a receiver's AST travels with its checked
+//   form where S0's does, so `place_root` can walk it (typeck_place.nova).
+// - The language server's probe and index (`probe_receiver`, `note_use`,
+//   `note_field`, `note_qualifier`, `mark_shorthand`) are not ported
+//   (decision 8).
+
+import ast
+import diagnostic
+import fixes
+import hir
+import infer
+import resolver
+import token
+import typeck
+import typeck_body
+import typeck_call
+import typeck_expr
+import typeck_place
+
+/// How a method name resolves on a receiver (`MethodRes`): an inherent
+/// method's id, a trait's method (the trait's id and the method's index),
+/// none, or more than one trait's.
+pub type MethodRes =
+    | MethodResInherent(Int)
+    | MethodResTrait(Int, Int)
+    | MethodResNone
+    | MethodResAmbiguous
+
+/// Where a trait call's `Self` comes from (`TraitCallSelf`): a receiver,
+/// checked and as written, or a qualifier's type (`Type::f`, `T::f`).
+pub type TraitCallSelf =
+    | TraitCallSelfReceiver(HirExpr, Spanned<Expr>)
+    | TraitCallSelfQualifier(Ty)
+
+impl Checker {
+    // --- Record literals ---
+
+    /// `Name { field: value, …, ..base }` (`check_record_literal`).
+    pub fn check_record_literal(
+        mut self,
+        mut fcx: FnCtx,
+        path: Path,
+        fields: Vec<FieldInit>,
+        base: Option<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        if path.segments.len() != 1 {
+            self.unsupported(span, "module-qualified record paths")
+            return error_expr(span)
+        }
+        let name = path.segments.at(0).value
+        let def_id = self.resolve_type_in(self.cur_module, name)
+        if def_id < 0 {
+            if !self.missing_on_target(name, path.segments.at(0).span) {
+                self.error("E0001", "cannot find record `${name}`", span)
+                self.name_fixes(path.segments.at(0), NeedRecord, Vec::new())
+            }
+            return error_expr(span)
+        }
+        let mut found: Option<RecordType> = None
+        for r in self.records.iter() {
+            if r.def_id == def_id {
+                found = Some(r)
+                break
+            }
+        }
+        let rec = match found {
+            Some(r) => r
+            None => {
+                self.error("E0010", "`${name}` is not a record type", span)
+                return error_expr(span)
+            }
+        }
+        let mut type_args: Vec<Ty> = Vec::new()
+        for _ in 0..rec.generics { type_args.push(fcx.icx.fresh()) }
+        let record_ty = TyRecord(def_id, type_args)
+        // The initializers into locals in source order, then the base, so
+        // their effects come left to right; the slots are then filled from
+        // them in declaration order.
+        let mut stmts: Vec<HirExpr> = Vec::new()
+        let mut provided: Map<String, Int> = Map::new()
+        for init in fields.iter() {
+            let fname = init.name.value
+            let mut field: Option<HirField> = None
+            for f in rec.fields.iter() {
+                if f.name == fname {
+                    field = Some(f)
+                    break
+                }
+            }
+            let field = match field {
+                Some(f) => f
+                None => {
+                    self.error("E0014", "record `${name}` has no field `${fname}`", init.name.span)
+                    let mut candidates: Vec<String> = Vec::new()
+                    for f in rec.fields.iter() {
+                        let mut given = false
+                        for g in fields.iter() { if g.name.value == f.name { given = true } }
+                        if !given { candidates.push(f.name) }
+                    }
+                    let fix = change_to(self.cur_file, init.name, candidates.to_array())
+                    self.push_fix(fix)
+                    continue
+                }
+            }
+            // Normalization seam: a field may declare a projection on the
+            // record's own bounded parameter, which an earlier field's value
+            // may have made concrete.
+            let expected = self.instantiate(field.ty, type_args, fcx.icx, init.name.span)
+            let value = match init.value {
+                Some(v) => self.check_expr(fcx, v)
+                // Shorthand `{ x }` binds the local named `x`.
+                None => {
+                    let mut segments: Vec<Spanned<String>> = Vec::new()
+                    segments.push(init.name)
+                    self.check_path(fcx, Path { segments: segments }, init.name.span)
+                }
+            }
+            if !fcx.icx.unify(value.ty, expected) {
+                self.error(
+                    "E0010",
+                    "field `${fname}` expects `${self.show(expected, fcx)}` but found `${self.show(value.ty, fcx)}`",
+                    init.name.span,
+                )
+            }
+            let local = fcx.new_local("__f_${fname}", value.ty, false, init.name.span)
+            stmts.push(HirExpr { kind: EkLet(local, value), ty: TyUnit, span: span })
+            if provided.insert(fname, local).is_some() {
+                self.error("E0014", "field `${fname}` specified more than once", init.name.span)
+            }
+        }
+        // A `..base` fills the fields not given, bound to a local so that it
+        // is evaluated once, after the fields.
+        let base_local = match base {
+            Some(base_expr) => {
+                let checked = self.check_expr(fcx, base_expr)
+                if !fcx.icx.unify(checked.ty, record_ty) {
+                    self.error(
+                        "E0010",
+                        "the `..` base has type `${self.show(checked.ty, fcx)}` but `${name}` was expected",
+                        base_expr.span,
+                    )
+                }
+                let local = fcx.new_local("__base", record_ty, false, span)
+                stmts.push(HirExpr { kind: EkLet(local, checked), ty: TyUnit, span: span })
+                local
+            }
+            None => -1
+        }
+        // The slots in declaration order, from the evaluated locals.
+        let mut ordered: Vec<HirExpr> = Vec::new()
+        let mut missing: Vec<String> = Vec::new()
+        for idx in 0..rec.fields.len() {
+            let field = rec.fields.at(idx)
+            // The same seam, defence in depth (S0's comment).
+            let field_ty = self.instantiate(field.ty, type_args, fcx.icx, span)
+            match provided.get(field.name) {
+                Some(local) => ordered.push(
+                    HirExpr { kind: EkLocal(local), ty: field_ty, span: span },
+                )
+                None => {
+                    if base_local >= 0 {
+                        let target = HirExpr {
+                            kind: EkLocal(base_local),
+                            ty: record_ty,
+                            span: span,
+                        }
+                        ordered.push(
+                            HirExpr { kind: EkFieldGet(target, idx), ty: field_ty, span: span },
+                        )
+                    } else {
+                        missing.push("`${field.name}`")
+                    }
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let mut list = ""
+            for k in 0..missing.len() {
+                if k > 0 { list = list + ", " }
+                list = list + missing.at(k)
+            }
+            self.error("E0014", "missing field(s) in `${name}`: ${list}", span)
+            return error_expr(span)
+        }
+        let make = HirExpr { kind: EkMakeRecord(def_id, ordered), ty: record_ty, span: span }
+        if stmts.is_empty() {
+            make
+        } else {
+            HirExpr { kind: EkBlock(stmts, Some(make)), ty: record_ty, span: span }
+        }
+    }
+
+    // --- Fields ---
+
+    /// `target.field` (`check_field`).
+    pub fn check_field(
+        mut self,
+        mut fcx: FnCtx,
+        target: Spanned<Expr>,
+        field: Spanned<String>,
+        span: Span,
+    ) -> HirExpr {
+        let recv = self.check_expr(fcx, target)
+        let recv_ty = fcx.icx.apply(recv.ty)
+        // An unfinished `x.` has an empty name, which the parser reported.
+        if field.value == "" { return error_expr(span) }
+        match self.record_field_index_and_ty(fcx, recv_ty, field.value, span) {
+            Some((index, field_ty)) => return HirExpr {
+                kind: EkFieldGet(recv, index),
+                ty: field_ty,
+                span: span,
+            }
+            None => ()
+        }
+        // A broken receiver reported its own error.
+        match recv_ty {
+            TyError => return error_expr(span)
+            _ => ()
+        }
+        if self.tuple_index_on_unknown(fcx, recv_ty, field) { return error_expr(span) }
+        self.error("E0014", self.no_field_message(fcx, recv_ty, field.value), field.span)
+        let fix = self.field_fix(recv_ty, field)
+        self.push_fix(fix)
+        error_expr(span)
+    }
+
+    /// `t.N` on a value whose type is not yet known: E0011, and `true`;
+    /// `false` for any other field or receiver (`tuple_index_on_unknown`).
+    pub fn tuple_index_on_unknown(
+        mut self,
+        mut fcx: FnCtx,
+        recv_ty: Ty,
+        field: Spanned<String>,
+    ) -> Bool {
+        let mut is_index = true
+        for k in 0..field.value.byte_len() {
+            let b = field.value.byte_at(k)
+            if b < 48 || b > 57 { is_index = false }
+        }
+        let unknown = match fcx.icx.apply(recv_ty) {
+            TyVar(_) => true
+            _ => false
+        }
+        if !is_index || !unknown { return false }
+        self.error(
+            "E0011",
+            "the type of this value must be known before `.${field.value}` reads an element of it",
+            field.span,
+        )
+        let mut d = self.diagnostics.last()
+        d.notes.push("annotate the value's type, for example `let p: (Int, Int) = …`")
+        // Bound to the error type, so that the variable is not reported
+        // again as one inference could not solve.
+        let _ = fcx.icx.unify(recv_ty, TyError)
+        true
+    }
+
+    /// The "no such field" message for a receiver type that is not the
+    /// error type (`no_field_message`).
+    pub fn no_field_message(self, mut fcx: FnCtx, recv_ty: Ty, field_name: String) -> String {
+        let mut record_name: Option<String> = None
+        match recv_ty {
+            TyRecord(def_id, _) => {
+                for r in self.records.iter() {
+                    if r.def_id == def_id {
+                        record_name = Some(r.name)
+                        break
+                    }
+                }
+            }
+            _ => ()
+        }
+        match record_name {
+            Some(n) => return "no field `${field_name}` on record `${n}`"
+            None => ()
+        }
+        match fcx.icx.apply(recv_ty) {
+            // `t.2` on `(Int, Int)`, or `t.x` on a tuple.
+            TyTuple(_) => "no field `${field_name}` on `${self.show(recv_ty, fcx)}`"
+            _ => "cannot access field `${field_name}` on `${self.show(recv_ty, fcx)}`"
+        }
+    }
+
+    /// A field of a record type, or an element of a tuple type: its index
+    /// and its type, instantiated; `None` when there is no such field
+    /// (`record_field_index_and_ty`).
+    pub fn record_field_index_and_ty(
+        mut self,
+        mut fcx: FnCtx,
+        recv_ty: Ty,
+        field: String,
+        span: Span,
+    ) -> Option<(Int, Ty)> {
+        let resolved = fcx.icx.apply(recv_ty)
+        let (def_id, args) = match resolved {
+            TyTuple(elems) => {
+                // `t.N`: the parser lets only decimal digits through.
+                let index = parse_index(field)
+                if index < 0 || index >= elems.len() { return None }
+                return Some((index, elems.at(index)))
+            }
+            TyRecord(d, a) => (d, a)
+            _ => return None
+        }
+        let mut found: Option<RecordType> = None
+        for r in self.records.iter() {
+            if r.def_id == def_id {
+                found = Some(r)
+                break
+            }
+        }
+        let rec = found?
+        let mut index = -1
+        for k in 0..rec.fields.len() {
+            if rec.fields.at(k).name == field {
+                index = k
+                break
+            }
+        }
+        if index < 0 { return None }
+        // Normalization seam: the field's type in this instantiation's
+        // arguments, its projections resolved.
+        let field_ty = self.instantiate(rec.fields.at(index).ty, args, fcx.icx, span)
+        Some((index, field_ty))
+    }
+
+    // --- Method lookup ---
+
+    /// A method `name` on a receiver of the resolved type `recv_ty`, with no
+    /// diagnostic (`resolve_method_on`).
+    pub fn resolve_method_on(self, recv_ty: Ty, fcx: FnCtx, name: String) -> MethodRes {
+        let mut matches: Vec<(Int, Int)> = Vec::new()
+        match recv_ty {
+            TyParam(k) => {
+                if k < fcx.param_bounds.len() {
+                    for tid in fcx.param_bounds.at(k).iter() {
+                        let i = self.trait_method_index(tid, name)
+                        if i >= 0 { matches.push((tid, i)) }
+                    }
+                }
+            }
+            _ => {
+                let h = match head(recv_ty) {
+                    Some(h) => h
+                    None => return MethodResNone
+                }
+                // Inherent methods first, but only an impl that fits the
+                // receiver counts.
+                let def = self.find_inherent_method(recv_ty, h, name)
+                if def >= 0 { return MethodResInherent(def) }
+                for imp in self.impls.iter() {
+                    if !head_eq(imp.self_head, h) || match_args(imp, recv_ty).is_none() { continue }
+                    if imp.trait_id < 0 { continue }
+                    let idx = self.trait_method_index(imp.trait_id, name)
+                    if idx >= 0 { matches.push((imp.trait_id, idx)) }
+                }
+            }
+        }
+        if matches.len() == 0 {
+            MethodResNone
+        } else if matches.len() == 1 {
+            let (t, i) = matches.at(0)
+            MethodResTrait(t, i)
+        } else {
+            MethodResAmbiguous
+        }
+    }
+
+    /// The index of trait `trait_id`'s method `name` that takes a `self`
+    /// receiver, or -1 (`trait_method_index`).
+    pub fn trait_method_index(self, trait_id: Int, name: String) -> Int {
+        for t in self.traits.iter() {
+            if t.def_id == trait_id {
+                for k in 0..t.methods.len() {
+                    let m = t.methods.at(k)
+                    if m.name == name && m.has_self { return k }
+                }
+                return -1
+            }
+        }
+        -1
+    }
+
+    /// The index of trait `trait_id`'s associated function `name`, one with
+    /// no `self` receiver, or -1 (`trait_assoc_fn_index`).
+    pub fn trait_assoc_fn_index(self, trait_id: Int, name: String) -> Int {
+        for t in self.traits.iter() {
+            if t.def_id == trait_id {
+                for k in 0..t.methods.len() {
+                    let m = t.methods.at(k)
+                    if m.name == name && !m.has_self { return k }
+                }
+                return -1
+            }
+        }
+        -1
+    }
+
+    /// The method `name` of the first inherent impl of `h` that fits
+    /// `recv_ty`, an associated function skipped, or -1
+    /// (`find_inherent_method`).
+    pub fn find_inherent_method(self, recv_ty: Ty, h: TyHead, name: String) -> Int {
+        for imp in self.impls.iter() {
+            if imp.trait_id >= 0 || !head_eq(imp.self_head, h) { continue }
+            if match_args(imp, recv_ty).is_none() { continue }
+            for (n, d) in imp.methods.iter() { if n == name && !self.selfless.at(d) { return d } }
+        }
+        -1
+    }
+
+    /// The self type a two-segment path's qualifier names (`Int::zero()`,
+    /// `P::new()`, `Box::make(…)`), a generic type's arguments fresh
+    /// variables (`qualifier_self_ty`).
+    pub fn qualifier_self_ty(self, mut fcx: FnCtx, name: String) -> Option<Ty> {
+        if name == "Int" { return Some(TyInt) }
+        if name == "Float" { return Some(TyFloat) }
+        if name == "Bool" { return Some(TyBool) }
+        if name == "Char" { return Some(TyChar) }
+        if name == "String" { return Some(TyString) }
+        if name == "Bytes" { return Some(TyBytes) }
+        // `Future` carries no associated functions.
+        if name == "Future" { return None }
+        let def_id = self.resolve_type_in(self.cur_module, name)
+        if def_id < 0 { return None }
+        let arity = self.type_arity.at(def_id)
+        let mut args: Vec<Ty> = Vec::new()
+        for _ in 0..arity { args.push(fcx.icx.fresh()) }
+        match self.kind_of(def_id) {
+            DefKindRecord(_) => Some(TyRecord(def_id, args))
+            DefKindSum(_, _) => Some(TySum(def_id, args))
+            _ => None
+        }
+    }
+
+    /// Every associated function `name` reachable through a trait impl that
+    /// fits `self_ty` (`find_trait_assoc_fns`).
+    pub fn find_trait_assoc_fns(self, self_ty: Ty, name: String) -> Vec<(Int, Int)> {
+        let mut out: Vec<(Int, Int)> = Vec::new()
+        let h = match head(self_ty) {
+            Some(h) => h
+            None => return out
+        }
+        for imp in self.impls.iter() {
+            if !head_eq(imp.self_head, h) || match_args(imp, self_ty).is_none() { continue }
+            if imp.trait_id < 0 { continue }
+            let idx = self.trait_assoc_fn_index(imp.trait_id, name)
+            if idx >= 0 { out.push((imp.trait_id, idx)) }
+        }
+        out
+    }
+
+    // --- Method calls ---
+
+    /// `receiver.method(args)`, the receiver and the arguments checked;
+    /// `receiver_ast` is the receiver as written, for `place_root`
+    /// (`check_method_call`).
+    pub fn check_method_call(
+        mut self,
+        mut fcx: FnCtx,
+        receiver: HirExpr,
+        receiver_ast: Spanned<Expr>,
+        method: Spanned<String>,
+        args: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        let recv_ty = fcx.icx.apply(receiver.ty)
+        match recv_ty {
+            TyError => return error_expr(span)
+            TyVar(_) => {
+                self.error(
+                    "E0011",
+                    "cannot infer the receiver's type; add a type annotation",
+                    receiver.span,
+                )
+                return error_expr(span)
+            }
+            // An array's built-in `len`, then the methods of its impls.
+            TyArray(_) => {
+                if method.value == "len" && args.is_empty() {
+                    return HirExpr { kind: EkArrayLen(receiver), ty: TyInt, span: span }
+                }
+                match self.resolve_method_on(recv_ty, fcx, method.value) {
+                    MethodResNone => {
+                        self.error(
+                            "E0014",
+                            "no method `${method.value}` on array type `${self.show(recv_ty, fcx)}`",
+                            method.span,
+                        )
+                        let fix = self.method_fix(recv_ty, fcx, method)
+                        self.push_fix(fix)
+                        return error_expr(span)
+                    }
+                    _ => ()
+                }
+            }
+            _ => ()
+        }
+        match self.resolve_method_on(recv_ty, fcx, method.value) {
+            MethodResInherent(def_id) => {
+                self.check_mutable_receiver(fcx, def_id, receiver_ast, span)
+                self.emit_inherent_call(fcx, def_id, receiver, args, span)
+            }
+            MethodResTrait(trait_id, method_idx) => self.emit_trait_call(
+                fcx,
+                trait_id,
+                method_idx,
+                TraitCallSelfReceiver(receiver, receiver_ast),
+                args,
+                span,
+            )
+            MethodResAmbiguous => {
+                self.error(
+                    "E0015",
+                    "ambiguous method call `${method.value}`: more than one trait in scope provides it",
+                    method.span,
+                )
+                error_expr(span)
+            }
+            MethodResNone => {
+                self.error(
+                    "E0014",
+                    "no method `${method.value}` on type `${self.show(recv_ty, fcx)}`",
+                    method.span,
+                )
+                let fix = self.method_fix(recv_ty, fcx, method)
+                self.push_fix(fix)
+                error_expr(span)
+            }
+        }
+    }
+
+    // A method declaring `mut self` needs its receiver reachable through a
+    // mutable binding (`check_mutable_receiver`).
+    fn check_mutable_receiver(
+        mut self,
+        fcx: FnCtx,
+        def_id: Int,
+        receiver_ast: Spanned<Expr>,
+        span: Span,
+    ) {
+        if !self.mut_self.at(def_id) { return }
+        let mname = self.shown_method(def_id)
+        self.require_mutable_place(fcx, receiver_ast, span, MutTargetReceiver(mname))
+    }
+
+    // An inherent method's call, the receiver first (`emit_inherent_call`).
+    fn emit_inherent_call(
+        mut self,
+        mut fcx: FnCtx,
+        def_id: Int,
+        receiver: HirExpr,
+        args: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        // An associated function has no receiver.
+        if self.selfless.at(def_id) {
+            let mname = self.shown_method(def_id)
+            self.error(
+                "E0014",
+                "`${mname}` is an associated function with no `self` receiver; call it as `Type::${mname}(…)`",
+                span,
+            )
+            return error_expr(span)
+        }
+        let sig = match self.sigs.at(def_id) {
+            Some(s) => s
+            None => return error_expr(span)
+        }
+        // `params[0]` is `self`.
+        let expected_args = if sig.params.len() > 0 { sig.params.len() - 1 } else { 0 }
+        if args.len() != expected_args {
+            let mname = self.shown_method(def_id)
+            self.error(
+                "E0016",
+                "`${mname}` takes ${expected_args} argument(s) but ${args.len()} were supplied",
+                span,
+            )
+            return error_expr(span)
+        }
+        // A generic impl's parameters, fresh, recovered from the receiver
+        // and the arguments.
+        let mut type_args: Vec<Ty> = Vec::new()
+        for _ in 0..sig.generics { type_args.push(fcx.icx.fresh()) }
+        let self_param = subst(sig.params.at(0), type_args)
+        // The receiver must fit the impl's self type exactly.
+        if !fcx.icx.unify(receiver.ty, self_param) {
+            let mname = self.shown_method(def_id)
+            self.error(
+                "E0014",
+                "method `${mname}` does not apply to receiver of type `${self.show(receiver.ty, fcx)}`",
+                span,
+            )
+            return error_expr(span)
+        }
+        for k in 0..args.len() {
+            let arg = args.at(k)
+            let expected = subst(sig.params.at(k + 1), type_args)
+            if !fcx.icx.unify(arg.ty, expected) {
+                self.error(
+                    "E0010",
+                    "argument has type `${self.show(arg.ty, fcx)}` but `${self.show(expected, fcx)}` was expected",
+                    arg.span,
+                )
+            }
+        }
+        let ret = subst(sig.ret, type_args)
+        let mut call_args: Vec<HirExpr> = Vec::new()
+        call_args.push(receiver)
+        for a in args.iter() { call_args.push(a) }
+        HirExpr { kind: EkCall(CalleeDef(def_id), type_args, call_args), ty: ret, span: span }
+    }
+
+    /// An associated function's call, `Type::f(args)`, with no receiver
+    /// (`emit_assoc_call`).
+    pub fn emit_assoc_call(
+        mut self,
+        mut fcx: FnCtx,
+        def_id: Int,
+        args: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        let sig = match self.sigs.at(def_id) {
+            Some(s) => s
+            None => return error_expr(span)
+        }
+        if args.len() != sig.params.len() {
+            let fname = self.name_of(def_id)
+            self.error(
+                "E0016",
+                "`${fname}` takes ${sig.params.len()} argument(s) but ${args.len()} were supplied",
+                span,
+            )
+            return error_expr(span)
+        }
+        let mut type_args: Vec<Ty> = Vec::new()
+        for _ in 0..sig.generics { type_args.push(fcx.icx.fresh()) }
+        for k in 0..args.len() {
+            let arg = args.at(k)
+            let expected = subst(sig.params.at(k), type_args)
+            if !fcx.icx.unify(arg.ty, expected) {
+                self.error(
+                    "E0010",
+                    "argument has type `${self.show(arg.ty, fcx)}` but `${self.show(expected, fcx)}` was expected",
+                    arg.span,
+                )
+            }
+        }
+        let ret = subst(sig.ret, type_args)
+        HirExpr { kind: EkCall(CalleeDef(def_id), type_args, args), ty: ret, span: span }
+    }
+
+    /// A trait method's call, the only maker of `TraitCall`; `dispatch`
+    /// says where `Self` comes from (`emit_trait_call`).
+    pub fn emit_trait_call(
+        mut self,
+        mut fcx: FnCtx,
+        trait_id: Int,
+        method_idx: Int,
+        dispatch: TraitCallSelf,
+        args: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        let mut found: Option<TraitMethod> = None
+        for t in self.traits.iter() {
+            if t.def_id == trait_id {
+                if method_idx >= 0 && method_idx < t.methods.len() {
+                    found = Some(t.methods.at(method_idx))
+                }
+                break
+            }
+        }
+        let tm = match found {
+            Some(m) => m
+            None => return error_expr(span)
+        }
+        // The receiver's presence must agree with what the trait declares.
+        let (self_ty, receiver) = match dispatch {
+            TraitCallSelfReceiver(recv, recv_ast) => {
+                if !tm.has_self {
+                    self.error(
+                        "E0014",
+                        "`${tm.name}` is an associated function with no `self` receiver; call it as `Type::${tm.name}(…)`",
+                        span,
+                    )
+                    return error_expr(span)
+                }
+                // The mutable-receiver rule, on the trait's own flag, before
+                // the arity and the arguments, without returning.
+                if tm.mut_self {
+                    self.require_mutable_place(fcx, recv_ast, span, MutTargetReceiver(tm.name))
+                }
+                let r: Option<HirExpr> = Some(recv)
+                (fcx.icx.apply(recv.ty), r)
+            }
+            TraitCallSelfQualifier(ty) => {
+                if tm.has_self {
+                    self.error(
+                        "E0014",
+                        "`${tm.name}` is a method with a `self` receiver; call it on a value as `value.${tm.name}(…)`",
+                        span,
+                    )
+                    return error_expr(span)
+                }
+                let r: Option<HirExpr> = None
+                (ty, r)
+            }
+        }
+        // `Self` is `Param(0)`, the method's own generics `Param(1..)`,
+        // fresh.
+        let mut type_args: Vec<Ty> = Vec::new()
+        for _ in 0..tm.generics { type_args.push(fcx.icx.fresh()) }
+        let mut sub: Vec<Ty> = Vec::new()
+        sub.push(self_ty)
+        for t in type_args.iter() { sub.push(t) }
+        if args.len() != tm.params.len() {
+            self.error(
+                "E0016",
+                "`${tm.name}` takes ${tm.params.len()} argument(s) but ${args.len()} were supplied",
+                span,
+            )
+            return error_expr(span)
+        }
+        for k in 0..args.len() {
+            let arg = args.at(k)
+            // A parameter may be `Self::Item`.
+            let expected = self.instantiate(tm.params.at(k), sub, fcx.icx, arg.span)
+            if !fcx.icx.unify(arg.ty, expected) {
+                self.error(
+                    "E0010",
+                    "argument has type `${self.show(arg.ty, fcx)}` but `${self.show(expected, fcx)}` was expected",
+                    arg.span,
+                )
+            }
+        }
+        // Normalization seam: the call's return type.
+        let ret = self.instantiate(tm.ret, sub, fcx.icx, span)
+        HirExpr {
+            kind: EkTraitCall(trait_id, method_idx, self_ty, type_args, receiver, args),
+            ty: ret,
+            span: span,
+        }
+    }
+
+    /// When `recv_ty` has a trait's `fmt(self) -> String` in scope, the call
+    /// that makes `value`'s string, for interpolation; `value_ast` is
+    /// `value` as written (`try_display`).
+    pub fn try_display(
+        mut self,
+        mut fcx: FnCtx,
+        value: HirExpr,
+        value_ast: Spanned<Expr>,
+        recv_ty: Ty,
+    ) -> Option<HirExpr> {
+        let (trait_id, method_idx) = match self.resolve_method_on(recv_ty, fcx, "fmt") {
+            MethodResTrait(t, i) => (t, i)
+            _ => return None
+        }
+        // No other argument, and a `String`.
+        let mut found: Option<TraitMethod> = None
+        for t in self.traits.iter() {
+            if t.def_id == trait_id {
+                if method_idx < t.methods.len() { found = Some(t.methods.at(method_idx)) }
+                break
+            }
+        }
+        let tm = found?
+        if !tm.params.is_empty() || !ty_eq(tm.ret, TyString) { return None }
+        let span = value.span
+        Some(
+            self.emit_trait_call(
+                fcx,
+                trait_id,
+                method_idx,
+                TraitCallSelfReceiver(value, value_ast),
+                Vec::new(),
+                span,
+            ),
+        )
+    }
+
+    /// A method as a diagnostic names it: an array impl's by its self type
+    /// in the impl's names, a generic named type's by its head, any other as
+    /// the resolver names it (`shown_method`).
+    pub fn shown_method(self, def_id: Int) -> String {
+        let raw = self.name_of(def_id)
+        let mut owner = -1
+        for k in 0..self.impls.len() {
+            let mut has = false
+            for (_, d) in self.impls.at(k).methods.iter() { if d == def_id { has = true } }
+            if has {
+                owner = k
+                break
+            }
+        }
+        let dot = last_dot(raw)
+        if owner < 0 || dot < 0 { return raw }
+        let method = raw.byte_slice(dot + 1, raw.byte_len())
+        let imp = self.impls.at(owner)
+        if head_eq(imp.self_head, TyHeadArray) {
+            let names = if owner < self.impl_param_names.len() {
+                self.impl_param_names.at(owner)
+            } else {
+                Vec::new()
+            }
+            let ty = display_ty_named(imp.self_ty, self.defs, names)
+            return "${ty}::${method}"
+        }
+        if imp.generics > 0 {
+            let ty = display_ty(imp.self_ty, self.defs)
+            let stem = match ty.index_of("<") {
+                Some(at) => ty.byte_slice(0, at)
+                None => ty
+            }
+            return "${stem}::${method}"
+        }
+        raw
+    }
+}
+
+// The byte index of the last `.` of `s`, or -1 (`rsplit_once('.')`).
+fn last_dot(s: String) -> Int {
+    let mut k = s.byte_len()
+    while k > 0 {
+        k -= 1
+        if s.byte_at(k) == 46 { return k }
+    }
+    -1
+}
+
+// A tuple index's value, `name` all decimal digits, or -1 when it is not
+// one (`str::parse::<usize>`); a value past every tuple's length is as
+// good as none.
+fn parse_index(name: String) -> Int {
+    let n = name.byte_len()
+    if n == 0 { return -1 }
+    let mut v = 0
+    for k in 0..n {
+        let b = name.byte_at(k)
+        if b < 48 || b > 57 { return -1 }
+        // Past any tuple's length: keep it from overflowing.
+        if v > 100000000 { v = 100000000 } else { v = v * 10 + (b - 48) }
+    }
+    v
+}

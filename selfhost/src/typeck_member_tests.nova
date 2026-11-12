@@ -1,0 +1,195 @@
+// N's own tests of the bodies' members (5.3b part 3): method lookup, `?`,
+// closures and functions as values (their ids, names and captures), and
+// places and mutability with their fixes, each expected value what S0's
+// `nova check --dump-hir` gives for the same source. The sources need no
+// std (typeck_body_tests.nova's `check_bodies_of`), so a `?` meets the
+// program's own `Option`. The differential compares every other input.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import diagnostic
+import hir
+import token
+import typeck
+import typeck_body
+import typeck_body_tests
+
+// Each diagnostic's code, message and primary span, its notes, and each
+// fix's title and edits, one a line.
+fn report(c: Checker) -> String {
+    let mut out: Vec<String> = Vec::new()
+    for d in c.diagnostics.iter() {
+        let at = d.labels.at(0).span
+        out.push("${d.code} ${d.message} ${at.start}..${at.end}")
+        for n in d.notes.iter() { out.push("  note: ${n}") }
+        for f in d.fixes.iter() {
+            out.push("  fix: ${f.title}")
+            for e in f.edits.iter() { out.push("    ${e.span.start}..${e.span.end} `${e.text}`") }
+        }
+    }
+    "\n".join(out.to_array())
+}
+
+// --- Method lookup ---
+
+@test
+fn an_inherent_method_comes_before_a_trait_method_of_its_name() {
+    let c = check_bodies_of(
+        "trait T { fn m(self) -> Int }\nrecord P { x: Int }\nimpl T for P { fn m(self) -> Int { 1 } }\nimpl P { fn m(self) -> Int { 2 } }\nfn f(p: P) -> Int { p.m() }\n",
+    )
+    assert(c.diagnostics.is_empty(), report(c))
+    let f = c.functions.at(0)
+    assert(f.name == "f", "the first function is `f`")
+    let call = match f.body.kind {
+        EkBlock(_, Some(t)) => t
+        _ => return assert(false, "a block with a tail")
+    }
+    match call.kind {
+        EkCall(CalleeDef(id), _, args) => {
+            assert(c.name_of(id) == "P.m", "the inherent method, `${c.name_of(id)}`")
+            assert(args.len() == 1, "the receiver its first argument")
+        }
+        _ => assert(false, "a direct call")
+    }
+}
+
+@test
+fn a_call_through_a_bound_is_a_trait_call_on_the_parameter() {
+    let c = check_bodies_of(
+        "trait T { fn m(self) -> Int\n fn z() -> Self }\nfn f<A: T>(a: A) -> Int { a.m() }\nfn g<A: T>() -> A { A::z() }\n",
+    )
+    assert(c.diagnostics.is_empty(), report(c))
+    for k in 0..2 {
+        let body = match c.functions.at(k).body.kind {
+            EkBlock(_, Some(t)) => t
+            _ => return assert(false, "a block with a tail")
+        }
+        match body.kind {
+            EkTraitCall(_, method, self_ty, _, receiver, _) => {
+                assert(method == k, "the trait's method ${k}")
+                assert(ty_eq(self_ty, TyParam(0)), "`Self` is the parameter")
+                assert(receiver.is_some() == (k == 0), "a receiver only for `a.m()`")
+            }
+            _ => assert(false, "a trait call")
+        }
+    }
+}
+
+@test
+fn a_missing_or_ambiguous_method_is_reported_with_its_fix() {
+    let c = check_bodies_of(
+        "trait A { fn go(self) }\ntrait B { fn go(self) }\nrecord P { x: Int }\nimpl A for P { fn go(self) {} }\nimpl B for P { fn go(self) {} }\nimpl P { fn length(self) -> Int { 1 } }\nfn f(p: P) {\n    p.go()\n    p.lenght()\n    p.y\n    [1].len(2)\n}\n",
+    )
+    let want = [
+        "E0015 ambiguous method call `go`: more than one trait in scope provides it 191..193",
+        "E0014 no method `lenght` on type `P` 202..208",
+        "  fix: change `lenght` to `length`",
+        "    202..208 `length`",
+        "E0014 no field `y` on record `P` 217..218",
+        "  fix: change `y` to `x`",
+        "    217..218 `x`",
+        "E0014 no method `len` on array type `[Int]` 227..230",
+    ]
+    assert(report(c) == "\n".join(want), report(c))
+}
+
+// --- `?` ---
+
+@test
+fn a_question_mark_on_the_programs_own_option_is_e0098() {
+    // No std: `Option` here is the program's own sum.
+    let c = check_bodies_of(
+        "type Option<T> = | Some(T) | None\nfn f(o: Option<Int>) -> Option<Int> { let v = o?\n Some(v) }\nconst C: Int = 1?\n",
+    )
+    let want = [
+        "E0098 `?` needs an `Option` or a `Result` 80..81",
+        "  note: this `Option<Int>` is the program's own type, not std's",
+        "E0098 `?` needs an `Option` or a `Result` 109..110",
+        "  note: its type is `Int`",
+    ]
+    assert(report(c) == "\n".join(want), report(c))
+}
+
+// --- Closures and functions as values ---
+
+@test
+fn closures_and_wrappers_take_ids_past_every_definition_in_the_order_met() {
+    let c = check_bodies_of(
+        "fn twice(n: Int) -> Int { n * 2 }\nfn f(k: Int) -> Int {\n    let a = |x: Int| x + k\n    let b = twice\n    let c = |y: Int| { let z = y\n a(z) + b(k) }\n    c(1)\n}\n",
+    )
+    assert(c.diagnostics.is_empty(), report(c))
+    let first = c.defs.defs.len()
+    // `twice`, `f`, then the closures and the wrapper, as they were lifted.
+    assert(c.functions.len() == 5, "five functions")
+    let a = c.functions.at(2)
+    let b = c.functions.at(3)
+    let cl = c.functions.at(4)
+    assert(a.def_id == first && a.name == "closure$" + "${first}", a.name)
+    assert(b.def_id == first + 1 && b.name == "fnval$" + "${first + 1}", b.name)
+    assert(cl.def_id == first + 2 && cl.name == "closure$" + "${first + 2}", cl.name)
+    // `a` captures `k`; the wrapper none; `c` captures `a`, `b` and `k`, in
+    // the order its body names them, ahead of its own locals.
+    assert(a.capture_count == 1 && a.locals.at(0).name == "k", "a captures k")
+    assert(b.capture_count == 0 && b.locals.at(0).name == "__a0", "the wrapper's parameter")
+    assert(cl.capture_count == 3, "c captures three")
+    let names = "${cl.locals.at(0).name} ${cl.locals.at(1).name} ${cl.locals.at(2).name} ${cl.locals.at(3).name} ${cl.locals.at(4).name}"
+    assert(names == "a b k y z", names)
+    assert(cl.takes_env && cl.params == 1, "a closure takes its environment and its parameter")
+}
+
+// --- Places and mutability ---
+
+@test
+fn assigning_through_an_immutable_binding_offers_mut_or_says_why_not() {
+    let c = check_bodies_of(
+        "record P { x: Int }\nimpl P {\n    fn grow(mut self) { self.x += 1 }\n    fn bad(self) { self.x = 0 }\n}\nfn f(p: P) {\n    let n = 1\n    n = 2\n    p.x = 3\n    p.grow()\n    P { x: 1 }.grow()\n}\n",
+    )
+    // The functions' bodies first, then the methods' (spec §4.1).
+    let want = [
+        "E0060 cannot assign to immutable variable `n` 132..137",
+        "  fix: make `n` mutable",
+        "    122..122 `mut `",
+        "E0060 cannot assign to a field of immutable `p` 142..149",
+        "  fix: make `p` mutable",
+        "    106..106 `mut `",
+        "E0060 `P.grow` mutates its receiver, but `p` is immutable 154..162",
+        "  fix: make `p` mutable",
+        "    106..106 `mut `",
+        "E0060 `P.grow` mutates its receiver, which cannot be a temporary 167..184",
+        "E0060 cannot assign to a field of immutable `self` 86..96",
+        "  note: declare the enclosing method's receiver as `mut self` to allow mutation",
+    ]
+    assert(report(c) == "\n".join(want), report(c))
+}
+
+@test
+fn a_compound_assignment_to_a_field_evaluates_its_receiver_once() {
+    let c = check_bodies_of("record P { x: Int }\nfn f(mut p: P) { p.x += 1 }\n")
+    assert(c.diagnostics.is_empty(), report(c))
+    let f = c.functions.at(0)
+    // `p` and the checker's own `__place`.
+    assert(f.locals.len() == 2 && f.locals.at(1).name == "__place", "a local of its own")
+    let set = match f.body.kind {
+        EkBlock(_, Some(t)) => t
+        _ => return assert(false, "a block with a tail")
+    }
+    match set.kind {
+        EkBlock(stmts, None) => {
+            match stmts.at(0).kind {
+                EkLet(1, _) => ()
+                _ => assert(false, "the receiver bound first")
+            }
+            match stmts.at(1).kind {
+                EkFieldSet(_, 0, value) => {
+                    match value.kind {
+                        EkBinary(OpAdd, _, _) => ()
+                        _ => assert(false, "`t.x + 1` stored")
+                    }
+                }
+                _ => assert(false, "then the field set")
+            }
+        }
+        _ => assert(false, "a block of its own")
+    }
+}

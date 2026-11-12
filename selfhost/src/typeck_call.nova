@@ -1,15 +1,15 @@
 // The type checker's calls: a port of check.rs's `check_call`,
 // `check_direct_call`, `instantiate`, `check_builtin_call`, `make_variant`,
-// `variant_index`, `qualifier_self_ty`'s test of a qualifier, and the free
+// `variant_index`, `core_sum`, `check_try`, and the free
 // `builtin_signature`, function by function and with the same names (spec
 // docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
 // §4.2, ADR 0056). typeck_body.nova gives the idioms; a builtin is its
 // index in `BUILTIN_VARIANTS` (builtins.nova), and `builtin_signature`
-// reads its Rust variant's name.
-//
-// While 5.3b is being built, a method call, a call through a type
-// parameter's bounds and an associated function's call are stubs
-// (typeck_expr.nova's `unported_expr`), which part 3 ports.
+// reads its Rust variant's name. `check_call`'s two longest arms,
+// `T::f(…)` through a type parameter's bounds and `Type::f(…)`, are
+// functions of their own here (`check_param_assoc_call`,
+// `check_qualified_assoc_call`), as is `check_try`'s E0099
+// (`try_cannot_return`); typeck_method.nova resolves and emits the calls.
 
 import ast
 import builtins
@@ -22,6 +22,8 @@ import token
 import typeck
 import typeck_body
 import typeck_expr
+import typeck_method
+import typeck_place
 import typeck_ty
 
 impl Checker {
@@ -36,8 +38,13 @@ impl Checker {
         span: Span,
     ) -> HirExpr {
         match callee.value {
-            // 5.3b part 3: `receiver.method(args)` (`check_method_call`).
-            ExprField(_, _) => return self.unported_expr("method calls (5.3b part 3)", span)
+            // `receiver.method(args)`: the receiver's AST rides along, for
+            // the mutable-receiver rule's `place_root`.
+            ExprField(target, field) => {
+                let receiver = self.check_expr(fcx, target)
+                let checked = self.check_args(fcx, args)
+                return self.check_method_call(fcx, receiver, target, field, checked, span)
+            }
             ExprPath(path) => {
                 let segs = path.segments
                 if segs.len() == 1 {
@@ -79,13 +86,20 @@ impl Checker {
                 } else if segs.len() == 2 {
                     let ty_name = segs.at(0).value
                     let name = segs.at(1).value
-                    // 5.3b part 3: `T::f()` through `T`'s bounds
-                    // (`emit_trait_call`).
-                    if fcx.generics.contains_key(ty_name) {
-                        return self.unported_expr(
-                            "calls through a type parameter's bounds (5.3b part 3)",
+                    // `T::zero()`, `T` a generic parameter: through its
+                    // bounds, as a bounded method call; before the type
+                    // namespace, so that `T` shadows a type of its name.
+                    match fcx.generics.get(ty_name) {
+                        Some(k) => return self.check_param_assoc_call(
+                            fcx,
+                            k,
+                            ty_name,
+                            name,
+                            callee.span,
+                            args,
                             span,
                         )
+                        None => ()
                     }
                     // `Type::Variant(args)`, before any associated function.
                     let def_id = self.resolve_type_in(self.cur_module, ty_name)
@@ -96,11 +110,24 @@ impl Checker {
                             return self.make_variant(fcx, def_id, vi, checked, span)
                         }
                     }
-                    // 5.3b part 3: an associated function, an inherent
-                    // impl's or a trait's, when the qualifier names a type
-                    // (`qualifier_self_ty`, `emit_assoc_call`).
-                    if self.qualifier_names_a_type(ty_name) {
-                        return self.unported_expr("associated functions (5.3b part 3)", span)
+                    // Then an associated function: an inherent impl's
+                    // first, then a trait impl's for the qualifier's type.
+                    match self.qualifier_self_ty(fcx, ty_name) {
+                        Some(self_ty) => {
+                            match self.check_qualified_assoc_call(
+                                fcx,
+                                self_ty,
+                                ty_name,
+                                name,
+                                callee.span,
+                                args,
+                                span,
+                            ) {
+                                Some(e) => return e
+                                None => ()
+                            }
+                        }
+                        None => ()
                     }
                 }
             }
@@ -156,25 +183,338 @@ impl Checker {
         out
     }
 
-    // Whether `qualifier_self_ty` gives the qualifier `name` a type: a
-    // primitive's name but `Future`'s, or a record or sum in scope.
-    fn qualifier_names_a_type(self, name: String) -> Bool {
-        if name == "Int"
-            || name == "Float"
-            || name == "Bool"
-            || name == "Char"
-            || name == "String"
-            || name == "Bytes" {
-            return true
+    // `T::name(args)`, `T` the generic parameter `k` (`check_call`'s arm):
+    // the one bound that declares an associated function `name`; the
+    // arguments are checked first.
+    fn check_param_assoc_call(
+        mut self,
+        mut fcx: FnCtx,
+        k: Int,
+        ty_name: String,
+        name: String,
+        callee_span: Span,
+        args: Vec<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        let mut matches: Vec<(Int, Int)> = Vec::new()
+        if k < fcx.param_bounds.len() {
+            for tid in fcx.param_bounds.at(k).iter() {
+                let i = self.trait_assoc_fn_index(tid, name)
+                if i >= 0 { matches.push((tid, i)) }
+            }
         }
-        if name == "Future" { return false }
-        let def_id = self.resolve_type_in(self.cur_module, name)
-        if def_id < 0 { return false }
-        match self.kind_of(def_id) {
-            DefKindRecord(_) => true
-            DefKindSum(_, _) => true
+        let checked = self.check_args(fcx, args)
+        if matches.len() == 1 {
+            let (tid, idx) = matches.at(0)
+            return self.emit_trait_call(
+                fcx,
+                tid,
+                idx,
+                TraitCallSelfQualifier(TyParam(k)),
+                checked,
+                span,
+            )
+        }
+        if matches.is_empty() {
+            // A bound may declare `name` as a method with a `self`
+            // receiver: then that is the reason.
+            let mut declared_as_method = false
+            if k < fcx.param_bounds.len() {
+                for tid in fcx.param_bounds.at(k).iter() {
+                    if self.trait_method_index(tid, name) >= 0 { declared_as_method = true }
+                }
+            }
+            if declared_as_method {
+                self.error(
+                    "E0001",
+                    "no associated function `${name}` on generic parameter `${ty_name}`; its bound declares `${name}` as a method with a `self` receiver, so it must be called on a value",
+                    callee_span,
+                )
+            } else {
+                self.error(
+                    "E0001",
+                    "no associated function `${name}` on generic parameter `${ty_name}`; none of its bounds declares one",
+                    callee_span,
+                )
+            }
+            return error_expr(span)
+        }
+        self.error(
+            "E0015",
+            "ambiguous associated function `${ty_name}::${name}`: more than one bound of `${ty_name}` provides it",
+            callee_span,
+        )
+        error_expr(span)
+    }
+
+    // `Type::name(args)`, `self_ty` the qualifier's type (`check_call`'s
+    // arm): an inherent impl's associated function, then a trait impl's;
+    // `None` when the call falls through to a call through a value.
+    fn check_qualified_assoc_call(
+        mut self,
+        mut fcx: FnCtx,
+        self_ty: Ty,
+        ty_name: String,
+        name: String,
+        callee_span: Span,
+        args: Vec<Spanned<Expr>>,
+        span: Span,
+    ) -> Option<HirExpr> {
+        let inherent = match head(self_ty) {
+            Some(h) => self.find_assoc_fns(h, name)
+            None => Vec::new()
+        }
+        if inherent.len() == 1 {
+            let checked = self.check_args(fcx, args)
+            return Some(self.emit_assoc_call(fcx, inherent.at(0), checked, span))
+        }
+        if inherent.len() > 1 {
+            // Two inherent impls sharing the head both declare it.
+            self.error(
+                "E0015",
+                "ambiguous associated function `${ty_name}::${name}`: more than one inherent impl of `${ty_name}` provides it",
+                callee_span,
+            )
+            return Some(error_expr(span))
+        }
+        let matches = self.find_trait_assoc_fns(self_ty, name)
+        if matches.len() == 1 {
+            let (tid, idx) = matches.at(0)
+            let checked = self.check_args(fcx, args)
+            return Some(
+                self.emit_trait_call(fcx, tid, idx, TraitCallSelfQualifier(self_ty), checked, span),
+            )
+        }
+        if matches.len() > 1 {
+            self.error(
+                "E0015",
+                "ambiguous associated function `${ty_name}::${name}`: more than one trait in scope provides it",
+                callee_span,
+            )
+            return Some(error_expr(span))
+        }
+        // A primitive is invisible to `resolve_type`: the associated
+        // function is what is missing.
+        if self.resolve_type_in(self.cur_module, ty_name) < 0 {
+            self.error(
+                "E0001",
+                "no associated function `${name}` on type `${ty_name}`",
+                callee_span,
+            )
+            return Some(error_expr(span))
+        }
+        // A nominal qualifier whose type arguments, still unknown, are why
+        // no impl was selected.
+        match head(self_ty) {
+            Some(h) => {
+                let mut head_declares_it = false
+                for imp in self.impls.iter() {
+                    if !head_eq(imp.self_head, h) || imp.trait_id < 0 { continue }
+                    if self.trait_assoc_fn_index(imp.trait_id, name) >= 0 {
+                        head_declares_it = true
+                    }
+                }
+                if head_declares_it {
+                    self.error(
+                        "E0011",
+                        "cannot call `${ty_name}::${name}()`: an impl provides it, but `${ty_name}`'s type arguments could not be determined from the qualifier alone to select it",
+                        callee_span,
+                    )
+                    return Some(error_expr(span))
+                }
+            }
+            None => ()
+        }
+        // Otherwise on to `check_path`, which reports the missing variant.
+        None
+    }
+
+    /// The type std's `core` exports as `name`, or -1 (`core_sum`).
+    pub fn core_sum(self, name: String) -> Int {
+        let mut core = -1
+        for m in 0..self.defs.modules.len() {
+            if self.defs.modules.at(m).name == "$std.core" {
+                core = m
+                break
+            }
+        }
+        if core < 0 || core >= self.defs.exports.len() { return -1 }
+        match self.defs.exports.at(core).types.get(name) {
+            Some(id) => id
+            None => -1
+        }
+    }
+
+    /// `e?`, desugared to the `match` that gives `Some(v)`'s or `Ok(v)`'s
+    /// `v` and returns `None` or `Err(x)` re-wrapped; nothing is
+    /// converted (`check_try`).
+    pub fn check_try(mut self, mut fcx: FnCtx, inner: Spanned<Expr>, span: Span) -> HirExpr {
+        let value = self.check_expr(fcx, inner)
+        let value_ty = fcx.icx.apply(value.ty)
+        match value_ty {
+            TyError => return error_expr(span)
+            _ => ()
+        }
+        let option = self.core_sum("Option")
+        let result = self.core_sum("Result")
+        let mut sum = -1
+        let mut args: Vec<Ty> = Vec::new()
+        match value_ty {
+            TySum(d, a) => if d >= 0 && (d == option || d == result) {
+                sum = d
+                args = a
+            }
+            _ => ()
+        }
+        if sum < 0 {
+            let note = match value_ty {
+                TyVar(_) => "its type is not known here; annotate it"
+                TySum(d, _) => {
+                    let n = self.name_of(d)
+                    if n == "Option" || n == "Result" {
+                        "this `${self.show(value_ty, fcx)}` is the program's own type, not std's"
+                    } else {
+                        "its type is `${self.show(value_ty, fcx)}`"
+                    }
+                }
+                _ => "its type is `${self.show(value_ty, fcx)}`"
+            }
+            let mut d = Diagnostic::error("E0098", "`?` needs an `Option` or a `Result`")
+            d.add_primary(self.cur_file, inner.span, "this value")
+            d.add_note(note)
+            self.diagnostics.push(d)
+            return error_expr(span)
+        }
+        let is_option = sum == option
+        let good = if is_option { "Some" } else { "Ok" }
+        let bad = if is_option { "None" } else { "Err" }
+        let good_idx = self.variant_index(sum, good)
+        let bad_idx = self.variant_index(sum, bad)
+        if good_idx < 0 || bad_idx < 0 { return error_expr(span) }
+        let payload = if args.is_empty() { TyError } else { args.at(0) }
+        // A constant's initializer is no function: nowhere to return.
+        if fcx.in_const {
+            let mut d = Diagnostic::error("E0099", "`?` cannot return from this function")
+            d.add_primary(self.cur_file, span, "this `?` is in a constant's initializer")
+            d.add_note(
+                "a constant is not a function: `?` works only in a `fn` or a closure; match on the value instead",
+            )
+            self.diagnostics.push(d)
+            return error_expr(span)
+        }
+        // The enclosing function's return type; a closure's, still being
+        // inferred, becomes the same sum with fresh arguments.
+        let ret0 = fcx.icx.apply(fcx.ret_ty)
+        match ret0 {
+            TyVar(_) => {
+                let mut fresh_args: Vec<Ty> = Vec::new()
+                fresh_args.push(fcx.icx.fresh())
+                if !is_option { fresh_args.push(fcx.icx.fresh()) }
+                let _ = fcx.icx.unify(ret0, TySum(sum, fresh_args))
+            }
+            _ => ()
+        }
+        let ret = fcx.icx.apply(fcx.ret_ty)
+        let ret_args = match ret {
+            TySum(d, a) => if d == sum {
+                a
+            } else {
+                self.try_cannot_return(fcx, ret, is_option, result, span)
+                return error_expr(span)
+            }
+            TyError => return error_expr(span)
+            _ => {
+                self.try_cannot_return(fcx, ret, is_option, result, span)
+                return error_expr(span)
+            }
+        }
+        // A `Result`'s error types must be the same: `map_err` converts.
+        if !is_option {
+            let value_err = if args.len() > 1 { args.at(1) } else { TyError }
+            let ret_err = if ret_args.len() > 1 { ret_args.at(1) } else { TyError }
+            if !fcx.icx.unify(value_err, ret_err) {
+                let mut d = Diagnostic::error(
+                    "E0010",
+                    "`?` cannot return an error of type `${self.show(value_err, fcx)}` from a function whose error type is `${self.show(ret_err, fcx)}`",
+                )
+                d.add_primary(self.cur_file, span, "here")
+                d.add_note(
+                    "`?` converts nothing: convert the error first, with `.map_err(|e| ...)?`",
+                )
+                self.diagnostics.push(d)
+                return error_expr(span)
+            }
+        }
+        // `match value { good(v) => v, bad(x) => return bad(x) }`, through
+        // unscoped locals no name reaches.
+        let v = fcx.new_local_unscoped("__ok", payload, false, span)
+        let mut bad_binders: Vec<HirPattern> = Vec::new()
+        let mut bad_args: Vec<HirExpr> = Vec::new()
+        if !is_option {
+            let err_ty = if args.len() > 1 { args.at(1) } else { TyError }
+            let x = fcx.new_local_unscoped("__err", err_ty, false, span)
+            bad_binders.push(PatBind(x))
+            bad_args.push(local_expr(x, err_ty, span))
+        }
+        let early = HirExpr { kind: EkMakeVariant(sum, bad_idx, bad_args), ty: ret, span: span }
+        let mut good_fields: Vec<HirPattern> = Vec::new()
+        good_fields.push(PatBind(v))
+        let mut arms: Vec<HirArm> = Vec::new()
+        arms.push(
+            HirArm {
+                pattern: PatVariant(sum, good_idx, good_fields),
+                guard: None,
+                body: local_expr(v, payload, span),
+                span: span,
+            },
+        )
+        arms.push(
+            HirArm {
+                pattern: PatVariant(sum, bad_idx, bad_binders),
+                guard: None,
+                body: HirExpr { kind: EkReturn(Some(early)), ty: TyNever, span: span },
+                span: span,
+            },
+        )
+        HirExpr { kind: EkMatch(value, arms), ty: payload, span: span }
+    }
+
+    // E0099: the enclosing function's return type `other` is not the sum
+    // the `?` is on (`check_try`'s arm).
+    fn try_cannot_return(
+        mut self,
+        mut fcx: FnCtx,
+        other: Ty,
+        is_option: Bool,
+        result: Int,
+        span: Span,
+    ) {
+        let mut d = Diagnostic::error("E0099", "`?` cannot return from this function")
+        d.add_primary(self.cur_file, span, "this `?` would return early")
+        let what = if is_option { "an `Option`" } else { "a `Result`" }
+        d.add_note("the function returns `${self.show(other, fcx)}`, not ${what}")
+        let returns_result = match other {
+            TySum(id, _) => id >= 0 && id == result
             _ => false
         }
+        if is_option && returns_result {
+            d.add_note("to return an error when the value is `None`, write `.ok_or(err)?`")
+        }
+        if fcx.entry {
+            d.add_note("`main` and `@test` functions return `()`, so `?` cannot return from them")
+        }
+        match other {
+            TySum(id, _) => {
+                let n = self.name_of(id)
+                if n == "Option" || n == "Result" {
+                    d.add_note(
+                        "this `${self.show(other, fcx)}` is the program's own type, not std's",
+                    )
+                }
+            }
+            _ => ()
+        }
+        self.diagnostics.push(d)
     }
 
     // A call of the function or extern function `def_id` by name
