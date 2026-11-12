@@ -485,7 +485,7 @@ parts set `N_BODIES`, and every set is then compared byte for byte.
   39.89 s (52 tests); after, 47.85, 48.36 and 47.49 s (55 tests), the full dump's
   sets on S0 alone and the 659 new cases among them.
 
-### 8. N's bodies, part by part (part 2)
+### 8. N's bodies, part by part (parts 2 and 3)
 
 N checks the program's bodies as S0 does, function by function:
 `infer.nova` (S0's `infer.rs`: plain substitution, the occurs check, `!`
@@ -513,16 +513,37 @@ qualifier. N's idioms, beyond ADR 0055's:
 - N checks the program's bodies only (§4): std's are std's part, which
   the shared path never checks for a program.
 
+Part 3 adds the members: `typeck_method.nova` (record literals, fields
+and tuple elements, method lookup with `MethodRes`, method calls,
+`emit_inherent_call`, `emit_assoc_call`, `emit_trait_call` with
+`TraitCallSelf`, `qualifier_self_ty` and its `fresh` calls, interpolation
+through `Display` by `try_display`, `shown_method`), `typeck_place.nova`
+(assignment, `place_root`, `require_mutable_place` with `MutTarget` and
+`PlaceRoot`, element and field sets and their compound forms),
+`typeck_closure.nova` (closures lifted and functions as values wrapped,
+each taking the next id past every definition in the order met, named
+`closure$<id>` and `fnval$<id>`, which the dump prints under §3's rule)
+and, in `typeck_call.nova`, `T::f(…)` through a bound, `Type::f(…)`,
+`core_sum` and `?`. `fixes.nova` gains a record literal's `Need`,
+`mutable_fix`, `immutable_note`, `field_fix` and `method_fix`. Beyond
+part 2's idioms:
+
+- `check_call`'s two longest arms (`T::f`, `Type::f`) and `check_try`'s
+  E0099 are functions of their own in N, called where S0's code stands.
+- A receiver's or a field initializer's AST travels beside its checked
+  form, in `TraitCallSelf` as in S0, so `place_root` walks the place as
+  written.
+- A lifted closure's locals are copies of the enclosing function's, as
+  S0's `clone`, since finalizing rewrites a local in place.
+
 **Until N checks every body** (`N_BODIES` false), `selfhost hir` checks
 the program's bodies and prints the full dump, and `selfhost hir
 --items` prints 5.3a's item part, which every 5.3a comparison takes (the
 harness's `n_hir`, beside S0's `--dump-hir-items`). A construct a later
 part ports is one stub in N, which records what it is: N then prints
 `UNPORTED` and why after the root's header and exits 3, so a half-checked
-body is never compared as though it were complete. The stubs: record
-literals, fields, method calls, `?`, closures and functions as values,
-assignment, calls through a type parameter's bounds and associated
-functions, interpolation through `Display` (part 3); `match`, `for`,
+body is never compared as though it were complete. The stubs, after
+part 3: `match`, `for`,
 destructuring `let` and std's bodies, for a program the shared path hands
 to the full check (§4) or a std that gives a diagnostic, and std's full
 part (part 4); views (part 5). `crates/nova-cli/tests/selfhost/n_bodies.txt`
@@ -541,3 +562,12 @@ cases, 32 corpus roots; 364 reach the type checker, 362 with functions,
 endings, the 814 loose cases of `cases/check/` give the same. Of 5.3a's
 167 item cases, 112 agree and 55 are refused (27 take the full check).
 
+**Part 3's figures** (2026-11-12): of 1,211 inputs (826 cases of the
+three modes, 385 corpus roots of the three modes), N gives 770 (622
+cases, 148 corpus roots) and refuses 441 (`match` 243, the fallback's
+roots 75, `for` 65, views 37, destructuring `let` 21); none differs from
+S0's. With CRLF line endings, the 814 loose cases of `cases/check/`
+give 616 and refuse 198, none differing. 1,524 mutants of the listed
+cases and corpus roots, aimed at the members, and every input of the
+type, name, mutation, soup, depth and edge fuzzers: none differs. Of
+5.3a's 167 item cases, 138 agree and 29 are refused.
