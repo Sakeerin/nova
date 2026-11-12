@@ -4168,7 +4168,14 @@ fn n_args_on_stack(dir: &Path, stack: Option<u32>, args: &[&str]) -> (Option<i32
 /// `where` bound and an extern's signature), through N's `selfhost hir` on
 /// a main thread of 1 MB, as
 /// [`n_parses_128_levels_of_every_kind_on_a_1_mb_main_thread`] runs N's
-/// parser: N's dump is S0's, which S0 checks on its 64 MB thread.
+/// parser: N's dump is S0's, which S0 checks on its 64 MB thread. The item
+/// passes walk arrays, a generic record's arguments, tuples and `fn` types'
+/// parameters and returns all 128 levels deep. The other five kinds' depth
+/// is the parser's alone, which the parser's test covers: parentheses are
+/// gone once parsed (`(T)` is `T`, so the item passes see `Int`), and for
+/// optionals, references, mutable references and pointers both sides stop
+/// at the outermost level with one E0900 and walk no further inside. They
+/// stay here to pin that on both sides.
 #[test]
 fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
     // Each kind's level, written around `Int`: an optional's first `?` is

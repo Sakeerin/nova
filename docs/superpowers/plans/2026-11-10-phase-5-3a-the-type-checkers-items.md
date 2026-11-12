@@ -175,7 +175,11 @@ commit comes first in the pull request (decision 19).
     it took in two of three measurements: within bytes of the limit (Task
     5, Step 7); every written nesting of a type at 128 levels,
     in each item position, N checks on 1 MB as S0 does (Task 3's
-    `n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread`).
+    `n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread`;
+    the item passes walk arrays, generic arguments, tuples and `fn` types
+    128 levels deep, while parentheses are gone once parsed and optionals,
+    references and pointers stop at the outermost level with one E0900,
+    their depth the parser's).
 
   - Where each ran: Tasks 3's and 4's replay and the second fact-check's
     nine mutants at the last commit itself; `selfhost.rs`'s times and the
@@ -540,7 +544,11 @@ check in the task that owns the code:
    and N's item passes,
    `n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread`
    (Task 3: `selfhost hir` on every written nesting of a type at 128
-   levels in each item position, its dump compared with S0's).
+   levels in each item position, its dump compared with S0's; the item
+   passes walk arrays, generic arguments, tuples and `fn` types 128 levels
+   deep, while parentheses are gone once parsed and optionals, references
+   and pointers stop at the outermost level with one E0900, their depth
+   the parser's).
 
 ## Decisions
 
@@ -6976,7 +6984,10 @@ Spec §3.1 to §3.7; decisions 5, 10, 12, 15, 17, 18 and 20.
     a return, a field, a variant's payload, a constant, a trait's method,
     an impl's self type, an impl's method alike and unlike its trait's,
     an associated type's binding, a `where` bound and an extern, ten files
-    under `nova-selfhost-deep-n-items`; S0's `check --dump-hir` reaches
+    under `nova-selfhost-deep-n-items` (the item passes walk arrays,
+    generic arguments, tuples and `fn` types 128 levels deep; parentheses
+    are gone once parsed, and the other four stop at the outermost level
+    with one E0900); S0's `check --dump-hir` reaches
     the type checker in each with no P0002, and N's `selfhost hir`, under
     `ulimit -s 1024` on Unix and as it is on Windows, prints S0's dump,
     each side's output settled as `run` settles it (Review Focus 1);
