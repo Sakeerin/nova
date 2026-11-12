@@ -400,8 +400,9 @@ and every comparison goes through `run`:
   to 5.2b's floors (240, 60, 35, 8);
 - the cases: 164 under `check` (154 extracted, 10 by hand), 2 for the
   WASM target, 1 under test mode, and all of them again with `\r\n`;
-- the type fuzzer's 120 inputs (seeds 401 to 403), part A's floors held
-  on N's dumps, which are S0's: E0001 30, E0010 16, E0012 50, E0015 11,
+- the type fuzzer's 120 inputs (seeds 401 to 403), each aimed code at
+  least twice (the harness's floor, §6); part A's counts on N's dumps,
+  which are S0's: E0001 30, E0010 16, E0012 50, E0015 11,
   E0070 10, E0071 14, E0072 21, E0073 18, E0074 23, E0076 5, E0077 20,
   E0078 19, E0105 4, E0403 17, E0900 46;
 - the refusals: no root under each mode, test mode for the WASM target
@@ -556,8 +557,19 @@ pointers) at 128 levels in each item position (a parameter, a return,
 a field, a variant's payload, a constant, a trait's method, an impl's
 self type, an impl's method alike and unlike its trait's, an associated
 type's binding, a `where` bound, an extern), its dump compared with
-S0's. Neither comes near the limit: N's dumps of the item test's
-inputs are S0's on 64 KB, on either runtime.
+S0's. The item passes walk arrays, a generic record's arguments, tuples
+and `fn` types' parameters and returns 128 levels deep. The other five
+kinds reach them only at their outermost level, so their depth is the
+parser's, which the first test covers: parentheses are gone once parsed
+(`(T)` is `T`), and at an optional, a reference, a mutable reference or
+a pointer both sides stop with one E0900 and walk no further inside.
+Neither test comes near the limit. N's dumps of the item test's inputs
+are S0's in every run on 72 KB on the debug runtime and on 64 KB on the
+release runtime, with this container's 9.5 KB environment, and on 60 and
+52 KB under `env -i` (2026-11-12, five runs at each size, the heaviest
+input `generics-128.nova`); a little below those a run passes or
+overflows by chance, as the environment, which shares the main thread's
+stack, and the stack's placement move it.
 
 **Measured again** (2026-11-10 at `4d0eca73` and 2026-11-11 at
 `5bda68ce`, earlier splits of this branch for its plan; `nova` and N
