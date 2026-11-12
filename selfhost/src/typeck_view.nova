@@ -1,0 +1,377 @@
+// The type checker's views: a port of check/view.rs (`ui`,
+// `component_ret`, `check_view`, `view_node`, `view_text`, `element`,
+// `element_builder`, `view_attr`, `view_handler`, `reader`, `ui_variant`,
+// and the free `text_child`, `is_str_lit`, `sum`, `str_lit` and `array`),
+// function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_body.nova gives the idioms.
+//
+// `view { … }` and `component` (RFC 0001): a view's elements, text and
+// attributes become the calls and variants of `std/ui`'s API here, as
+// string interpolation becomes calls; no pass rewrites the tree before
+// this one. S0's `note_use` calls are the language server's index, which
+// N does not port.
+
+import ast
+import hir
+import infer
+import resolver
+import token
+import typeck
+import typeck_body
+import typeck_call
+import typeck_closure
+import typeck_expr
+
+/// What a view desugars to (`Ui`): `std/ui`'s two sums, `View` and
+/// `Attr`, and the two builders of `std/ui/html` it calls or shows, `on(kind,
+/// f)`, which adapts a `fn()` handler to `On`'s `fn(String)`, and `text`.
+pub record Ui { pub view: Int, pub attr: Int, pub on: Int, pub text: Int }
+
+impl Checker {
+    /// `std/ui`'s names, which every target compiles, so a view needs no
+    /// import of its own (`ui`).
+    pub fn ui(self) -> Option<Ui> {
+        let ui = self.module_named("$std.ui")
+        if ui < 0 { return None }
+        let html = self.module_named("$std.ui.html")
+        if html < 0 { return None }
+        let view = self.resolve_type_in(ui, "View")
+        if view < 0 { return None }
+        let attr = self.resolve_type_in(ui, "Attr")
+        if attr < 0 { return None }
+        let on = self.def_value(html, "on")
+        if on < 0 { return None }
+        let text = self.def_value(html, "text")
+        if text < 0 { return None }
+        Some(Ui { view: view, attr: attr, on: on, text: text })
+    }
+
+    // The first module named `name`, or -1.
+    fn module_named(self, name: String) -> Int {
+        for m in 0..self.defs.modules.len() { if self.defs.modules.at(m).name == name { return m } }
+        -1
+    }
+
+    // The definition the value `name` in module `m` names, or -1.
+    fn def_value(self, m: Int, name: String) -> Int {
+        match self.resolve_value_in(m, name) {
+            Some(ResDef(id)) => id
+            _ => -1
+        }
+    }
+
+    /// A component's return type: `std/ui`'s `View` (`component_ret`).
+    pub fn component_ret(self) -> Ty {
+        match self.ui() {
+            Some(ui) => sum(ui.view)
+            None => TyError
+        }
+    }
+
+    /// `view { child }`: the `View` its one child desugars to
+    /// (`check_view`).
+    pub fn check_view(
+        mut self,
+        mut fcx: FnCtx,
+        children: Vec<Spanned<ViewNode>>,
+        span: Span,
+    ) -> HirExpr {
+        let ui = match self.ui() {
+            Some(u) => u
+            None => return error_expr(span)
+        }
+        if children.len() != 1 {
+            self.error("E0094", "`view` holds one root, found ${children.len()}", span)
+            for c in children.iter() { let _ = self.view_node(fcx, ui, c) }
+            return error_expr(span)
+        }
+        self.view_node(fcx, ui, children.at(0))
+    }
+
+    // A child: an element, a view's `text(…)`, or an expression of type
+    // `View` (`view_node`).
+    fn view_node(mut self, mut fcx: FnCtx, ui: Ui, node: Spanned<ViewNode>) -> HirExpr {
+        match node.value {
+            ViewNodeElement(name, args, children) => self.element(
+                fcx,
+                ui,
+                name,
+                args,
+                children,
+                node.span,
+            )
+            ViewNodeExpr(e) => {
+                match text_child(e) {
+                    Some((_, content)) => return self.view_text(fcx, ui, content, e.span)
+                    None => ()
+                }
+                let x = self.check_expr(fcx, e)
+                self.expect_ty(fcx, x, sum(ui.view), "a view's child")
+                x
+            }
+        }
+    }
+
+    // `text(e)`: `Text(e)` for a string literal, `DynText(|| e)` for
+    // anything else (`view_text`).
+    fn view_text(mut self, mut fcx: FnCtx, ui: Ui, content: Spanned<Expr>, span: Span) -> HirExpr {
+        if is_str_lit(content) {
+            let v = self.check_expr(fcx, content)
+            return self.ui_variant(fcx, ui.view, "Text", Vec::from_array([v]), span)
+        }
+        let (f, ty) = self.reader(fcx, content)
+        if !fcx.icx.unify(ty, TyString) {
+            self.error(
+                "E0010",
+                "text must have type `String`, found `${self.show(ty, fcx)}`",
+                content.span,
+            )
+            return error_expr(span)
+        }
+        self.ui_variant(fcx, ui.view, "DynText", Vec::from_array([f]), span)
+    }
+
+    // An element: a call of its builder with its attributes and its
+    // children (`element`).
+    fn element(
+        mut self,
+        mut fcx: FnCtx,
+        ui: Ui,
+        name: Spanned<String>,
+        args: Vec<ViewArg>,
+        children: Option<Vec<Spanned<ViewNode>>>,
+        span: Span,
+    ) -> HirExpr {
+        let builder = self.element_builder(fcx, ui, name)
+        let mut attrs: Vec<HirExpr> = Vec::new()
+        for a in args.iter() { attrs.push(self.view_attr(fcx, ui, a)) }
+        let mut kids: Vec<HirExpr> = Vec::new()
+        match children {
+            Some(cs) => { for c in cs.iter() { kids.push(self.view_node(fcx, ui, c)) } }
+            None => ()
+        }
+        let (def_id, takes_children) = match builder {
+            Some(b) => b
+            None => return error_expr(span)
+        }
+        if !takes_children && children.is_some() {
+            self.error("E0095", "`${name.value}` takes no children", name.span)
+            return error_expr(span)
+        }
+        let mut call_args: Vec<HirExpr> = Vec::new()
+        call_args.push(array(attrs, sum(ui.attr), span))
+        if takes_children { call_args.push(array(kids, sum(ui.view), span)) }
+        HirExpr {
+            kind: EkCall(CalleeDef(def_id), Vec::new(), call_args),
+            ty: sum(ui.view),
+            span: span,
+        }
+    }
+
+    // The function an element names, and whether it takes children: one
+    // that takes `([Attr], [View])`, or `([Attr])`, and returns `View`
+    // (`element_builder`).
+    fn element_builder(
+        mut self,
+        mut fcx: FnCtx,
+        ui: Ui,
+        name: Spanned<String>,
+    ) -> Option<(Int, Bool)> {
+        let n = name.value
+        if fcx.lookup(n) >= 0 { return self.not_builder(name) }
+        let def_id = match self.resolve_value_in(self.cur_module, n) {
+            Some(ResDef(id)) => {
+                match self.kind_of(id) {
+                    DefKindFn(_) => id
+                    _ => return self.not_builder(name)
+                }
+            }
+            None => {
+                if !self.missing_on_target(n, name.span) {
+                    self.error("E0001", "cannot find function `${n}` in this scope", name.span)
+                }
+                return None
+            }
+            Some(_) => return self.not_builder(name)
+        }
+        let sig = match self.sigs.at(def_id) {
+            Some(s) => s
+            None => return None
+        }
+        let attrs = TyArray(sum(ui.attr))
+        let views = TyArray(sum(ui.view))
+        if sig.generics != 0 || !ty_eq(sig.ret, sum(ui.view)) { return self.not_builder(name) }
+        if tys_eq(sig.params, Vec::from_array([attrs, views])) {
+            Some((def_id, true))
+        } else if tys_eq(sig.params, Vec::from_array([attrs])) {
+            Some((def_id, false))
+        } else {
+            self.not_builder(name)
+        }
+    }
+
+    // E0096 at an element's name that is not a builder (`element_builder`'s
+    // `not_builder`).
+    fn not_builder(mut self, name: Spanned<String>) -> Option<(Int, Bool)> {
+        self.error(
+            "E0096",
+            "`${name.value}` is not an element builder: one takes `([Attr], [View])` or `([Attr])` and returns `View`",
+            name.span,
+        )
+        None
+    }
+
+    // An element's argument: an `Attr` as it is, or a named one made into
+    // one (`view_attr`).
+    fn view_attr(mut self, mut fcx: FnCtx, ui: Ui, arg: ViewArg) -> HirExpr {
+        let (name, value) = match arg {
+            ViewArgPositional(e) => {
+                let x = self.check_expr(fcx, e)
+                self.expect_ty(fcx, x, sum(ui.attr), "an element's attribute")
+                return x
+            }
+            ViewArgNamed(n, v) => (n, v)
+        }
+        let span = name.span.merge(value.span)
+        if name.value.starts_with("on_") {
+            let kind = name.value.byte_slice(3, name.value.byte_len())
+            if kind.is_empty() {
+                self.error("E0097", "`on_` names no event", name.span)
+                return error_expr(span)
+            }
+            return self.view_handler(fcx, ui, name, kind, value, span)
+        }
+        let key = str_lit("-".join(name.value.split("_")), name.span)
+        let property = name.value == "value"
+        if is_str_lit(value) {
+            let v = self.check_expr(fcx, value)
+            let variant = if property { "Property" } else { "Static" }
+            return self.ui_variant(fcx, ui.attr, variant, Vec::from_array([key, v]), span)
+        }
+        let (f, ty) = self.reader(fcx, value)
+        if !fcx.icx.unify(ty, TyString) {
+            self.error(
+                "E0097",
+                "`${name.value}` takes a `String`, found `${self.show(ty, fcx)}`",
+                value.span,
+            )
+            return error_expr(span)
+        }
+        let variant = if property { "DynProperty" } else { "Dynamic" }
+        self.ui_variant(fcx, ui.attr, variant, Vec::from_array([key, f]), span)
+    }
+
+    // `on_kind: h`: `On("kind", h)` for a `fn(String)`, and `std/ui/html`'s
+    // `on("kind", h)` for a `fn()` (`view_handler`).
+    fn view_handler(
+        mut self,
+        mut fcx: FnCtx,
+        ui: Ui,
+        name: Spanned<String>,
+        kind: String,
+        value: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        let kind = str_lit(kind, name.span)
+        let h = self.check_expr(fcx, value)
+        let other = fcx.icx.apply(h.ty)
+        match other {
+            TyFn(params, ret) => {
+                // S0's guards in order, each unification kept when a later
+                // one fails.
+                if params.is_empty() && fcx.icx.unify(ret, TyUnit) {
+                    return HirExpr {
+                        kind: EkCall(CalleeDef(ui.on), Vec::new(), Vec::from_array([kind, h])),
+                        ty: sum(ui.attr),
+                        span: span,
+                    }
+                }
+                if params.len() == 1
+                    && fcx.icx.unify(params.at(0), TyString)
+                    && fcx.icx.unify(ret, TyUnit) {
+                    return self.ui_variant(fcx, ui.attr, "On", Vec::from_array([kind, h]), span)
+                }
+            }
+            TyError => return error_expr(span)
+            _ => ()
+        }
+        self.error(
+            "E0097",
+            "`${name.value}` takes a handler, `fn()` or `fn(String)`, found `${self.show(other, fcx)}`",
+            value.span,
+        )
+        error_expr(span)
+    }
+
+    // `|| value`, which reads `value` again each time it runs, and the type
+    // `value` has (`reader`).
+    fn reader(mut self, mut fcx: FnCtx, value: Spanned<Expr>) -> (HirExpr, Ty) {
+        let f = self.check_closure(fcx, Vec::new(), None, value, value.span)
+        let ty = match f.ty {
+            TyFn(_, ret) => ret
+            _ => TyError
+        }
+        (f, ty)
+    }
+
+    // The variant `name` of `std/ui`'s sum `sum_id`, made of `args`
+    // (`ui_variant`).
+    fn ui_variant(
+        mut self,
+        mut fcx: FnCtx,
+        sum_id: Int,
+        name: String,
+        args: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        let vi = self.variant_index(sum_id, name)
+        if vi < 0 { return error_expr(span) }
+        self.make_variant(fcx, sum_id, vi, args, span)
+    }
+}
+
+// A child `text(e)`: the bare name `text` and one argument (`text_child`).
+fn text_child(e: Spanned<Expr>) -> Option<(Spanned<String>, Spanned<Expr>)> {
+    let (callee, args) = match e.value {
+        ExprCall(c, a) => (c, a)
+        _ => return None
+    }
+    let path = match callee.value {
+        ExprPath(p) => p
+        _ => return None
+    }
+    if path.segments.len() == 1 && args.len() == 1 && path.segments.at(0).value == "text" {
+        return Some((path.segments.at(0), args.at(0)))
+    }
+    None
+}
+
+// A string literal with no interpolation, which a view keeps fixed: a raw
+// string, or a `StringInterp` of literal parts alone, as the parser makes
+// every other string (`is_str_lit`).
+fn is_str_lit(e: Spanned<Expr>) -> Bool {
+    match e.value {
+        ExprLit(LiteralStr(_)) => true
+        ExprStringInterp(parts) => {
+            for p in parts.iter() {
+                match p {
+                    StringPartLit(_) => ()
+                    _ => return false
+                }
+            }
+            true
+        }
+        _ => false
+    }
+}
+
+fn sum(def_id: Int) -> Ty { TySum(def_id, Vec::new()) }
+
+fn str_lit(s: String, span: Span) -> HirExpr {
+    HirExpr { kind: EkStrLit(s), ty: TyString, span: span }
+}
+
+fn array(elems: Vec<HirExpr>, elem: Ty, span: Span) -> HirExpr {
+    HirExpr { kind: EkMakeArray(elems), ty: TyArray(elem), span: span }
+}

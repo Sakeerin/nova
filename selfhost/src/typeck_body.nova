@@ -146,8 +146,6 @@ impl Checker {
         let const_ids = self.defs_of_kind(true)
         let mut functions: Vec<HirFunction> = Vec::new()
         let mut std_closures = self.next_closure_def
-        // Once a construct N does not check yet is met, the program is
-        // refused (`unported`), and no other body need be checked.
         for pass in 0..2 {
             let in_std = pass == 1
             if in_std {
@@ -155,14 +153,14 @@ impl Checker {
                 if self.shared.is_some() { break }
             }
             for (def_id, item_index) in fn_ids.iter() {
-                if (def_id >= std_def) != in_std || self.unported != "" { continue }
+                if (def_id >= std_def) != in_std { continue }
                 match self.check_function(def_id, item_index) {
                     Some(f) => functions.push(f)
                     None => ()
                 }
             }
             for id in 0..self.method_locs.len() {
-                if (id >= std_def) != in_std || self.unported != "" { continue }
+                if (id >= std_def) != in_std { continue }
                 if self.method_locs.at(id).is_none() { continue }
                 match self.check_method(id) {
                     Some(f) => functions.push(f)
@@ -170,7 +168,7 @@ impl Checker {
                 }
             }
             for (def_id, item_index) in const_ids.iter() {
-                if (def_id >= std_def) != in_std || self.unported != "" { continue }
+                if (def_id >= std_def) != in_std { continue }
                 match self.check_const(def_id, item_index) {
                     Some(f) => functions.push(f)
                     None => ()
@@ -546,10 +544,6 @@ impl Checker {
         let _ = self.bindings.insert(place_key(self.cur_file, span), binding)
         fcx.new_local(name, ty, is_mut, span)
     }
-
-    /// The construct `what` names is one N does not check yet (5.3b's
-    /// later parts): the first such is kept, and N refuses the program.
-    pub fn unported_at(mut self, what: String) { if self.unported == "" { self.unported = what } }
 
     // --- E0103 ---
 

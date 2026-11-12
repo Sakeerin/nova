@@ -539,7 +539,6 @@ fn settled_stdout(args: &[&str], stdout: Vec<u8>, windows: bool) -> Vec<u8> {
     // §3.6): S0's `check --dump-hir` and N's `hir` are settled alike.
     if args.starts_with(RESOLUTION_S0)
         || args.starts_with(HIR_S0)
-        || args.starts_with(HIR_ITEMS_S0)
         || matches!(args.first(), Some(&"resolve" | &"hir"))
     {
         settle_paths(&stdout, windows)
@@ -957,14 +956,8 @@ fn both_sides_refuse_no_file() {
     // The HIR dump's (5.3a): S0's `check --dump-hir` shares the resolution
     // dump's parser, N's `hir` the resolution dump's.
     let hir_wasm_test = Dump {
-        s0: leak_args(&[hir_s0(), &["--test", "--target", "wasm"]].concat()),
-        n: leak_args(
-            &[
-                n_hir(),
-                &["--std", &std_dir(), "--test", "--target", "wasm"],
-            ]
-            .concat(),
-        ),
+        s0: leak_args(&[HIR_S0, &["--test", "--target", "wasm"]].concat()),
+        n: leak_args(&[HIR_N, &["--std", &std_dir(), "--test", "--target", "wasm"]].concat()),
     };
     let hir_wasm_test_std = Dump {
         s0: leak_args(&[hir_wasm_test.s0, &["--std"]].concat()),
@@ -1033,7 +1026,7 @@ fn both_sides_take_test_in_every_position_alike() {
     for ((args, code), (s0, command)) in shapes.iter().flat_map(|shape| {
         [
             (shape, (RESOLUTION_S0, &["resolve"][..])),
-            (shape, (hir_s0(), n_hir())),
+            (shape, (HIR_S0, HIR_N)),
         ]
     }) {
         let n: Vec<&str> = command
@@ -2060,11 +2053,6 @@ const RESOLUTION_S0: &[&str] = &["check", "--dump-resolution"];
 /// S0's HIR dump (5.3a, ADR 0055): the hidden `check --dump-hir`, before
 /// the mode's flags and the roots.
 const HIR_S0: &[&str] = &["check", "--dump-hir"];
-
-/// S0's HIR dump's item part alone, 5.3a's dump (5.3b): the hidden `check
-/// --dump-hir-items`, which the differential compares with N's `hir`
-/// until N checks bodies ([`N_BODIES`]).
-const HIR_ITEMS_S0: &[&str] = &["check", "--dump-hir-items"];
 
 /// A package's `nova.toml` with what the package graph requires and
 /// nothing else: the tests' packages (5.2b, ADR 0054).
@@ -3562,61 +3550,19 @@ fn the_name_fuzzer_agrees_and_gives_every_resolver_code() {
     }
 }
 
-// === 5.3a: the HIR dump (spec 5.3 §3.6, ADR 0055) ===
+// === 5.3: the HIR dump (spec 5.3 §3.6 and §4.6, ADR 0055 and ADR 0056) ===
 //
-// Part A builds S0's side: the hidden `check --dump-hir`, its cases
-// (`cases/check/`, `cases/check-wasm/`, `cases/check-test/`) and the type
-// fuzzer's item mutations, each run through [`run`]. Until N's `selfhost
-// hir` exists ([`N_HIR`]), every set runs through S0 alone and its
-// assertions hold on S0's dump; part B ports N's side, sets `N_HIR`, and
-// every set below is then compared byte for byte, exit codes included,
-// through [`compare_batch`].
+// S0's hidden `check --dump-hir` and N's `selfhost hir`: the type
+// checker's item tables, then every function with its body checked, then
+// the diagnostics, fixes included, of std's three parts, every corpus root
+// natively, for the WASM target and under test mode, the type checker's
+// cases with both line endings, the type fuzzer's item inputs, the body
+// fuzzer's inputs and the depth cases, each compared byte for byte, exit
+// codes included, through [`compare_batch`].
 
-/// Whether N has `selfhost hir --std DIR [--target wasm] [--test] FILE…`
-/// (or `--std-part`), the HIR dump's other side (spec 5.3 §3.3): part B of
-/// 5.3a sets it.
-const N_HIR: bool = true;
-
-// From part B on, N's side is compared: the HIR dump's checks hold on
-// both sides, never on S0's alone.
-const _: () = assert!(N_HIR, "5.3a's part B compares N's side");
-
-/// Whether N's `selfhost hir` checks bodies and prints every function
-/// (5.3b, spec 5.3 §4.3), as S0's `check --dump-hir` does. Until it does,
-/// N is compared with S0's item part alone, `check --dump-hir-items`
-/// ([`hir_s0`]), 5.3a's checks hold as they did, and the full dump's
-/// inputs (std's three parts, the corpus and the cases, with both line
-/// endings) run through S0 alone, whose dumps must be well formed and
-/// hold every form and every code. 5.3b's later parts port N's bodies and
-/// set it, and every set is then compared byte for byte.
-const N_BODIES: bool = false;
-
-/// S0's side of the HIR dump that N's `hir` prints: the full dump once N
-/// checks bodies ([`N_BODIES`]), its item part before.
-fn hir_s0() -> &'static [&'static str] {
-    if N_BODIES {
-        HIR_S0
-    } else {
-        HIR_ITEMS_S0
-    }
-}
-
-/// N's side of [`hir_s0`]: `hir`, or `hir --items` for the item part
-/// alone ([`n_hir_for`]).
-fn n_hir() -> &'static [&'static str] {
-    n_hir_for(hir_s0())
-}
-
-/// N's command for S0's HIR dump `s0` (5.3b): `hir --items` for S0's
-/// `check --dump-hir-items`, 5.3a's item part, and `hir` for the full
-/// dump, which N prints from 5.3b's part 2 on.
-fn n_hir_for(s0: &[&str]) -> &'static [&'static str] {
-    if s0 == HIR_ITEMS_S0 {
-        &["hir", "--items"]
-    } else {
-        &["hir"]
-    }
-}
+/// N's side of the HIR dump ([`HIR_S0`]): `selfhost hir`, before `--std
+/// DIR`, the mode's flags and the roots (or `--std-part`).
+const HIR_N: &[&str] = &["hir"];
 
 /// The item codes of 5.3a (spec 5.3 §3.2): each occurs among the HIR
 /// dumps of the cases, the corpus and the fuzzer's inputs. E0092 is the
@@ -3624,6 +3570,15 @@ fn n_hir_for(s0: &[&str]) -> &'static [&'static str] {
 const ITEM_CODES: [&str; 16] = [
     "E0001", "E0010", "E0012", "E0015", "E0070", "E0071", "E0072", "E0073", "E0074", "E0076",
     "E0077", "E0078", "E0092", "E0105", "E0403", "E0900",
+];
+
+/// The type checker's body codes (spec 5.3 §4.4), beside the item codes
+/// ([`ITEM_CODES`]): each of the 38 occurs among the HIR dumps of the
+/// cases and the corpus.
+const BODY_CODES: [&str; 22] = [
+    "E0011", "E0013", "E0014", "E0016", "E0020", "E0021", "E0022", "E0060", "E0080", "E0081",
+    "E0086", "E0087", "E0094", "E0095", "E0096", "E0097", "E0098", "E0099", "E0100", "E0101",
+    "E0103", "E0104",
 ];
 
 /// The type checker's cases under `mode` (5.3a): `cases/check/` under
@@ -3656,22 +3611,18 @@ fn std_hir(mode: Mode) -> &'static Dump {
     DUMPS[mode as usize].get_or_init(|| hir_dump_with(mode, &["--std"]))
 }
 
-/// [`dump_with`] for the HIR dump.
+/// [`dump_with`] for the HIR dump: S0's `check --dump-hir` and N's `hir
+/// --std DIR`, each with the mode's flags and `extra`, `--std` being N's
+/// `--std-part`.
 fn hir_dump_with(mode: Mode, extra: &[&str]) -> Dump {
-    hir_dump_from(hir_s0(), mode, extra)
-}
-
-/// [`hir_dump_with`], S0's side `s0` (the full dump or its item part).
-fn hir_dump_from(s0: &[&str], mode: Mode, extra: &[&str]) -> Dump {
-    let command = n_hir_for(s0);
-    let s0: Vec<&str> = s0
+    let s0: Vec<&str> = HIR_S0
         .iter()
         .chain(mode.flags())
         .chain(extra)
         .copied()
         .collect();
     let std_dir = std_dir();
-    let mut n = command.to_vec();
+    let mut n = HIR_N.to_vec();
     n.extend(["--std", std_dir.as_str()]);
     n.extend(mode.flags());
     n.extend(
@@ -3686,22 +3637,13 @@ fn hir_dump_from(s0: &[&str], mode: Mode, extra: &[&str]) -> Dump {
 }
 
 /// `dump` on `files`, relative to `dir`, in one process a side, each side
-/// exiting with `code`: compared through [`compare_batch`] once N has the
-/// HIR dump, and through S0 alone ([`run`]) before. Returns S0's output.
+/// exiting with `code`, compared through [`compare_batch`]; the dump is
+/// well formed ([`assert_well_formed`]). Returns S0's output.
 fn agree_on_hir_dump(dump: &Dump, dir: &Path, files: &[String], code: i32) -> String {
-    if N_HIR {
-        return compare_batch(dump, dir, files, code, &nova(), selfhost())
-            .unwrap_or_else(|report| panic!("{report}"));
-    }
-    let s0 = run(&nova(), dump.s0, dir, files).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(
-        s0.code,
-        Some(code),
-        "{}: {}",
-        batch_name(&nova(), dump.s0, files),
-        s0.stderr
-    );
-    String::from_utf8(s0.stdout).expect("the HIR dump is UTF-8")
+    let text = compare_batch(dump, dir, files, code, &nova(), selfhost())
+        .unwrap_or_else(|report| panic!("{report}"));
+    assert_well_formed(&text);
+    text
 }
 
 /// [`agree_on_hir_dump`] the HIR dump under `mode` on `files`, each a
@@ -3728,23 +3670,91 @@ fn agree_on_hir_cases(mode: Mode, cases: &Path) -> (String, usize) {
     (all, count)
 }
 
-/// The forms `dumps` print, as the resolution dump's [`forms_on`] reads
-/// them ([`nova_driver::resolution_dump::forms_on`]).
-fn hir_forms(dumps: &[&str]) -> std::collections::HashSet<String> {
+/// [`agree_on_hir_cases`] on the cases of `mode` as they are, once a run,
+/// for the tests that read them.
+fn hir_cases(mode: Mode) -> &'static (String, usize) {
+    static CASES: [OnceLock<(String, usize)>; 3] =
+        [OnceLock::new(), OnceLock::new(), OnceLock::new()];
+    CASES[mode as usize].get_or_init(|| agree_on_hir_cases(mode, &hir_cases_dir(mode)))
+}
+
+/// The forms `dump` prints, as the resolution dump's [`forms_on`] reads
+/// them ([`nova_driver::resolution_dump::forms_on`]), each distinct line
+/// read once.
+fn hir_forms(dump: &str) -> std::collections::HashSet<String> {
+    let mut lines = std::collections::HashSet::new();
     let mut found = std::collections::HashSet::new();
-    for dump in dumps {
-        for line in dump.lines() {
+    for line in dump.lines() {
+        if lines.insert(line) {
             found.extend(nova_driver::resolution_dump::forms_on(line));
         }
     }
     found
 }
 
+/// `dump` is well formed, as the grammar's nesting has it (ADR 0055 §2,
+/// ADR 0056): after each `== ` header, an `IOERR` line or a part whose
+/// every line starts two spaces deeper for each node still open and with
+/// `(`, whose parentheses outside the quotes never close more than is open
+/// and balance by the part's end, and whose quotes close on their line.
+fn assert_well_formed(dump: &str) {
+    let mut depth = 0usize;
+    let mut part = "";
+    for (n, line) in dump.lines().enumerate() {
+        if line.starts_with("== ") || line.starts_with("IOERR ") {
+            assert_eq!(depth, 0, "{part}: a node open before line {n}");
+            part = line;
+            continue;
+        }
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        assert!(
+            indent == 2 * depth && line[indent..].starts_with('('),
+            "{part}: line {n} at depth {depth}: {line}"
+        );
+        // By bytes: no byte of a character past ASCII is one of these.
+        let mut quoted = false;
+        for c in line[indent..].bytes() {
+            match c {
+                b'"' => quoted = !quoted,
+                b'(' if !quoted => depth += 1,
+                b')' if !quoted => {
+                    assert!(depth > 0, "{part}: line {n} closes too much: {line}");
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        assert!(!quoted, "{part}: line {n} leaves a quote open: {line}");
+    }
+    assert_eq!(depth, 0, "{part}: a node open at the end");
+}
+
+/// The well-formedness check refuses a line at the wrong depth, a closing
+/// parenthesis too many, a node left open and a quote left open, and
+/// takes parentheses inside quotes as text.
+#[test]
+fn the_well_formedness_check_refuses_what_it_should() {
+    let good = "== a.nova\n(Hir target=native checked=true\n  (Function u0 \"(\" a=1\n    (Ret ())))\n(Diagnostics)\n== b.nova\nIOERR NotFound\n";
+    assert_well_formed(good);
+    for bad in [
+        "(Hir\n(Ret ()))\n",
+        "(Hir\n  (Ret ())))\n",
+        "(Hir\n  (Ret ())\n",
+        "(Hir \"open)\n",
+        "== a.nova\n(Hir\n  (Ret ())\n== b.nova\n",
+    ] {
+        let caught = std::panic::catch_unwind(|| assert_well_formed(bad));
+        assert!(caught.is_err(), "{bad:?} passed");
+    }
+}
+
 /// `nova check`'s help names no `--dump-hir`, every `nova check` command
-/// line whose first argument after `check` is neither hidden flag is
+/// line whose first argument after `check` is not the hidden flag is
 /// parsed as the base parses it (the resolution dump's test holds the
 /// rest), and the HIR dump's own parser refuses what the resolution dump's
-/// refuses, under its own usage line (5.3a, ADR 0055).
+/// refuses, under its own usage line (5.3a, ADR 0055). 5.3b's scaffolding,
+/// the item part alone as `--dump-hir-items`, is gone: refused as any
+/// unknown argument is (ADR 0056).
 #[test]
 fn the_hir_dump_flag_is_hidden_and_refused_as_the_resolution_dumps() {
     let help = Command::new(nova())
@@ -3764,6 +3774,11 @@ fn the_hir_dump_flag_is_hidden_and_refused_as_the_resolution_dumps() {
     for (args, named, usage) in [
         (&["check", "--dump-hi", "a.nova"][..], "--dump-hi", opts),
         (&["check", "--dump-hirr", "a.nova"], "--dump-hirr", opts),
+        (
+            &["check", "--dump-hir-items", "a.nova"],
+            "--dump-hir-items",
+            opts,
+        ),
         (&["check", "--dump-hir=1", "a.nova"], "--dump-hir", opts),
         (&["check", "--dump-hir=", "a.nova"], "--dump-hir", opts),
         (&["check", "a.nova", "--dump-hir"], "--dump-hir", file),
@@ -3811,35 +3826,28 @@ fn the_hir_dump_flag_is_hidden_and_refused_as_the_resolution_dumps() {
         &["--test"],
         &[],
     ] {
-        // 5.3b's item part alone, `--dump-hir-items`, refuses as the full
-        // dump does, under its own usage line.
-        for form in [HIR_S0, HIR_ITEMS_S0] {
-            let flag = form[1];
-            let out = Command::new(nova())
-                .args(form)
-                .args(args)
-                .output()
-                .expect("run nova check --dump-hir");
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
-            assert!(stderr.starts_with("error: "), "{args:?}: {stderr}");
-            assert_eq!(stderr.matches("error:").count(), 1, "{args:?}: {stderr}");
-            assert_eq!(
-                stderr.matches("Usage: ").count(),
-                stderr
-                    .matches(&format!("Usage: nova check {flag} "))
-                    .count(),
+        let out = Command::new(nova())
+            .args(HIR_S0)
+            .args(args)
+            .output()
+            .expect("run nova check --dump-hir");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with("error: "), "{args:?}: {stderr}");
+        assert_eq!(stderr.matches("error:").count(), 1, "{args:?}: {stderr}");
+        assert_eq!(
+            stderr.matches("Usage: ").count(),
+            stderr.matches("Usage: nova check --dump-hir ").count(),
+            "{args:?}: {stderr}"
+        );
+        // The form's own refusals, which are not clap's, name its flag.
+        if !stderr.contains("Usage: ") && !stderr.contains("[possible values: ") {
+            assert!(
+                stderr.starts_with("error: --dump-hir "),
                 "{args:?}: {stderr}"
             );
-            // The form's own refusals, which are not clap's, name its flag.
-            if !stderr.contains("Usage: ") && !stderr.contains("[possible values: ") {
-                assert!(
-                    stderr.starts_with(&format!("error: {flag} ")),
-                    "{args:?}: {stderr}"
-                );
-            }
-            assert!(out.stdout.is_empty(), "{args:?}");
         }
+        assert!(out.stdout.is_empty(), "{args:?}");
     }
 }
 
@@ -3847,9 +3855,9 @@ fn the_hir_dump_flag_is_hidden_and_refused_as_the_resolution_dumps() {
 /// cannot be read is `IOERR` and its kind, the rest are dumped, and the
 /// exit code is 2; a program that stops before the type checker prints
 /// `checked=false` and the diagnostics so far; a package's root is a module
-/// of its package; `--std` prints std's part for the target and mode, the
-/// same as std's part of any program, and a program's part holds only its
-/// own entries (5.3a).
+/// of its package; and a program's part holds only its own entries, its
+/// functions after its items (5.3a, 5.3b). std's part, `--std`, is
+/// [`the_hir_dumps_agree_on_std_the_corpus_and_the_cases`]'s.
 #[test]
 fn the_hir_dump_has_a_header_per_root_and_std_its_own_part() {
     let dir = fresh_dir("hir-headers");
@@ -3896,7 +3904,7 @@ fn the_hir_dump_has_a_header_per_root_and_std_its_own_part() {
         "{out}"
     );
     assert!(
-        out.contains("== a.nova\n(Hir target=native checked=true\n  (StdStart module=1 def=2 item=2)\n  (Record u0 \"P\" generics=0\n    (Field \"x\" Int))\n  (Sig u1 generics=0\n    (Ret ())))\n(Diagnostics)\n"),
+        out.contains("== a.nova\n(Hir target=native checked=true\n  (StdStart module=1 def=2 item=2)\n  (Record u0 \"P\" generics=0\n    (Field \"x\" Int))\n  (Sig u1 generics=0\n    (Ret ()))\n  (Function u1 \"main\" generics=0 takes_env=false captures=0 params=0 async=false \"a\":23..27\n    (Ret ())\n    (Block tail=false 30..32 ())))\n(Diagnostics)\n"),
         "{out}"
     );
     assert!(
@@ -3920,19 +3928,6 @@ fn the_hir_dump_has_a_header_per_root_and_std_its_own_part() {
         out.contains("  (Sum u1 \"Shape\" generics=0\n    (Variant \"Dot\"))"),
         "{out}"
     );
-    for (mode, head) in [
-        (Mode::Check, "(HirStd target=native records="),
-        (Mode::Wasm, "(HirStd target=wasm records="),
-        (Mode::Test, "(HirStd target=native mode=test records="),
-    ] {
-        let std = agree_on_hir_dump(std_hir(mode), &dir, &[], 0);
-        assert!(std.starts_with(head), "{}", &std[..80]);
-        assert!(std.ends_with(")\n(Diagnostics)\n"), "{mode:?}");
-        assert!(
-            !std.contains(" u"),
-            "{mode:?}: a program's id in std's part"
-        );
-    }
 }
 
 /// The HIR dump's settling: S0's `check --dump-hir` and N's `hir` read `\`
@@ -3945,12 +3940,6 @@ fn every_run_of_a_hir_dump_settles_e0004s_paths_on_windows() {
     assert_ne!(settled, windows);
     let hir_args: Vec<&str> = HIR_S0.iter().chain(["a.nova"].iter()).copied().collect();
     assert_eq!(settled_stdout(&hir_args, windows.clone(), true), settled);
-    let items_args: Vec<&str> = HIR_ITEMS_S0
-        .iter()
-        .chain(["a.nova"].iter())
-        .copied()
-        .collect();
-    assert_eq!(settled_stdout(&items_args, windows.clone(), true), settled);
     assert_eq!(
         settled_stdout(&["hir", "--std", "std"], windows.clone(), true),
         settled
@@ -3960,23 +3949,52 @@ fn every_run_of_a_hir_dump_settles_e0004s_paths_on_windows() {
 
 /// std's three parts, every corpus root (natively, for the WASM target
 /// and under test mode) and the cases of each mode, through the HIR dump
-/// (5.3a, spec 5.3 §3.6): each root's part is there, every form the dump
-/// prints is listed and every listed form but [`nova_driver::hir_dump::LATER_KINDS`]
-/// occurs, and each of the 16 item codes occurs, E0092 only for the WASM
-/// target.
+/// (5.3a, 5.3b, spec 5.3 §3.6 and §4.6): each root's part is there and
+/// most reach the type checker; every form the dump prints is listed,
+/// every listed form of the item part and of the functions occurs, and
+/// none of [`nova_driver::hir_dump::LATER_KINDS`]; std's parts each hold
+/// their functions and name no program's id; and each of the 38 codes
+/// occurs, the item passes' E0092 only for the WASM target.
 #[test]
 fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
     let root = root();
+    // The forms every dump prints, each read on the thread that made it.
+    let found = std::sync::Mutex::new(std::collections::HashSet::new());
+    let formed = |dump: String| {
+        let forms = hir_forms(&dump);
+        found.lock().expect("the forms").extend(forms);
+        dump
+    };
     let std_parts: Vec<String> = std::thread::scope(|scope| {
         let parts: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
             .into_iter()
             .map(|mode| {
-                let root = &root;
-                scope.spawn(move || agree_on_hir_dump(std_hir(mode), root, &[], 0))
+                let (root, formed) = (&root, &formed);
+                scope.spawn(move || formed(agree_on_hir_dump(std_hir(mode), root, &[], 0)))
             })
             .collect();
         joined(parts)
     });
+    for (part, head) in std_parts.iter().zip([
+        "(HirStd target=native records=",
+        "(HirStd target=wasm records=",
+        "(HirStd target=native mode=test records=",
+    ]) {
+        assert!(part.starts_with(head), "{}", &part[..80]);
+        assert!(part
+            .lines()
+            .next()
+            .is_some_and(|l| l.contains(" functions=")));
+        assert!(part.contains("\n  (Function s"), "{head}");
+        assert!(part.ends_with(")\n(Diagnostics)\n"), "{head}");
+        let program_id = |w: &str| {
+            w.len() > 1 && w.starts_with('u') && w[1..].bytes().all(|b| b.is_ascii_digit())
+        };
+        assert!(
+            !part.split([' ', '(', ')', '\n']).any(program_id),
+            "{head}: a program's id in std's part"
+        );
+    }
     let loose = loose_corpus();
     let packages = package_corpus();
     let wasm = wasm_corpus();
@@ -3994,16 +4012,22 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
     let (check, wasm_dumps, test_dumps, counts) = std::thread::scope(|scope| {
         let cases: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
             .into_iter()
-            .map(|mode| scope.spawn(move || agree_on_hir_cases(mode, &hir_cases_dir(mode))))
+            .map(|mode| {
+                let formed = &formed;
+                scope.spawn(move || {
+                    let (dumps, count) = hir_cases(mode).clone();
+                    (formed(dumps), count)
+                })
+            })
             .collect();
         let package_dumps = scope.spawn(|| {
-            agree_in_parts(&packages, 3, |part| {
-                agree_on_hir_in(Mode::Check, &root, part, 0)
+            agree_in_parts(&packages, HIR_PACKAGE_PARTS, |part| {
+                formed(agree_on_hir_in(Mode::Check, &root, part, 0))
             })
         });
-        let wasm_dumps = scope.spawn(|| agree_on_hir_in(Mode::Wasm, &root, &wasm, 0));
-        let test_dumps = scope.spawn(|| agree_on_hir_in(Mode::Test, &root, &tests, 0));
-        let mut check = agree_on_hir_in(Mode::Check, &root, &loose, 0);
+        let wasm_dumps = scope.spawn(|| formed(agree_on_hir_in(Mode::Wasm, &root, &wasm, 0)));
+        let test_dumps = scope.spawn(|| formed(agree_on_hir_in(Mode::Test, &root, &tests, 0)));
+        let mut check = formed(loose_hir().clone());
         check.push_str(&package_dumps.join().expect("the packages' thread"));
         let mut wasm_dumps = wasm_dumps.join().expect("the WASM programs' thread");
         let mut test_dumps = test_dumps.join().expect("the tests' thread");
@@ -4019,11 +4043,11 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
         }
         (check, wasm_dumps, test_dumps, counts)
     });
-    // 5.3a's cases: 164 under `check` (154 extracted, 10 by hand), 2 for
-    // the WASM target, 1 under test mode.
-    assert!(counts[0] >= 150, "only {} type-checker cases", counts[0]);
+    // 5.3b's cases: 5.3a's 164, 646 of the body-level tests' sources and
+    // 13 by hand under `check`; 2 for the WASM target; 5 under test mode.
+    assert!(counts[0] >= 800, "only {} type-checker cases", counts[0]);
     assert!(counts[1] >= 2, "only {} WASM cases", counts[1]);
-    assert!(counts[2] >= 1, "only {} test-mode cases", counts[2]);
+    assert!(counts[2] >= 5, "only {} test-mode cases", counts[2]);
     let parts = |dumps: &str, head: &str| dumps.lines().filter(|l| l.starts_with(head)).count();
     assert_eq!(
         parts(&check, "(Hir target=native checked="),
@@ -4043,27 +4067,21 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
         checked * 10 > parts(&check, "(Hir ") * 8,
         "{checked} checked"
     );
-    let found = hir_forms(&[
-        &check,
-        &wasm_dumps,
-        &test_dumps,
-        &std_parts[0],
-        &std_parts[1],
-        &std_parts[2],
-    ]);
+    let found = found.into_inner().expect("the forms");
+    let kinds = || {
+        nova_driver::hir_dump::KINDS
+            .iter()
+            .chain(nova_driver::hir_dump::BODY_KINDS)
+    };
     let listed = |f: &String| {
         f.ends_with("=<n>")
             || f.ends_with("=<id>")
-            || nova_driver::hir_dump::KINDS.contains(&f.as_str())
+            || kinds().any(|k| k == f)
             || nova_driver::hir_dump::LATER_KINDS.contains(&f.as_str())
     };
     let unlisted: Vec<&String> = found.iter().filter(|f| !listed(f)).collect();
     assert!(unlisted.is_empty(), "{unlisted:?} are in no list");
-    let missing: Vec<&str> = nova_driver::hir_dump::KINDS
-        .iter()
-        .copied()
-        .filter(|k| !found.contains(*k))
-        .collect();
+    let missing: Vec<&str> = kinds().copied().filter(|k| !found.contains(*k)).collect();
     assert!(missing.is_empty(), "no HIR dump holds {missing:?}");
     let later: Vec<&str> = nova_driver::hir_dump::LATER_KINDS
         .iter()
@@ -4071,10 +4089,6 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
         .filter(|k| found.contains(*k))
         .collect();
     assert!(later.is_empty(), "{later:?} appear");
-    let mut all = codes_in(&check);
-    for (code, n) in codes_in(&test_dumps) {
-        *all.entry(code).or_insert(0) += n;
-    }
     // The resolver's E0092 (a std module the target lacks, imported)
     // occurs natively too; the item passes' only for the WASM target.
     assert!(
@@ -4082,30 +4096,49 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
             .contains("which target wasm does not have\"\n    (Primary \"every_item_e0092_site\""),
         "no item E0092"
     );
-    for (code, n) in codes_in(&wasm_dumps) {
-        *all.entry(code).or_insert(0) += n;
+    let mut all = codes_in(&check);
+    for dumps in [&test_dumps, &wasm_dumps] {
+        for (code, n) in codes_in(dumps) {
+            *all.entry(code).or_insert(0) += n;
+        }
     }
     let absent: Vec<&str> = ITEM_CODES
         .iter()
+        .chain(&BODY_CODES)
         .copied()
         .filter(|c| !all.contains_key(*c))
         .collect();
     assert!(absent.is_empty(), "{absent:?} occur nowhere: {all:?}");
     eprintln!(
-        "the HIR pass dumps {} loose programs, {} package files, {} WASM programs, {} files \
-         with tests and {:?} cases; codes {all:?}",
+        "the HIR dumps of {} loose programs, {} package files, {} WASM programs, {} files \
+         with tests and {:?} cases: {} lines natively; codes {all:?}",
         loose.len(),
         packages.len(),
         wasm.len(),
         tests.len(),
-        counts
+        counts,
+        check.lines().count(),
     );
 }
+
+/// The loose corpus's HIR dump under `check`, compared, once a run: the
+/// corpus test's, and the type and body fuzzers' bases are read from it.
+fn loose_hir() -> &'static String {
+    static DUMP: OnceLock<String> = OnceLock::new();
+    DUMP.get_or_init(|| agree_on_hir_in(Mode::Check, &root(), &loose_corpus(), 0))
+}
+
+/// How many parts the package corpus is dealt into, each a process a side
+/// on a thread of its own ([`agree_in_parts`]): N's own 30 package roots,
+/// each a dump of all of N, are most of the corpus's dump.
+const HIR_PACKAGE_PARTS: usize = 3;
 
 /// The type checker's cases of every mode as a Windows checkout has them
 /// ([`crlf`]), as the resolver's are compared
 /// (`the_resolution_dumps_agree_on_the_cases_with_windows_line_endings`):
-/// a mode whose copy changes no file is not run again.
+/// each part is there, and the codes are those of the cases as they are,
+/// which a `\r\n` moves no diagnostic from or to; a mode whose copy
+/// changes no file is not run again.
 #[test]
 fn the_hir_dumps_agree_on_the_cases_with_windows_line_endings() {
     let dir = fresh_dir("crlf-hir");
@@ -4119,7 +4152,7 @@ fn the_hir_dumps_agree_on_the_cases_with_windows_line_endings() {
         }
     }
     assert!(
-        crlf_files > 150,
+        crlf_files > 700,
         "only {crlf_files} cases have CRLF line endings"
     );
     std::thread::scope(|scope| {
@@ -4127,13 +4160,17 @@ fn the_hir_dumps_agree_on_the_cases_with_windows_line_endings() {
             .into_iter()
             .map(|mode| {
                 let cases = dir.join(hir_cases_name(mode));
-                scope.spawn(move || (mode, agree_on_hir_cases(mode, &cases)))
+                scope.spawn(move || {
+                    let crlf = agree_on_hir_cases(mode, &cases);
+                    (mode, crlf, hir_cases(mode))
+                })
             })
             .collect();
         for handle in modes {
-            let (mode, (dumps, count)) = handle.join().expect("a mode's thread");
+            let (mode, (dumps, count), (lf, _)) = handle.join().expect("a mode's thread");
             let parts = dumps.lines().filter(|l| l.starts_with("(Hir ")).count();
             assert_eq!(parts, count, "{mode:?}");
+            assert_eq!(codes_in(&dumps), codes_in(lf), "{mode:?}");
         }
     });
 }
@@ -4161,8 +4198,8 @@ fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
     let std = std.display().to_string();
     let cases = hir_cases_dir(Mode::Check);
     let roots: Vec<String> = case_roots(&cases).loose[..8].to_vec();
-    let s0 = run(&nova(), hir_s0(), &cases, &roots).expect("run S0");
-    let n_args = [n_hir(), &["--std", &std]].concat();
+    let s0 = run(&nova(), HIR_S0, &cases, &roots).expect("run S0");
+    let n_args = [HIR_N, &["--std", &std]].concat();
     let n = run(selfhost(), &n_args, &cases, &roots).expect("run N");
     assert_eq!((s0.code, n.code), (Some(0), Some(0)), "{}", n.stderr);
     let (s0, n) = (
@@ -4188,7 +4225,7 @@ fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
     assert!(checked >= 6, "{checked} of {} checked", roots.len());
     let part = run(
         selfhost(),
-        &[n_hir(), &["--std", &std, "--std-part"]].concat(),
+        &[HIR_N, &["--std", &std, "--std-part"]].concat(),
         &cases,
         &[],
     )
@@ -4232,24 +4269,29 @@ fn n_args_on_stack(dir: &Path, stack: Option<u32>, args: &[&str]) -> (Option<i32
     )
 }
 
-/// N's item passes on its own stack (spec 5.3 §3.7, ADR 0055 §12): every
-/// written nesting of a type, 128 levels deep, the parser's limit, in each
-/// item position (a parameter's and a return's type, a field, a variant's
-/// payload, a constant, a trait's method, an impl's self type, an impl's
-/// method alike and unlike its trait's, an associated type's binding, a
-/// `where` bound and an extern's signature), through N's `selfhost hir` on
-/// a main thread of 1 MB, as
+/// N's type checker on its own stack (spec 5.3 §3.7 and §4.6, ADR 0055
+/// §12, ADR 0056 §11): N's `selfhost hir` on a main thread of 1 MB, as
 /// [`n_parses_128_levels_of_every_kind_on_a_1_mb_main_thread`] runs N's
-/// parser: N's dump is S0's, which S0 checks on its 64 MB thread. The item
-/// passes walk arrays, a generic record's arguments, tuples and `fn` types'
-/// parameters and returns all 128 levels deep. The other five kinds' depth
-/// is the parser's alone, which the parser's test covers: parentheses are
-/// gone once parsed (`(T)` is `T`, so the item passes see `Int`), and for
-/// optionals, references, mutable references and pointers both sides stop
-/// at the outermost level with one E0900 and walk no further inside. They
-/// stay here to pin that on both sides.
+/// parser, on every written nesting at its deepest, its dump S0's, which
+/// S0 checks on its 64 MB thread. The bodies: every kind the deep
+/// generator writes ([`fuzz::DEEP_KINDS`]) at 128 levels, the parser's
+/// limit, and every kind of [`fuzz::BODY_DEEP_KINDS`] at the deepest level
+/// the parser takes, each well typed but `items` and `optionals`, whose
+/// nested functions and `T?` are E0900. The items: every written nesting
+/// of a type, 128 levels deep, in each item position (a parameter's and a
+/// return's type, a field, a variant's payload, a constant, a trait's
+/// method, an impl's self type, an impl's method alike and unlike its
+/// trait's, an associated type's binding, a `where` bound and an
+/// extern's signature). The item passes walk arrays, a generic record's
+/// arguments, tuples and `fn` types' parameters and returns all 128 levels
+/// deep. The other five kinds' depth is the parser's alone, which the
+/// parser's test covers: parentheses are gone once parsed (`(T)` is `T`,
+/// so the item passes see `Int`), and for optionals, references, mutable
+/// references and pointers both sides stop at the outermost level with
+/// one E0900 and walk no further inside. They stay here to pin that on
+/// both sides.
 #[test]
-fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
+fn n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread() {
     // Each kind's level, written around `Int`: an optional's first `?` is
     // not a level, each after it one more.
     const KINDS: [(&str, &str, &str); 10] = [
@@ -4279,13 +4321,13 @@ fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
         "fn h<U>(x: U) where {T}: Eq {}\n",
         "extern \"C\" {\n    fn e(x: {T}) -> {T}\n}\n",
     ];
-    let dir = fresh_dir("deep-n-items");
+    let dir = fresh_dir("deep-n-hir");
     let mut files = Vec::new();
     for (kind, open, close) in KINDS {
         let extra = if kind == "optionals" { "?" } else { "" };
         let ty = format!("{}Int{}{extra}", open.repeat(128), close.repeat(128));
         let items: Vec<String> = ITEMS.iter().map(|item| item.replace("{T}", &ty)).collect();
-        let file = format!("{kind}-128.nova");
+        let file = format!("items-{kind}-128.nova");
         std::fs::write(
             dir.join(&file),
             format!("record W<T> {{ x: T }}\n\n{}", items.join("\n")),
@@ -4293,10 +4335,24 @@ fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
         .expect("write a deep input");
         files.push(file);
     }
-    let s0 = run(&nova(), hir_s0(), &dir, &files).expect("run S0");
+    let mut rng = SplitMix64::new(DEEP_SEEDS[0]);
+    let bodies = fuzz::DEEP_KINDS
+        .iter()
+        .map(|kind| (*kind, 128, fuzz::deep(&mut rng, kind, 128)))
+        .chain(
+            fuzz::BODY_DEEP_KINDS
+                .iter()
+                .map(|&(kind, depth)| (kind, depth, fuzz::body_deep(kind, depth))),
+        );
+    for (kind, depth, text) in bodies {
+        let file = format!("bodies-{kind}-{depth}.nova");
+        std::fs::write(dir.join(&file), text).expect("write a deep input");
+        files.push(file);
+    }
+    let s0 = run(&nova(), HIR_S0, &dir, &files).expect("run S0");
     assert_eq!(s0.code, Some(0), "{}", s0.stderr);
     // At the parser's limit, not past it: every program reaches the type
-    // checker.
+    // checker, and only `items` and `optionals` give a diagnostic.
     let text = String::from_utf8_lossy(&s0.stdout);
     assert_eq!(
         text.matches(" checked=true\n").count(),
@@ -4304,8 +4360,17 @@ fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
         "{text}"
     );
     assert!(!text.contains("\"P0002\""), "{text}");
+    for (root, part) in parts_by_root(&text) {
+        let e0900 = root.starts_with("items-")
+            || root.starts_with("bodies-items-")
+            || root.starts_with("bodies-optionals-");
+        assert!(
+            part.ends_with("\n(Diagnostics)\n") || e0900,
+            "{root}: {part}"
+        );
+    }
     let std_dir = std_dir();
-    let mut args = n_hir().to_vec();
+    let mut args = HIR_N.to_vec();
     args.extend(["--std", std_dir.as_str()]);
     args.extend(files.iter().map(String::as_str));
     let stack = if cfg!(unix) { Some(1024) } else { None };
@@ -4319,6 +4384,22 @@ fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
     }
 }
 
+/// Each root's part of `dump`, by the header line that starts it.
+fn parts_by_root(dump: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    for line in dump.split_inclusive('\n') {
+        if let Some(root) = line.strip_prefix("== ") {
+            parts.push((
+                root.trim_end_matches(['\n', '\r']).to_string(),
+                String::new(),
+            ));
+        } else if let Some((_, part)) = parts.last_mut() {
+            part.push_str(line);
+        }
+    }
+    parts
+}
+
 /// The type fuzzer's seeds (5.3a): its own, past the name fuzzer's.
 const TYPE_SEEDS: [u64; 3] = [401, 402, 403];
 const TYPE_COUNT: usize = 40;
@@ -4326,8 +4407,15 @@ const TYPE_COUNT: usize = 40;
 /// The loose corpus programs the type fuzzer starts from: those that
 /// import no module, whose HIR dump under `check` reaches the type checker
 /// with no diagnostic, so that every diagnostic of an input is its
-/// mutations'. Read from S0's dump, which is the same on every system.
+/// mutations'. Read from the loose corpus's dump ([`loose_hir`]), which is
+/// the same on every system.
 fn type_bases() -> Vec<String> {
+    static BASES: OnceLock<Vec<String>> = OnceLock::new();
+    BASES.get_or_init(clean_bases).clone()
+}
+
+/// [`type_bases`], read once a run.
+fn clean_bases() -> Vec<String> {
     let root = root();
     let candidates: Vec<String> = loose_corpus()
         .into_iter()
@@ -4337,25 +4425,15 @@ fn type_bases() -> Vec<String> {
                 && fuzz::parses(&text.replace("\r\n", "\n"))
         })
         .collect();
-    let s0 = run(&nova(), hir_s0(), &root, &candidates).unwrap_or_else(|e| panic!("{e}"));
-    let dump = String::from_utf8(s0.stdout).expect("the HIR dump is UTF-8");
-    let mut bases = Vec::new();
-    let mut current: Option<&str> = None;
-    let mut clean = false;
-    for line in dump.lines().chain(["== "]) {
-        if let Some(file) = line.strip_prefix("== ") {
-            if let (Some(f), true) = (current, clean) {
-                bases.push(f.to_string());
-            }
-            current = Some(file);
-            clean = false;
-        } else if line == "(Diagnostics)" {
-            clean = true;
-        } else if line.starts_with("(Hir target=native checked=false") {
-            current = None;
-        }
-    }
-    bases
+    parts_by_root(loose_hir())
+        .into_iter()
+        .filter(|(root, part)| {
+            candidates.contains(root)
+                && part.starts_with("(Hir target=native checked=true")
+                && part.ends_with("\n(Diagnostics)\n")
+        })
+        .map(|(root, _)| root)
+        .collect()
 }
 
 /// `count` type-mutated programs from `seed` ([`fuzz::type_mutate`]), each
@@ -4430,609 +4508,91 @@ fn the_type_fuzzers_item_inputs_agree_and_hold_each_aimed_code() {
     eprintln!("the type fuzzer's codes over seeds {TYPE_SEEDS:?}: {codes:?}");
 }
 
-// === 5.3b: the full HIR dump (spec 5.3 §4.3, §4.6, ADR 0056) ===
-//
-// Part 1 builds S0's side: the full `check --dump-hir`, every function
-// after the item part, and the body cases (`cases/check*`, the body-level
-// tests' sources and hand cases). Until N checks bodies ([`N_BODIES`]),
-// the full dump's sets run through S0 alone, through [`run`], and their
-// assertions hold on S0's dump; later parts set `N_BODIES`, and every set
-// below is then compared byte for byte through [`compare_batch`].
+/// The body fuzzer's seeds (5.3b, spec 5.3 §4.6): its own, past the type
+/// fuzzer's.
+const BODY_SEEDS: [u64; 3] = [501, 502, 503];
+const BODY_COUNT: usize = 40;
 
-/// The type checker's body codes (spec 5.3 §4.4), beside the item codes
-/// ([`ITEM_CODES`]): each of the 38 occurs among the full dumps of the
-/// cases, the corpus and std.
-const BODY_CODES: [&str; 22] = [
-    "E0011", "E0013", "E0014", "E0016", "E0020", "E0021", "E0022", "E0060", "E0080", "E0081",
-    "E0086", "E0087", "E0094", "E0095", "E0096", "E0097", "E0098", "E0099", "E0100", "E0101",
-    "E0103", "E0104",
+/// The codes the body fuzzer must give at least twice over its fixed
+/// seeds (spec 5.3 §4.6): E0001 the type checker's, an unknown value or
+/// function in a body.
+const BODY_FLOORS: [&str; 13] = [
+    "E0001", "E0010", "E0011", "E0013", "E0014", "E0015", "E0016", "E0020", "E0021", "E0060",
+    "E0080", "E0098", "E0099",
 ];
 
-/// The full HIR dump through both sides under `mode`: S0's `check
-/// --dump-hir` and N's `hir --std DIR`, each with the mode's flags.
-fn full_hir_in(mode: Mode) -> &'static Dump {
-    static DUMPS: [OnceLock<Dump>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
-    DUMPS[mode as usize].get_or_init(|| hir_dump_from(HIR_S0, mode, &[]))
-}
-
-/// std's part of the full HIR dump under `mode`.
-fn full_std_hir(mode: Mode) -> &'static Dump {
-    static DUMPS: [OnceLock<Dump>; 3] = [OnceLock::new(), OnceLock::new(), OnceLock::new()];
-    DUMPS[mode as usize].get_or_init(|| hir_dump_from(HIR_S0, mode, &["--std"]))
-}
-
-/// `dump`, a full HIR dump, on `files` relative to `dir`, each side
-/// exiting with `code`: compared through [`compare_batch`] once N checks
-/// bodies ([`N_BODIES`]), and run through S0 alone ([`run`]) before, its
-/// dump then well formed ([`assert_well_formed`]). Returns S0's output.
-fn agree_on_full_hir(dump: &Dump, dir: &Path, files: &[String], code: i32) -> String {
-    if N_BODIES {
-        return compare_batch(dump, dir, files, code, &nova(), selfhost())
-            .unwrap_or_else(|report| panic!("{report}"));
-    }
-    let s0 = run(&nova(), dump.s0, dir, files).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(
-        s0.code,
-        Some(code),
-        "{}: {}",
-        batch_name(&nova(), dump.s0, files),
-        s0.stderr
-    );
-    let text = String::from_utf8(s0.stdout).expect("the HIR dump is UTF-8");
-    assert_well_formed(&text);
-    text
-}
-
-/// [`agree_on_full_hir`] under `mode` on `files`, each a program's root.
-fn agree_on_full_hir_in(mode: Mode, dir: &Path, files: &[String], code: i32) -> String {
-    if files.is_empty() {
-        return String::new();
-    }
-    agree_on_full_hir(full_hir_in(mode), dir, files, code)
-}
-
-/// [`agree_on_hir_cases`] for the full dump.
-fn agree_on_full_hir_cases(mode: Mode, cases: &Path) -> (String, usize) {
-    let roots = case_roots(cases);
-    let count = roots.loose.len() + roots.apart.len() + roots.packages.len();
-    let from_cases: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
-    let mut all = agree_on_full_hir_in(mode, cases, &from_cases, 0);
-    for dir in &roots.apart {
-        all.push_str(&agree_on_full_hir_in(
-            mode,
-            dir,
-            &["main.nova".to_string()],
-            0,
-        ));
-    }
-    (all, count)
-}
-
-/// [`agree_on_full_hir_cases`] on the cases of `mode` as they are, once
-/// a run, for the tests that read them.
-fn full_hir_cases(mode: Mode) -> &'static (String, usize) {
-    static CASES: [OnceLock<(String, usize)>; 3] =
-        [OnceLock::new(), OnceLock::new(), OnceLock::new()];
-    CASES[mode as usize].get_or_init(|| agree_on_full_hir_cases(mode, &hir_cases_dir(mode)))
-}
-
-/// `dump` is well formed, as the grammar's nesting has it (ADR 0055 §2,
-/// ADR 0056): after each `== ` header, an `IOERR` line or a part whose
-/// every line starts two spaces deeper for each node still open and with
-/// `(`, whose parentheses outside the quotes never close more than is open
-/// and balance by the part's end, and whose quotes close on their line.
-fn assert_well_formed(dump: &str) {
-    let mut depth = 0usize;
-    let mut part = "";
-    for (n, line) in dump.lines().enumerate() {
-        if line.starts_with("== ") || line.starts_with("IOERR ") {
-            assert_eq!(depth, 0, "{part}: a node open before line {n}");
-            part = line;
-            continue;
-        }
-        let indent = line.len() - line.trim_start_matches(' ').len();
-        assert!(
-            indent == 2 * depth && line[indent..].starts_with('('),
-            "{part}: line {n} at depth {depth}: {line}"
-        );
-        let mut quoted = false;
-        for c in line[indent..].chars() {
-            match c {
-                '"' => quoted = !quoted,
-                '(' if !quoted => depth += 1,
-                ')' if !quoted => {
-                    assert!(depth > 0, "{part}: line {n} closes too much: {line}");
-                    depth -= 1;
-                }
-                _ => {}
-            }
-        }
-        assert!(!quoted, "{part}: line {n} leaves a quote open: {line}");
-    }
-    assert_eq!(depth, 0, "{part}: a node open at the end");
-}
-
-/// The well-formedness check refuses a line at the wrong depth, a closing
-/// parenthesis too many, a node left open and a quote left open, and
-/// takes parentheses inside quotes as text.
-#[test]
-fn the_well_formedness_check_refuses_what_it_should() {
-    let good = "== a.nova\n(Hir target=native checked=true\n  (Function u0 \"(\" a=1\n    (Ret ())))\n(Diagnostics)\n== b.nova\nIOERR NotFound\n";
-    assert_well_formed(good);
-    for bad in [
-        "(Hir\n(Ret ()))\n",
-        "(Hir\n  (Ret ())))\n",
-        "(Hir\n  (Ret ())\n",
-        "(Hir \"open)\n",
-        "== a.nova\n(Hir\n  (Ret ())\n== b.nova\n",
-    ] {
-        let caught = std::panic::catch_unwind(|| assert_well_formed(bad));
-        assert!(caught.is_err(), "{bad:?} passed");
-    }
-}
-
-/// std's three full parts, every corpus root (natively, for the WASM
-/// target and under test mode) and the cases of each mode, through the
-/// full HIR dump (5.3b, spec 5.3 §4.6): each root's part is there; every
-/// form the dump prints is listed, every listed form but
-/// [`nova_driver::hir_dump::LATER_KINDS`] occurs, functions' forms among
-/// them; std's parts name no program's id, each its functions; and each of
-/// the 38 codes occurs, E0092 only for the WASM target. Through S0 alone
-/// until N checks bodies ([`N_BODIES`]).
-#[test]
-fn the_full_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
+/// The body fuzzer's inputs (5.3b, spec 5.3 §4.6, ADR 0056): the type
+/// fuzzer's bases ([`type_bases`]), each mutated inside its bodies
+/// ([`fuzz::body_mutate`]), `count` from `seed`, read with each `\r\n` as
+/// `\n`, so a seed gives the same inputs on every system.
+fn body_inputs(bases: &[String], seed: u64, count: usize) -> Vec<String> {
     let root = root();
-    let std_parts: Vec<String> = std::thread::scope(|scope| {
-        let parts: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
-            .into_iter()
-            .map(|mode| {
-                let root = &root;
-                scope.spawn(move || agree_on_full_hir(full_std_hir(mode), root, &[], 0))
-            })
-            .collect();
-        joined(parts)
-    });
-    for (part, head) in std_parts.iter().zip([
-        "(HirStd target=native records=",
-        "(HirStd target=wasm records=",
-        "(HirStd target=native mode=test records=",
-    ]) {
-        assert!(part.starts_with(head), "{}", &part[..80]);
-        assert!(part
-            .lines()
-            .next()
-            .is_some_and(|l| l.contains(" functions=")));
-        assert!(part.contains("\n  (Function s"), "{head}");
-        assert!(part.ends_with(")\n(Diagnostics)\n"), "{head}");
-        let program_id = |w: &str| {
-            w.len() > 1 && w.starts_with('u') && w[1..].bytes().all(|b| b.is_ascii_digit())
-        };
-        assert!(
-            !part.split([' ', '(', ')', '\n']).any(program_id),
-            "{head}: a program's id in std's part"
-        );
-    }
-    let loose = loose_corpus();
-    let packages = package_corpus();
-    let wasm = wasm_corpus();
-    let tests = test_corpus();
-    let (check, wasm_dumps, test_dumps, counts) = std::thread::scope(|scope| {
-        let cases: Vec<_> = [Mode::Check, Mode::Wasm, Mode::Test]
-            .into_iter()
-            .map(|mode| scope.spawn(move || full_hir_cases(mode).clone()))
-            .collect();
-        let package_dumps = scope.spawn(|| {
-            agree_in_parts(&packages, 3, |part| {
-                agree_on_full_hir_in(Mode::Check, &root, part, 0)
-            })
-        });
-        let wasm_dumps = scope.spawn(|| agree_on_full_hir_in(Mode::Wasm, &root, &wasm, 0));
-        let test_dumps = scope.spawn(|| agree_on_full_hir_in(Mode::Test, &root, &tests, 0));
-        let mut check = agree_on_full_hir_in(Mode::Check, &root, &loose, 0);
-        check.push_str(&package_dumps.join().expect("the packages' thread"));
-        let mut wasm_dumps = wasm_dumps.join().expect("the WASM programs' thread");
-        let mut test_dumps = test_dumps.join().expect("the tests' thread");
-        let mut counts = Vec::new();
-        for (mode, case) in [Mode::Check, Mode::Wasm, Mode::Test].into_iter().zip(cases) {
-            let (dumps, count) = case.join().expect("a mode's cases' thread");
-            counts.push(count);
-            match mode {
-                Mode::Check => check.push_str(&dumps),
-                Mode::Wasm => wasm_dumps.push_str(&dumps),
-                Mode::Test => test_dumps.push_str(&dumps),
-            }
-        }
-        (check, wasm_dumps, test_dumps, counts)
-    });
-    // 5.3b's cases: 5.3a's 164, 646 of the body-level tests' sources and
-    // 13 by hand under `check`; 2 for the WASM target; 5 under test mode.
-    assert!(counts[0] >= 800, "only {} type-checker cases", counts[0]);
-    assert!(counts[1] >= 2, "only {} WASM cases", counts[1]);
-    assert!(counts[2] >= 5, "only {} test-mode cases", counts[2]);
-    let parts = |dumps: &str, head: &str| dumps.lines().filter(|l| l.starts_with(head)).count();
-    assert_eq!(
-        parts(&check, "(Hir target=native checked="),
-        loose.len() + packages.len() + counts[0]
-    );
-    assert_eq!(
-        parts(&wasm_dumps, "(Hir target=wasm checked="),
-        wasm.len() + counts[1]
-    );
-    assert_eq!(
-        parts(&test_dumps, "(Hir target=native mode=test checked="),
-        tests.len() + counts[2]
-    );
-    let found = hir_forms(&[
-        &check,
-        &wasm_dumps,
-        &test_dumps,
-        &std_parts[0],
-        &std_parts[1],
-        &std_parts[2],
-    ]);
-    let kinds = || {
-        nova_driver::hir_dump::KINDS
-            .iter()
-            .chain(nova_driver::hir_dump::BODY_KINDS)
-    };
-    let listed = |f: &String| {
-        f.ends_with("=<n>")
-            || f.ends_with("=<id>")
-            || kinds().any(|k| k == f)
-            || nova_driver::hir_dump::LATER_KINDS.contains(&f.as_str())
-    };
-    let unlisted: Vec<&String> = found.iter().filter(|f| !listed(f)).collect();
-    assert!(unlisted.is_empty(), "{unlisted:?} are in no list");
-    let missing: Vec<&str> = kinds().copied().filter(|k| !found.contains(*k)).collect();
-    assert!(missing.is_empty(), "no full HIR dump holds {missing:?}");
-    let mut all = codes_in(&check);
-    for dumps in [&test_dumps, &wasm_dumps] {
-        for (code, n) in codes_in(dumps) {
-            *all.entry(code).or_insert(0) += n;
-        }
-    }
-    let absent: Vec<&str> = ITEM_CODES
-        .iter()
-        .chain(&BODY_CODES)
-        .copied()
-        .filter(|c| !all.contains_key(*c))
-        .collect();
-    assert!(absent.is_empty(), "{absent:?} occur nowhere: {all:?}");
-    eprintln!(
-        "the full HIR dumps of {} loose programs, {} package files, {} WASM programs, {} files \
-         with tests and {:?} cases: {} lines natively; codes {all:?}",
-        loose.len(),
-        packages.len(),
-        wasm.len(),
-        tests.len(),
-        counts,
-        check.lines().count(),
-    );
-}
-
-/// The type checker's cases of every mode as a Windows checkout has them
-/// ([`crlf`]), through the full HIR dump: each part is there, and the
-/// codes are those of the cases as they are, which a `\r\n` moves no
-/// diagnostic from or to. Through S0 alone until N checks bodies
-/// ([`N_BODIES`]).
-#[test]
-fn the_full_hir_dumps_agree_on_the_cases_with_windows_line_endings() {
-    let dir = fresh_dir("crlf-full-hir");
-    let mut crlf_files = 0;
-    let mut changed_modes = Vec::new();
-    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
-        let (held, changed) = copy_crlf(&hir_cases_dir(mode), &dir.join(hir_cases_name(mode)));
-        crlf_files += held;
-        if changed > 0 {
-            changed_modes.push(mode);
-        }
-    }
-    assert!(
-        crlf_files > 700,
-        "only {crlf_files} cases have CRLF line endings"
-    );
-    std::thread::scope(|scope| {
-        let modes: Vec<_> = changed_modes
-            .into_iter()
-            .map(|mode| {
-                let cases = dir.join(hir_cases_name(mode));
-                scope.spawn(move || {
-                    let crlf = agree_on_full_hir_cases(mode, &cases);
-                    (mode, crlf, full_hir_cases(mode))
-                })
-            })
-            .collect();
-        for handle in modes {
-            let (mode, (dumps, count), (lf, _)) = handle.join().expect("a mode's thread");
-            let parts = dumps.lines().filter(|l| l.starts_with("(Hir ")).count();
-            assert_eq!(parts, count, "{mode:?}");
-            assert_eq!(codes_in(&dumps), codes_in(lf), "{mode:?}");
-        }
-    });
-}
-
-// === 5.3b, part 2 on: the full dump of the inputs N checks ===
-//
-// While 5.3b is being built ([`N_BODIES`] false), N's `hir` checks a
-// program's bodies and prints every function, as S0's `check --dump-hir`
-// does, or refuses the program when its bodies need what N does not check
-// yet: it prints `UNPORTED` and why after the root's header, and exits 3.
-// So a half-checked body is never compared as though it were complete:
-// `n_bodies.txt` lists the inputs whose full program part N gives, and
-// the test below holds it both ways. Each part that ports more adds the
-// inputs N then gives; the last sets `N_BODIES`, and every set above is
-// compared byte for byte, the list and this test removed.
-
-/// The inputs whose full program part N gives ([`N_BODIES`] false): each
-/// line of `n_bodies.txt` a mode and an input, a corpus root relative to
-/// the repository or a case's root relative to the cases' parent
-/// (`cases/check/a.nova`, a case run apart `cases/check/d/main.nova`).
-fn n_bodies_listed() -> std::collections::BTreeSet<(String, String)> {
-    let path = cases_dir()
-        .parent()
-        .expect("the cases' parent")
-        .join("n_bodies.txt");
-    let text = std::fs::read_to_string(&path).expect("read n_bodies.txt");
-    text.lines()
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| {
-            let (mode, input) = l.split_once(' ').expect("a mode and an input");
-            (mode.to_string(), input.to_string())
+    let mut bases = bases.to_vec();
+    bases.sort();
+    let mut rng = SplitMix64::new(seed);
+    (0..count)
+        .map(|i| {
+            let file = rng.pick(&bases);
+            let source = std::fs::read_to_string(root.join(file))
+                .expect("read a corpus file")
+                .replace("\r\n", "\n");
+            fuzz::body_mutate(&mut rng, &source, i)
         })
         .collect()
 }
 
-/// A mode's name in `n_bodies.txt`.
-fn mode_name(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Check => "check",
-        Mode::Wasm => "wasm",
-        Mode::Test => "test",
-    }
-}
-
-/// Each root's part of `dump`, by the header line that starts it.
-fn parts_by_root(dump: &str) -> Vec<(String, String)> {
-    let mut parts: Vec<(String, String)> = Vec::new();
-    for line in dump.split_inclusive('\n') {
-        if let Some(root) = line.strip_prefix("== ") {
-            parts.push((
-                root.trim_end_matches(['\n', '\r']).to_string(),
-                String::new(),
-            ));
-        } else if let Some((_, part)) = parts.last_mut() {
-            part.push_str(line);
-        }
-    }
-    parts
-}
-
-/// What N's full dump gave for one input, against the list.
-#[derive(Default)]
-struct BodiesCompared {
-    agree: usize,
-    refused: Vec<((String, String), String)>,
-    unlisted: Vec<String>,
-    differ: Vec<String>,
-}
-
-/// One set of inputs, `roots` relative to `dir` under `mode`, each named
-/// `prefix` and its root in the list: N's full `hir` on every root, then
-/// S0's `check --dump-hir` on the roots N gives, in batches.
-fn n_bodies_on(
-    mode: Mode,
-    dir: &Path,
-    roots: &[String],
-    prefix: &str,
-    listed: &std::collections::BTreeSet<(String, String)>,
-) -> BodiesCompared {
-    let std_dir = std_dir();
-    let mut n_args = vec!["hir", "--std", std_dir.as_str()];
-    n_args.extend(mode.flags());
-    let s0_args: Vec<&str> = HIR_S0.iter().chain(mode.flags()).copied().collect();
-    let mut out = BodiesCompared::default();
-    for chunk in roots.chunks(BATCH) {
-        let n = run(selfhost(), &n_args, dir, chunk).unwrap_or_else(|e| panic!("{e}"));
-        let n_text = String::from_utf8(n.stdout).expect("N's dump is UTF-8");
-        let n_parts = parts_by_root(&n_text);
-        let names: Vec<&str> = n_parts.iter().map(|(r, _)| r.as_str()).collect();
-        assert_eq!(names, chunk, "N's headers, {}: {}", dir.display(), n.stderr);
-        let refused = n_parts
-            .iter()
-            .filter(|(_, p)| p.starts_with("UNPORTED "))
-            .count();
-        assert_eq!(
-            n.code,
-            Some(if refused > 0 { 3 } else { 0 }),
-            "N on {chunk:?}: {}",
-            n.stderr
-        );
-        let given: Vec<String> = n_parts
-            .iter()
-            .filter(|(_, p)| !p.starts_with("UNPORTED "))
-            .map(|(r, _)| r.clone())
-            .collect();
-        let s0_parts = if given.is_empty() {
-            Vec::new()
-        } else {
-            let s0 = run(&nova(), &s0_args, dir, &given).unwrap_or_else(|e| panic!("{e}"));
-            assert_eq!(s0.code, Some(0), "S0 on {given:?}: {}", s0.stderr);
-            parts_by_root(&String::from_utf8(s0.stdout).expect("S0's dump is UTF-8"))
-        };
-        let mut s0_parts = s0_parts.into_iter();
-        for (root, part) in n_parts {
-            let input = format!("{prefix}{root}");
-            let key = (mode_name(mode).to_string(), input.clone());
-            if let Some(why) = part.strip_prefix("UNPORTED ") {
-                out.refused.push((key, why.trim_end().to_string()));
-                continue;
-            }
-            let (s0_root, s0_part) = s0_parts.next().expect("S0's part");
-            assert_eq!(s0_root, root);
-            if !listed.contains(&key) {
-                out.unlisted.push(format!("{} {input}", key.0));
-            } else if s0_part != part {
-                let at = first_difference(s0_part.as_bytes(), part.as_bytes());
-                out.differ.push(format!("{} {input}: {at:?}", key.0));
-            } else {
-                out.agree += 1;
-            }
-        }
-    }
-    out
-}
-
-/// N's full HIR dump of every input of the full dump's sets but std's
-/// parts (the corpus natively, for the WASM target and under test mode,
-/// and the cases of each mode) is S0's, byte for byte, for each input
-/// `n_bodies.txt` lists, and N refuses every other input, printing
-/// `UNPORTED` and why (5.3b, while it is being built, ADR 0056): every
-/// listed input agrees, and an input not listed is one N refuses. std's
-/// full part of each mode, which holds std's bodies, is listed as
-/// `<mode> std` (5.3b part 4).
+/// The body fuzzer (5.3b, spec 5.3 §4.6): each seed's inputs, written to
+/// `bodies/<seed>/` and checked in one process a side, reach the type
+/// checker, and their full dumps agree; the body E0001s and each code of
+/// [`BODY_FLOORS`] occur at least twice over the fixed seeds.
 #[test]
-fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
-    let listed = n_bodies_listed();
-    let root = root();
-    let mut sets: Vec<(Mode, PathBuf, Vec<String>, String)> = vec![
-        (Mode::Check, root.clone(), package_corpus(), String::new()),
-        (Mode::Check, root.clone(), loose_corpus(), String::new()),
-        (Mode::Wasm, root.clone(), wasm_corpus(), String::new()),
-        (Mode::Test, root.clone(), test_corpus(), String::new()),
-    ];
-    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
-        let name = hir_cases_name(mode);
-        let roots = case_roots(&hir_cases_dir(mode));
-        let from_cases: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
-        sets.push((
-            mode,
-            hir_cases_dir(mode),
-            from_cases,
-            format!("cases/{name}/"),
-        ));
-        for dir in roots.apart {
-            let apart = dir
-                .file_name()
-                .expect("a name")
-                .to_string_lossy()
-                .into_owned();
-            sets.push((
-                mode,
-                dir,
-                vec!["main.nova".to_string()],
-                format!("cases/{name}/{apart}/"),
-            ));
+fn the_body_fuzzers_inputs_agree_and_hold_each_aimed_code() {
+    let bases = type_bases();
+    assert!(bases.len() >= 100, "only {} bases", bases.len());
+    let dir = fresh_dir("bodies");
+    let mut roots = Vec::new();
+    for seed in BODY_SEEDS {
+        let sub = dir.join(seed.to_string());
+        std::fs::create_dir_all(&sub).expect("create a seed's directory");
+        for (i, input) in body_inputs(&bases, seed, BODY_COUNT).iter().enumerate() {
+            let file = format!("f{i:05}.nova");
+            std::fs::write(sub.join(&file), input).expect("write a body-fuzz input");
+            roots.push(format!("{seed}/{file}"));
         }
     }
-    // Each set's roots in batches, taken in turn by as many threads as there
-    // are cores; a set holding N's own package roots, each a dump of all of
-    // N, in batches of three, or its thread would be the test's long pole.
-    // Each of N's runs checks std's bodies once, so other sets keep whole
-    // batches.
-    let jobs: Vec<(Mode, &Path, &[String], &str)> = sets
-        .iter()
-        .flat_map(|(mode, dir, roots, prefix)| {
-            let size = if roots.iter().any(|r| r.starts_with("selfhost/")) {
-                3
-            } else {
-                BATCH
-            };
-            roots
-                .chunks(size)
-                .map(move |chunk| (*mode, dir.as_path(), chunk, prefix.as_str()))
+    let dump = agree_on_hir_in(Mode::Check, &dir, &roots, 0);
+    let unchecked: Vec<&str> = dump
+        .split("== ")
+        .filter(|p| p.contains("(Hir target=native checked=false"))
+        .map(|p| p.lines().next().unwrap_or(""))
+        .collect();
+    assert!(
+        unchecked.is_empty(),
+        "inputs that stop before the type checker: {unchecked:?}"
+    );
+    for seed in BODY_SEEDS {
+        let part = seed_parts(&dump, seed);
+        assert_eq!(part.matches("(Hir ").count(), BODY_COUNT, "seed {seed}");
+    }
+    let codes = codes_in(&dump);
+    // Every E0001 here is the type checker's, in a body: the mutations
+    // and the appended functions touch no item's names.
+    let body_e0001 = dump
+        .lines()
+        .filter(|l| {
+            l.starts_with("  (Error \"E0001\" \"cannot find `")
+                || l.starts_with("  (Error \"E0001\" \"cannot find function `")
         })
-        .collect();
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let compared: Vec<BodiesCompared> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                let (jobs, next, listed) = (&jobs, &next, &listed);
-                scope.spawn(move || {
-                    let mut done = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&(mode, dir, roots, prefix)) = jobs.get(i) else {
-                            break;
-                        };
-                        done.push(n_bodies_on(mode, dir, roots, prefix, listed));
-                    }
-                    done
-                })
-            })
-            .collect();
-        joined(handles).into_iter().flatten().collect()
-    });
-    let mut all = BodiesCompared::default();
-    for c in compared {
-        all.agree += c.agree;
-        all.refused.extend(c.refused);
-        all.unlisted.extend(c.unlisted);
-        all.differ.extend(c.differ);
-    }
-    // std's full part of each mode, listed as `<mode> std`: N's is S0's,
-    // byte for byte, or N refuses it, as a root's.
-    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
-        let key = (mode_name(mode).to_string(), "std".to_string());
-        let std_dir = std_dir();
-        let mut args = vec!["hir", "--std", std_dir.as_str()];
-        args.extend(mode.flags());
-        args.push("--std-part");
-        let n = run(selfhost(), &args, &root, &[]).unwrap_or_else(|e| panic!("{e}"));
-        let n_text = String::from_utf8(n.stdout).expect("N's dump is UTF-8");
-        if let Some(why) = n_text.strip_prefix("UNPORTED ") {
-            assert_eq!(n.code, Some(3), "{mode:?}: {}", n.stderr);
-            all.refused.push((key, why.trim_end().to_string()));
-            continue;
-        }
-        assert_eq!(n.code, Some(0), "{mode:?}: {}", n.stderr);
-        let mut s0_args: Vec<&str> = HIR_S0.iter().chain(mode.flags()).copied().collect();
-        s0_args.push("--std");
-        let s0 = run(&nova(), &s0_args, &root, &[]).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(s0.code, Some(0), "S0's std part, {mode:?}: {}", s0.stderr);
-        let s0_text = String::from_utf8(s0.stdout).expect("S0's dump is UTF-8");
-        if !listed.contains(&key) {
-            all.unlisted.push(format!("{} std", key.0));
-        } else if s0_text != n_text {
-            let at = first_difference(s0_text.as_bytes(), n_text.as_bytes());
-            all.differ.push(format!("{} std: {at:?}", key.0));
-        } else {
-            all.agree += 1;
-        }
-    }
-    let stale: Vec<&(String, String)> = all
-        .refused
+        .count();
+    assert_eq!(body_e0001, codes.get("E0001").copied().unwrap_or(0));
+    let short: Vec<(&str, usize)> = BODY_FLOORS
         .iter()
-        .map(|(key, _)| key)
-        .filter(|key| listed.contains(*key))
+        .map(|c| (*c, codes.get(*c).copied().unwrap_or(0)))
+        .filter(|(_, n)| *n < 2)
         .collect();
-    let mut why: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
-    for (_, w) in &all.refused {
-        *why.entry(w.as_str()).or_insert(0) += 1;
-    }
-    eprintln!(
-        "N gives {} inputs' full dump as S0's, refuses {}: {why:#?}",
-        all.agree,
-        all.refused.len()
-    );
     assert!(
-        all.differ.is_empty(),
-        "N's full dump differs from S0's: {:#?}",
-        all.differ
+        short.is_empty(),
+        "aimed codes under two: {short:?}; all: {codes:?}"
     );
-    assert!(
-        all.unlisted.is_empty(),
-        "N gives these inputs' full dump, S0's, but n_bodies.txt does not list them: {:#?}",
-        all.unlisted
-    );
-    assert!(
-        stale.is_empty() && all.agree == listed.len(),
-        "n_bodies.txt lists {} inputs, of which N gives {}; refused: {stale:#?}",
-        listed.len(),
-        all.agree
-    );
-    // 5.3b's part 2: 384 inputs, 352 cases and 32 corpus roots.
-    // 5.3b's part 4: 1,159 inputs, 806 cases, 350 corpus roots and std's
-    // three parts.
-    assert!(all.agree >= 1150, "only {} inputs", all.agree);
+    eprintln!("the body fuzzer's codes over seeds {BODY_SEEDS:?}: {codes:?}");
 }
