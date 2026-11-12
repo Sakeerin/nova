@@ -35,10 +35,9 @@
 //                             with `--items`, the item part alone, as the
 //                             hidden `nova check --dump-hir-items` prints
 //                             it. While 5.3b is being built, a root whose
-//                             bodies need what N does not check yet, std's
-//                             bodies among them, prints `UNPORTED` and why
-//                             after its header, and the exit code is then
-//                             3; so does std's part, without `--items`.
+//                             bodies need what N does not check yet (views)
+//                             prints `UNPORTED` and why after its header,
+//                             and the exit code is then 3.
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -69,12 +68,16 @@ import typeck_body_tests
 import typeck_call
 import typeck_closure
 import typeck_expr
+import typeck_for
 import typeck_member_tests
 import typeck_method
+import typeck_pattern
+import typeck_pattern_tests
 import typeck_place
 import typeck_tests
 import typeck_traits
 import typeck_ty
+import usefulness
 
 async fn main() {
     let argv = args()
@@ -206,16 +209,19 @@ async fn dump_command(argv: Vec<String>, command: String) {
         }
     }
     if std_part {
-        if hir && !items_only {
-            // 5.3b part 4: std's part holds std's bodies.
-            print("UNPORTED std's bodies (5.3b part 4)\n")
-            exit(3)
-            return
-        }
         let resolved = resolve_program_for(target, Vec::new(), std_set)
         if hir {
             let (labels, texts) = labels_and_texts(Vec::new(), std_set)
-            let tables = check_items(resolved.items, resolved.definitions, labels, texts)
+            let mut tables = check_items(resolved.items, resolved.definitions, labels, texts)
+            // std's part holds std's bodies, but under `--items`.
+            if !items_only {
+                tables.check_bodies(resolved.newline_splits)
+                if tables.unported != "" {
+                    print("UNPORTED ${tables.unported}\n")
+                    exit(3)
+                    return
+                }
+            }
             let mut diagnostics: Vec<Diagnostic> = Vec::new()
             for d in resolved.diagnostics.iter() { diagnostics.push(d) }
             for d in tables.diagnostics.iter() { diagnostics.push(d) }
@@ -443,38 +449,58 @@ async fn dump_hir(
         )
     }
     if failed { return DumpedText(dump_hir_program(target, test, None, diagnostics)) }
+    if items.is_some() {
+        match hir_of(target, test, sources, modules, shared, items, bodies, diagnostics) {
+            Some(d) => return d
+            None => ()
+        }
+    }
+    hir_of(target, test, sources, modules, shared, None, bodies, diagnostics).unwrap()
+}
+
+// `dump_hir`'s part from the resolver on, the loader's diagnostics
+// `load_diagnostics`: with std's tables `items`, the program resolved with
+// std's definitions after its own, reading std's tables rebased past them,
+// and its bodies alone checked, std's being std's part; without, resolved
+// and checked in full, as `check` does, std's bodies too. `None` when the
+// shared path cannot check the program, because it implements anything on
+// a type it does not own, which the full path then checks (ADR 0056 §4).
+fn hir_of(
+    target: CompileTarget,
+    test: Bool,
+    sources: Vec<ModuleSource>,
+    modules: Vec<Loaded>,
+    shared: SharedStd,
+    items: Option<SharedItems>,
+    bodies: Bool,
+    load_diagnostics: Vec<Diagnostic>,
+) -> Option<Dumped> {
+    let std_set = shared.std_set
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    for d in load_diagnostics.iter() { diagnostics.push(d) }
     let resolved = match items {
         Some(_) => resolve_program_shared_for_check(sources, shared)
         None => resolve_program_for(target, sources, std_set)
     }
     name_tests(resolved.tests, resolved.definitions, modules)
+    let mut failed = false
     for d in resolved.diagnostics.iter() {
         diagnostics.push(d)
         if d.is_error() { failed = true }
     }
-    if failed { return DumpedText(dump_hir_program(target, test, None, diagnostics)) }
+    if failed { return Some(DumpedText(dump_hir_program(target, test, None, diagnostics))) }
     let (labels, texts) = labels_and_texts(sources, std_set)
     let mut tables = match items {
         Some(s) => check_items_shared(resolved.items, resolved.definitions, labels, texts, s)
         None => check_items(resolved.items, resolved.definitions, labels, texts)
     }
     if bodies {
-        // 5.3b part 4: a program checked in full, because std alone gave a
-        // diagnostic or because it implements anything on a type it does
-        // not own, checks std's bodies too (ADR 0056 §4).
-        if items.is_none() {
-            return DumpedUnported("std's bodies, checked with each program (5.3b part 4)")
-        }
-        if tables.implements_on_a_type_it_does_not_own() {
-            return DumpedUnported(
-                "std's bodies, checked with a program that implements on a type it does not own (5.3b part 4)",
-            )
-        }
+        if items.is_some() && tables.implements_on_a_type_it_does_not_own() { return None }
         tables.check_bodies(resolved.newline_splits)
-        if tables.unported != "" { return DumpedUnported(tables.unported) }
+        if tables.unported != "" { return Some(DumpedUnported(tables.unported)) }
     }
     for d in tables.diagnostics.iter() { diagnostics.push(d) }
-    DumpedText(dump_hir_program(target, test, Some((resolved, tables)), diagnostics))
+    Some(DumpedText(dump_hir_program(target, test, Some((resolved, tables)), diagnostics)))
 }
 
 // Each module's file label, the program's `sources` then std's modules

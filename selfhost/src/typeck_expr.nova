@@ -10,12 +10,13 @@
 //
 // typeck_method.nova checks record literals, fields and methods,
 // typeck_place.nova assignments, typeck_closure.nova closures and
-// functions as values, typeck_call.nova calls and `?`.
+// functions as values, typeck_call.nova calls and `?`, typeck_pattern.nova
+// `match`, typeck_for.nova `for` loops.
 //
 // While 5.3b is being built, an expression whose checking a later part
-// ports (`for`, `match`, views) is a stub, `unported_expr`, which keeps what it is
-// and makes N refuse the program (`Checker::unported`): N never prints a
-// body it has not checked as S0 does.
+// ports (views) is a stub, `unported_expr`, which keeps what it is and
+// makes N refuse the program (`Checker::unported`): N never prints a body
+// it has not checked as S0 does.
 
 import ast
 import builtins
@@ -29,7 +30,9 @@ import typeck
 import typeck_body
 import typeck_call
 import typeck_closure
+import typeck_for
 import typeck_method
+import typeck_pattern
 import typeck_place
 
 impl Checker {
@@ -55,7 +58,7 @@ impl Checker {
                 fcx.loop_depth -= 1
                 HirExpr { kind: EkWhile(cond, body), ty: TyUnit, span: span }
             }
-            ExprMatch(_, _) => self.unported_expr("`match` (5.3b part 4)", span)
+            ExprMatch(scrutinee, arms) => self.check_match(fcx, scrutinee, arms, span)
             ExprReturn(value) => {
                 let checked: Option<HirExpr> = match value {
                     Some(v) => Some(self.check_expr(fcx, v))
@@ -86,7 +89,7 @@ impl Checker {
                 for e in elems.iter() { tys.push(e.ty) }
                 HirExpr { kind: EkMakeTuple(elems), ty: TyTuple(tys), span: span }
             }
-            ExprFor(_, _, _) => self.unported_expr("`for` loops (5.3b part 4)", span)
+            ExprFor(pattern, iter, body) => self.check_for(fcx, pattern, iter, body, span)
             ExprRange(_, _, _) => {
                 self.unsupported(span, "ranges outside a `for` loop")
                 error_expr(span)

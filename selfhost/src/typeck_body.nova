@@ -12,10 +12,10 @@
 // fields and methods, typeck_place.nova assignments, typeck_closure.nova
 // closures and functions as values; infer.nova is the unifier.
 //
-// - N checks the program's bodies only: std's are std's part of the dump
-//   (spec §4.5), which the shared path never checks for a program, in
-//   `DefId` order, functions, then methods, then constants, as S0's
-//   `check_bodies` does (§4.1).
+// - N checks the program's bodies, then std's, each in `DefId` order,
+//   functions, then methods, then constants, as S0's `check_bodies` does
+//   (§4.1); the shared path skips std's, which are std's part of the dump
+//   (§4.5), checked once per process and mode.
 // - Inference variables are numbered per function, `fresh` called where
 //   S0 calls it.
 // - A `Binding` is kept by its declaration's place, its file's label and
@@ -34,6 +34,8 @@ import resolver
 import token
 import typeck
 import typeck_expr
+import typeck_for
+import typeck_pattern
 import typeck_ty
 
 /// What checking one function body carries (`FnCtx`): its inference
@@ -129,44 +131,53 @@ impl FnCtx {
 impl Checker {
     // --- Passes 6 to 8 ---
 
-    /// The program's bodies in `DefId` order, functions, then methods,
-    /// then constants; the constant cycles and the newline splits; then the
-    /// closures and wrappers in the order they were lifted
+    /// The program's bodies, then std's, each in `DefId` order,
+    /// functions, then methods, then constants; std's are skipped on the
+    /// shared path, where they are std's part of the dump; the constant
+    /// cycles and the newline splits; then the closures and wrappers in
+    /// the order they were lifted, the program's before std's
     /// (`check_bodies`). `splits` are the program's newline splits, each
-    /// with its file's label. std's bodies are std's part of the dump,
-    /// which a program's check never reaches.
+    /// with its file's label.
     pub fn check_bodies(mut self, splits: Vec<(String, NewlineSplit)>) {
         self.splits = splits
         self.bodies = true
         let (_, std_def, _) = std_start_of(self.defs)
+        let fn_ids = self.defs_of_kind(false)
+        let const_ids = self.defs_of_kind(true)
         let mut functions: Vec<HirFunction> = Vec::new()
+        let mut std_closures = self.next_closure_def
         // Once a construct N does not check yet is met, the program is
         // refused (`unported`), and no other body need be checked.
-        for (def_id, item_index) in self.defs_of_kind(false).iter() {
-            if def_id >= std_def || self.unported != "" { continue }
-            match self.check_function(def_id, item_index) {
-                Some(f) => functions.push(f)
-                None => ()
+        for pass in 0..2 {
+            let in_std = pass == 1
+            if in_std {
+                std_closures = self.next_closure_def
+                if self.shared.is_some() { break }
             }
-        }
-        let mut id = 0
-        while id < std_def && id < self.method_locs.len() {
-            if self.method_locs.at(id).is_some() && self.unported == "" {
+            for (def_id, item_index) in fn_ids.iter() {
+                if (def_id >= std_def) != in_std || self.unported != "" { continue }
+                match self.check_function(def_id, item_index) {
+                    Some(f) => functions.push(f)
+                    None => ()
+                }
+            }
+            for id in 0..self.method_locs.len() {
+                if (id >= std_def) != in_std || self.unported != "" { continue }
+                if self.method_locs.at(id).is_none() { continue }
                 match self.check_method(id) {
                     Some(f) => functions.push(f)
                     None => ()
                 }
             }
-            id += 1
-        }
-        for (def_id, item_index) in self.defs_of_kind(true).iter() {
-            if def_id >= std_def || self.unported != "" { continue }
-            match self.check_const(def_id, item_index) {
-                Some(f) => functions.push(f)
-                None => ()
+            for (def_id, item_index) in const_ids.iter() {
+                if (def_id >= std_def) != in_std || self.unported != "" { continue }
+                match self.check_const(def_id, item_index) {
+                    Some(f) => functions.push(f)
+                    None => ()
+                }
             }
         }
-        self.std_closures = self.next_closure_def
+        self.std_closures = std_closures
         self.check_const_cycles(functions)
         self.warn_newline_splits()
         for f in self.extra_functions.iter() { functions.push(f) }
@@ -467,9 +478,19 @@ impl Checker {
                         PatternIdent(m, n) => (n.value, m, n.span)
                         PatternWildcard => ("_", false, pattern.span)
                         _ => {
-                            // 5.3b part 4: a destructuring `let` binds by a
-                            // pattern, which `check_pattern` checks.
-                            self.unported_at("destructuring `let` patterns (5.3b part 4)")
+                            // Destructuring: an irrefutable pattern, bound
+                            // by a one-arm `match`. `let mut` makes each of
+                            // its bindings mutable.
+                            self.pats.mutable = is_mut
+                            self.pats.let_head = Some(let_head(pattern.value))
+                            let errors = self.error_count()
+                            let pat = self.check_pattern(fcx, pattern, value.ty)
+                            self.pats.mutable = false
+                            self.pats.let_head = None
+                            if self.error_count() == errors {
+                                self.require_irrefutable(fcx, pat, value.ty, pattern.span, "`let`")
+                            }
+                            stmts.push(let_pattern(pat, value, stmt.span))
                             continue
                         }
                     }

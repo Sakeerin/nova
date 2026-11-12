@@ -36,6 +36,7 @@ import fixes
 import hir
 import resolver
 import token
+import typeck_pattern
 
 // ---------------------------------------------------------------------------
 // The state
@@ -113,6 +114,8 @@ pub record Checker {
     pub std_closures: Int,
     pub bodies: Bool,
     pub unported: String,
+    // The pattern being checked (`pats`, typeck_pattern.nova).
+    pub pats: PatState,
 }
 
 /// std's item tables, built once from the check of a program of no module
@@ -134,15 +137,23 @@ pub fn check_items(
 }
 
 /// std's item tables from the resolution of a program of no module of its
-/// own (`SharedItems::new`).
+/// own (`SharedItems::new`). std's bodies are checked once too, on the
+/// same checker, whose tables a body never changes (5.3b, ADR 0056 §4):
+/// should they give a diagnostic, as its items, nothing is shared; nor
+/// should N not check them yet.
 pub fn share_items(
     items: Vec<Spanned<Item>>,
     defs: Definitions,
     labels: Vec<String>,
     texts: Vec<Option<String>>,
 ) -> SharedItems {
-    let tables = check_items(items, defs, labels, texts)
-    SharedItems { tables: tables, defs: defs.defs.len(), shareable: tables.diagnostics.is_empty() }
+    let mut tables = check_items(items, defs, labels, texts)
+    tables.check_bodies(Vec::new())
+    SharedItems {
+        tables: tables,
+        defs: defs.defs.len(),
+        shareable: tables.diagnostics.is_empty() && tables.unported == "",
+    }
 }
 
 /// `check_items` reading std's tables from `shared` (`check_items_shared`):
@@ -248,6 +259,7 @@ fn new_checker(
         std_closures: n,
         bodies: false,
         unported: "",
+        pats: new_pat_state(),
     }
 }
 

@@ -1,0 +1,438 @@
+// The type checker's `for` loops: a port of check.rs's `check_for`,
+// `check_for_iterator`, `iterator_next` and `IteratorNext`, and of
+// check/patterns.rs's `LoopBind`, `let_pattern`, `for_loop_binding` and
+// `check_for_array`, function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_pattern.nova checks the patterns a loop binds;
+// typeck_body.nova gives the idioms.
+//
+// - A loop desugars to blocks, `let`s, a `while` and, over an iterator, a
+//   `match` on `next`, each node made new where S0 makes one, so that
+//   finalizing, which rewrites a node in place, meets each once.
+// - The hidden locals are made where S0 makes them, in its order, as
+//   their ids reach the dump: a range's `__run` after the body.
+
+import ast
+import fixes
+import hir
+import infer
+import token
+import typeck
+import typeck_body
+import typeck_expr
+import typeck_method
+import typeck_pattern
+
+/// The `next` a `for` loop drives, as `iterator_next` resolved it
+/// (`IteratorNext`): the trait and the method's index; the sum `next`
+/// returns, `Option` in std, read off the same trait declaration; the
+/// index of its one-field `Some` and of its empty `None`.
+record IteratorNext { trait_id: Int, method_idx: Int, option: Int, some: Int, none: Int }
+
+/// How a `for` loop binds each element (`LoopBind`): a plain local, or an
+/// irrefutable pattern.
+pub type LoopBind = | LoopBindLocal(Int) | LoopBindPattern(HirPattern)
+
+/// The pattern that binds an element, for a `match` arm
+/// (`LoopBind::into_pattern`).
+pub fn loop_bind_pattern(b: LoopBind) -> HirPattern {
+    match b {
+        LoopBindLocal(l) => PatBind(l)
+        LoopBindPattern(p) => p
+    }
+}
+
+/// The statement that binds `init`: a `let` for a plain local, and for a
+/// pattern a one-arm `match` whose arm binds the pattern's locals for the
+/// rest of the block (`LoopBind::bind`).
+pub fn loop_bind(b: LoopBind, init: HirExpr, span: Span) -> HirExpr {
+    match b {
+        LoopBindLocal(local) => HirExpr { kind: EkLet(local, init), ty: TyUnit, span: span }
+        LoopBindPattern(pattern) => let_pattern(pattern, init, span)
+    }
+}
+
+/// `let P = init` for a destructuring `P`: a `match` with one arm, whose
+/// body is `()` (`let_pattern`).
+pub fn let_pattern(pattern: HirPattern, init: HirExpr, span: Span) -> HirExpr {
+    let mut arms: Vec<HirArm> = Vec::new()
+    arms.push(
+        HirArm {
+            pattern: pattern,
+            guard: None,
+            body: HirExpr { kind: EkUnit, ty: TyUnit, span: span },
+            span: span,
+        },
+    )
+    HirExpr { kind: EkMatch(init, arms), ty: TyUnit, span: span }
+}
+
+impl Checker {
+    /// `for p in iter { body }` (`check_for`): over `lo..hi` or `lo..=hi`
+    /// a counted `while`; otherwise `check_for_iterator`.
+    pub fn check_for(
+        mut self,
+        mut fcx: FnCtx,
+        pattern: Spanned<Pattern>,
+        iter: Spanned<Expr>,
+        body: Spanned<Block>,
+        span: Span,
+    ) -> HirExpr {
+        let (lo_ast, hi_ast, inclusive) = match iter.value {
+            ExprRange(lo, hi, inclusive) => (lo, hi, inclusive)
+            _ => return self.check_for_iterator(fcx, pattern, iter, body, span)
+        }
+        let lo = self.check_expr(fcx, lo_ast)
+        self.expect_ty(fcx, lo, TyInt, "a range bound")
+        let hi = self.check_expr(fcx, hi_ast)
+        self.expect_ty(fcx, hi, TyInt, "a range bound")
+        // Hidden counter and bound locals, unscoped so they neither collide
+        // with nor shadow a source name; the counter is apart from the
+        // user's immutable loop variable, so assigning that is E0060 and
+        // cannot corrupt the trip count.
+        let counter = fcx.new_local_unscoped("__i", TyInt, true, span)
+        let end = fcx.new_local_unscoped("__end", TyInt, false, span)
+        fcx.scopes.push(Map::new())
+        let i = self.for_loop_binding(fcx, pattern, TyInt)
+        fcx.loop_depth += 1
+        let body_hir = self.check_block(fcx, body.value, body.span)
+        fcx.loop_depth -= 1
+        let _ = fcx.scopes.pop()
+        // The immutable loop variable bound to the counter each iteration.
+        let bind_i = loop_bind(i, read_int(counter, span), span)
+        // `__i = __i + 1`
+        let incr = assign_to(
+            counter,
+            HirExpr {
+                kind: EkBinary(
+                    OpAdd,
+                    read_int(counter, span),
+                    HirExpr { kind: EkIntLit(1), ty: TyInt, span: span },
+                ),
+                ty: TyInt,
+                span: span,
+            },
+            span,
+        )
+        let mut outer: Vec<HirExpr> = Vec::new()
+        outer.push(let_stmt(counter, lo, span))
+        outer.push(let_stmt(end, hi, span))
+        let while_expr = if inclusive {
+            // An inclusive range uses a run flag, so that iterating up to
+            // `Int::MAX` ends instead of wrapping past the bound.
+            let run = fcx.new_local_unscoped("__run", TyBool, true, span)
+            outer.push(let_stmt(run, compare(OpLe, counter, end, span), span))
+            // The counter and the flag advance before the body, so that a
+            // `continue` still progresses.
+            let update_run = assign_to(run, compare(OpLt, counter, end, span), span)
+            let mut stmts: Vec<HirExpr> = Vec::new()
+            stmts.push(bind_i)
+            stmts.push(update_run)
+            stmts.push(incr)
+            stmts.push(body_hir)
+            let while_body = HirExpr { kind: EkBlock(stmts, None), ty: TyUnit, span: span }
+            HirExpr {
+                kind: EkWhile(HirExpr { kind: EkLocal(run), ty: TyBool, span: span }, while_body),
+                ty: TyUnit,
+                span: span,
+            }
+        } else {
+            let cond = compare(OpLt, counter, end, span)
+            // The increment before the body, so `continue` still advances.
+            let mut stmts: Vec<HirExpr> = Vec::new()
+            stmts.push(bind_i)
+            stmts.push(incr)
+            stmts.push(body_hir)
+            let while_body = HirExpr { kind: EkBlock(stmts, None), ty: TyUnit, span: span }
+            HirExpr { kind: EkWhile(cond, while_body), ty: TyUnit, span: span }
+        }
+        outer.push(while_expr)
+        HirExpr { kind: EkBlock(outer, None), ty: TyUnit, span: span }
+    }
+
+    // `for x in it { body }` over an array or a value whose type has an
+    // `Iterator`-shaped `next` (`check_for_iterator`): `{ let mut __it = it
+    // while true { match __it.next() { Some(x) => { body }, None => break } }
+    // }`. `__it` is unscoped and `mut`, so `next`'s `mut self` is met; the
+    // user's `x` stays immutable.
+    fn check_for_iterator(
+        mut self,
+        mut fcx: FnCtx,
+        pattern: Spanned<Pattern>,
+        iter: Spanned<Expr>,
+        body: Spanned<Block>,
+        span: Span,
+    ) -> HirExpr {
+        let it_name = "__it"
+        let iterable = self.check_expr(fcx, iter)
+        let iter_ty = fcx.icx.apply(iterable.ty)
+        // The iterable's own mistake is already reported.
+        match iter_ty {
+            TyError => return error_expr(span)
+            TyArray(elem) => return self.check_for_array(fcx, pattern, iterable, elem, body, span)
+            _ => ()
+        }
+        let next = match self.iterator_next(fcx, iter_ty) {
+            Some(n) => n
+            None => {
+                self.unsupported(
+                    iter.span,
+                    "`for` loops over anything but an integer range (`a..b`), an array, or a value implementing `Iterator` (try `.iter()`)",
+                )
+                return error_expr(span)
+            }
+        }
+        let it_local = fcx.new_local_unscoped(it_name, iter_ty, true, span)
+        let receiver = HirExpr { kind: EkLocal(it_local), ty: iter_ty, span: iter.span }
+        // `emit_trait_call` classifies its receiver by `place_root`, which
+        // resolves an AST name in the scopes: the receiver is spelt as a
+        // path, findable for the one call emitted here.
+        let it_ast = Spanned::new(
+            ExprPath(single_path(Spanned::new(it_name, iter.span))),
+            iter.span,
+        )
+        let mut scope: Map<String, Int> = Map::new()
+        let _ = scope.insert(it_name, it_local)
+        fcx.scopes.push(scope)
+        let next_call = self.emit_trait_call(
+            fcx,
+            next.trait_id,
+            next.method_idx,
+            TraitCallSelfReceiver(receiver, it_ast),
+            Vec::new(),
+            span,
+        )
+        let _ = fcx.scopes.pop()
+        // The item type is read off the call's result, whose projection the
+        // call already normalized against the impl it selected.
+        let item_ty = match fcx.icx.apply(next_call.ty) {
+            TySum(def_id, args) => if def_id == next.option {
+                self.some_payload(next, args)
+            } else {
+                TyError
+            }
+            // `emit_trait_call` bailed, having said why.
+            _ => TyError
+        }
+        fcx.scopes.push(Map::new())
+        let elem = self.for_loop_binding(fcx, pattern, item_ty)
+        fcx.loop_depth += 1
+        let body_hir = self.check_block(fcx, body.value, body.span)
+        fcx.loop_depth -= 1
+        let _ = fcx.scopes.pop()
+        let mut some_fields: Vec<HirPattern> = Vec::new()
+        some_fields.push(loop_bind_pattern(elem))
+        let mut stmts: Vec<HirExpr> = Vec::new()
+        stmts.push(body_hir)
+        let mut arms: Vec<HirArm> = Vec::new()
+        // The body in a block, so the arm is `()` whatever its value.
+        arms.push(
+            HirArm {
+                pattern: PatVariant(next.option, next.some, some_fields),
+                guard: None,
+                body: HirExpr { kind: EkBlock(stmts, None), ty: TyUnit, span: span },
+                span: body.span,
+            },
+        )
+        arms.push(
+            HirArm {
+                pattern: PatVariant(next.option, next.none, Vec::new()),
+                guard: None,
+                body: HirExpr { kind: EkBreak, ty: TyNever, span: span },
+                span: span,
+            },
+        )
+        let while_expr = HirExpr {
+            kind: EkWhile(
+                HirExpr { kind: EkBoolLit(true), ty: TyBool, span: span },
+                HirExpr { kind: EkMatch(next_call, arms), ty: TyUnit, span: span },
+            ),
+            ty: TyUnit,
+            span: span,
+        }
+        let bind_it = HirExpr { kind: EkLet(it_local, iterable), ty: TyUnit, span: span }
+        let mut outer: Vec<HirExpr> = Vec::new()
+        outer.push(bind_it)
+        outer.push(while_expr)
+        HirExpr { kind: EkBlock(outer, None), ty: TyUnit, span: span }
+    }
+
+    // The payload type of `next`'s `Some`, at the sum's arguments `args`.
+    fn some_payload(self, next: IteratorNext, args: Vec<Ty>) -> Ty {
+        for s in self.sums.iter() {
+            if s.def_id == next.option {
+                if next.some < 0 || next.some >= s.variants.len() { return TyError }
+                let v = s.variants.at(next.some)
+                if v.fields.is_empty() { return TyError }
+                return subst(v.fields.at(0), args)
+            }
+        }
+        TyError
+    }
+
+    // The `next` a `for` loop drives on a value of type `recv_ty`: none when
+    // the type has no method of that name, more than one trait provides
+    // one, or the one found is not shaped like `Iterator::next`
+    // (`iterator_next`).
+    fn iterator_next(self, fcx: FnCtx, recv_ty: Ty) -> Option<IteratorNext> {
+        let (trait_id, method_idx) = match self.resolve_method_on(recv_ty, fcx, "next") {
+            MethodResTrait(t, i) => (t, i)
+            _ => return None
+        }
+        let mut found: Option<TraitMethod> = None
+        for t in self.traits.iter() {
+            if t.def_id == trait_id {
+                if method_idx >= 0 && method_idx < t.methods.len() {
+                    found = Some(t.methods.at(method_idx))
+                }
+                break
+            }
+        }
+        let tm = found?
+        // `next(mut self) -> Option<…>`: no further argument and no generics
+        // of its own.
+        if !tm.params.is_empty() || tm.generics != 0 { return None }
+        // An `Option`-shaped return: exactly `Some(x)` and `None`.
+        let def_id = match tm.ret {
+            TySum(d, _) => d
+            _ => return None
+        }
+        let mut sum: Option<SumType> = None
+        for s in self.sums.iter() {
+            if s.def_id == def_id {
+                sum = Some(s)
+                break
+            }
+        }
+        let s = sum?
+        if s.variants.len() != 2 { return None }
+        let mut some = -1
+        let mut none = -1
+        for k in 0..s.variants.len() {
+            let v = s.variants.at(k)
+            if some < 0 && v.name == "Some" && v.fields.len() == 1 { some = k }
+            if none < 0 && v.name == "None" && v.fields.is_empty() { none = k }
+        }
+        if some < 0 || none < 0 { return None }
+        Some(
+            IteratorNext {
+                trait_id: trait_id,
+                method_idx: method_idx,
+                option: def_id,
+                some: some,
+                none: none,
+            },
+        )
+    }
+
+    /// How a `for` loop binds each element of type `ty`: a name or `_`, or
+    /// an irrefutable pattern (`for_loop_binding`). A loop variable is
+    /// immutable, so assigning it is E0060.
+    pub fn for_loop_binding(
+        mut self,
+        mut fcx: FnCtx,
+        pattern: Spanned<Pattern>,
+        ty: Ty,
+    ) -> LoopBind {
+        match pattern.value {
+            PatternIdent(_, name) => LoopBindLocal(
+                self.bind_local(fcx, name.value, ty, false, name.span, BindingOther),
+            )
+            PatternWildcard => LoopBindLocal(
+                self.bind_local(fcx, "_", ty, false, pattern.span, BindingOther),
+            )
+            _ => {
+                let errors = self.error_count()
+                let pat = self.check_pattern(fcx, pattern, ty)
+                if self.error_count() == errors {
+                    self.require_irrefutable(fcx, pat, ty, pattern.span, "a `for` loop")
+                }
+                LoopBindPattern(pat)
+            }
+        }
+    }
+
+    // `for p in a`, `a` an array (`check_for_array`): `{ let __arr = a
+    // let __n = __arr.len()  let mut __i = 0  while __i < __n { <bind p to
+    // __arr[__i]>  __i = __i + 1  body } }`. `a` is evaluated once, each
+    // element read when the loop reaches it; the index advances before the
+    // body.
+    fn check_for_array(
+        mut self,
+        mut fcx: FnCtx,
+        pattern: Spanned<Pattern>,
+        iterable: HirExpr,
+        elem: Ty,
+        body: Spanned<Block>,
+        span: Span,
+    ) -> HirExpr {
+        let arr_ty = iterable.ty
+        let arr = fcx.new_local_unscoped("__arr", arr_ty, false, span)
+        let len = fcx.new_local_unscoped("__n", TyInt, false, span)
+        let idx = fcx.new_local_unscoped("__i", TyInt, true, span)
+        fcx.scopes.push(Map::new())
+        let bind = self.for_loop_binding(fcx, pattern, elem)
+        fcx.loop_depth += 1
+        let body_hir = self.check_block(fcx, body.value, body.span)
+        fcx.loop_depth -= 1
+        let _ = fcx.scopes.pop()
+        let element = HirExpr {
+            kind: EkIndex(
+                HirExpr { kind: EkLocal(arr), ty: arr_ty, span: span },
+                read_int(idx, span),
+            ),
+            ty: elem,
+            span: span,
+        }
+        let advance = assign_to(
+            idx,
+            HirExpr {
+                kind: EkBinary(
+                    OpAdd,
+                    read_int(idx, span),
+                    HirExpr { kind: EkIntLit(1), ty: TyInt, span: span },
+                ),
+                ty: TyInt,
+                span: span,
+            },
+            span,
+        )
+        let cond = compare(OpLt, idx, len, span)
+        let mut stmts: Vec<HirExpr> = Vec::new()
+        stmts.push(loop_bind(bind, element, span))
+        stmts.push(advance)
+        stmts.push(body_hir)
+        let while_body = HirExpr { kind: EkBlock(stmts, None), ty: TyUnit, span: span }
+        let len_init = HirExpr {
+            kind: EkArrayLen(HirExpr { kind: EkLocal(arr), ty: arr_ty, span: span }),
+            ty: TyInt,
+            span: span,
+        }
+        let mut outer: Vec<HirExpr> = Vec::new()
+        outer.push(let_stmt(arr, iterable, span))
+        outer.push(let_stmt(len, len_init, span))
+        outer.push(let_stmt(idx, HirExpr { kind: EkIntLit(0), ty: TyInt, span: span }, span))
+        outer.push(HirExpr { kind: EkWhile(cond, while_body), ty: TyUnit, span: span })
+        HirExpr { kind: EkBlock(outer, None), ty: TyUnit, span: span }
+    }
+}
+
+// An `Int` local read.
+fn read_int(local: Int, span: Span) -> HirExpr {
+    HirExpr { kind: EkLocal(local), ty: TyInt, span: span }
+}
+
+// `let local = init`.
+fn let_stmt(local: Int, init: HirExpr, span: Span) -> HirExpr {
+    HirExpr { kind: EkLet(local, init), ty: TyUnit, span: span }
+}
+
+// `local = value`.
+fn assign_to(local: Int, value: HirExpr, span: Span) -> HirExpr {
+    HirExpr { kind: EkAssign(local, value), ty: TyUnit, span: span }
+}
+
+// `a op b` on two `Int` locals, a `Bool`.
+fn compare(op: HirBinOp, a: Int, b: Int, span: Span) -> HirExpr {
+    HirExpr { kind: EkBinary(op, read_int(a, span), read_int(b, span)), ty: TyBool, span: span }
+}
