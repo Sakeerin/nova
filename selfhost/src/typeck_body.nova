@@ -1,0 +1,1048 @@
+// The type checker's bodies: a port of check.rs's passes 6 to 8
+// (`check_bodies`, `check_function`, `check_method`, `check_fn_body`,
+// `check_const`, `check_const_cycles`, `finalize_function`,
+// `finalize_expr`, `check_block`, `bind_local`, `warn_newline_splits`,
+// `judge_split`), `FnCtx`, and the free helpers they use
+// (`collect_const_calls`, `reaches_self`, `collect_captures`,
+// `remap_locals`, `child_exprs`, `split_operand`, `unused_value`,
+// `body_result_span`), function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.1 and §4.2, ADR 0056). typeck_expr.nova checks expressions,
+// typeck_call.nova calls; infer.nova is the unifier.
+//
+// - N checks the program's bodies only: std's are std's part of the dump
+//   (spec §4.5), which the shared path never checks for a program, in
+//   `DefId` order, functions, then methods, then constants, as S0's
+//   `check_bodies` does (§4.1).
+// - Inference variables are numbered per function, `fresh` called where
+//   S0 calls it.
+// - A `Binding` is kept by its declaration's place, its file's label and
+//   its span (`place_key`), as S0 keeps it by its `Span`, file included.
+// - The language server's probe and index (`probe_locals`, `note_*`,
+//   `enter_type_params`, `note_local_types`) are not ported (decision 8).
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import infer
+import resolution_dump
+import resolver
+import token
+import typeck
+import typeck_expr
+import typeck_ty
+
+/// What checking one function body carries (`FnCtx`): its inference
+/// variables, its locals, its scopes of names, its generic parameters and
+/// their bounds, the type its `return`s must have, how many loops enclose
+/// the expression being checked, whether `.await` is allowed, the closures
+/// lifted from it so far, whether it is `main`'s or a test's, and whether
+/// it is a constant's value.
+pub record FnCtx {
+    pub icx: InferCtx,
+    pub locals: Vec<Local>,
+    pub scopes: Vec<Map<String, Int>>,
+    pub generics: Map<String, Int>,
+    pub param_bounds: Vec<Vec<Int>>,
+    pub ret_ty: Ty,
+    pub loop_depth: Int,
+    pub in_async: Bool,
+    pub pending_closures: Vec<HirFunction>,
+    pub entry: Bool,
+    pub in_const: Bool,
+}
+
+/// A body's context with one empty scope.
+pub fn new_fn_ctx(
+    generics: Map<String, Int>,
+    bounds: Vec<Vec<Int>>,
+    ret_ty: Ty,
+    in_async: Bool,
+    entry: Bool,
+    in_const: Bool,
+) -> FnCtx {
+    let mut scopes: Vec<Map<String, Int>> = Vec::new()
+    scopes.push(Map::new())
+    FnCtx {
+        icx: new_infer(),
+        locals: Vec::new(),
+        scopes: scopes,
+        generics: generics,
+        param_bounds: bounds,
+        ret_ty: ret_ty,
+        loop_depth: 0,
+        in_async: in_async,
+        pending_closures: Vec::new(),
+        entry: entry,
+        in_const: in_const,
+    }
+}
+
+impl FnCtx {
+    /// The local `name` names, the innermost scope first, or -1 (`lookup`).
+    pub fn lookup(self, name: String) -> Int {
+        let mut k = self.scopes.len()
+        while k > 0 {
+            k -= 1
+            match self.scopes.at(k).get(name) {
+                Some(id) => return id
+                None => ()
+            }
+        }
+        -1
+    }
+
+    /// A new local, named in the innermost scope unless it is `_`
+    /// (`new_local`).
+    pub fn new_local(mut self, name: String, ty: Ty, is_mut: Bool, span: Span) -> Int {
+        let id = self.new_local_unscoped(name, ty, is_mut, span)
+        if name != "_" && !self.scopes.is_empty() {
+            let mut scope = self.scopes.last()
+            let _ = scope.insert(name, id)
+        }
+        id
+    }
+
+    /// A new local no name finds, the checker's own temporary
+    /// (`new_local_unscoped`).
+    pub fn new_local_unscoped(mut self, name: String, ty: Ty, is_mut: Bool, span: Span) -> Int {
+        let id = self.locals.len()
+        self.locals.push(Local { name: name, ty: ty, is_mut: is_mut, span: span })
+        id
+    }
+
+    /// The locals this body can see, sorted, each once; never the
+    /// checker's own, whose names start with `__` (`visible_locals`).
+    pub fn visible_locals(self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new()
+        for scope in self.scopes.iter() {
+            for n in scope.keys().iter() { if !n.starts_with("__") { names.push(n) } }
+        }
+        sorted_unique(names)
+    }
+}
+
+impl Checker {
+    // --- Passes 6 to 8 ---
+
+    /// The program's bodies in `DefId` order, functions, then methods,
+    /// then constants; the constant cycles and the newline splits; then the
+    /// closures and wrappers in the order they were lifted
+    /// (`check_bodies`). `splits` are the program's newline splits, each
+    /// with its file's label. std's bodies are std's part of the dump,
+    /// which a program's check never reaches.
+    pub fn check_bodies(mut self, splits: Vec<(String, NewlineSplit)>) {
+        self.splits = splits
+        self.bodies = true
+        let (_, std_def, _) = std_start_of(self.defs)
+        let mut functions: Vec<HirFunction> = Vec::new()
+        // Once a construct N does not check yet is met, the program is
+        // refused (`unported`), and no other body need be checked.
+        for (def_id, item_index) in self.defs_of_kind(false).iter() {
+            if def_id >= std_def || self.unported != "" { continue }
+            match self.check_function(def_id, item_index) {
+                Some(f) => functions.push(f)
+                None => ()
+            }
+        }
+        let mut id = 0
+        while id < std_def && id < self.method_locs.len() {
+            if self.method_locs.at(id).is_some() && self.unported == "" {
+                match self.check_method(id) {
+                    Some(f) => functions.push(f)
+                    None => ()
+                }
+            }
+            id += 1
+        }
+        for (def_id, item_index) in self.defs_of_kind(true).iter() {
+            if def_id >= std_def || self.unported != "" { continue }
+            match self.check_const(def_id, item_index) {
+                Some(f) => functions.push(f)
+                None => ()
+            }
+        }
+        self.std_closures = self.next_closure_def
+        self.check_const_cycles(functions)
+        self.warn_newline_splits()
+        for f in self.extra_functions.iter() { functions.push(f) }
+        self.extra_functions = Vec::new()
+        self.functions = functions
+    }
+
+    fn check_function(mut self, def_id: Int, item_index: Int) -> Option<HirFunction> {
+        let f = match self.items.at(item_index).value {
+            ItemFunction(f) => f
+            _ => return None
+        }
+        self.enter_item(item_index)
+        // A free function is in no impl, so `Self::Item` in its body is a
+        // module-qualified path.
+        self.impl_self = None
+        let generics = generic_scope(f.generics)
+        self.check_fn_body(def_id, f, generics)
+    }
+
+    // An impl's or a trait's default method's body (`check_method`).
+    fn check_method(mut self, def_id: Int) -> Option<HirFunction> {
+        let loc = match self.method_locs.at(def_id) {
+            Some(l) => l
+            None => return None
+        }
+        self.enter_item(loc.item_index)
+        let item = self.items.at(loc.item_index).value
+        let f = match loc.owner {
+            MethodOwnerImpl => {
+                match item {
+                    ItemImpl(block) => block.functions.at(loc.method_index)
+                    _ => return None
+                }
+            }
+            MethodOwnerTraitDefault => {
+                match item {
+                    ItemTrait(decl) => {
+                        match decl.items.at(loc.method_index) {
+                            TraitItemProvided(f) => f
+                            _ => return None
+                        }
+                    }
+                    _ => return None
+                }
+            }
+        }
+        // `Self` in an impl method's body is the impl's self type; in a
+        // trait's default body it is the trait's own `Param(0)`.
+        self.impl_self = match loc.owner {
+            MethodOwnerImpl => self.impl_selves.get(loc.item_index)
+            MethodOwnerTraitDefault => None
+        }
+        let generics = match loc.owner {
+            // The impl's parameters, then the method's own after them.
+            MethodOwnerImpl => {
+                match item {
+                    ItemImpl(block) => {
+                        let mut scope = generic_scope(block.generics)
+                        let impl_count = block.generics.len()
+                        for j in 0..f.generics.len() {
+                            let _ = scope.insert(f.generics.at(j).name.value, impl_count + j)
+                        }
+                        scope
+                    }
+                    _ => Map::new()
+                }
+            }
+            // `Self` at 0, then the method's own from 1.
+            MethodOwnerTraitDefault => {
+                let mut scope = self_generic_scope()
+                for j in 0..f.generics.len() {
+                    let _ = scope.insert(f.generics.at(j).name.value, 1 + j)
+                }
+                scope
+            }
+        }
+        self.check_fn_body(def_id, f, generics)
+    }
+
+    // A function's or a method's body (`check_fn_body`).
+    fn check_fn_body(
+        mut self,
+        def_id: Int,
+        f: Function,
+        generics: Map<String, Int>,
+    ) -> Option<HirFunction> {
+        let sig = match self.sigs.at(def_id) {
+            Some(s) => s
+            None => return None
+        }
+        // Normalization seam: the declared return type and the parameters'.
+        let ret = self.normalize(sig.ret, self.cur_file, f.name.span)
+        let mut params: Vec<Ty> = Vec::new()
+        for p in sig.params.iter() { params.push(self.normalize(p, self.cur_file, f.name.span)) }
+        let name = self.name_of(def_id)
+        // An async function's body produces its output, not the future.
+        let body_ret_ty = if f.is_async {
+            match ret {
+                TyFuture(out) => out
+                other => other
+            }
+        } else {
+            ret
+        }
+        let mut entry = name == "main"
+        for a in f.attrs.iter() { if a.name.value == "test" { entry = true } }
+        let mut fcx = new_fn_ctx(generics, sig.bounds, body_ret_ty, f.is_async, entry, false)
+        let mut i = 0
+        while i < f.params.len() && i < params.len() {
+            let p = f.params.at(i)
+            let _ = self.bind_local(
+                fcx,
+                p.name.value,
+                params.at(i),
+                p.is_mut,
+                p.name.span,
+                BindingParam,
+            )
+            i += 1
+        }
+        let body = self.check_block(fcx, f.body.value, f.body.span)
+        if !fcx.icx.unify(body.ty, body_ret_ty) {
+            let span = body_result_span(f.body)
+            self.error(
+                "E0010",
+                "`${name}` should return `${self.show(body_ret_ty, fcx)}` but its body has type `${self.show(body.ty, fcx)}`",
+                span,
+            )
+        }
+        let func = HirFunction {
+            def_id: def_id,
+            name: name,
+            generics: sig.generics,
+            bounds: sig.bounds,
+            takes_env: false,
+            capture_count: 0,
+            params: f.params.len(),
+            locals: fcx.locals,
+            ret_ty: ret,
+            is_async: f.is_async,
+            body: body,
+            span: FileSpan { file: self.cur_file, span: f.name.span },
+        }
+        self.finalize_function(func, fcx.icx)
+        // The closures and wrappers lifted from this body, finalized with
+        // its inference context.
+        for c in fcx.pending_closures.iter() {
+            self.finalize_function(c, fcx.icx)
+            self.extra_functions.push(c)
+        }
+        Some(func)
+    }
+
+    /// A new id for a closure or a wrapper, past every definition
+    /// (`fresh_closure_def`).
+    pub fn fresh_closure_def(mut self) -> Int {
+        let id = self.next_closure_def
+        self.next_closure_def += 1
+        id
+    }
+
+    // A constant, as a function of no argument returning its value
+    // (`check_const`).
+    fn check_const(mut self, def_id: Int, item_index: Int) -> Option<HirFunction> {
+        let c = match self.items.at(item_index).value {
+            ItemConst(c) => c
+            _ => return None
+        }
+        self.enter_item(item_index)
+        self.impl_self = None
+        let sig = match self.sigs.at(def_id) {
+            Some(s) => s
+            None => return None
+        }
+        let name = self.name_of(def_id)
+        // A constant's value has no `async`, so `.await` is never allowed.
+        let mut fcx = new_fn_ctx(Map::new(), Vec::new(), sig.ret, false, false, true)
+        let value = self.check_expr(fcx, c.value)
+        if !fcx.icx.unify(value.ty, sig.ret) {
+            self.error(
+                "E0010",
+                "constant `${name}` has type `${self.show(value.ty, fcx)}` but is declared `${self.show(sig.ret, fcx)}`",
+                c.value.span,
+            )
+        }
+        let func = HirFunction {
+            def_id: def_id,
+            name: name,
+            generics: 0,
+            bounds: Vec::new(),
+            takes_env: false,
+            capture_count: 0,
+            params: 0,
+            locals: fcx.locals,
+            ret_ty: sig.ret,
+            is_async: false,
+            body: value,
+            span: FileSpan { file: self.cur_file, span: c.value.span },
+        }
+        self.finalize_function(func, fcx.icx)
+        for cl in fcx.pending_closures.iter() {
+            self.finalize_function(cl, fcx.icx)
+            self.extra_functions.push(cl)
+        }
+        Some(func)
+    }
+
+    // E0081 for each constant defined, at some remove, in terms of itself
+    // (`check_const_cycles`), in id order.
+    fn check_const_cycles(mut self, functions: Vec<HirFunction>) {
+        let mut consts: Vec<Int> = Vec::new()
+        for (id, _) in self.defs_of_kind(true).iter() { consts.push(id) }
+        let mut edges: Map<Int, Vec<Int>> = Map::new()
+        for f in functions.iter() {
+            if !int_in(consts, f.def_id) { continue }
+            let callees: Vec<Int> = Vec::new()
+            collect_const_calls(f.body, consts, callees)
+            let _ = edges.insert(f.def_id, callees)
+        }
+        for c in consts.iter() {
+            if !reaches_self(c, edges) { continue }
+            let def = self.defs.defs.at(c)
+            let mut d = Diagnostic::error(
+                "E0081",
+                "constant `${def.name}` is defined in terms of itself",
+            )
+            d.add_primary(def.file, def.span, "cyclic constant")
+            d.add_note("a constant's value cannot depend on its own value")
+            self.diagnostics.push(d)
+        }
+    }
+
+    /// The final substitution applied to every type of `func`, and E0011
+    /// for each place whose type still holds a variable
+    /// (`finalize_function`).
+    pub fn finalize_function(mut self, mut func: HirFunction, icx: InferCtx) {
+        let mut residual: Vec<Span> = Vec::new()
+        // A closure's return type may be a variable.
+        func.ret_ty = icx.apply(func.ret_ty)
+        if has_vars(func.ret_ty) { residual.push(func.span.span) }
+        for local in func.locals.iter() {
+            let mut l = local
+            l.ty = icx.apply(l.ty)
+            if has_vars(l.ty) { residual.push(l.span) }
+        }
+        finalize_expr(func.body, icx, residual)
+        for span in residual.iter() {
+            self.error("E0011", "cannot infer the type here; add a type annotation", span)
+        }
+    }
+
+    /// A block: its statements, then its tail, in a scope of its own
+    /// (`check_block`).
+    pub fn check_block(mut self, mut fcx: FnCtx, block: Block, span: Span) -> HirExpr {
+        fcx.scopes.push(Map::new())
+        let mut stmts: Vec<HirExpr> = Vec::new()
+        // Where each statement's successor starts: a newline split there
+        // follows this statement.
+        let mut nexts: Vec<Span> = Vec::new()
+        for k in 1..block.stmts.len() { nexts.push(block.stmts.at(k).span) }
+        match block.trailing {
+            Some(t) => nexts.push(t.span)
+            None => ()
+        }
+        for k in 0..block.stmts.len() {
+            let stmt = block.stmts.at(k)
+            let next: Option<Span> = if k < nexts.len() { Some(nexts.at(k)) } else { None }
+            match stmt.value {
+                StmtLet(is_mut, pattern, annotation, init) => {
+                    let init = match init {
+                        Some(e) => e
+                        None => {
+                            self.unsupported(stmt.span, "`let` without an initializer")
+                            continue
+                        }
+                    }
+                    let mut value = self.check_expr(fcx, init)
+                    self.judge_split(fcx, value, next)
+                    match annotation {
+                        Some(annot) => {
+                            let annot_ty = self.convert_ty(annot, fcx.generics, fcx.param_bounds)
+                            // Normalization seam: the annotation replaces
+                            // the value's type.
+                            let annot_ty = self.normalize(annot_ty, self.cur_file, annot.span)
+                            if !fcx.icx.unify(value.ty, annot_ty) {
+                                self.error(
+                                    "E0010",
+                                    "type mismatch: expected `${self.show(annot_ty, fcx)}`, found `${self.show(value.ty, fcx)}`",
+                                    init.span,
+                                )
+                            }
+                            value.ty = annot_ty
+                        }
+                        None => ()
+                    }
+                    let (name, pat_mut, name_span) = match pattern.value {
+                        PatternIdent(m, n) => (n.value, m, n.span)
+                        PatternWildcard => ("_", false, pattern.span)
+                        _ => {
+                            // 5.3b part 4: a destructuring `let` binds by a
+                            // pattern, which `check_pattern` checks.
+                            self.unported_at("destructuring `let` patterns (5.3b part 4)")
+                            continue
+                        }
+                    }
+                    let local = self.bind_local(
+                        fcx,
+                        name,
+                        value.ty,
+                        is_mut || pat_mut,
+                        name_span,
+                        BindingLet,
+                    )
+                    stmts.push(HirExpr { kind: EkLet(local, value), ty: TyUnit, span: stmt.span })
+                }
+                StmtExpr(e) => {
+                    let checked = self.check_expr(fcx, e)
+                    self.judge_split(fcx, checked, next)
+                    stmts.push(checked)
+                    match unused_value(e) {
+                        Some(what) => {
+                            let mut d = Diagnostic::warning("E0103", "this value is not used")
+                            d.add_primary(self.cur_file, e.span, "this ${what} is discarded")
+                            self.diagnostics.push(d)
+                        }
+                        None => ()
+                    }
+                }
+                StmtItem(_) => self.unsupported(stmt.span, "items nested inside function bodies")
+            }
+        }
+        let trailing: Option<HirExpr> = match block.trailing {
+            Some(e) => Some(self.check_expr(fcx, e))
+            None => None
+        }
+        let _ = fcx.scopes.pop()
+        let ty = match trailing {
+            Some(t) => t.ty
+            None => TyUnit
+        }
+        HirExpr { kind: EkBlock(stmts, trailing), ty: ty, span: span }
+    }
+
+    /// A local the user wrote, how it was bound kept by its place
+    /// (`bind_local`).
+    pub fn bind_local(
+        mut self,
+        mut fcx: FnCtx,
+        name: String,
+        ty: Ty,
+        is_mut: Bool,
+        span: Span,
+        binding: Binding,
+    ) -> Int {
+        let _ = self.bindings.insert(place_key(self.cur_file, span), binding)
+        fcx.new_local(name, ty, is_mut, span)
+    }
+
+    /// The construct `what` names is one N does not check yet (5.3b's
+    /// later parts): the first such is kept, and N refuses the program.
+    pub fn unported_at(mut self, what: String) { if self.unported == "" { self.unported = what } }
+
+    // --- E0103 ---
+
+    // E0103 for each newline split after which the old reading could have
+    // been well typed, or a note on the E0103 of an unused value that
+    // starts there (`warn_newline_splits`).
+    fn warn_newline_splits(mut self) {
+        for (label, split) in self.splits.iter() {
+            if self.is_quiet(label, split.at) { continue }
+            let note = match split.kind {
+                SplitKindValue => "a `return` or `break` at the end of a line takes no value: to return this line's value, put it on the same line; to keep this line a statement of its own, write `;` after the `return` or `break`"
+                _ => "a line that starts with `(`, `[` or `-` begins a new statement: to continue the line before, end that line with the operator, or put the `(` or `[` on it; to keep two statements, end that line with `;`"
+            }
+            let mut noted = false
+            for d in self.diagnostics.iter() {
+                if d.code == "E0103"
+                    && !d.labels.is_empty()
+                    && d.labels.at(0).file == label
+                    && d.labels.at(0).span.start == split.at.start {
+                    let mut unused = d
+                    unused.notes.push("a line break ended the statement before this one; ${note}")
+                    noted = true
+                    break
+                }
+            }
+            if noted { continue }
+            let (message, text) = match split.kind {
+                SplitKindValue => (
+                    "a line break ends this `return` or `break`",
+                    "this line is not its value",
+                )
+                SplitKindCall => (
+                    "a line break ends the statement before this `(`",
+                    "this `(` begins a new statement",
+                )
+                SplitKindIndex => (
+                    "a line break ends the statement before this `[`",
+                    "this `[` begins a new statement",
+                )
+                SplitKindMinus => (
+                    "a line break ends the statement before this `-`",
+                    "this `-` begins a new statement",
+                )
+            }
+            let mut d = Diagnostic::warning("E0103", message)
+            d.add_primary(label, split.at, text)
+            d.add_note(note)
+            self.diagnostics.push(d)
+        }
+    }
+
+    // Whether the split at `at` of `label`'s file is quiet.
+    fn is_quiet(self, label: String, at: Span) -> Bool {
+        for (l, start, end) in self.quiet_splits.iter() {
+            if l == label && start == at.start && end == at.end { return true }
+        }
+        false
+    }
+
+    // Whether the old reading of a split after the statement whose value is
+    // `value` could have been well typed: a `(` only after a function, a
+    // `[` only after an array, a `-` only after an `Int` or a `Float`, a
+    // type not yet known any; where it could not, the split is quiet
+    // (`judge_split`). `next` is where the statement after starts.
+    fn judge_split(mut self, mut fcx: FnCtx, value: HirExpr, next: Option<Span>) {
+        let at = match next {
+            Some(s) => s
+            None => return
+        }
+        let mut found: Option<NewlineSplit> = None
+        for (label, s) in self.splits.iter() {
+            if label == self.cur_file && s.at.start == at.start {
+                found = Some(s)
+                break
+            }
+        }
+        let split = match found {
+            Some(s) => s
+            None => return
+        }
+        let operand = split_operand(value, split.kind, fcx.pending_closures)
+        let could = match (split.kind, fcx.icx.apply(operand.ty)) {
+            (SplitKindValue, _) => true
+            (_, TyVar(_)) => true
+            (SplitKindCall, TyFn(_, _)) => true
+            (SplitKindIndex, TyArray(_)) => true
+            (SplitKindMinus, TyInt) => true
+            (SplitKindMinus, TyFloat) => true
+            _ => false
+        }
+        if !could { self.quiet_splits.push((self.cur_file, split.at.start, split.at.end)) }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+/// A place's key, its file's label and its span, for a table kept by
+/// place.
+pub fn place_key(file: String, span: Span) -> String { "${file}:${span.start}:${span.end}" }
+
+// `names` sorted in byte order, each once.
+fn sorted_unique(names: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new()
+    for n in names.iter() {
+        let mut k = 0
+        while k < out.len() && less(out.at(k), n) { k += 1 }
+        if k < out.len() && out.at(k) == n { continue }
+        out.push(n)
+        let mut j = out.len() - 1
+        while j > k {
+            out.set(j, out.at(j - 1))
+            j -= 1
+        }
+        out.set(k, n)
+    }
+    out
+}
+
+/// The span an E0010 on a body's type points at: its tail's, or the
+/// whole body's (`body_result_span`).
+pub fn body_result_span(body: Spanned<Block>) -> Span {
+    match body.value.trailing {
+        Some(e) => e.span
+        None => body.span
+    }
+}
+
+/// `expr` with the substitution applied to every type it holds, each place
+/// whose type still holds a variable added to `residual`
+/// (`finalize_expr`).
+pub fn finalize_expr(mut expr: HirExpr, icx: InferCtx, mut residual: Vec<Span>) {
+    expr.ty = icx.apply(expr.ty)
+    if has_vars(expr.ty) { residual.push(expr.span) }
+    match expr.kind {
+        EkCall(_, type_args, args) => {
+            finalize_tys(type_args, icx, residual, expr.span)
+            for a in args.iter() { finalize_expr(a, icx, residual) }
+        }
+        EkMakeClosure(_, type_args, captures) => {
+            finalize_tys(type_args, icx, residual, expr.span)
+            for c in captures.iter() { finalize_expr(c, icx, residual) }
+        }
+        EkMakeVariant(_, _, args) => for a in args.iter() { finalize_expr(a, icx, residual) }
+        EkMakeRecord(_, args) => for a in args.iter() { finalize_expr(a, icx, residual) }
+        EkMakeTuple(args) => for a in args.iter() { finalize_expr(a, icx, residual) }
+        EkMakeArray(args) => for a in args.iter() { finalize_expr(a, icx, residual) }
+        EkStrConcat(args) => for a in args.iter() { finalize_expr(a, icx, residual) }
+        EkFieldGet(target, _) => finalize_expr(target, icx, residual)
+        EkArrayLen(target) => finalize_expr(target, icx, residual)
+        EkFieldSet(target, _, value) => {
+            finalize_expr(target, icx, residual)
+            finalize_expr(value, icx, residual)
+        }
+        EkArrayRepeat(init, len) => {
+            finalize_expr(init, icx, residual)
+            finalize_expr(len, icx, residual)
+        }
+        EkIndex(target, index) => {
+            finalize_expr(target, icx, residual)
+            finalize_expr(index, icx, residual)
+        }
+        EkIndexSet(target, index, value) => {
+            finalize_expr(target, icx, residual)
+            finalize_expr(index, icx, residual)
+            finalize_expr(value, icx, residual)
+        }
+        EkTraitCall(trait_id, method, self_ty, type_args, receiver, args) => {
+            let s = icx.apply(self_ty)
+            if has_vars(s) { residual.push(expr.span) }
+            // The method's own generic arguments; one not inferred is E0011.
+            finalize_tys(type_args, icx, residual, expr.span)
+            expr.kind = EkTraitCall(trait_id, method, s, type_args, receiver, args)
+            match receiver {
+                Some(r) => finalize_expr(r, icx, residual)
+                None => ()
+            }
+            for a in args.iter() { finalize_expr(a, icx, residual) }
+        }
+        EkBinary(_, lhs, rhs) => {
+            finalize_expr(lhs, icx, residual)
+            finalize_expr(rhs, icx, residual)
+        }
+        EkLogicalAnd(lhs, rhs) => {
+            finalize_expr(lhs, icx, residual)
+            finalize_expr(rhs, icx, residual)
+        }
+        EkLogicalOr(lhs, rhs) => {
+            finalize_expr(lhs, icx, residual)
+            finalize_expr(rhs, icx, residual)
+        }
+        EkUnary(_, inner) => finalize_expr(inner, icx, residual)
+        EkToStr(inner) => finalize_expr(inner, icx, residual)
+        EkLet(_, inner) => finalize_expr(inner, icx, residual)
+        EkAssign(_, inner) => finalize_expr(inner, icx, residual)
+        EkAwait(inner) => finalize_expr(inner, icx, residual)
+        EkBlock(stmts, trailing) => {
+            for s in stmts.iter() { finalize_expr(s, icx, residual) }
+            match trailing {
+                Some(t) => finalize_expr(t, icx, residual)
+                None => ()
+            }
+        }
+        EkIf(cond, then, else_) => {
+            finalize_expr(cond, icx, residual)
+            finalize_expr(then, icx, residual)
+            match else_ {
+                Some(e) => finalize_expr(e, icx, residual)
+                None => ()
+            }
+        }
+        EkWhile(cond, body) => {
+            finalize_expr(cond, icx, residual)
+            finalize_expr(body, icx, residual)
+        }
+        EkMatch(scrutinee, arms) => {
+            finalize_expr(scrutinee, icx, residual)
+            for arm in arms.iter() {
+                match arm.guard {
+                    Some(g) => finalize_expr(g, icx, residual)
+                    None => ()
+                }
+                finalize_expr(arm.body, icx, residual)
+            }
+        }
+        EkReturn(value) => {
+            match value {
+                Some(v) => finalize_expr(v, icx, residual)
+                None => ()
+            }
+        }
+        _ => ()
+    }
+}
+
+// Each of `tys` replaced by itself with the substitution applied, in
+// place, `span` added to `residual` for each that still holds a variable.
+fn finalize_tys(mut tys: Vec<Ty>, icx: InferCtx, mut residual: Vec<Span>, span: Span) {
+    for k in 0..tys.len() {
+        let t = icx.apply(tys.at(k))
+        tys.set(k, t)
+        if has_vars(t) { residual.push(span) }
+    }
+}
+
+/// The constants of `consts` that `expr` calls, each once, in the order
+/// met, added to `out` (`collect_const_calls`).
+pub fn collect_const_calls(expr: HirExpr, consts: Vec<Int>, mut out: Vec<Int>) {
+    match expr.kind {
+        EkCall(CalleeDef(d), _, _) => if int_in(consts, d) && !int_in(out, d) { out.push(d) }
+        _ => ()
+    }
+    for child in child_exprs(expr).iter() { collect_const_calls(child, consts, out) }
+}
+
+/// Whether `start` reaches itself through `edges` (`reaches_self`).
+pub fn reaches_self(start: Int, edges: Map<Int, Vec<Int>>) -> Bool {
+    let mut stack: Vec<Int> = Vec::new()
+    match edges.get(start) {
+        Some(succ) => for s in succ.iter() { stack.push(s) }
+        None => ()
+    }
+    let mut seen: Vec<Int> = Vec::new()
+    while !stack.is_empty() {
+        let n = stack.pop().unwrap()
+        if n == start { return true }
+        if int_in(seen, n) { continue }
+        seen.push(n)
+        match edges.get(n) {
+            Some(succ) => for s in succ.iter() { stack.push(s) }
+            None => ()
+        }
+    }
+    false
+}
+
+/// The locals below `snapshot`, declared outside a closure, that its body
+/// `expr` reads, assigns or calls, each once, in the order met
+/// (`collect_captures`).
+pub fn collect_captures(expr: HirExpr, snapshot: Int, mut out: Vec<Int>) {
+    let id = match expr.kind {
+        EkLocal(id) => id
+        EkAssign(local, _) => local
+        EkCall(CalleeLocal(id), _, _) => id
+        _ => -1
+    }
+    if id >= 0 && id < snapshot && !int_in(out, id) { out.push(id) }
+    for child in child_exprs(expr).iter() { collect_captures(child, snapshot, out) }
+}
+
+/// Every local id in a lifted closure's body `expr` rewritten through
+/// `map`, in place (`remap_locals`).
+pub fn remap_locals(mut expr: HirExpr, map: Map<Int, Int>) {
+    match expr.kind {
+        EkLocal(id) => expr.kind = EkLocal(remapped(id, map))
+        EkLet(local, init) => expr.kind = EkLet(remapped(local, map), init)
+        EkAssign(local, value) => expr.kind = EkAssign(remapped(local, map), value)
+        EkCall(CalleeLocal(id), type_args, args) => expr.kind = EkCall(
+            CalleeLocal(remapped(id, map)),
+            type_args,
+            args,
+        )
+        EkMatch(_, arms) => {
+            for arm in arms.iter() {
+                let mut a = arm
+                a.pattern = remap_pattern(a.pattern, map)
+            }
+        }
+        _ => ()
+    }
+    for child in child_exprs(expr).iter() { remap_locals(child, map) }
+}
+
+fn remapped(id: Int, map: Map<Int, Int>) -> Int {
+    match map.get(id) {
+        Some(new) => new
+        None => id
+    }
+}
+
+// `pat` with its bindings rewritten through `map` (`remap_pattern`).
+fn remap_pattern(pat: HirPattern, map: Map<Int, Int>) -> HirPattern {
+    match pat {
+        PatBind(local) => PatBind(remapped(local, map))
+        PatVariant(sum, variant, fields) => PatVariant(sum, variant, remap_patterns(fields, map))
+        PatTuple(ps) => PatTuple(remap_patterns(ps, map))
+        PatOr(ps) => PatOr(remap_patterns(ps, map))
+        other => other
+    }
+}
+
+fn remap_patterns(ps: Vec<HirPattern>, map: Map<Int, Int>) -> Vec<HirPattern> {
+    let mut out: Vec<HirPattern> = Vec::new()
+    for p in ps.iter() { out.push(remap_pattern(p, map)) }
+    out
+}
+
+/// An expression's direct sub-expressions, in order (`child_exprs`).
+pub fn child_exprs(expr: HirExpr) -> Vec<HirExpr> {
+    let mut out: Vec<HirExpr> = Vec::new()
+    match expr.kind {
+        EkMakeClosure(_, _, captures) => for c in captures.iter() { out.push(c) }
+        EkCall(_, _, args) => for a in args.iter() { out.push(a) }
+        EkMakeVariant(_, _, args) => for a in args.iter() { out.push(a) }
+        EkMakeRecord(_, args) => for a in args.iter() { out.push(a) }
+        EkMakeTuple(args) => for a in args.iter() { out.push(a) }
+        EkMakeArray(args) => for a in args.iter() { out.push(a) }
+        EkStrConcat(args) => for a in args.iter() { out.push(a) }
+        EkFieldGet(target, _) => out.push(target)
+        EkArrayLen(target) => out.push(target)
+        EkFieldSet(target, _, value) => {
+            out.push(target)
+            out.push(value)
+        }
+        EkArrayRepeat(init, len) => {
+            out.push(init)
+            out.push(len)
+        }
+        EkIndex(target, index) => {
+            out.push(target)
+            out.push(index)
+        }
+        EkIndexSet(target, index, value) => {
+            out.push(target)
+            out.push(index)
+            out.push(value)
+        }
+        EkTraitCall(_, _, _, _, receiver, args) => {
+            // No receiver for a trait's associated function.
+            match receiver {
+                Some(r) => out.push(r)
+                None => ()
+            }
+            for a in args.iter() { out.push(a) }
+        }
+        EkBinary(_, lhs, rhs) => {
+            out.push(lhs)
+            out.push(rhs)
+        }
+        EkLogicalAnd(lhs, rhs) => {
+            out.push(lhs)
+            out.push(rhs)
+        }
+        EkLogicalOr(lhs, rhs) => {
+            out.push(lhs)
+            out.push(rhs)
+        }
+        EkUnary(_, e) => out.push(e)
+        EkToStr(e) => out.push(e)
+        EkAwait(e) => out.push(e)
+        EkLet(_, init) => out.push(init)
+        EkAssign(_, value) => out.push(value)
+        EkBlock(stmts, trailing) => {
+            for s in stmts.iter() { out.push(s) }
+            match trailing {
+                Some(t) => out.push(t)
+                None => ()
+            }
+        }
+        EkIf(cond, then, else_) => {
+            out.push(cond)
+            out.push(then)
+            match else_ {
+                Some(e) => out.push(e)
+                None => ()
+            }
+        }
+        EkWhile(cond, body) => {
+            out.push(cond)
+            out.push(body)
+        }
+        EkMatch(scrutinee, arms) => {
+            out.push(scrutinee)
+            for a in arms.iter() {
+                match a.guard {
+                    Some(g) => out.push(g)
+                    None => ()
+                }
+                out.push(a.body)
+            }
+        }
+        EkReturn(value) => {
+            match value {
+                Some(v) => out.push(v)
+                None => ()
+            }
+        }
+        _ => ()
+    }
+    out
+}
+
+/// The part of a statement's value that the old reading of a split of
+/// `kind` after it would have extended (`split_operand`): a postfix `(` or
+/// `[` the rightmost operand, inside a unary operator too; a `-` the
+/// rightmost operand of a binary operator, and a unary operator's whole
+/// expression; through a `return`'s value, an assignment's, the block a
+/// compound assignment to an element or a field builds, and a closure's
+/// body, `closures` being the function's closures lifted so far.
+pub fn split_operand(e: HirExpr, kind: SplitKind, closures: Vec<HirFunction>) -> HirExpr {
+    let minus = match kind {
+        SplitKindMinus => true
+        _ => false
+    }
+    match e.kind {
+        EkBinary(_, _, rhs) => split_operand(rhs, kind, closures)
+        EkLogicalAnd(_, rhs) => split_operand(rhs, kind, closures)
+        EkLogicalOr(_, rhs) => split_operand(rhs, kind, closures)
+        EkUnary(_, inner) => if minus { e } else { split_operand(inner, kind, closures) }
+        EkReturn(Some(v)) => split_operand(v, kind, closures)
+        EkAssign(_, value) => split_operand(value, kind, closures)
+        EkFieldSet(_, _, value) => split_operand(value, kind, closures)
+        EkIndexSet(_, _, value) => split_operand(value, kind, closures)
+        // `a[i] op= v` and `r.f op= v`: `{ let __place = …; …; set }`.
+        EkBlock(stmts, None) => {
+            if stmts.is_empty() { return e }
+            let set = stmts.last()
+            let is_set = match set.kind {
+                EkIndexSet(_, _, _) => true
+                EkFieldSet(_, _, _) => true
+                _ => false
+            }
+            if !is_set { return e }
+            for k in 0..stmts.len() - 1 {
+                match stmts.at(k).kind {
+                    EkLet(_, _) => ()
+                    _ => return e
+                }
+            }
+            split_operand(set, kind, closures)
+        }
+        // A closure the source wrote, not a bare function's wrapper.
+        EkMakeClosure(func, _, _) => {
+            for f in closures.iter() {
+                if f.def_id == func && f.name.starts_with("closure$") {
+                    return split_operand(f.body, kind, closures)
+                }
+            }
+            e
+        }
+        _ => e
+    }
+}
+
+/// What the statement `e` is, when its value can only be discarded: E0103
+/// names it (`unused_value`); `None` for a call, an assignment, `&&`,
+/// `||`, a block, `if`, `match` and the rest.
+pub fn unused_value(e: Spanned<Expr>) -> Option<String> {
+    match e.value {
+        ExprLit(_) => Some("literal")
+        ExprStringInterp(_) => Some("literal")
+        ExprPath(_) => Some("name")
+        ExprUnary(_, _) => Some("operator expression")
+        ExprBinary(op, _, _) => {
+            match op {
+                BinOpAnd => None
+                BinOpOr => None
+                _ => Some("operator expression")
+            }
+        }
+        ExprTuple(items) => if items.is_empty() { None } else { Some("tuple") }
+        ExprArray(_) => Some("array")
+        ExprArrayRepeat(_, _) => Some("array")
+        // A parenthesised expression's span starts at its `(`, before the
+        // operand it starts with.
+        ExprCall(first, _) => parenthesised(e, first)
+        ExprField(first, _) => parenthesised(e, first)
+        ExprIndex(first, _) => parenthesised(e, first)
+        ExprTry(first) => parenthesised(e, first)
+        ExprAwait(first) => parenthesised(e, first)
+        ExprCast(first, _) => parenthesised(e, first)
+        _ => None
+    }
+}
+
+fn parenthesised(e: Spanned<Expr>, first: Spanned<Expr>) -> Option<String> {
+    if e.span.start < first.span.start { Some("parenthesised expression") } else { None }
+}

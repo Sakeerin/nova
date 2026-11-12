@@ -91,6 +91,28 @@ pub record Checker {
     pub rebase_def: Int,
     pub rebase_item: Int,
     pub scope_offset: Int,
+    // The bodies (5.3b, typeck_body.nova): how each local the user wrote
+    // was bound, by its declaration's place (`place_key`); the program's
+    // newline splits, with their files' labels, and those after which the
+    // old reading could not have been well typed (`quiet_splits`, by
+    // label, start and end); the argument count `check_call` leaves for
+    // `check_path` (-1 for none); the closures and wrappers lifted and the
+    // next one's id; the functions checked, the first closure's id
+    // (`defs.len()`) and the first of std's, and whether bodies were
+    // checked; and, while 5.3b is being built, the first construct met
+    // whose checking N lacks (`unported`), empty when there is none, for
+    // which N refuses the program rather than print a half-checked body.
+    pub bindings: Map<String, Binding>,
+    pub splits: Vec<(String, NewlineSplit)>,
+    pub quiet_splits: Vec<(String, Int, Int)>,
+    pub qualified_callee: Int,
+    pub extra_functions: Vec<HirFunction>,
+    pub next_closure_def: Int,
+    pub functions: Vec<HirFunction>,
+    pub closures: Int,
+    pub std_closures: Int,
+    pub bodies: Bool,
+    pub unported: String,
 }
 
 /// std's item tables, built once from the check of a program of no module
@@ -215,6 +237,17 @@ fn new_checker(
         rebase_def: own,
         rebase_item: items.len(),
         scope_offset: if is_shared { own } else { 0 },
+        bindings: Map::new(),
+        splits: Vec::new(),
+        quiet_splits: Vec::new(),
+        qualified_callee: -1,
+        extra_functions: Vec::new(),
+        next_closure_def: n,
+        functions: Vec::new(),
+        closures: n,
+        std_closures: n,
+        bodies: false,
+        unported: "",
     }
 }
 
@@ -242,6 +275,33 @@ impl Checker {
     /// Whether the definition `id` is the program's own, which the passes
     /// collect (`own`).
     pub fn own(self, id: Int) -> Bool { id < self.own_defs }
+
+    /// Whether the program implements anything on a type it does not own
+    /// (`implements_on_a_type_it_does_not_own`, 5.3b, ADR 0056 §4): an
+    /// impl whose self type is not one of its own records or sums, or an
+    /// impl of its items the passes did not collect; `items` holds the
+    /// program's items alone, on the shared path.
+    pub fn implements_on_a_type_it_does_not_own(self) -> Bool {
+        let mut written = 0
+        for item in self.items.iter() {
+            match item.value {
+                ItemImpl(_) => written += 1
+                _ => ()
+            }
+        }
+        let mut collected = 0
+        for k in 0..self.impls.len() {
+            if k < self.impl_in_std.len() && self.impl_in_std.at(k) { continue }
+            collected += 1
+            let own = match self.impls.at(k).self_head {
+                TyHeadSum(id) => id < self.own_defs
+                TyHeadRecord(id) => id < self.own_defs
+                _ => false
+            }
+            if !own { return true }
+        }
+        collected != written
+    }
 
     /// Make the item at `item_index`'s module the current one.
     pub fn enter_item(mut self, item_index: Int) {

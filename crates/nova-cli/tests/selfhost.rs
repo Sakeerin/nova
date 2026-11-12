@@ -958,7 +958,13 @@ fn both_sides_refuse_no_file() {
     // dump's parser, N's `hir` the resolution dump's.
     let hir_wasm_test = Dump {
         s0: leak_args(&[hir_s0(), &["--test", "--target", "wasm"]].concat()),
-        n: leak_args(&["hir", "--std", &std_dir(), "--test", "--target", "wasm"]),
+        n: leak_args(
+            &[
+                n_hir(),
+                &["--std", &std_dir(), "--test", "--target", "wasm"],
+            ]
+            .concat(),
+        ),
     };
     let hir_wasm_test_std = Dump {
         s0: leak_args(&[hir_wasm_test.s0, &["--std"]].concat()),
@@ -1026,12 +1032,14 @@ fn both_sides_take_test_in_every_position_alike() {
     // take (5.3a, ADR 0055).
     for ((args, code), (s0, command)) in shapes.iter().flat_map(|shape| {
         [
-            (shape, (RESOLUTION_S0, "resolve")),
-            (shape, (hir_s0(), "hir")),
+            (shape, (RESOLUTION_S0, &["resolve"][..])),
+            (shape, (hir_s0(), n_hir())),
         ]
     }) {
-        let n: Vec<&str> = [command, "--std", std.as_str()]
-            .into_iter()
+        let n: Vec<&str> = command
+            .iter()
+            .copied()
+            .chain(["--std", std.as_str()])
             .chain(
                 args.iter()
                     .map(|a| if *a == "--std" { "--std-part" } else { a }),
@@ -1042,7 +1050,7 @@ fn both_sides_take_test_in_every_position_alike() {
             n: leak_args(&n),
         };
         if let Err(report) = compare_batch(&dump, &root(), &[], *code, &nova(), selfhost()) {
-            panic!("{command} {args:?}: {report}");
+            panic!("{command:?} {args:?}: {report}");
         }
     }
 }
@@ -3593,6 +3601,23 @@ fn hir_s0() -> &'static [&'static str] {
     }
 }
 
+/// N's side of [`hir_s0`]: `hir`, or `hir --items` for the item part
+/// alone ([`n_hir_for`]).
+fn n_hir() -> &'static [&'static str] {
+    n_hir_for(hir_s0())
+}
+
+/// N's command for S0's HIR dump `s0` (5.3b): `hir --items` for S0's
+/// `check --dump-hir-items`, 5.3a's item part, and `hir` for the full
+/// dump, which N prints from 5.3b's part 2 on.
+fn n_hir_for(s0: &[&str]) -> &'static [&'static str] {
+    if s0 == HIR_ITEMS_S0 {
+        &["hir", "--items"]
+    } else {
+        &["hir"]
+    }
+}
+
 /// The item codes of 5.3a (spec 5.3 §3.2): each occurs among the HIR
 /// dumps of the cases, the corpus and the fuzzer's inputs. E0092 is the
 /// WASM target's.
@@ -3638,6 +3663,7 @@ fn hir_dump_with(mode: Mode, extra: &[&str]) -> Dump {
 
 /// [`hir_dump_with`], S0's side `s0` (the full dump or its item part).
 fn hir_dump_from(s0: &[&str], mode: Mode, extra: &[&str]) -> Dump {
+    let command = n_hir_for(s0);
     let s0: Vec<&str> = s0
         .iter()
         .chain(mode.flags())
@@ -3645,7 +3671,8 @@ fn hir_dump_from(s0: &[&str], mode: Mode, extra: &[&str]) -> Dump {
         .copied()
         .collect();
     let std_dir = std_dir();
-    let mut n = vec!["hir", "--std", std_dir.as_str()];
+    let mut n = command.to_vec();
+    n.extend(["--std", std_dir.as_str()]);
     n.extend(mode.flags());
     n.extend(
         extra
@@ -4135,7 +4162,8 @@ fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
     let cases = hir_cases_dir(Mode::Check);
     let roots: Vec<String> = case_roots(&cases).loose[..8].to_vec();
     let s0 = run(&nova(), hir_s0(), &cases, &roots).expect("run S0");
-    let n = run(selfhost(), &["hir", "--std", &std], &cases, &roots).expect("run N");
+    let n_args = [n_hir(), &["--std", &std]].concat();
+    let n = run(selfhost(), &n_args, &cases, &roots).expect("run N");
     assert_eq!((s0.code, n.code), (Some(0), Some(0)), "{}", n.stderr);
     let (s0, n) = (
         String::from_utf8_lossy(&s0.stdout).into_owned(),
@@ -4160,7 +4188,7 @@ fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
     assert!(checked >= 6, "{checked} of {} checked", roots.len());
     let part = run(
         selfhost(),
-        &["hir", "--std", &std, "--std-part"],
+        &[n_hir(), &["--std", &std, "--std-part"]].concat(),
         &cases,
         &[],
     )
@@ -4277,7 +4305,8 @@ fn n_checks_items_holding_128_levels_of_every_kind_on_a_1_mb_main_thread() {
     );
     assert!(!text.contains("\"P0002\""), "{text}");
     let std_dir = std_dir();
-    let mut args = vec!["hir", "--std", std_dir.as_str()];
+    let mut args = n_hir().to_vec();
+    args.extend(["--std", std_dir.as_str()]);
     args.extend(files.iter().map(String::as_str));
     let stack = if cfg!(unix) { Some(1024) } else { None };
     let (code, n) = n_args_on_stack(&dir, stack, &args);
@@ -4720,4 +4749,239 @@ fn the_full_hir_dumps_agree_on_the_cases_with_windows_line_endings() {
             assert_eq!(codes_in(&dumps), codes_in(lf), "{mode:?}");
         }
     });
+}
+
+// === 5.3b, part 2 on: the full dump of the inputs N checks ===
+//
+// While 5.3b is being built ([`N_BODIES`] false), N's `hir` checks a
+// program's bodies and prints every function, as S0's `check --dump-hir`
+// does, or refuses the program when its bodies need what N does not check
+// yet: it prints `UNPORTED` and why after the root's header, and exits 3.
+// So a half-checked body is never compared as though it were complete:
+// `n_bodies.txt` lists the inputs whose full program part N gives, and
+// the test below holds it both ways. Each part that ports more adds the
+// inputs N then gives; the last sets `N_BODIES`, and every set above is
+// compared byte for byte, the list and this test removed.
+
+/// The inputs whose full program part N gives ([`N_BODIES`] false): each
+/// line of `n_bodies.txt` a mode and an input, a corpus root relative to
+/// the repository or a case's root relative to the cases' parent
+/// (`cases/check/a.nova`, a case run apart `cases/check/d/main.nova`).
+fn n_bodies_listed() -> std::collections::BTreeSet<(String, String)> {
+    let path = cases_dir()
+        .parent()
+        .expect("the cases' parent")
+        .join("n_bodies.txt");
+    let text = std::fs::read_to_string(&path).expect("read n_bodies.txt");
+    text.lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            let (mode, input) = l.split_once(' ').expect("a mode and an input");
+            (mode.to_string(), input.to_string())
+        })
+        .collect()
+}
+
+/// A mode's name in `n_bodies.txt`.
+fn mode_name(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Check => "check",
+        Mode::Wasm => "wasm",
+        Mode::Test => "test",
+    }
+}
+
+/// Each root's part of `dump`, by the header line that starts it.
+fn parts_by_root(dump: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    for line in dump.split_inclusive('\n') {
+        if let Some(root) = line.strip_prefix("== ") {
+            parts.push((
+                root.trim_end_matches(['\n', '\r']).to_string(),
+                String::new(),
+            ));
+        } else if let Some((_, part)) = parts.last_mut() {
+            part.push_str(line);
+        }
+    }
+    parts
+}
+
+/// What N's full dump gave for one input, against the list.
+#[derive(Default)]
+struct BodiesCompared {
+    agree: usize,
+    refused: Vec<((String, String), String)>,
+    unlisted: Vec<String>,
+    differ: Vec<String>,
+}
+
+/// One set of inputs, `roots` relative to `dir` under `mode`, each named
+/// `prefix` and its root in the list: N's full `hir` on every root, then
+/// S0's `check --dump-hir` on the roots N gives, in batches.
+fn n_bodies_on(
+    mode: Mode,
+    dir: &Path,
+    roots: &[String],
+    prefix: &str,
+    listed: &std::collections::BTreeSet<(String, String)>,
+) -> BodiesCompared {
+    let std_dir = std_dir();
+    let mut n_args = vec!["hir", "--std", std_dir.as_str()];
+    n_args.extend(mode.flags());
+    let s0_args: Vec<&str> = HIR_S0.iter().chain(mode.flags()).copied().collect();
+    let mut out = BodiesCompared::default();
+    for chunk in roots.chunks(BATCH) {
+        let n = run(selfhost(), &n_args, dir, chunk).unwrap_or_else(|e| panic!("{e}"));
+        let n_text = String::from_utf8(n.stdout).expect("N's dump is UTF-8");
+        let n_parts = parts_by_root(&n_text);
+        let names: Vec<&str> = n_parts.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(names, chunk, "N's headers, {}: {}", dir.display(), n.stderr);
+        let refused = n_parts
+            .iter()
+            .filter(|(_, p)| p.starts_with("UNPORTED "))
+            .count();
+        assert_eq!(
+            n.code,
+            Some(if refused > 0 { 3 } else { 0 }),
+            "N on {chunk:?}: {}",
+            n.stderr
+        );
+        let given: Vec<String> = n_parts
+            .iter()
+            .filter(|(_, p)| !p.starts_with("UNPORTED "))
+            .map(|(r, _)| r.clone())
+            .collect();
+        let s0_parts = if given.is_empty() {
+            Vec::new()
+        } else {
+            let s0 = run(&nova(), &s0_args, dir, &given).unwrap_or_else(|e| panic!("{e}"));
+            assert_eq!(s0.code, Some(0), "S0 on {given:?}: {}", s0.stderr);
+            parts_by_root(&String::from_utf8(s0.stdout).expect("S0's dump is UTF-8"))
+        };
+        let mut s0_parts = s0_parts.into_iter();
+        for (root, part) in n_parts {
+            let input = format!("{prefix}{root}");
+            let key = (mode_name(mode).to_string(), input.clone());
+            if let Some(why) = part.strip_prefix("UNPORTED ") {
+                out.refused.push((key, why.trim_end().to_string()));
+                continue;
+            }
+            let (s0_root, s0_part) = s0_parts.next().expect("S0's part");
+            assert_eq!(s0_root, root);
+            if !listed.contains(&key) {
+                out.unlisted.push(format!("{} {input}", key.0));
+            } else if s0_part != part {
+                let at = first_difference(s0_part.as_bytes(), part.as_bytes());
+                out.differ.push(format!("{} {input}: {at:?}", key.0));
+            } else {
+                out.agree += 1;
+            }
+        }
+    }
+    out
+}
+
+/// N's full HIR dump of every input of the full dump's sets but std's
+/// parts (the corpus natively, for the WASM target and under test mode,
+/// and the cases of each mode) is S0's, byte for byte, for each input
+/// `n_bodies.txt` lists, and N refuses every other input, printing
+/// `UNPORTED` and why (5.3b, while it is being built, ADR 0056): every
+/// listed input agrees, and an input not listed is one N refuses. std's
+/// full part, which holds std's bodies, N refuses too (part 4's).
+#[test]
+fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
+    let listed = n_bodies_listed();
+    let root = root();
+    let mut sets: Vec<(Mode, PathBuf, Vec<String>, String)> = Vec::new();
+    sets.push((Mode::Check, root.clone(), loose_corpus(), String::new()));
+    sets.push((Mode::Check, root.clone(), package_corpus(), String::new()));
+    sets.push((Mode::Wasm, root.clone(), wasm_corpus(), String::new()));
+    sets.push((Mode::Test, root.clone(), test_corpus(), String::new()));
+    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
+        let name = hir_cases_name(mode);
+        let roots = case_roots(&hir_cases_dir(mode));
+        let from_cases: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
+        sets.push((
+            mode,
+            hir_cases_dir(mode),
+            from_cases,
+            format!("cases/{name}/"),
+        ));
+        for dir in roots.apart {
+            let apart = dir
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
+            sets.push((
+                mode,
+                dir,
+                vec!["main.nova".to_string()],
+                format!("cases/{name}/{apart}/"),
+            ));
+        }
+    }
+    let compared: Vec<BodiesCompared> = std::thread::scope(|scope| {
+        let handles: Vec<_> = sets
+            .iter()
+            .map(|(mode, dir, roots, prefix)| {
+                let listed = &listed;
+                scope.spawn(move || n_bodies_on(*mode, dir, roots, prefix, listed))
+            })
+            .collect();
+        joined(handles)
+    });
+    let mut all = BodiesCompared::default();
+    for c in compared {
+        all.agree += c.agree;
+        all.refused.extend(c.refused);
+        all.unlisted.extend(c.unlisted);
+        all.differ.extend(c.differ);
+    }
+    let stale: Vec<&(String, String)> = all
+        .refused
+        .iter()
+        .map(|(key, _)| key)
+        .filter(|key| listed.contains(*key))
+        .collect();
+    let mut why: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (_, w) in &all.refused {
+        *why.entry(w.as_str()).or_insert(0) += 1;
+    }
+    eprintln!(
+        "N gives {} inputs' full dump as S0's, refuses {}: {why:#?}",
+        all.agree,
+        all.refused.len()
+    );
+    assert!(
+        all.differ.is_empty(),
+        "N's full dump differs from S0's: {:#?}",
+        all.differ
+    );
+    assert!(
+        all.unlisted.is_empty(),
+        "N gives these inputs' full dump, S0's, but n_bodies.txt does not list them: {:#?}",
+        all.unlisted
+    );
+    assert!(
+        stale.is_empty() && all.agree == listed.len(),
+        "n_bodies.txt lists {} inputs, of which N gives {}; refused: {stale:#?}",
+        listed.len(),
+        all.agree
+    );
+    // 5.3b's part 2: 384 inputs, 352 cases and 32 corpus roots.
+    assert!(all.agree >= 380, "only {} inputs", all.agree);
+    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
+        let std_dir = std_dir();
+        let mut args = vec!["hir", "--std", std_dir.as_str()];
+        args.extend(mode.flags());
+        args.push("--std-part");
+        let n = run(selfhost(), &args, &root, &[]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(n.code, Some(3), "{mode:?}: {}", n.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&n.stdout),
+            "UNPORTED std's bodies (5.3b part 4)\n"
+        );
+    }
 }
