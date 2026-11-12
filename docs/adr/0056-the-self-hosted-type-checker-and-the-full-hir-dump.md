@@ -485,7 +485,7 @@ parts set `N_BODIES`, and every set is then compared byte for byte.
   39.89 s (52 tests); after, 47.85, 48.36 and 47.49 s (55 tests), the full dump's
   sets on S0 alone and the 659 new cases among them.
 
-### 8. N's bodies, part by part (parts 2 and 3)
+### 8. N's bodies, part by part (parts 2 to 4)
 
 N checks the program's bodies as S0 does, function by function:
 `infer.nova` (S0's `infer.rs`: plain substitution, the occurs check, `!`
@@ -510,8 +510,9 @@ qualifier. N's idioms, beyond ADR 0055's:
 - A `Binding` is kept by its declaration's file label and span, and a
   quiet newline split by its label, start and end, as S0 keeps them by
   `Span`.
-- N checks the program's bodies only (§4): std's are std's part, which
-  the shared path never checks for a program.
+- N checks the program's bodies, then std's, as S0's `check_bodies`
+  does (§1); the shared path stops after the program's (§4). Until part
+  4, N checked the program's alone and refused the rest.
 
 Part 3 adds the members: `typeck_method.nova` (record literals, fields
 and tuple elements, method lookup with `MethodRes`, method calls,
@@ -543,15 +544,15 @@ harness's `n_hir`, beside S0's `--dump-hir-items`). A construct a later
 part ports is one stub in N, which records what it is: N then prints
 `UNPORTED` and why after the root's header and exits 3, so a half-checked
 body is never compared as though it were complete. The stubs, after
-part 3: `match`, `for`,
-destructuring `let` and std's bodies, for a program the shared path hands
-to the full check (§4) or a std that gives a diagnostic, and std's full
-part (part 4); views (part 5). `crates/nova-cli/tests/selfhost/n_bodies.txt`
+part 4: views (part 5). Parts 2 and 3 also stubbed `match`, `for`,
+destructuring `let` and std's bodies (part 4). `crates/nova-cli/tests/selfhost/n_bodies.txt`
 lists the inputs whose full program part N gives, and
 `n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest` holds it
-both ways over every input of the full dump's sets but std's parts: each
-listed input's part is S0's, byte for byte, and every other input is one N
-refuses. Each part adds the inputs it then gives; the last sets
+both ways over every input of the full dump's sets, std's three parts
+listed as `<mode> std` since part 4: each listed input's part is S0's,
+byte for byte, and every other input is one N refuses. Since part 4 the
+test runs its batches on every core, N's own package roots three at a
+time, as one set's thread was its long pole. Each part adds the inputs it then gives; the last sets
 `N_BODIES`, and removes the list, the test, `UNPORTED` and both item-only
 forms.
 
@@ -571,3 +572,73 @@ give 616 and refuse 198, none differing. 1,524 mutants of the listed
 cases and corpus roots, aimed at the members, and every input of the
 type, name, mutation, soup, depth and edge fuzzers: none differs. Of
 5.3a's 167 item cases, 138 agree and 29 are refused.
+
+Part 4 adds control flow and patterns: `usefulness.nova` (S0's
+`usefulness.rs`: `Ctor`, the pattern as `UPat`, `MatchCx` with
+`naming_values`, `missing_value`), `typeck_pattern.nova` (`check_match`,
+the reachability and exhaustiveness glue with E0020, E0021 and its
+"remove the unreachable arm" fix, `render_witness`, `check_pattern` with
+its variant, tuple, or- and range patterns, and `patterns.rs`'s
+`PatState`, E0100, E0101, E0022, E0104 with its "did you mean" fix, the
+or-alternatives' E0021 and `restrict_or`), `typeck_for.nova` (`for` over
+a range, an array and an `Iterator`-shaped `next`, `LoopBind`,
+`let_pattern`) and the destructuring `let` in `typeck_body.nova`;
+`fixes.nova` gains a pattern's `Need`, `scrutinee_sum`, `remove_arm_fix`
+and lines.rs's `arm_removal`. std's bodies: `share_items` checks them
+once per process and mode, on the checker its tables come from, whose
+tables a body never changes, and shares nothing should they give a
+diagnostic (S0's `SharedItems::new`, which collects std's items a second
+time to check them); `selfhost hir --std-part` prints std's full part;
+a program the shared path cannot check (§4) is resolved again in full
+and checked with std's bodies, as S0's driver does. Beyond the earlier
+parts' idioms:
+
+- `UPat`'s variants carry `Up`, as `hir.nova`'s `HirPattern` holds
+  `PatOr` and `PatTuple`; an or-pattern's tree node is `(parent node,
+  parent alternative, alternatives)`, the parent -1 at the top.
+- A matrix's rows and a witness are built new wherever S0 clones a
+  slice, since a `Vec` is shared when passed.
+- A witness's `String` and `Char` print as Rust's `{:?}` does
+  (`debug_str`, `debug_char`): `\0`, `\t`, `\r`, `\n`, `\\` and the
+  quote escaped, a control character, a format character, a separator, a
+  private use and the commonest grapheme extenders (combining marks,
+  variation selectors, the zero-width non-joiner) as the code point's
+  escape. Rust's full `is_printable` and `Grapheme_Extend` tables are
+  not ported (a departure; no input holds another such character).
+- A `for` loop's hidden locals are made where S0 makes them, a range's
+  `__run` after its body, since their ids reach the dump.
+
+**Part 4's figures** (2026-11-12): std's full part is S0's, byte for
+byte, in the three modes, at the first run. Of 1,216 roots and std's
+three parts (826 cases of the three modes, 390 corpus roots of the three
+modes), N gives 1,159 (806 cases, 350 corpus roots, std's three parts),
+every fallback root among them, and refuses 60, all for views (20
+cases, 40 corpus roots); none differs from S0's. With CRLF line endings,
+the 814 loose cases of `cases/check/` give 795 and refuse 19 (views).
+2,059 mutants of the listed cases and corpus roots, aimed at the members
+and at `match`, patterns, `for` and destructuring `let`, the research's
+16 probes of §4, 13 hand cases of the three modes and a two-module
+case, and every input of the type, name, mutation, soup, depth and edge
+fuzzers: none differs.
+
+| N's run | Wall, debug runtime | Wall, release runtime | Peak RSS | GCs | Max live | S0's wall |
+|---|---:|---:|---:|---:|---:|---:|
+| `hir --std-part` | 0.70 s | 0.17 s | 32.8 MB | 14 | 14.2 MB | 0.11 s |
+| `hir --target wasm --std-part` | 0.77 s | 0.20 s | 38.1 MB | 14 | 11.1 MB | 0.11 s |
+| `hir --test --std-part` | 0.71 s | 0.17 s | 33.1 MB | 14 | 14.2 MB | 0.10 s |
+| `hir` N's root | 4.15 s | 1.08 s | 145.2 MB | 21 | 54.6 MB | 0.66 s |
+
+Against ADR 0055 §13's item stage (std's part 0.29 s, 15.0 MB, 3.9 MB
+live; N's root 1.07 s, 40.1 MB, 13.6 MB live on the debug runtime), the
+bodies multiply std's part's time by 2.4 and its live heap by 3.6, and
+N's root's time by 3.9 and its live heap by 4. Each `selfhost hir` run
+checks std's bodies once: 0.17 s more a run on the debug runtime. N's
+stack, under `ulimit -s` on Linux, its dump compared with S0's: 127
+nested `match`es (in an arm and as a scrutinee), `for` loops (over a
+range, an array and a tuple pattern), variant and tuple patterns
+(`let`) and or-patterns, and 63 closures in closures, all on 1 MB on
+both runtimes, the least stack 200 to 216 KB for the expressions and
+48 to 64 KB for the patterns. The 795 listed loose cases of
+`cases/check/` take S0 6.5 s, N 21.8 s on the debug runtime and 5.6 s
+on the release one. `selfhost.rs` locally: 115 to 117 s (56 tests),
+against part 3's 74 to 82 s.
