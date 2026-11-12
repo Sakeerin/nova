@@ -4893,11 +4893,12 @@ fn n_bodies_on(
 fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
     let listed = n_bodies_listed();
     let root = root();
-    let mut sets: Vec<(Mode, PathBuf, Vec<String>, String)> = Vec::new();
-    sets.push((Mode::Check, root.clone(), loose_corpus(), String::new()));
-    sets.push((Mode::Check, root.clone(), package_corpus(), String::new()));
-    sets.push((Mode::Wasm, root.clone(), wasm_corpus(), String::new()));
-    sets.push((Mode::Test, root.clone(), test_corpus(), String::new()));
+    let mut sets: Vec<(Mode, PathBuf, Vec<String>, String)> = vec![
+        (Mode::Check, root.clone(), loose_corpus(), String::new()),
+        (Mode::Check, root.clone(), package_corpus(), String::new()),
+        (Mode::Wasm, root.clone(), wasm_corpus(), String::new()),
+        (Mode::Test, root.clone(), test_corpus(), String::new()),
+    ];
     for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
         let name = hir_cases_name(mode);
         let roots = case_roots(&hir_cases_dir(mode));

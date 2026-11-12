@@ -7,9 +7,10 @@ Proposed (2026-11-12), written as 5.3b's prototype is built (spec
 §4). Part 1 (S0's side) wrote §1 to §7: S0's order of bodies, the full
 dump's function forms with one example of every form, the closure-id
 rule, std's bodies shared with the fallback and the bug it works around,
-the body cases, the harness's switch, and part 1's figures. Parts 2 to 5
-(N's side, the comparison, the fuzzer's body mutations, the depth cases,
-CI and the figures) finish it.
+the body cases, the harness's switch, and part 1's figures. Part 2 (N's
+frame and expressions) wrote §8. Parts 3 to 5 (the rest of N's side, the
+comparison, the fuzzer's body mutations, the depth cases, CI and the
+figures) finish it.
 
 ## Decision
 
@@ -481,3 +482,60 @@ parts set `N_BODIES`, and every set is then compared byte for byte.
 - **`selfhost.rs` locally**, three runs: before part 1, 36.30, 37.19 and
   39.89 s (52 tests); after, 47.85, 48.36 and 47.49 s (55 tests), the full dump's
   sets on S0 alone and the 659 new cases among them.
+
+### 8. N's bodies, part by part (part 2)
+
+N checks the program's bodies as S0 does, function by function:
+`infer.nova` (S0's `infer.rs`: plain substitution, the occurs check, `!`
+and the error type unifying with anything, a failed unification keeping
+the bindings it made), `typeck_body.nova` (the order of §1, a function's,
+a method's and a constant's body, blocks, finalizing with E0011, E0081,
+E0103 and the helpers `child_exprs`, `collect_captures`, `remap_locals`,
+`split_operand`), `typeck_expr.nova` (`check_expr`, `.await` with E0086
+and E0087, interpolation, paths, operators, arrays, indexing) and
+`typeck_call.nova` (calls, `builtin_signature` by the variant's name,
+variants); `fixes.nova` gains the `Need`s of a value, a callee and a
+qualifier. N's idioms, beyond ADR 0055's:
+
+- HIR's body types are in `hir.nova`; a `LocalId` is an `Int`. An `Expr`
+  is a record of kind, type and span, so finalizing and remapping rewrite
+  it in place (spec §4.2); a kind is a sum, whose payload is replaced, not
+  rewritten. Names `ast.nova` holds too carry `Hir` (`HirExpr`,
+  `HirFunction`, `HirPattern`); a kind's variant is `Ek` and its Rust name
+  (`EkCall`), a pattern's `Pat` and the dump's name.
+- `fresh` stands where S0 calls it, in the same order, so `?N` numbers
+  alike; N's own tests pin a program's numbering.
+- A `Binding` is kept by its declaration's file label and span, and a
+  quiet newline split by its label, start and end, as S0 keeps them by
+  `Span`.
+- N checks the program's bodies only (§4): std's are std's part, which
+  the shared path never checks for a program.
+
+**Until N checks every body** (`N_BODIES` false), `selfhost hir` checks
+the program's bodies and prints the full dump, and `selfhost hir
+--items` prints 5.3a's item part, which every 5.3a comparison takes (the
+harness's `n_hir`, beside S0's `--dump-hir-items`). A construct a later
+part ports is one stub in N, which records what it is: N then prints
+`UNPORTED` and why after the root's header and exits 3, so a half-checked
+body is never compared as though it were complete. The stubs: record
+literals, fields, method calls, `?`, closures and functions as values,
+assignment, calls through a type parameter's bounds and associated
+functions, interpolation through `Display` (part 3); `match`, `for`,
+destructuring `let` and std's bodies, for a program the shared path hands
+to the full check (§4) or a std that gives a diagnostic, and std's full
+part (part 4); views (part 5). `crates/nova-cli/tests/selfhost/n_bodies.txt`
+lists the inputs whose full program part N gives, and
+`n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest` holds it
+both ways over every input of the full dump's sets but std's parts: each
+listed input's part is S0's, byte for byte, and every other input is one N
+refuses. Each part adds the inputs it then gives; the last sets
+`N_BODIES`, and removes the list, the test, `UNPORTED` and both item-only
+forms.
+
+**Part 2's figures** (2026-11-12): of 1,204 inputs (826 cases of the
+three modes, 378 corpus roots of the three modes), N gives 384 (352
+cases, 32 corpus roots; 364 reach the type checker, 362 with functions,
+582 functions) and refuses 820; none differs from S0's. With CRLF line
+endings, the 814 loose cases of `cases/check/` give the same. Of 5.3a's
+167 item cases, 112 agree and 55 are refused (27 take the full check).
+
