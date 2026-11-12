@@ -522,12 +522,15 @@ pub struct DumpResolutionCmd {
 }
 
 /// Which hidden dump a command line asks for: the resolution dump (5.2,
-/// ADR 0053) or the HIR dump (5.3a, ADR 0055), each with
-/// [`DumpResolutionCmd`]'s arguments and refusals.
+/// ADR 0053), the full HIR dump (5.3a, 5.3b, ADR 0055, ADR 0056), or the
+/// HIR dump's item part alone (5.3a's, `--dump-hir-items`, which the
+/// differential compares until the self-hosted type checker checks
+/// bodies), each with [`DumpResolutionCmd`]'s arguments and refusals.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DumpKind {
     Resolution,
     Hir,
+    HirItems,
 }
 
 impl DumpKind {
@@ -536,6 +539,7 @@ impl DumpKind {
         match self {
             DumpKind::Resolution => "--dump-resolution",
             DumpKind::Hir => "--dump-hir",
+            DumpKind::HirItems => "--dump-hir-items",
         }
     }
 }
@@ -565,20 +569,24 @@ impl DumpCmd {
                 args: <DumpResolutionCmd as clap::Parser>::parse_from(args),
             });
         }
-        if flag != "--dump-hir" {
+        let kind = if flag == "--dump-hir" {
+            DumpKind::Hir
+        } else if flag == "--dump-hir-items" {
+            DumpKind::HirItems
+        } else {
             return None;
-        }
-        let name = "nova check --dump-hir";
+        };
+        let name = match kind {
+            DumpKind::HirItems => "nova check --dump-hir-items",
+            _ => "nova check --dump-hir",
+        };
         let matches = <DumpResolutionCmd as clap::CommandFactory>::command()
             .name(name)
             .bin_name(name)
             .get_matches_from(args);
         let args = <DumpResolutionCmd as clap::FromArgMatches>::from_arg_matches(&matches)
             .unwrap_or_else(|e| e.exit());
-        Some(DumpCmd {
-            kind: DumpKind::Hir,
-            args,
-        })
+        Some(DumpCmd { kind, args })
     }
 }
 
@@ -619,6 +627,7 @@ fn dump_code(cmd: &DumpCmd) -> Result<i32> {
         let std = match cmd.kind {
             DumpKind::Resolution => nova_driver::dump_std_resolution(target, args.test),
             DumpKind::Hir => nova_driver::dump_std_hir(target, args.test),
+            DumpKind::HirItems => nova_driver::dump_std_hir_items(target, args.test),
         };
         out.write_all(std.as_bytes())?;
         out.flush()?;
@@ -637,6 +646,10 @@ fn dump_code(cmd: &DumpCmd) -> Result<i32> {
         }
         DumpKind::Hir => {
             let dumps = nova_driver::HirDumps::new(target, args.test);
+            Box::new(move |file| dumps.dump(file))
+        }
+        DumpKind::HirItems => {
+            let dumps = nova_driver::HirDumps::items_only(target, args.test);
             Box::new(move |file| dumps.dump(file))
         }
     };

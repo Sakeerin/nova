@@ -1,0 +1,4 @@
+impl StringBuilder {
+    fn new() -> StringBuilder { StringBuilder::new() }
+}
+fn main() {}

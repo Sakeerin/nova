@@ -18,7 +18,10 @@ pub mod dump;
 mod infer;
 mod usefulness;
 
-pub use check::{check, check_items, check_items_shared, check_with, ItemTables, SharedItems};
+pub use check::{
+    check, check_items, check_items_shared, check_program, check_program_shared, check_with,
+    implements_on_a_type_it_does_not_own, Checked, ItemTables, SharedItems,
+};
 
 use nova_hir::Ty;
 use nova_resolver::Definitions;

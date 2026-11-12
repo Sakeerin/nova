@@ -1,0 +1,4 @@
+impl Bytes {
+    fn to_string(self) -> Option<String> { None }
+}
+fn main() {}

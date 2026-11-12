@@ -33,7 +33,10 @@ mod tuple_tests;
 mod view;
 
 use fixes::{Binding, Need};
-pub use items::{check_items, check_items_shared, ItemTables, SharedItems};
+pub use items::{
+    check_items, check_items_shared, check_program, check_program_shared,
+    implements_on_a_type_it_does_not_own, Checked, ItemTables, SharedItems,
+};
 use items::{Rebase, Splice};
 use patterns::PatState;
 
@@ -3230,7 +3233,7 @@ impl<'a> Checker<'a> {
     /// and the newline splits; then the closures and wrappers in the order
     /// they were lifted. So the program's closures and wrappers take ids
     /// from `defs.len()` and std's follow them, and no map's order reaches
-    /// the output. With std's tables shared (5.3b, `check_program_shared`)
+    /// the output. With std's tables shared (5.3b, [`check_program_shared`])
     /// std's bodies are not checked: they are std's part of the HIR dump.
     /// Returns the functions and the first id a std closure or wrapper
     /// takes.

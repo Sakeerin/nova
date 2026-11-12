@@ -1,0 +1,4 @@
+impl<K, V> Map<K, V> {
+    fn new() -> Map<K, V> { panic("hijacked") }
+}
+fn main() {}

@@ -99,8 +99,9 @@ enum Ran {
 }
 
 /// What a command line asks for: a command [`Cli`] parses, or the hidden
-/// `nova check --dump-resolution` or `nova check --dump-hir`, which have a
-/// parser of their own, so that `check`'s is as it was
+/// `nova check --dump-resolution`, `nova check --dump-hir` or `nova check
+/// --dump-hir-items`, which have a parser of their own, so that `check`'s
+/// is as it was
 /// ([`cmd::run::DumpCmd`]).
 enum Job {
     Cli(Command),
