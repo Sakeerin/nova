@@ -1818,15 +1818,33 @@ mod resolution_dumps {
                                 .map(|r| dumps.dump(r).map_err(|e| e.kind()))
                                 .collect::<Vec<_>>()
                         };
-                        let unshared = dump_all(&HirDumps::unshared(*target, *test), roots);
-                        let shared = HirDumps::new(*target, *test);
-                        assert!(shared.shared, "std is shared");
-                        let forward = dump_all(&shared, roots);
-                        let fallbacks = shared.fallbacks();
-                        let reversed: Vec<std::path::PathBuf> =
-                            roots.iter().rev().cloned().collect();
-                        let mut backward = dump_all(&shared, &reversed);
-                        backward.reverse();
+                        // The full check of each root, which keeps nothing from
+                        // one root to the next, in parts on threads of their own,
+                        // beside the shared path's two passes in turn.
+                        let (unshared, (forward, backward, fallbacks)) =
+                            std::thread::scope(|inner| {
+                                let parts: Vec<_> = roots
+                                    .chunks(roots.len().div_ceil(3).max(1))
+                                    .map(|part| {
+                                        inner.spawn(move || {
+                                            dump_all(&HirDumps::unshared(*target, *test), part)
+                                        })
+                                    })
+                                    .collect();
+                                let shared = HirDumps::new(*target, *test);
+                                assert!(shared.shared, "std is shared");
+                                let forward = dump_all(&shared, roots);
+                                let fallbacks = shared.fallbacks();
+                                let reversed: Vec<std::path::PathBuf> =
+                                    roots.iter().rev().cloned().collect();
+                                let mut backward = dump_all(&shared, &reversed);
+                                backward.reverse();
+                                let unshared: Vec<_> = parts
+                                    .into_iter()
+                                    .flat_map(|p| p.join().expect("a part's thread"))
+                                    .collect();
+                                (unshared, (forward, backward, fallbacks))
+                            });
                         for (i, r) in roots.iter().enumerate() {
                             assert_eq!(
                                 forward[i],
