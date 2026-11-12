@@ -1,0 +1,2 @@
+fn main() { let inc = |n| n + 1
+ println("${inc(41)}") }

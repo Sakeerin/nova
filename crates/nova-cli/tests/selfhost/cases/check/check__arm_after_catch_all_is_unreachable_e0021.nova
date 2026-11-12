@@ -1,0 +1,2 @@
+fn f(n: Int) -> Int { match n { _ => 0, 1 => 2 } }
+fn main() { }

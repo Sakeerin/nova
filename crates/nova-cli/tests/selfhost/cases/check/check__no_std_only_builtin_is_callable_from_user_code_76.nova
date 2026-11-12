@@ -1,0 +1,1 @@
+fn main() { crypto_random_bytes() }

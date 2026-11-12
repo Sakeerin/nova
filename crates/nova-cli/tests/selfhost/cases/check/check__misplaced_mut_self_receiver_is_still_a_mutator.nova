@@ -1,0 +1,4 @@
+record P { v: Int }
+impl P { fn odd(x: Int, mut self) -> Int { x } }
+fn main() { let p = P { v: 1 }
+ println("${p.odd(1)}") }

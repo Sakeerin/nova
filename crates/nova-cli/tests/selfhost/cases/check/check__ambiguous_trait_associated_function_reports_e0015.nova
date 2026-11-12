@@ -1,0 +1,5 @@
+trait A { fn zero() -> Int }
+trait B { fn zero() -> Int }
+impl A for Int { fn zero() -> Int { 1 } }
+impl B for Int { fn zero() -> Int { 2 } }
+fn main() { println("${Int::zero()}") }

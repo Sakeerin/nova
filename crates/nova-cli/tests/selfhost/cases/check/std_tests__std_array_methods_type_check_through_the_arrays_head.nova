@@ -1,0 +1,7 @@
+fn main() {
+    let a = [1, 2, 3]
+    let s = a.slice(0, 2)
+    let it = a.iter()
+    let n = a.len()
+    let w = ["x"].slice(0, 1)
+}

@@ -1,0 +1,7 @@
+fn show_all<T: Display>(x: T) -> String { x.fmt() }
+fn main() {
+println(show_all(3))
+println("${(1).eq(1)}")
+let o = ("a").cmp("b")
+match o { Less => println("less"), Equal => println("eq"), Greater => println("gt") }
+}

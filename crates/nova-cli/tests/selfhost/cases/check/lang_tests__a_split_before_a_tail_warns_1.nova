@@ -1,0 +1,6 @@
+record R { a: Int, b: Int }
+fn w(r: R) -> Int {
+    r.a
+    - r.b
+}
+fn main() {}

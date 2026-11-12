@@ -1,0 +1,8 @@
+fn dbl(n: Int) -> Int { n * 2 }
+fn main() {
+let a = Some(21).map(dbl).unwrap_or(0)
+let b = Some(1).is_some()
+let c: Result<Int, String> = Some(2).ok_or("none")
+let d = c.map(dbl).unwrap_or(0)
+println("${a} ${b} ${d}")
+}

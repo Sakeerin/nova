@@ -1,0 +1,4 @@
+fn main() {
+    let m: OrderedMap<Int, Int> = OrderedMap::new()
+    let _ = m.insert(1, 2)
+}

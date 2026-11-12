@@ -1,0 +1,4 @@
+record P { x: Int }
+fn main() {
+    let b = P { x: 1 } == P { x: 1 }
+}

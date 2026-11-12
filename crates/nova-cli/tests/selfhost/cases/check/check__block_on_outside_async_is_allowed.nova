@@ -1,0 +1,2 @@
+async fn f() -> Int { 1 }
+fn main() { let x = block_on(f()) }

@@ -1,0 +1,6 @@
+record Pair<A, B> { first: A, second: B }
+trait Display { fn fmt(self) -> String }
+impl<T> Pair<T, T> { fn fmt(self) -> String { "same" } }
+impl<A, B> Display for Pair<A, B> { fn fmt(self) -> String { "pair" } }
+fn main() { let p = Pair { first: 1, second: "x" }
+ println("${p}") }

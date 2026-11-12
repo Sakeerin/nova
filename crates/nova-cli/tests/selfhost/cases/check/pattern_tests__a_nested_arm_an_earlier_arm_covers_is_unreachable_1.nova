@@ -1,0 +1,21 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Res<T, E> =
+  | Win(T)
+  | Fail(E)
+type Tok =
+  | Ident(String)
+  | Num(Int)
+  | Sym(Char)
+  | Eof
+type Wrap =
+  | Wrap(Int, String)
+fn f(o: Opt<Opt<Int>>) -> Int {
+    match o {
+        Yes(_) => 1
+        Yes(Yes(1)) => 2
+        No => 3
+    }
+}
+fn main() {}

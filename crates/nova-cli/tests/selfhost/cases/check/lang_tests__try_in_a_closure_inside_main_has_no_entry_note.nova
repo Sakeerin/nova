@@ -1,0 +1,7 @@
+fn main() {
+    let f = |o: Option<Int>| -> Int {
+        let v = o?
+        v
+    }
+    println("${f(Some(1))}")
+}

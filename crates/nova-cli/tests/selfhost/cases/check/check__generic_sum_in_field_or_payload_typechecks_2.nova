@@ -1,0 +1,3 @@
+record Slot { b: Box<Int> }
+record Box<T> { value: T }
+fn main() { }

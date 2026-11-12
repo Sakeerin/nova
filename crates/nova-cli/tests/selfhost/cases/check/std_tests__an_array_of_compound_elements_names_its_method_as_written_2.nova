@@ -1,0 +1,6 @@
+impl [Option<String>] {
+    fn two(self, n: Int) -> Int { n }
+}
+fn main() {
+    let x = [Some("a")].two()
+}

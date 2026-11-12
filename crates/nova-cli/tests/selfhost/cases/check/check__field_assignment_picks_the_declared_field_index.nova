@@ -1,0 +1,4 @@
+record P { a: Int, b: String }
+fn main() { let mut p = P { a: 1, b: "x" }
+ p.b = "y"
+ println("${p.b}") }

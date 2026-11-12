@@ -1,0 +1,17 @@
+trait Show { fn show(self) -> String }
+impl Show for Int { fn show(self) -> String { "i" } }
+record Vec2<T> { a: T, b: T }
+type Maybe<T> = | Just(T) | Nothing
+impl<T: Show> Vec2<T> { fn first(self) -> String { self.a.show() } }
+trait Conv { fn conv<U: Show>(self, u: U) -> String }
+impl Conv for Int { fn conv<U: Show>(self, u: U) -> String { u.show() } }
+fn label<T: Show>(x: T) -> String { x.show() }
+fn label2<T>(x: T) -> String where T: Show { x.show() }
+fn main() {
+println(label(1))
+println(label2(2))
+println(Vec2 { a: 1, b: 2 }.first())
+println(3.conv(4))
+let m = Just(5)
+match m { Just(v) => println("${v}"), Nothing => println("n") }
+}

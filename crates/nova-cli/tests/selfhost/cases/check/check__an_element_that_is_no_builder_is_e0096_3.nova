@@ -1,0 +1,5 @@
+import ui
+import ui::html::{div, input}
+fn two(a: Int, b: Int) -> View { div([], []) }
+component A() { view { two(x: "a") { } } }
+fn main() { }

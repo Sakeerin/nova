@@ -1,0 +1,6 @@
+record Box<T> { value: T }
+impl Box<Int> { fn tag() -> Int { 7 } }
+fn main() {
+let t = Box::tag()
+println("${t}")
+}

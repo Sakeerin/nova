@@ -1,0 +1,4 @@
+const A: Int = 1
+const B: Int = A + 1
+const C: Int = B + 1
+fn main() { println("${C}") }

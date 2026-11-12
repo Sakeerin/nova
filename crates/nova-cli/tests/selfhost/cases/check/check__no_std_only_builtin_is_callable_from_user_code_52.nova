@@ -1,0 +1,1 @@
+fn main() { io_stderr_write() }

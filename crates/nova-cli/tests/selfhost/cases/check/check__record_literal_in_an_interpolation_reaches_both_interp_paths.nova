@@ -1,0 +1,4 @@
+record R { v: Int }
+trait Display { fn fmt(self) -> String }
+impl Display for R { fn fmt(self) -> String { "r=${self.v}" } }
+fn main() { println("${R { v: 1 }.v} ${R { v: 2 }}") }

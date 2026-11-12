@@ -1,0 +1,10 @@
+record Box<T> { value: T }
+impl<T> Box<T> {
+fn map<U>(self, f: fn(T) -> U) -> Box<U> { Box { value: f(self.value) } }
+}
+fn twice(n: Int) -> Int { n * 2 }
+fn main() {
+let a = Box { value: 5 }
+let b = a.map(twice)
+println("${b.value}")
+}

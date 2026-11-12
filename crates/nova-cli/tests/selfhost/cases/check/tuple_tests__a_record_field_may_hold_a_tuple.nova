@@ -1,0 +1,6 @@
+record Holder { pair: (String, Int) }
+fn main() {
+    let mut h = Holder { pair: ("h", 1) }
+    let n: Int = h.pair.1
+    h.pair = ("g", 2)
+}

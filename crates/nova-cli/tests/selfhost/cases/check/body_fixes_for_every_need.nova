@@ -1,0 +1,22 @@
+record Point { x: Int, y: Int }
+type Shape =
+  | Dot
+  | Line(Int)
+const LIMIT: Int = 3
+fn measure(s: Shape) -> Int {
+    match s {
+        Shap::Dot => 0
+        Shape::Lin(n) => n
+        _ => 1
+    }
+}
+fn main() {
+    let total = LIMT + 1
+    let p = Pont { x: 1, y: 2 }
+    let v = Vecc::new()
+    let n = measur(Dot)
+    let q = Point { x: 1, y: 2 }
+    let z = q.z
+    let w = total.to_strin()
+    let s = Shape::Lin(2)
+}

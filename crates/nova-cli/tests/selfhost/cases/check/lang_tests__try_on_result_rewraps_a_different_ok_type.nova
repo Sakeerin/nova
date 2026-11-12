@@ -1,0 +1,6 @@
+fn p(s: String) -> Result<Int, String> { Ok(s.len()) }
+fn q(s: String) -> Result<Bool, String> {
+    let n = p(s)?
+    Ok(n > 1)
+}
+fn main() {}

@@ -1,0 +1,5 @@
+trait Bump { fn bump(mut self) }
+record C { n: Int }
+impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }
+fn make() -> C { C { n: 1 } }
+fn main() { make().bump() }

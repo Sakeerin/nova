@@ -1,0 +1,5 @@
+trait Show { fn show(self) -> String }
+trait Tagger { fn tag<U: Show>(self, x: U) -> String }
+record Thing { v: Int }
+impl Tagger for Thing { fn tag<U: Show>(self, x: U) -> String { "ok" } }
+fn main() { }

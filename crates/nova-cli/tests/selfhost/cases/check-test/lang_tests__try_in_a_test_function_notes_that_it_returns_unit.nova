@@ -1,0 +1,7 @@
+@test
+fn t() {
+    let o: Option<Int> = Some(1)
+    let v = o?
+    assert(v == 1)
+}
+fn main() {}

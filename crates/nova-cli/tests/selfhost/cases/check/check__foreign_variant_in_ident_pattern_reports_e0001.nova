@@ -1,0 +1,4 @@
+type A = | Foo | Bar
+type B = | Baz
+fn f(a: A) -> Int { match a { Baz => 1, Foo => 2, Bar => 3 } }
+fn main() { }

@@ -1,0 +1,4 @@
+record Holder { b: Bytes }
+fn ident(x: Bytes) -> Bytes { x }
+fn takes_array(xs: [Bytes]) -> Int { xs.len() }
+fn main() { let x: Bytes = panic("unreachable") }

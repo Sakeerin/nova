@@ -1,0 +1,3 @@
+type Shape = | Circle(Int) | Square(Int)
+fn area(s: Shape) -> Int { match s { Circle(r) => r * r, Square(w) => w * w } }
+fn main() { println("${area(Shape::Circle(5))}") }

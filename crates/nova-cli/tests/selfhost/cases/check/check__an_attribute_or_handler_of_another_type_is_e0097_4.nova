@@ -1,0 +1,4 @@
+import ui
+import ui::html::{div, input}
+component A() { view { div(on_click: || 5) } }
+fn main() { }

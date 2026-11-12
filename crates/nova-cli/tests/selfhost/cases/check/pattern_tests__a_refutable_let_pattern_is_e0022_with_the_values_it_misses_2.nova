@@ -1,0 +1,18 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Res<T, E> =
+  | Win(T)
+  | Fail(E)
+type Tok =
+  | Ident(String)
+  | Num(Int)
+  | Sym(Char)
+  | Eof
+type Wrap =
+  | Wrap(Int, String)
+fn f(p: (Int, Bool)) -> Int {
+    let (n, true) = p
+    n
+}
+fn main() {}

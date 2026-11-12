@@ -1,0 +1,16 @@
+import ui
+import ui::html::{div, input}
+fn h() { }
+fn one(s: String) -> View { div([], []) }
+component Card(x: String) {
+    view {
+        div(class: "a", id: r"r", aria_label: x, on_click: h, on_input: |v: String| println(v)) {
+            text("t")
+            text(x)
+            input(value: "v")
+            input(value: x, title: "a ${x}")
+            one("y")
+        }
+    }
+}
+fn main() { }

@@ -1,0 +1,12 @@
+trait A { fn a(self) -> Int }
+trait B: A { fn b(self) -> Int }
+record R { v: Int }
+record W<T> { inner: T }
+impl A for R { fn a(self) -> Int { 1 } }
+impl B for R { fn b(self) -> Int { 2 } }
+impl<T: B> A for W<T> { fn a(self) -> Int { self.inner.a() } }
+impl<T: B> B for W<T> { fn b(self) -> Int { self.inner.b() } }
+fn main() {
+let w = W { inner: R { v: 0 } }
+println("${w.b()}")
+}

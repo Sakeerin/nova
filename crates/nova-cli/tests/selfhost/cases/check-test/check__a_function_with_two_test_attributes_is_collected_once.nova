@@ -1,0 +1,4 @@
+@test
+@test
+fn t() { }
+fn main() { }

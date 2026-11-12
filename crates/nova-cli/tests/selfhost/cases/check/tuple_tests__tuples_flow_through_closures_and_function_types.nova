@@ -1,0 +1,8 @@
+fn apply(f: fn((Int, Int)) -> Int, p: (Int, Int)) -> Int { f(p) }
+fn main() {
+    let mul = |t: (Int, Int)| t.0 * t.1
+    let n = apply(mul, (2, 3))
+    let base = (1, 2)
+    let add = |x: Int| (base.0 + x, base.1 + x)
+    let r: (Int, Int) = add(1)
+}

@@ -1,0 +1,9 @@
+fn first(s: String) -> Option<String> { Some(s) }
+fn main() {
+    let f = |s: String| {
+        let w = first(s)?
+        Some(w.len())
+    }
+    let n: Option<Int> = f("a")
+    println("${n.is_some()}")
+}

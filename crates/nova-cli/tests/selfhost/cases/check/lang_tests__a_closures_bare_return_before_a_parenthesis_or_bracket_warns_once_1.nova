@@ -1,0 +1,5 @@
+fn main() {
+    let h = || return
+    (5)
+    println("x")
+}

@@ -1,0 +1,10 @@
+fn k() -> fn(Int) -> Int {
+    |y: Int| y
+}
+fn f(n: Int) -> Int {
+    let mut q = k()
+    let mut m = 0
+    m = n
+    (n)
+}
+fn main() {}

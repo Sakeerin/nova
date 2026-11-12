@@ -1,0 +1,1 @@
+fn main() { mem_load64() }

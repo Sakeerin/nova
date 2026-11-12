@@ -1,0 +1,1 @@
+fn main() { time_now_epoch_nanos() }

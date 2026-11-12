@@ -1,0 +1,20 @@
+trait It { type Item
+ type Other
+fn get(self) -> Self::Item
+fn wrapped(self) -> Option<Self::Item> }
+record W<T> { v: T }
+impl<T: It> It for W<T> { type Item = T::Item
+type Other = Self::Item
+fn get(self) -> Self::Item { self.v.get() }
+fn wrapped(self) -> Option<Self::Item> { let x: Self::Item = self.get()
+Some(x) } }
+record C { n: Int }
+impl It for C { type Item = Int
+ type Other = Int
+fn get(self) -> Int { self.n }
+fn wrapped(self) -> Option<Int> { Some(self.n) } }
+fn first<I: It>(x: I) -> I::Item { x.get() }
+fn main() { let c = C { n: 4 }
+ println("${first(c)}")
+let w = W { v: C { n: 7 } }
+ println("${first(w)}") }

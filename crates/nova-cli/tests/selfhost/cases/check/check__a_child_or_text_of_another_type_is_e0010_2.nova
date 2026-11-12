@@ -1,0 +1,4 @@
+import ui
+import ui::html::{div}
+component A() { view { div(class: 5) { text(5) } } }
+fn main() { }

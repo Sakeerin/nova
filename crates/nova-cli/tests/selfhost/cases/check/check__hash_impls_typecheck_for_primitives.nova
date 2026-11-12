@@ -1,0 +1,4 @@
+fn h<T: Hash>(x: T) -> Int { x.hash() }
+fn main() {
+println("${h(7)} ${h(true)} ${h('c')} ${h("s")}")
+}

@@ -1,0 +1,9 @@
+record Box<T> { value: T }
+impl Box<Int> { fn a(self) -> Int { self.value } }
+impl Box<Bool> { fn b(self) -> Bool { self.value } }
+fn main() {
+let bi = Box { value: 1 }
+let bb = Box { value: true }
+let x = bi.a()
+let y = bb.b()
+}

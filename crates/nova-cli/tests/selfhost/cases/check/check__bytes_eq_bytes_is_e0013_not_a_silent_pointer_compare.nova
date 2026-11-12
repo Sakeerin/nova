@@ -1,0 +1,3 @@
+fn main() { let a = bytes_from_string("x")
+ let b = bytes_from_string("x")
+ let _ = a == b }

@@ -1,0 +1,4 @@
+record P { v: Int }
+impl P { fn new() -> P { P { v: 7 } } }
+fn main() { let p = P::new()
+ println("${p.v}") }

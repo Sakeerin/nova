@@ -1,0 +1,4 @@
+fn get(o: Option<Int>) -> Int {
+match o { Some(v) => v, None => panic("none") }
+}
+fn main() { println("${get(Some(3))}") }

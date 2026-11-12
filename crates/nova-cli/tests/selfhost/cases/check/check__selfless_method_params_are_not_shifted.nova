@@ -1,0 +1,3 @@
+record P { v: Int }
+impl P { fn make(x: Int) -> Int { x + 1 } }
+fn main() { println("ok") }

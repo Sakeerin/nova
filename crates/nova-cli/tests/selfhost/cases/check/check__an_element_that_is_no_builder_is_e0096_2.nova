@@ -1,0 +1,5 @@
+import ui
+import ui::html::{div, input}
+fn A() -> View { let div = 1
+ view { div { } } }
+fn main() { }

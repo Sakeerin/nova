@@ -1,0 +1,5 @@
+record Box<T> { value: T }
+trait Tag { fn tag(self) -> String }
+impl<T> Tag for Box<T> { fn tag(self) -> String { "b" } }
+fn main() { let b = Box { value: 1 }
+ println(b.tag()) }

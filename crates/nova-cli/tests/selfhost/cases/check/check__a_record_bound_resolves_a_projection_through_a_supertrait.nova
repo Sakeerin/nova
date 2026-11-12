@@ -1,0 +1,5 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+trait Sub: It { fn extra(self) -> Int }
+record M<I: Sub> { f: fn(I::Item) -> Int }
+fn main() { }

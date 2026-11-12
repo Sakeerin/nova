@@ -1,0 +1,8 @@
+fn main() {
+let mut s = 0
+while true { if s > 3 { break }
+ s = s + 1 }
+for i in 0..10 { if i % 2 == 1 { continue }
+ s = s + i }
+println("${s}")
+}

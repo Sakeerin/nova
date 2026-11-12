@@ -1,0 +1,4 @@
+fn Int() -> Int { 1 }
+const String: Int = 2
+fn main() { let Bool = 3
+println("${Int()} ${String} ${Bool}") }

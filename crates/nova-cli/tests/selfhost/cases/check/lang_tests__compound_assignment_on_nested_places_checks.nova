@@ -1,0 +1,8 @@
+record G { cells: [[Int]] }
+record W { g: G }
+fn main() {
+    let mut w = W { g: G { cells: [[1]] } }
+    w.g.cells[0][0] += 1
+    let mut a = [[1, 2], [3, 4]]
+    a[1][0] -= 1
+}

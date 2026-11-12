@@ -1,0 +1,5 @@
+record P { v: Int }
+trait Zero { fn zero() -> Int }
+impl Zero for P { fn zero() -> Int { 42 } }
+fn main() { let p = P { v: 0 }
+ println("${p.zero()}") }

@@ -1,0 +1,13 @@
+impl<T> [T] {
+    fn second(self) -> T { self[1] }
+}
+impl [Int] {
+    fn total(self) -> Int {
+        let mut t = 0
+        for x in self { t += x }
+        t
+    }
+}
+fn main() {
+    println("${["a", "b"].second()} ${[1, 2].total()}")
+}

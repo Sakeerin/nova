@@ -1,0 +1,4 @@
+fn apply(f: fn(Int) -> Int, x: Int) -> Int { f(x) }
+fn main() { while true { let c = |n: Int| { if n > 0 { break }
+ n }
+ let _ = apply(c, 1) } }

@@ -17,8 +17,17 @@
 //!   quoted, `:` and a span; diagnostics print as the resolution dump's.
 //! - **5.3a's part is the items** (passes 2 to 5): records, sums, traits,
 //!   impls, every signature by `DefId`, externs, then every diagnostic so
-//!   far, the earlier stages' and the item passes'. 5.3b adds every
-//!   function, after the externs and before the diagnostics.
+//!   far, the earlier stages' and the item passes'. **5.3b's adds every
+//!   function** (ADR 0056), after the externs and before the diagnostics,
+//!   in `hir::Module`'s order: its line (id, name, generics, `takes_env`,
+//!   captures, parameters, `async`, place), its bounds, its return type,
+//!   its locals (`l<n>`) and its body, each node `(Kind values… span type`
+//!   with its type arguments, a trait call's self type and its children a
+//!   level deeper; a node's span is `start..end` in its function's file;
+//!   a pattern carries no span or type. The type checker's diagnostics
+//!   are then the bodies' too. `nova check --dump-hir-items` prints 5.3a's
+//!   part, which the differential compares until the self-hosted type
+//!   checker checks bodies.
 //! - **Two parts.** std's tables are the same in every program for a
 //!   target and mode, so they print once, by [`dump_std`]; a program's
 //!   part, by [`dump_program`], prints only the program's own entries, and
@@ -26,7 +35,9 @@
 //! - **Ids** are the resolution dump's: `u<n>` for the program's own
 //!   definition, `s<n>` for std's, its `DefId` less the first std
 //!   definition's. An impl, which has no `DefId`, is numbered from 0 within
-//!   its part, in the table's order.
+//!   its part, in the table's order. A closure or wrapper, whose `DefId` is
+//!   past every definition, prints as though its part's own closures came
+//!   right after that part's definitions (5.3b), its name's number too.
 //! - **Types** print by structure, with ids, not names: `Int`, `()`,
 //!   `[T0]`, `(Int, String)`, `(Int,)`, `fn(Int) -> Bool`, `Future<Int>`,
 //!   `T0` for a type parameter, a record or a sum as its id and its
@@ -103,6 +114,78 @@ pub const KINDS: &[&str] = &[
     "(Note",
     "(Fix",
     "(Edit",
+];
+
+/// Every form the full dump's functions print (5.3b, ADR 0056), beyond
+/// [`KINDS`]: the full dumps of std, the corpus and the cases print each
+/// of them, and 5.3a's item dumps none.
+pub const BODY_KINDS: &[&str] = &[
+    "(Function",
+    "(Function takes_env=true",
+    "(Function takes_env=false",
+    "(Function async=true",
+    "(Function async=false",
+    "(LocalDecl",
+    "(LocalDecl mut=true",
+    "(LocalDecl mut=false",
+    "(TypeArgs",
+    "(IntLit",
+    "(FloatLit",
+    "(BoolLit",
+    "(StrLit",
+    "(CharLit",
+    "(Unit",
+    "(Local",
+    "(MakeClosure",
+    "(Call",
+    "(MakeVariant",
+    "(MakeRecord",
+    "(MakeTuple",
+    "(FieldGet",
+    "(FieldSet",
+    "(MakeArray",
+    "(ArrayRepeat",
+    "(Index",
+    "(IndexSet",
+    "(ArrayLen",
+    "(TraitCall",
+    "(TraitCall receiver=true",
+    "(TraitCall receiver=false",
+    "(Binary",
+    "(LogicalAnd",
+    "(LogicalOr",
+    "(Unary",
+    "(Let",
+    "(Assign",
+    "(Block",
+    "(Block tail=true",
+    "(Block tail=false",
+    "(If",
+    "(If else=true",
+    "(If else=false",
+    "(While",
+    "(Break",
+    "(Continue",
+    "(Match",
+    "(Arm",
+    "(Arm guard=true",
+    "(Arm guard=false",
+    "(Return",
+    "(Return value=true",
+    "(Return value=false",
+    "(ToStr",
+    "(StrConcat",
+    "(Await",
+    "(PatWildcard",
+    "(PatBind",
+    "(PatInt",
+    "(PatBool",
+    "(PatStr",
+    "(PatChar",
+    "(PatRange",
+    "(PatVariant",
+    "(PatTuple",
+    "(PatOr",
 ];
 
 /// The forms no input prints: the two severities no stage gives.

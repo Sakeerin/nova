@@ -1,0 +1,6 @@
+record R { x: Int }
+fn f(mut a: [Int], mut r: R, mut t: (Int, (Int, Int))) -> Int {
+    r.x += 2
+    - 1
+}
+fn main() {}

@@ -1,0 +1,3 @@
+record Wrap { v: Int }
+type Two = | A | B
+fn main() { }

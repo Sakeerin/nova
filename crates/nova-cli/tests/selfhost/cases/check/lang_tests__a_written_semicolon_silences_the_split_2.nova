@@ -1,0 +1,6 @@
+fn g() {}
+fn f() {
+    return;
+    g()
+}
+fn main() {}

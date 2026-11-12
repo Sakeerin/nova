@@ -1,0 +1,5 @@
+record Pair<A, B> { first: A, second: B }
+fn main() {
+let p = Pair { first: 1, second: "two" }
+println("${p.first} ${p.second}")
+}

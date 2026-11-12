@@ -1,0 +1,8 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+record Once { v: Int, done: Bool }
+impl It for Once { type Item = Int
+fn next(mut self) -> Option<Int> { if self.done { None } else { self.done = true
+ Some(self.v) } } }
+fn main() { let it = Once { v: 7, done: false }
+for x in it { x = 1 } }

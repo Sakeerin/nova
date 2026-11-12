@@ -1,0 +1,16 @@
+import ui
+import ui::html::{div, input}
+fn h() { }
+fn typed(v: String) { }
+component Card(title: String, n: Signal<Int>) {
+    view {
+        div(class: "c", aria_label: title, on_click: h, on_input: typed) {
+            text("fixed")
+            text("n ${n.value()}")
+            input(type: "text", value: title, on_change: |v: String| println(v))
+            div { }
+        }
+    }
+}
+fn use_it() { let v: View = Card("t", signal(1)) }
+fn main() { }

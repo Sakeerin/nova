@@ -1,0 +1,4 @@
+record Box<T> { value: T }
+trait Tag { fn tag(self) -> String }
+impl<T> Tag for Box<T> where T: Tag { fn tag(self) -> String { "b" } }
+fn main() { }

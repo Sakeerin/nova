@@ -1,0 +1,4 @@
+record Box<T> { value: T }
+impl Box<Int> { fn tag() -> Int { 1 } }
+impl Box<Bool> { fn tag() -> Int { 2 } }
+fn main() { println("${Box::tag()}") }
