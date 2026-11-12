@@ -257,6 +257,13 @@ dump (spec
 
 ### Changed
 
+- **Methods are checked in declaration order.** The type checker checks
+  a program's functions, then its methods, then its constants, each in
+  the order they are declared, and then std's, so the errors inside
+  methods are reported in the order the methods are written, where they
+  came in an order of their own before. Closures and functions used as
+  values are numbered in the same order, the program's before std's, and
+  their numbers show only in the names of the symbols they compile to.
 - **Deeply nested source is now P0002, not a crash.** Past 128 levels of
   nesting, "this is nested too deeply (more than 128 levels)" at the token
   where the limit was crossed; the parser stops there, so it is the
