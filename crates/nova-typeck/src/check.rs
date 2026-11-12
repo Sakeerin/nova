@@ -9662,7 +9662,7 @@ mod tests {
             .map(|d| {
                 assert_eq!(d.code, "E0010", "{d:?}");
                 let at = d.labels[0].span.start as usize;
-                src[at..].as_bytes()[2] as usize - b'0' as usize
+                src.as_bytes()[at + 2] as usize - b'0' as usize
             })
             .collect();
         assert_eq!(shown, [1, 2, 3, 4, 5, 6, 7, 8]);
