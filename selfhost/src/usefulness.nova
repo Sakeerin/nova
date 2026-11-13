@@ -1,0 +1,532 @@
+// Maranget's usefulness algorithm for `match` exhaustiveness and
+// reachability: a port of crates/nova-typeck/src/usefulness.rs, function by
+// function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). A candidate row `q` is useful with respect to a pattern
+// matrix when some value matches `q` but no row of the matrix: a `match` is
+// exhaustive when a wildcard row is not useful against its arms, and an
+// arm reachable when its row is useful against the earlier arms. The search
+// rebuilds witness patterns for the values a match misses.
+//
+// - Ranges are not split: a literal and a range are each a constructor of
+//   their own, equal only to the same literal or range (usefulness.rs's
+//   module comment gives why).
+// - `Ctor` and `UPat` are S0's `Ctor` and `Pat`; `UPat`'s variants carry an
+//   `Up` prefix, as hir.nova's `HirPattern` holds `PatOr` and `PatTuple`.
+// - A `Vec` is shared, not copied, when passed: each row and witness is
+//   built new, never changed once made, where S0 clones.
+
+import hir
+
+/// A pattern constructor (`Ctor`): the shape a value can take that a
+/// pattern tests.
+pub type Ctor =
+    // sum, variant
+    | CtorVariant(Int, Int)
+    | CtorBool(Bool)
+    | CtorInt(Int)
+    | CtorStr(String)
+    | CtorChar(Char)
+    // lo, hi: an `Int` range, or a `Char` range by code point, both included
+    | CtorRange(Int, Int)
+    // arity: the one constructor of a tuple type of that arity
+    | CtorTuple(Int)
+
+/// `a == b` on two constructors (`Ctor`'s derived `PartialEq`).
+pub fn ctor_eq(a: Ctor, b: Ctor) -> Bool {
+    match (a, b) {
+        (CtorVariant(s1, v1), CtorVariant(s2, v2)) => s1 == s2 && v1 == v2
+        (CtorBool(x), CtorBool(y)) => x == y
+        (CtorInt(x), CtorInt(y)) => x == y
+        (CtorStr(x), CtorStr(y)) => x == y
+        (CtorChar(x), CtorChar(y)) => x.to_int() == y.to_int()
+        (CtorRange(a1, b1), CtorRange(a2, b2)) => a1 == a2 && b1 == b2
+        (CtorTuple(x), CtorTuple(y)) => x == y
+        _ => false
+    }
+}
+
+/// A pattern in the checker's normalized form (`Pat`): a wildcard, which
+/// also stands for an irrefutable binding, a constructor applied to
+/// sub-patterns, or an or-pattern, which matches what any alternative
+/// matches.
+pub type UPat = | UpWild | UpCtor(Ctor, Vec<UPat>) | UpOr(Vec<UPat>)
+
+/// The algorithm's context (`MatchCx`): the sum types, whose variants give a
+/// type's constructors and their arities, and whether a witness names a
+/// value of an `Int`, `Char` or `String` column that the column's literals
+/// and ranges miss, as E0022 shows it, rather than `_`, as E0020 does.
+pub record MatchCx { pub sums: Vec<SumType>, pub name_values: Bool }
+
+/// A context over `sums` (`MatchCx::new`).
+pub fn new_match_cx(sums: Vec<SumType>) -> MatchCx { MatchCx { sums: sums, name_values: false } }
+
+impl MatchCx {
+    /// This context, its witnesses naming a value a column's literals and
+    /// ranges miss (`naming_values`).
+    pub fn naming_values(self) -> MatchCx { MatchCx { sums: self.sums, name_values: true } }
+
+    /// The witnesses that `q` matches but no row of `matrix` does: none
+    /// when `q` is not useful. Each row, `q` and each witness is aligned
+    /// with `col_tys` (`usefulness`).
+    pub fn usefulness(
+        self,
+        matrix: Vec<Vec<UPat>>,
+        q: Vec<UPat>,
+        col_tys: Vec<Ty>,
+    ) -> Vec<Vec<UPat>> {
+        let mut out: Vec<Vec<UPat>> = Vec::new()
+        // No column left: useful when no row is (a value reached this far
+        // unmatched); the sole witness is the empty row.
+        if q.is_empty() {
+            if matrix.is_empty() { out.push(Vec::new()) }
+            return out
+        }
+        // A row whose head is an or-pattern stands for one row per
+        // alternative.
+        let mut any_or = false
+        for r in matrix.iter() {
+            match r.at(0) {
+                UpOr(_) => any_or = true
+                _ => ()
+            }
+        }
+        let matrix = if any_or { expand_or_heads(matrix) } else { matrix }
+        match q.at(0) {
+            // `q` is useful when one of its alternatives is.
+            UpOr(alts) => {
+                for a in alts.iter() {
+                    for w in self.usefulness(matrix, cons(a, rest(q, 1)), col_tys).iter() {
+                        out.push(w)
+                    }
+                }
+            }
+            UpCtor(c, args) => {
+                let spec = self.specialize(matrix, c)
+                let spec_tys = self.specialized_tys(c, col_tys)
+                let sq = concat(args, rest(q, 1))
+                for w in self.usefulness(spec, sq, spec_tys).iter() {
+                    out.push(reassemble(c, w, args.len()))
+                }
+            }
+            UpWild => {
+                let present = column_ctors(matrix)
+                let col0 = tuple_ty(col_tys.at(0), present)
+                let col_tys = with_head(col0, col_tys)
+                if self.is_complete(col_tys.at(0), present) {
+                    // Every constructor of the type is present: `q` is
+                    // useful only under some specific constructor.
+                    for c in self.signature(col_tys.at(0)).iter() {
+                        let arity = self.arity(c)
+                        let spec = self.specialize(matrix, c)
+                        let spec_tys = self.specialized_tys(c, col_tys)
+                        let sq = concat(wilds(arity), rest(q, 1))
+                        for w in self.usefulness(spec, sq, spec_tys).iter() {
+                            out.push(reassemble(c, w, arity))
+                        }
+                    }
+                } else {
+                    // The column's constructors are incomplete: the default
+                    // matrix, with a missing constructor (or `_`) in front.
+                    let def = default_matrix(matrix)
+                    let tail = self.usefulness(def, rest(q, 1), rest_tys(col_tys, 1))
+                    let heads = self.missing_heads(col_tys.at(0), present)
+                    for w in tail.iter() { for h in heads.iter() { out.push(cons(h, w)) } }
+                    // Where E0022 asks, also the values under each present
+                    // constructor, so `for (1, true) in p` names `(1, false)`
+                    // beside `(0, _)`.
+                    if self.name_values {
+                        for c in present.iter() {
+                            let arity = self.arity(c)
+                            let spec = self.specialize(matrix, c)
+                            let spec_tys = self.specialized_tys(c, col_tys)
+                            let sq = concat(wilds(arity), rest(q, 1))
+                            for w in self.usefulness(spec, sq, spec_tys).iter() {
+                                out.push(reassemble(c, w, arity))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // The matrix specialized by `c`: the rows whose head is `c`, its
+    // sub-patterns as new leading columns, and those whose head is a
+    // wildcard, with `arity(c)` wildcards; the rest dropped (`specialize`).
+    fn specialize(self, matrix: Vec<Vec<UPat>>, c: Ctor) -> Vec<Vec<UPat>> {
+        let arity = self.arity(c)
+        let mut out: Vec<Vec<UPat>> = Vec::new()
+        for row in matrix.iter() {
+            match row.at(0) {
+                UpCtor(rc, rargs) => if ctor_eq(rc, c) { out.push(concat(rargs, rest(row, 1))) }
+                UpWild => out.push(concat(wilds(arity), rest(row, 1)))
+                UpOr(alts) => {
+                    let mut rows: Vec<Vec<UPat>> = Vec::new()
+                    for a in alts.iter() { rows.push(cons(a, rest(row, 1))) }
+                    for r in self.specialize(rows, c).iter() { out.push(r) }
+                }
+            }
+        }
+        out
+    }
+
+    // The column types after specializing on `c`: `c`'s argument types in
+    // place of the first (`specialized_tys`).
+    fn specialized_tys(self, c: Ctor, col_tys: Vec<Ty>) -> Vec<Ty> {
+        let mut tys = self.arg_tys(c, col_tys.at(0))
+        for k in 1..col_tys.len() { tys.push(col_tys.at(k)) }
+        tys
+    }
+
+    /// The types of a constructor's fields, the column type's generic
+    /// arguments substituted in, as a new list (`arg_tys`).
+    pub fn arg_tys(self, c: Ctor, ty0: Ty) -> Vec<Ty> {
+        let mut out: Vec<Ty> = Vec::new()
+        match c {
+            CtorVariant(sum_id, vi) => {
+                let args = match ty0 {
+                    TySum(_, a) => a
+                    _ => Vec::new()
+                }
+                match self.variant(sum_id, vi) {
+                    Some(v) => for f in v.fields.iter() { out.push(subst(f, args)) }
+                    None => ()
+                }
+            }
+            CtorTuple(n) => {
+                let elems = match ty0 {
+                    TyTuple(es) => if es.len() == n { Some(es) } else { None }
+                    _ => None
+                }
+                match elems {
+                    Some(es) => for e in es.iter() { out.push(e) }
+                    None => for _ in 0..n { out.push(TyError) }
+                }
+            }
+            _ => ()
+        }
+        out
+    }
+
+    // A constructor's arity (`arity`).
+    fn arity(self, c: Ctor) -> Int {
+        match c {
+            CtorVariant(sum_id, vi) => {
+                match self.variant(sum_id, vi) {
+                    Some(v) => v.fields.len()
+                    None => 0
+                }
+            }
+            CtorTuple(n) => n
+            _ => 0
+        }
+    }
+
+    // A type's complete constructor signature, or none for a type with no
+    // finite one: integers, strings, opaque types (`signature`).
+    fn signature(self, ty: Ty) -> Vec<Ctor> {
+        let mut out: Vec<Ctor> = Vec::new()
+        match ty {
+            TyBool => {
+                out.push(CtorBool(true))
+                out.push(CtorBool(false))
+            }
+            TySum(def_id, _) => {
+                for s in self.sums.iter() {
+                    if s.def_id == def_id {
+                        for i in 0..s.variants.len() { out.push(CtorVariant(def_id, i)) }
+                        break
+                    }
+                }
+            }
+            TyTuple(elems) => out.push(CtorTuple(elems.len()))
+            _ => ()
+        }
+        out
+    }
+
+    // Whether `present` covers every constructor of `ty`; a type with no
+    // finite signature never is (`is_complete`).
+    fn is_complete(self, ty: Ty, present: Vec<Ctor>) -> Bool {
+        let sig = self.signature(ty)
+        if sig.is_empty() { return false }
+        for c in sig.iter() { if !ctor_in(present, c) { return false } }
+        true
+    }
+
+    // The constructors of `ty` missing from `present` as witness heads,
+    // each applied to wildcards; for a type with no enumerable signature a
+    // single `_` (`missing_heads`).
+    fn missing_heads(self, ty: Ty, present: Vec<Ctor>) -> Vec<UPat> {
+        let mut out: Vec<UPat> = Vec::new()
+        let sig = self.signature(ty)
+        if sig.is_empty() {
+            // A type with too many values to list: where asked, one the
+            // column's literals and ranges miss, `(_, 0)` rather than
+            // `(_, _)`.
+            let named = missing_value(ty, present)
+            let head = match named {
+                Some(c) => if self.name_values { UpCtor(c, Vec::new()) } else { UpWild }
+                None => UpWild
+            }
+            out.push(head)
+            return out
+        }
+        if present.is_empty() && self.name_values {
+            // No row names a constructor here: where E0022 asks, `_` says
+            // it all; E0020 lists them, so an empty `match` names every
+            // variant it misses.
+            out.push(UpWild)
+            return out
+        }
+        for c in sig.iter() {
+            if !ctor_in(present, c) { out.push(UpCtor(c, wilds(self.arity(c)))) }
+        }
+        if out.is_empty() { out.push(UpWild) }
+        out
+    }
+
+    // Variant `vi` of sum `sum_id` (`variant`).
+    fn variant(self, sum_id: Int, vi: Int) -> Option<HirVariant> {
+        for s in self.sums.iter() {
+            if s.def_id == sum_id {
+                if vi >= 0 && vi < s.variants.len() { return Some(s.variants.at(vi)) }
+                return None
+            }
+        }
+        None
+    }
+}
+
+// A value of `ty`, an `Int`, a `Char` or a `String`, that no literal or
+// range of `present` matches: the first from `0`, `'a'` or `""` on; none
+// when `present` holds none of the type's constructors or a short search
+// finds no such value (`missing_value`).
+fn missing_value(ty: Ty, present: Vec<Ctor>) -> Option<Ctor> {
+    let mut ints = false
+    let mut chars = false
+    let mut strs = false
+    for c in present.iter() {
+        match c {
+            CtorInt(_) => ints = true
+            CtorChar(_) => chars = true
+            CtorRange(_, _) => {
+                ints = true
+                chars = true
+            }
+            CtorStr(_) => strs = true
+            _ => ()
+        }
+    }
+    match ty {
+        TyInt => {
+            if !ints { return None }
+            match first_free(present, 0) {
+                Some(v) => Some(CtorInt(v))
+                None => None
+            }
+        }
+        TyChar => {
+            if !chars { return None }
+            match first_free(present, 97) {
+                Some(v) => {
+                    match char_from_int(v) {
+                        Some(c) => Some(CtorChar(c))
+                        None => None
+                    }
+                }
+                None => None
+            }
+        }
+        TyString => {
+            if !strs { return None }
+            if !str_in(present, "") { return Some(CtorStr("")) }
+            for b in 97..123 {
+                let s = string_from_chars([char_from_int(b).unwrap()])
+                if !str_in(present, s) { return Some(CtorStr(s)) }
+            }
+            None
+        }
+        _ => None
+    }
+}
+
+// Whether a literal or range of `present` matches `v` (`missing_value`'s
+// `covers`).
+fn covers(present: Vec<Ctor>, v: Int) -> Bool {
+    for c in present.iter() {
+        let hit = match c {
+            CtorInt(n) => n == v
+            CtorChar(ch) => ch.to_int() == v
+            CtorRange(lo, hi) => lo <= v && v <= hi
+            _ => false
+        }
+        if hit { return true }
+    }
+    false
+}
+
+// The first value from `start` on that `present` does not cover, past each
+// range that covers one, in as many steps as `present` has constructors
+// and one; none on overflow (`missing_value`'s `first_free`).
+fn first_free(present: Vec<Ctor>, start: Int) -> Option<Int> {
+    let mut v = start
+    for _ in 0..present.len() + 1 {
+        if !covers(present, v) { return Some(v) }
+        let mut past = v
+        for c in present.iter() {
+            match c {
+                CtorRange(lo, hi) => if lo <= v && v <= hi {
+                    past = hi
+                    break
+                }
+                _ => ()
+            }
+        }
+        if past == 9223372036854775807 { return None }
+        v = past + 1
+    }
+    None
+}
+
+// Whether `present` holds the string literal `s`.
+fn str_in(present: Vec<Ctor>, s: String) -> Bool {
+    for c in present.iter() {
+        match c {
+            CtorStr(t) => if t == s { return true }
+            _ => ()
+        }
+    }
+    false
+}
+
+/// Whether `cs` holds `c` (`contains`).
+pub fn ctor_in(cs: Vec<Ctor>, c: Ctor) -> Bool {
+    for x in cs.iter() { if ctor_eq(x, c) { return true } }
+    false
+}
+
+// The matrix with each row whose head is an or-pattern replaced by one row
+// per alternative, until no head is one (`expand_or_heads`).
+fn expand_or_heads(matrix: Vec<Vec<UPat>>) -> Vec<Vec<UPat>> {
+    let mut out: Vec<Vec<UPat>> = Vec::new()
+    for row in matrix.iter() {
+        match row.at(0) {
+            UpOr(alts) => {
+                let mut rows: Vec<Vec<UPat>> = Vec::new()
+                for a in alts.iter() { rows.push(cons(a, rest(row, 1))) }
+                for r in expand_or_heads(rows).iter() { out.push(r) }
+            }
+            _ => out.push(row)
+        }
+    }
+    out
+}
+
+// The first column's type, as a tuple of the arity the column's rows use,
+// when inference has not made it one: a tuple has one constructor whatever
+// its elements' types (`tuple_ty`).
+fn tuple_ty(ty: Ty, present: Vec<Ctor>) -> Option<Ty> {
+    match ty {
+        TyTuple(_) => return None
+        _ => ()
+    }
+    for c in present.iter() {
+        match c {
+            CtorTuple(n) => {
+                let mut es: Vec<Ty> = Vec::new()
+                for _ in 0..n { es.push(TyError) }
+                return Some(TyTuple(es))
+            }
+            _ => ()
+        }
+    }
+    None
+}
+
+// `col_tys` with its first type replaced by `h`, if there is one, as a new
+// list (`with_head`).
+fn with_head(h: Option<Ty>, col_tys: Vec<Ty>) -> Vec<Ty> {
+    let mut tys: Vec<Ty> = Vec::new()
+    for t in col_tys.iter() { tys.push(t) }
+    match h {
+        Some(t) => tys.set(0, t)
+        None => ()
+    }
+    tys
+}
+
+// The distinct constructors of the matrix's first column, in order
+// (`column_ctors`).
+fn column_ctors(matrix: Vec<Vec<UPat>>) -> Vec<Ctor> {
+    let mut out: Vec<Ctor> = Vec::new()
+    for row in matrix.iter() {
+        match row.at(0) {
+            UpCtor(c, _) => if !ctor_in(out, c) { out.push(c) }
+            _ => ()
+        }
+    }
+    out
+}
+
+// The default matrix: the rows whose head is a wildcard, that column
+// dropped (`default_matrix`).
+fn default_matrix(matrix: Vec<Vec<UPat>>) -> Vec<Vec<UPat>> {
+    let mut out: Vec<Vec<UPat>> = Vec::new()
+    for row in matrix.iter() {
+        match row.at(0) {
+            UpWild => out.push(rest(row, 1))
+            _ => ()
+        }
+    }
+    out
+}
+
+// One witness row rebuilt after a specialization by `c`: its first `arity`
+// columns are `c`'s arguments, the rest follow (`reassemble`).
+fn reassemble(c: Ctor, w: Vec<UPat>, arity: Int) -> Vec<UPat> {
+    let k = if arity < w.len() { arity } else { w.len() }
+    let mut args: Vec<UPat> = Vec::new()
+    for i in 0..k { args.push(w.at(i)) }
+    cons(UpCtor(c, args), rest(w, k))
+}
+
+// --- Rows, built new where S0 clones a slice ---
+
+/// `row[from..]`, a new list.
+pub fn rest(row: Vec<UPat>, from: Int) -> Vec<UPat> {
+    let mut out: Vec<UPat> = Vec::new()
+    for k in from..row.len() { out.push(row.at(k)) }
+    out
+}
+
+fn rest_tys(tys: Vec<Ty>, from: Int) -> Vec<Ty> {
+    let mut out: Vec<Ty> = Vec::new()
+    for k in from..tys.len() { out.push(tys.at(k)) }
+    out
+}
+
+/// `[head] ++ row`, a new list.
+pub fn cons(head: UPat, row: Vec<UPat>) -> Vec<UPat> {
+    let mut out: Vec<UPat> = Vec::new()
+    out.push(head)
+    for p in row.iter() { out.push(p) }
+    out
+}
+
+// `a ++ b`, a new list.
+fn concat(a: Vec<UPat>, b: Vec<UPat>) -> Vec<UPat> {
+    let mut out: Vec<UPat> = Vec::new()
+    for p in a.iter() { out.push(p) }
+    for p in b.iter() { out.push(p) }
+    out
+}
+
+/// `n` wildcards.
+pub fn wilds(n: Int) -> Vec<UPat> {
+    let mut out: Vec<UPat> = Vec::new()
+    for _ in 0..n { out.push(UpWild) }
+    out
+}

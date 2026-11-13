@@ -10,8 +10,9 @@
 // `Need`s of a value, a call's callee and a qualifier, `STD_ONLY_PUBLIC_FORMS`,
 // `offers`, `arity`, `variant_arity`, `variant_named` and `has_member`, and
 // `Binding` (ADR 0056); then a record literal's `Need`, `mutable_fix`,
-// `immutable_note`, `field_fix` and `method_fix` (5.3b part 3); the rest
-// of fixes.rs comes with the parts that use it.
+// `immutable_note`, `field_fix` and `method_fix` (5.3b part 3); then a
+// pattern's `Need`, `scrutinee_sum`, `remove_arm_fix` and lines.rs's
+// `arm_removal` (5.3b part 4).
 
 import ast
 import diagnostic
@@ -24,8 +25,9 @@ import typeck_method
 
 /// What an unknown name must be at its site (`Need`): the item passes
 /// meet a type and a trait; the bodies a value, a call's callee with its
-/// argument count, a record literal's record, and `T` in `T::member`, with
-/// the call's argument count when it is a callee's, -1 when it is not.
+/// argument count, a record literal's record, `T` in `T::member`, with
+/// the call's argument count when it is a callee's, -1 when it is not,
+/// and `T` in a pattern's `T::variant`.
 pub type Need =
     | NeedType
     | NeedTrait
@@ -34,6 +36,9 @@ pub type Need =
     | NeedRecord
     // member, call
     | NeedQualifier(String, Int)
+    // variant, arity, scrutinee: `T` in the pattern `T::variant` with
+    // `arity` fields, the matched value's sum type -1 when not known
+    | NeedPattern(String, Int, Int)
 
 /// How a local the user wrote was bound (`Binding`): by a `let`, as a
 /// parameter, by a name inside a destructuring `let`'s pattern (with that
@@ -169,6 +174,22 @@ impl Checker {
         }
     }
 
+    /// "remove the unreachable arm", `arm` being its pattern through its
+    /// body, placed by the source's lines; only in a module this project
+    /// owns (`remove_arm_fix`).
+    pub fn remove_arm_fix(self, arm: Span) -> Option<Fix> {
+        if !self.owned(self.cur_module) { return None }
+        let text = if self.cur_module >= 0 && self.cur_module < self.texts.len() {
+            self.texts.at(self.cur_module)?
+        } else {
+            return None
+        }
+        let (start, end) = arm_removal(text, arm.start, arm.end)?
+        let mut edits: Vec<Edit> = Vec::new()
+        edits.push(Edit::replace(self.cur_file, Span { start: start, end: end }, ""))
+        Some(Fix { title: "remove the unreachable arm", edits: edits })
+    }
+
     /// `fix`, if there is one, added to the diagnostic just pushed, unless
     /// the module being checked is not this project's (`push_fix`).
     pub fn push_fix(mut self, fix: Option<Fix>) {
@@ -291,6 +312,15 @@ impl Checker {
             NeedQualifier(member, call) => {
                 match e.types.get(x) {
                     Some(id) => self.has_member(id, member, call)
+                    None => false
+                }
+            }
+            NeedPattern(variant, arity, scrutinee) => {
+                match e.types.get(x) {
+                    Some(id) => {
+                        let (vi, a) = self.variant_named(id, variant)
+                        (scrutinee < 0 || scrutinee == id) && vi >= 0 && a == arity
+                    }
                     None => false
                 }
             }
@@ -504,6 +534,14 @@ impl Checker {
                         }
                     }
                 }
+                NeedPattern(_, _, _) => {
+                    for n in scope.types.keys().iter() {
+                        match self.kind_of(scope.types.get(n).unwrap() + offset) {
+                            DefKindSum(_, _) => candidates.push(n)
+                            _ => ()
+                        }
+                    }
+                }
                 NeedTrait => for n in scope.traits.keys().iter() { candidates.push(n) }
                 _ => ()
             }
@@ -550,6 +588,15 @@ pub fn res_eq(a: Res, b: Res) -> Bool {
         (ResVariant(s1, i1), ResVariant(s2, i2)) => s1 == s2 && i1 == i2
         (ResBuiltin(x), ResBuiltin(y)) => x == y
         _ => false
+    }
+}
+
+/// The sum type of a matched value, when inference knows it, or -1
+/// (`scrutinee_sum`).
+pub fn scrutinee_sum(fcx: FnCtx, ty: Ty) -> Int {
+    match fcx.icx.apply(ty) {
+        TySum(def_id, _) => def_id
+        _ => -1
     }
 }
 
@@ -667,4 +714,45 @@ fn comments_before(text: String, end: Int) -> Vec<(Int, Int)> {
         }
     }
     out
+}
+
+/// The bytes an unreachable arm's removal takes, the arm being `start` to
+/// `end` of `text`: its whole lines, when nothing else is on them but a
+/// comment after it, and a `,` after it; none when something other than
+/// a `,`, a line's end, a `}` or a comment follows it (`arm_removal`).
+pub fn arm_removal(text: String, start: Int, end: Int) -> Option<(Int, Int)> {
+    let n = text.byte_len()
+    let mut after = skip_blanks(text, end)
+    if after < n {
+        let b = text.byte_at(after)
+        let comment_here = b == 47 && after + 1 < n && text.byte_at(after + 1) == 47
+        if b == 44 {
+            after = skip_blanks(text, after + 1)
+        } else if b != 13 && b != 10 && b != 125 && !comment_here {
+            return None
+        }
+    }
+    let first = line_start(text, start)
+    let mut alone_before = true
+    for i in first..start {
+        let b = text.byte_at(i)
+        if b != 32 && b != 9 { alone_before = false }
+    }
+    let comment = after + 1 < n && text.byte_at(after) == 47 && text.byte_at(after + 1) == 47
+    let alone_after = comment
+        || after >= n
+        || text.byte_at(after) == 13
+        || text.byte_at(after) == 10
+    if alone_before && alone_after {
+        Some((first, next_line_start(text, after)))
+    } else {
+        Some((start, after))
+    }
+}
+
+// The first byte from `from` on that is not a space or a tab.
+fn skip_blanks(text: String, from: Int) -> Int {
+    let mut i = from
+    while i < text.byte_len() && (text.byte_at(i) == 32 || text.byte_at(i) == 9) { i += 1 }
+    i
 }

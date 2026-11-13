@@ -1,0 +1,1275 @@
+// The type checker's `match` and patterns: a port of check.rs's
+// `check_match`, `check_match_usefulness`, `render_witness`,
+// `check_pattern`, `variant_matches_scrutinee`, `variant_pattern`,
+// `unify_pattern_ty`, `error_count`, `ArmPat` and `to_useful_pat`, and of
+// check/patterns.rs's `PatState`, `bind_pattern_name`,
+// `warn_upper_case_binding` (E0104, with its fix), `tuple_pattern`,
+// `or_pattern`, `range_pattern`, `require_irrefutable`,
+// `check_or_alternatives`, `or_alternative_spans`, `or_tree`, `ancestors`,
+// `only`, `restrict_or` and `let_head`, function by function and with the
+// same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). usefulness.nova is the algorithm; typeck_for.nova
+// checks `for` loops and the patterns they bind; typeck_body.nova gives
+// the idioms and checks a destructuring `let`.
+//
+// - A witness's `String` and `Char` print as Rust's `{:?}` prints them
+//   (`debug_str`, `debug_char`).
+// - An or-pattern's tree node is `(parent node, parent alternative,
+//   alternatives)`, the parent node -1 at the top, where S0's is an
+//   `Option<(usize, usize)>` and a count.
+// - The language server's index (`note_use`) is not ported (decision 8).
+
+import ast
+import diagnostic
+import fixes
+import hir
+import infer
+import resolver
+import token
+import typeck
+import typeck_body
+import typeck_call
+import typeck_expr
+import usefulness
+
+/// The checker's state while it checks one pattern (`PatState`): the
+/// or-patterns being checked, innermost last; whether every binding is
+/// mutable, for `let mut P`; and, for a destructuring `let`'s pattern, its
+/// head as E0060's note quotes it, `(…)` or `W(…)`.
+pub record PatState { pub frames: Vec<OrFrame>, pub mutable: Bool, pub let_head: Option<String> }
+
+/// No pattern being checked (`PatState::default`).
+pub fn new_pat_state() -> PatState {
+    PatState { frames: Vec::new(), mutable: false, let_head: None }
+}
+
+/// One or-pattern being checked (`OrFrame`): the first alternative's
+/// bindings, once it is checked, which each later one binds; and the
+/// bindings of the alternative being checked, nested or-patterns' included.
+pub record OrFrame { pub first: Option<Vec<PatBind>>, pub current: Vec<PatBind> }
+
+/// A binding an or-pattern's alternative makes (`PatBind`).
+pub record PatBind { pub name: String, pub local: Int, pub ty: Ty, pub span: Span }
+
+/// One arm, as the usefulness analysis reads it (`ArmPat`): its pattern,
+/// whether it has a guard, its pattern's span, the whole arm's span, and
+/// its or-patterns' alternatives' spans, in pre-order.
+record ArmPat { pat: UPat, guarded: Bool, pat_span: Span, arm_span: Span, or_spans: Vec<Vec<Span>> }
+
+// `restrict_or`'s count of the or-patterns met.
+record Counter { n: Int }
+
+impl Checker {
+    // --- `match` ---
+
+    /// `match scrutinee { arms }` (`check_match`).
+    pub fn check_match(
+        mut self,
+        mut fcx: FnCtx,
+        scrutinee: Spanned<Expr>,
+        arms: Vec<MatchArm>,
+        span: Span,
+    ) -> HirExpr {
+        let scrut = self.check_expr(fcx, scrutinee)
+        let result_ty = fcx.icx.fresh()
+        let mut hir_arms: Vec<HirArm> = Vec::new()
+        // Each arm's normalized pattern, for the exhaustiveness and
+        // reachability analysis after all arms are checked.
+        let mut arm_pats: Vec<ArmPat> = Vec::new()
+        // An arm whose pattern was an error stands in as `_`; reading it so
+        // would report the arms after it unreachable, so the analysis is
+        // skipped.
+        let mut bad_pattern = false
+        for arm in arms.iter() {
+            let guarded = arm.guard.is_some()
+            fcx.scopes.push(Map::new())
+            let errors = self.error_count()
+            let pattern = self.check_pattern(fcx, arm.pattern, scrut.ty)
+            if self.error_count() > errors { bad_pattern = true }
+            let upat = to_useful_pat(pattern)
+            let mut or_spans: Vec<Vec<Span>> = Vec::new()
+            or_alternative_spans(arm.pattern, pattern, or_spans)
+            // A guard sees the arm's bindings and runs after they bind.
+            let guard: Option<HirExpr> = match arm.guard {
+                Some(g) => {
+                    let checked = self.check_expr(fcx, g)
+                    self.expect_ty(fcx, checked, TyBool, "a match guard")
+                    Some(checked)
+                }
+                None => None
+            }
+            let body = self.check_expr(fcx, arm.body)
+            let _ = fcx.scopes.pop()
+            // A diverging arm imposes no constraint on the result type.
+            let diverges = match fcx.icx.apply(body.ty) {
+                TyNever => true
+                _ => false
+            }
+            if !diverges && !fcx.icx.unify(body.ty, result_ty) {
+                self.error(
+                    "E0010",
+                    "match arms have incompatible types: expected `${self.show(result_ty, fcx)}`, found `${self.show(body.ty, fcx)}`",
+                    body.span,
+                )
+            }
+            arm_pats.push(
+                ArmPat {
+                    pat: upat,
+                    guarded: guarded,
+                    pat_span: arm.pattern.span,
+                    arm_span: arm.pattern.span.merge(arm.body.span),
+                    or_spans: or_spans,
+                },
+            )
+            hir_arms.push(
+                HirArm { pattern: pattern, guard: guard, body: body, span: arm.pattern.span },
+            )
+        }
+        if !bad_pattern { self.check_match_usefulness(fcx, scrut, arm_pats, span) }
+        // If every arm diverged the result was never constrained; it is then
+        // itself `Never`.
+        let ty = match fcx.icx.apply(result_ty) {
+            TyVar(_) => TyNever
+            _ => result_ty
+        }
+        HirExpr { kind: EkMatch(scrut, hir_arms), ty: ty, span: span }
+    }
+
+    // Exhaustiveness and reachability: an unguarded arm that is not useful
+    // against the earlier arms is E0021, and a match against which a
+    // wildcard row is still useful is E0020, its witnesses the values it
+    // misses (`check_match_usefulness`).
+    fn check_match_usefulness(
+        mut self,
+        mut fcx: FnCtx,
+        scrut: HirExpr,
+        arm_pats: Vec<ArmPat>,
+        span: Span,
+    ) {
+        let scrut_ty = fcx.icx.apply(scrut.ty)
+        // A type not yet resolved to constructors has no signature to
+        // analyze, but a match on it with no arm still misses every value;
+        // `Never` is uninhabited and `Error` already reported.
+        let (unknown, inhabited) = match scrut_ty {
+            TyVar(_) => (true, true)
+            TyParam(_) => (true, true)
+            TyError => (true, false)
+            TyNever => (true, false)
+            _ => (false, false)
+        }
+        if unknown {
+            if arm_pats.is_empty() && inhabited {
+                self.error("E0020", "non-exhaustive match: this match has no arms", span)
+                let mut d = self.diagnostics.last()
+                d.notes.push("a `match` on an inhabited type needs at least one arm")
+            }
+            return
+        }
+        let cx = new_match_cx(self.sums)
+        let mut col: Vec<Ty> = Vec::new()
+        col.push(scrut_ty)
+        // Reachability: each unguarded arm must cover a value no earlier
+        // unguarded arm does. A guarded arm neither is reported nor counts
+        // toward coverage; only its or-pattern's alternatives are checked,
+        // when it is reachable.
+        let mut prior: Vec<Vec<UPat>> = Vec::new()
+        for ap in arm_pats.iter() {
+            if ap.guarded {
+                if !cx.usefulness(prior, one(ap.pat), col).is_empty() {
+                    self.check_or_alternatives(cx, prior, ap.pat, ap.or_spans, col, true)
+                }
+                continue
+            }
+            if cx.usefulness(prior, one(ap.pat), col).is_empty() {
+                let mut d = Diagnostic::warning("E0021", "unreachable match arm")
+                d.add_primary(self.cur_file, ap.pat_span, "this arm is never reached")
+                d.add_note("an earlier arm already matches every value this one would")
+                match self.remove_arm_fix(ap.arm_span) {
+                    Some(fix) => d.add_fix(fix)
+                    None => ()
+                }
+                self.diagnostics.push(d)
+            } else {
+                self.check_or_alternatives(cx, prior, ap.pat, ap.or_spans, col, false)
+            }
+            prior.push(one(ap.pat))
+        }
+        // Exhaustiveness: a wildcard must not be useful against all arms.
+        let witnesses = cx.usefulness(prior, one(UpWild), col)
+        if witnesses.is_empty() { return }
+        let mut rendered: Vec<String> = Vec::new()
+        for w in witnesses.iter() {
+            if w.is_empty() { continue }
+            let r = self.render_witness(w.at(0), scrut_ty)
+            if rendered.is_empty() || rendered.last() != r { rendered.push(r) }
+        }
+        let mut quoted: Vec<String> = Vec::new()
+        for r in rendered.iter() { quoted.push("`${r}`") }
+        let plural = if rendered.len() == 1 { "" } else { "s" }
+        self.error(
+            "E0020",
+            "non-exhaustive match: pattern${plural} ${", ".join(quoted.to_array())} not covered",
+            span,
+        )
+        let mut d = self.diagnostics.last()
+        d.notes.push("add the missing arms or a `_ => ...` catch-all")
+    }
+
+    /// A witness pattern, at the type `ty` of the value it matches: a range
+    /// in a `Char` column renders as `Char`s, in an `Int` one as integers
+    /// (`render_witness`).
+    pub fn render_witness(self, pat: UPat, ty: Ty) -> String {
+        match pat {
+            UpWild => "_"
+            UpOr(alts) => {
+                let mut parts: Vec<String> = Vec::new()
+                for a in alts.iter() { parts.push(self.render_witness(a, ty)) }
+                " | ".join(parts.to_array())
+            }
+            UpCtor(c, args) => {
+                match c {
+                    CtorBool(b) => "${b}"
+                    CtorInt(v) => "${v}"
+                    CtorStr(s) => debug_str(s)
+                    CtorChar(ch) => debug_char(ch)
+                    CtorRange(lo, hi) => {
+                        let is_char = match ty {
+                            TyChar => true
+                            _ => false
+                        }
+                        match (char_from_int(lo), char_from_int(hi)) {
+                            (Some(a), Some(b)) => if is_char {
+                                "${debug_char(a)}..=${debug_char(b)}"
+                            } else {
+                                "${lo}..=${hi}"
+                            }
+                            _ => "${lo}..=${hi}"
+                        }
+                    }
+                    CtorTuple(_) => {
+                        let inner = self.witness_args(c, args, ty)
+                        if inner.len() == 1 {
+                            "(${inner.at(0)},)"
+                        } else {
+                            "(${", ".join(inner.to_array())})"
+                        }
+                    }
+                    CtorVariant(sum, vi) => {
+                        let mut name = "?"
+                        for s in self.sums.iter() {
+                            if s.def_id == sum {
+                                if vi >= 0 && vi < s.variants.len() {
+                                    name = s.variants.at(vi).name
+                                }
+                                break
+                            }
+                        }
+                        if args.is_empty() {
+                            name
+                        } else {
+                            "${name}(${", ".join(self.witness_args(c, args, ty).to_array())})"
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // The arguments of a witness's constructor `c`, each at its field's type
+    // (`render_witness`'s `args_at`).
+    fn witness_args(self, c: Ctor, args: Vec<UPat>, ty: Ty) -> Vec<String> {
+        let tys = new_match_cx(self.sums).arg_tys(c, ty)
+        let mut out: Vec<String> = Vec::new()
+        for i in 0..args.len() {
+            out.push(
+                self.render_witness(args.at(i), if i < tys.len() { tys.at(i) } else { TyError }),
+            )
+        }
+        out
+    }
+
+    // --- Patterns ---
+
+    /// A pattern against a value of type `scrut_ty` (`check_pattern`).
+    pub fn check_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        pattern: Spanned<Pattern>,
+        scrut_ty: Ty,
+    ) -> HirPattern {
+        match pattern.value {
+            PatternWildcard => PatWildcard
+            PatternLit(lit) => {
+                match lit {
+                    LiteralInt(v) => {
+                        self.unify_pattern_ty(fcx, TyInt, scrut_ty, pattern.span)
+                        PatInt(v)
+                    }
+                    LiteralBool(v) => {
+                        self.unify_pattern_ty(fcx, TyBool, scrut_ty, pattern.span)
+                        PatBool(v)
+                    }
+                    LiteralStr(v) => {
+                        self.unify_pattern_ty(fcx, TyString, scrut_ty, pattern.span)
+                        PatStr(v)
+                    }
+                    LiteralChar(c) => {
+                        self.unify_pattern_ty(fcx, TyChar, scrut_ty, pattern.span)
+                        PatChar(c)
+                    }
+                    LiteralFloat(_) => {
+                        self.unsupported(pattern.span, "`Float` literal patterns")
+                        PatWildcard
+                    }
+                }
+            }
+            PatternIdent(is_mut, name) => {
+                // A name of a variant of the scrutinee's sum is a variant
+                // pattern, not a binding.
+                match self.resolve_value_in(self.cur_module, name.value) {
+                    Some(ResVariant(sum_id, vi)) => {
+                        if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+                            return self.variant_pattern(
+                                fcx,
+                                sum_id,
+                                vi,
+                                Vec::new(),
+                                scrut_ty,
+                                pattern.span,
+                            )
+                        }
+                        // A known constructor of a different type: rejected
+                        // rather than bound as a catch-all.
+                        let mut d = Diagnostic::error(
+                            "E0001",
+                            "`${name.value}` is not a variant of the matched type",
+                        )
+                        d.add_primary(self.cur_file, pattern.span, "here")
+                        d.add_note(
+                            "a name inside a pattern that names a variant matches that variant; to bind a value, use a lower-case name",
+                        )
+                        self.diagnostics.push(d)
+                        return PatWildcard
+                    }
+                    _ => ()
+                }
+                self.bind_pattern_name(fcx, name, scrut_ty, is_mut)
+            }
+            PatternPath(path) => {
+                if path.segments.len() == 1 {
+                    self.single_path_pattern(fcx, path, scrut_ty, pattern.span)
+                } else if path.segments.len() == 2 {
+                    self.qualified_path_pattern(fcx, path, scrut_ty, pattern.span)
+                } else {
+                    self.unsupported(pattern.span, "this pattern form")
+                    PatWildcard
+                }
+            }
+            PatternTupleStruct(path, fields) => self.tuple_struct_pattern(
+                fcx,
+                path,
+                fields,
+                scrut_ty,
+                pattern.span,
+            )
+            PatternTuple(elems) => self.tuple_pattern(fcx, elems, scrut_ty, pattern.span)
+            PatternOr(alts) => self.or_pattern(fcx, alts, scrut_ty)
+            PatternRange(lo, hi, inclusive) => self.range_pattern(
+                fcx,
+                lo,
+                hi,
+                inclusive,
+                scrut_ty,
+                pattern.span,
+            )
+            PatternBinding(_, _) => {
+                self.unsupported(pattern.span, "`@` patterns")
+                PatWildcard
+            }
+            PatternRecord(_, _, _) => {
+                self.unsupported(pattern.span, "record patterns")
+                PatWildcard
+            }
+            PatternArray(_) => {
+                self.unsupported(pattern.span, "array patterns")
+                PatWildcard
+            }
+        }
+    }
+
+    // `Variant`, a path of one segment (`check_pattern`'s arm).
+    fn single_path_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        path: Path,
+        scrut_ty: Ty,
+        span: Span,
+    ) -> HirPattern {
+        let name = path.segments.at(0).value
+        match self.resolve_value_in(self.cur_module, name) {
+            Some(ResVariant(sum_id, vi)) => {
+                if self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+                    return self.variant_pattern(fcx, sum_id, vi, Vec::new(), scrut_ty, span)
+                }
+            }
+            _ => ()
+        }
+        self.error("E0001", "`${name}` is not a variant of the matched type", span)
+        PatWildcard
+    }
+
+    // `Type::Variant`, a path of two segments (`check_pattern`'s arm).
+    fn qualified_path_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        path: Path,
+        scrut_ty: Ty,
+        span: Span,
+    ) -> HirPattern {
+        let first = path.segments.at(0)
+        let ty_name = first.value
+        let v_name = path.segments.at(1).value
+        let sum_id = self.resolve_type_in(self.cur_module, ty_name)
+        if sum_id >= 0 {
+            let vi = self.variant_index(sum_id, v_name)
+            if vi >= 0 && self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+                return self.variant_pattern(fcx, sum_id, vi, Vec::new(), scrut_ty, span)
+            }
+        }
+        if sum_id < 0 && self.missing_on_target(ty_name, first.span) { return PatWildcard }
+        self.error("E0001", "`${ty_name}::${v_name}` is not a variant of the matched type", span)
+        // A qualifier this module never imported.
+        if sum_id < 0 {
+            let scrutinee = scrutinee_sum(fcx, scrut_ty)
+            self.name_fixes(first, NeedPattern(v_name, 0, scrutinee), Vec::new())
+        }
+        PatWildcard
+    }
+
+    // `Variant(p, …)` or `Type::Variant(p, …)` (`check_pattern`'s arm).
+    fn tuple_struct_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        path: Path,
+        fields: Vec<Spanned<Pattern>>,
+        scrut_ty: Ty,
+        span: Span,
+    ) -> HirPattern {
+        let segs = path.segments
+        let mut sum_id = -1
+        let mut vi = -1
+        if segs.len() == 1 {
+            match self.resolve_value_in(self.cur_module, segs.at(0).value) {
+                Some(ResVariant(s, v)) => {
+                    sum_id = s
+                    vi = v
+                }
+                _ => ()
+            }
+        } else if segs.len() == 2 {
+            let s = self.resolve_type_in(self.cur_module, segs.at(0).value)
+            if s >= 0 {
+                let v = self.variant_index(s, segs.at(1).value)
+                if v >= 0 {
+                    sum_id = s
+                    vi = v
+                }
+            }
+        }
+        if sum_id < 0 {
+            let unknown_type = segs.len() == 2
+                && self.resolve_type_in(self.cur_module, segs.at(0).value) < 0
+            // A type of a module the target lacks: its fields bind nothing
+            // usable, so they are checked against the error type.
+            if unknown_type && self.missing_on_target(segs.at(0).value, segs.at(0).span) {
+                for field in fields.iter() { let _ = self.check_pattern(fcx, field, TyError) }
+                return PatWildcard
+            }
+            self.error("E0001", "cannot resolve this pattern to a sum type variant", span)
+            // A qualifier this module never imported.
+            if unknown_type {
+                let scrutinee = scrutinee_sum(fcx, scrut_ty)
+                self.name_fixes(
+                    segs.at(0),
+                    NeedPattern(segs.at(1).value, fields.len(), scrutinee),
+                    Vec::new(),
+                )
+            }
+            return PatWildcard
+        }
+        if !self.variant_matches_scrutinee(fcx, sum_id, scrut_ty) {
+            self.error("E0010", "this variant does not belong to the matched type", span)
+            return PatWildcard
+        }
+        self.variant_pattern(fcx, sum_id, vi, fields, scrut_ty, span)
+    }
+
+    /// The scrutinee unified with the sum `sum_id` over fresh variables, so
+    /// payload fields take the scrutinee's generic arguments
+    /// (`variant_matches_scrutinee`).
+    pub fn variant_matches_scrutinee(mut self, mut fcx: FnCtx, sum_id: Int, scrut_ty: Ty) -> Bool {
+        let mut generics = 0
+        for s in self.sums.iter() {
+            if s.def_id == sum_id {
+                generics = s.generics
+                break
+            }
+        }
+        let mut args: Vec<Ty> = Vec::new()
+        for _ in 0..generics { args.push(fcx.icx.fresh()) }
+        fcx.icx.unify(scrut_ty, TySum(sum_id, args))
+    }
+
+    // Variant `variant` of `sum_id` with the sub-patterns `fields`
+    // (`variant_pattern`).
+    fn variant_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        sum_id: Int,
+        variant: Int,
+        fields: Vec<Spanned<Pattern>>,
+        scrut_ty: Ty,
+        span: Span,
+    ) -> HirPattern {
+        let mut found: Option<SumType> = None
+        for s in self.sums.iter() {
+            if s.def_id == sum_id {
+                found = Some(s)
+                break
+            }
+        }
+        let sum = match found {
+            Some(s) => s
+            None => return PatWildcard
+        }
+        let v = sum.variants.at(variant)
+        if fields.len() != v.fields.len() {
+            self.error(
+                "E0016",
+                "variant `${v.name}` has ${v.fields.len()} field(s) but the pattern has ${fields.len()}",
+                span,
+            )
+            return PatWildcard
+        }
+        // The scrutinee is a `Sum { fresh args }` by now: its arguments type
+        // the binders.
+        let scrut_args = match fcx.icx.apply(scrut_ty) {
+            TySum(_, args) => args
+            _ => Vec::new()
+        }
+        // Each field is a pattern, to any depth.
+        let mut out: Vec<HirPattern> = Vec::new()
+        for i in 0..fields.len() {
+            out.push(self.check_pattern(fcx, fields.at(i), subst(v.fields.at(i), scrut_args)))
+        }
+        PatVariant(sum_id, variant, out)
+    }
+
+    /// E0010 when a pattern of type `pat_ty` cannot match a value of
+    /// `scrut_ty` (`unify_pattern_ty`).
+    pub fn unify_pattern_ty(mut self, mut fcx: FnCtx, pat_ty: Ty, scrut_ty: Ty, span: Span) {
+        if !fcx.icx.unify(pat_ty, scrut_ty) {
+            self.error(
+                "E0010",
+                "pattern has type `${self.show(pat_ty, fcx)}` but the matched value has type `${self.show(scrut_ty, fcx)}`",
+                span,
+            )
+        }
+    }
+
+    /// How many errors have been reported so far (`error_count`).
+    pub fn error_count(self) -> Int {
+        let mut n = 0
+        for d in self.diagnostics.iter() { if d.is_error() { n += 1 } }
+        n
+    }
+
+    // --- patterns.rs ---
+
+    /// `name` bound in a pattern; in the second or a later alternative of
+    /// an or-pattern, the first alternative's local, at the same type
+    /// (E0100 otherwise) (`bind_pattern_name`).
+    pub fn bind_pattern_name(
+        mut self,
+        mut fcx: FnCtx,
+        name: Spanned<String>,
+        ty: Ty,
+        is_mut: Bool,
+    ) -> HirPattern {
+        // The innermost or-pattern whose first alternative is checked, and
+        // its binding of this name.
+        let mut has_first = false
+        let mut first: Option<PatBind> = None
+        let mut k = self.pats.frames.len()
+        while k > 0 {
+            k -= 1
+            match self.pats.frames.at(k).first {
+                Some(list) => {
+                    has_first = true
+                    for b in list.iter() {
+                        if b.name == name.value {
+                            first = Some(b)
+                            break
+                        }
+                    }
+                    break
+                }
+                None => ()
+            }
+        }
+        let bind = match first {
+            Some(b) => {
+                if !fcx.icx.unify(ty, b.ty) {
+                    let here = self.show(ty, fcx)
+                    let there = self.show(b.ty, fcx)
+                    let mut d = Diagnostic::error(
+                        "E0100",
+                        "the alternatives bind `${name.value}` at different types",
+                    )
+                    d.add_primary(
+                        self.cur_file,
+                        name.span,
+                        "`${name.value}` is `${here}` here, `${there}` in the first alternative",
+                    )
+                    self.diagnostics.push(d)
+                }
+                b
+            }
+            None => {
+                if has_first {
+                    let mut d = Diagnostic::error("E0100", "the alternatives bind different names")
+                    d.add_primary(
+                        self.cur_file,
+                        name.span,
+                        "`${name.value}` is not bound in the first alternative",
+                    )
+                    self.diagnostics.push(d)
+                }
+                // A binding that starts with an upper-case letter is most
+                // often a variant misspelt or not in scope.
+                let lead = if name.value.byte_len() > 0 { name.value.byte_at(0) } else { 0 }
+                if lead >= 65 && lead <= 90 { self.warn_upper_case_binding(fcx, name, ty) }
+                let mutable = is_mut || self.pats.mutable
+                let binding = match self.pats.let_head {
+                    Some(h) => BindingLetPattern(h)
+                    None => BindingPattern
+                }
+                let local = self.bind_local(fcx, name.value, ty, mutable, name.span, binding)
+                PatBind { name: name.value, local: local, ty: ty, span: name.span }
+            }
+        }
+        for frame in self.pats.frames.iter() {
+            let mut f = frame
+            let mut seen = false
+            for c in f.current.iter() { if c.name == bind.name { seen = true } }
+            if !seen { f.current.push(bind) }
+        }
+        PatBind(bind.local)
+    }
+
+    // E0104 at `name`, a pattern's binding that starts with an upper-case
+    // letter: a constant's name gets its own note, and a name near a
+    // variant's "did you mean" with its fix (`warn_upper_case_binding`).
+    fn warn_upper_case_binding(mut self, mut fcx: FnCtx, name: Spanned<String>, ty: Ty) {
+        let is_const = match self.resolve_value_in(self.cur_module, name.value) {
+            Some(ResDef(id)) => {
+                match self.kind_of(id) {
+                    DefKindConst(_) => true
+                    _ => false
+                }
+            }
+            _ => false
+        }
+        let note = if is_const {
+            "a pattern cannot match a constant by name; use a guard: `n if n == ${name.value}`"
+        } else {
+            "a name that starts with an upper-case letter reads as a variant; if one was meant, check its spelling or import it; to bind a value, use a lower-case name"
+        }
+        let mut d = Diagnostic::warning(
+            "E0104",
+            "`${name.value}` binds a value: no variant of that name is in scope",
+        )
+        d.add_primary(self.cur_file, name.span, "this binding matches any value")
+        d.add_note(note)
+        // The variants the name could mean, of a sum the matched value's
+        // type unifies with: the matched sum's, and those in scope; any
+        // sum's while that type is not yet known.
+        let col = fcx.icx.apply(ty)
+        let matched = scrutinee_sum(fcx, ty)
+        let mut variants: Vec<String> = Vec::new()
+        let mut unimported = ""
+        if matched >= 0 {
+            match self.kind_of(matched) {
+                DefKindSum(_, vs) => {
+                    for v in vs.iter() { variants.push(v.name) }
+                    for v in vs.iter() {
+                        if v.name == name.value {
+                            unimported = self.name_of(matched)
+                            break
+                        }
+                    }
+                }
+                _ => ()
+            }
+        }
+        if self.cur_module >= 0 && self.cur_module < self.defs.modules.len() {
+            let scope = self.defs.modules.at(self.cur_module)
+            let offset = self.offset_of(self.cur_module)
+            for n in scope.values.keys().iter() {
+                match shift_res(scope.values.get(n).unwrap(), offset) {
+                    ResVariant(sum, _) => {
+                        let fits = match col {
+                            TySum(def_id, _) => def_id == sum
+                            TyVar(_) => true
+                            TyError => true
+                            _ => false
+                        }
+                        if fits { variants.push(n) }
+                    }
+                    _ => ()
+                }
+            }
+        }
+        let near = if is_const || unimported != "" {
+            None
+        } else {
+            closest(name.value, variants.to_array())
+        }
+        if unimported != "" {
+            // The matched sum has a variant of this very name, which is not
+            // in scope here.
+            d.add_note(
+                "`${name.value}` is a variant of `${unimported}` but is not in scope here: write `${unimported}::${name.value}`, or import it",
+            )
+        }
+        match near {
+            Some(to) => d.add_note("did you mean `${to}`?")
+            None => ()
+        }
+        self.diagnostics.push(d)
+        if near.is_some() { self.push_fix(change_to(self.cur_file, name, variants.to_array())) }
+    }
+
+    /// `(p1, …, pn)`, and `()` against the unit type (`tuple_pattern`).
+    pub fn tuple_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        elems: Vec<Spanned<Pattern>>,
+        scrut_ty: Ty,
+        span: Span,
+    ) -> HirPattern {
+        if elems.is_empty() {
+            self.unify_pattern_ty(fcx, TyUnit, scrut_ty, span)
+            return PatWildcard
+        }
+        let n = elems.len()
+        let tys: Option<Vec<Ty>> = match fcx.icx.apply(scrut_ty) {
+            TyTuple(ts) => {
+                if ts.len() == n {
+                    Some(ts)
+                } else {
+                    let s = if n == 1 { "" } else { "s" }
+                    self.error(
+                        "E0010",
+                        "this pattern has ${n} element${s} but the matched value is a tuple of ${ts.len()}, `${self.show(scrut_ty, fcx)}`",
+                        span,
+                    )
+                    None
+                }
+            }
+            TyError => {
+                let mut es: Vec<Ty> = Vec::new()
+                for _ in 0..n { es.push(TyError) }
+                Some(es)
+            }
+            _ => {
+                let mut fresh: Vec<Ty> = Vec::new()
+                for _ in 0..n { fresh.push(fcx.icx.fresh()) }
+                if fcx.icx.unify(scrut_ty, TyTuple(fresh)) {
+                    Some(fresh)
+                } else {
+                    self.error(
+                        "E0010",
+                        "a tuple pattern cannot match a value of type `${self.show(scrut_ty, fcx)}`",
+                        span,
+                    )
+                    None
+                }
+            }
+        }
+        let ts = match tys {
+            Some(t) => t
+            None => {
+                // The elements' names are bound anyway, so their uses are
+                // not E0001 too.
+                for e in elems.iter() { let _ = self.check_pattern(fcx, e, TyError) }
+                return PatWildcard
+            }
+        }
+        let mut out: Vec<HirPattern> = Vec::new()
+        for i in 0..n { out.push(self.check_pattern(fcx, elems.at(i), ts.at(i))) }
+        PatTuple(out)
+    }
+
+    /// `p1 | p2 | …`: each alternative binds the first one's names, at
+    /// their types (E0100) (`or_pattern`).
+    pub fn or_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        alts: Vec<Spanned<Pattern>>,
+        scrut_ty: Ty,
+    ) -> HirPattern {
+        self.pats.frames.push(OrFrame { first: None, current: Vec::new() })
+        let mut out: Vec<HirPattern> = Vec::new()
+        for i in 0..alts.len() {
+            let alt = alts.at(i)
+            let mut top = self.pats.frames.last()
+            top.current = Vec::new()
+            out.push(self.check_pattern(fcx, alt, scrut_ty))
+            let mut frame = self.pats.frames.last()
+            match frame.first {
+                None => {
+                    if i == 0 {
+                        let mut copy: Vec<PatBind> = Vec::new()
+                        for b in frame.current.iter() { copy.push(b) }
+                        frame.first = Some(copy)
+                    }
+                }
+                Some(first) => {
+                    for b in first.iter() {
+                        let mut here = false
+                        for c in frame.current.iter() { if c.name == b.name { here = true } }
+                        if here { continue }
+                        let mut d = Diagnostic::error(
+                            "E0100",
+                            "the alternatives bind different names",
+                        )
+                        d.add_primary(
+                            self.cur_file,
+                            alt.span,
+                            "`${b.name}` is missing from this alternative",
+                        )
+                        d.add_note(
+                            "every alternative of an or-pattern binds the same names; the first one binds `${b.name}`",
+                        )
+                        self.diagnostics.push(d)
+                    }
+                }
+            }
+        }
+        let _ = self.pats.frames.pop()
+        PatOr(out)
+    }
+
+    /// `lo..hi` and `lo..=hi` over `Int`, and `lo..=hi` over `Char`; an
+    /// empty range is E0101 (`range_pattern`).
+    pub fn range_pattern(
+        mut self,
+        mut fcx: FnCtx,
+        lo: Spanned<Pattern>,
+        hi: Spanned<Pattern>,
+        inclusive: Bool,
+        scrut_ty: Ty,
+        span: Span,
+    ) -> HirPattern {
+        let (lo_v, hi_v, ty, a, b) = match (lo.value, hi.value) {
+            (PatternLit(LiteralInt(x)), PatternLit(LiteralInt(y))) => (x, y, TyInt, "${x}", "${y}")
+            (PatternLit(LiteralChar(x)), PatternLit(LiteralChar(y))) => (
+                x.to_int(),
+                y.to_int(),
+                TyChar,
+                debug_char(x),
+                debug_char(y),
+            )
+            _ => {
+                self.error(
+                    "E0010",
+                    "a range pattern's ends must be two `Int` or two `Char` literals",
+                    span,
+                )
+                return PatWildcard
+            }
+        }
+        self.unify_pattern_ty(fcx, ty, scrut_ty, span)
+        let empty = if inclusive { lo_v > hi_v } else { lo_v >= hi_v }
+        if empty {
+            let why = if lo_v == hi_v {
+                "`${a}..${b}` stops before its start"
+            } else {
+                "`${a}` is above `${b}`"
+            }
+            let mut d = Diagnostic::error("E0101", "this range matches nothing")
+            d.add_primary(self.cur_file, span, why)
+            self.diagnostics.push(d)
+            // Kept as written, not as `_`, so the arms after it are not
+            // reported unreachable as well.
+        }
+        PatRange(lo_v, if inclusive { hi_v } else { hi_v - 1 })
+    }
+
+    /// E0022, with the values it misses, when a destructuring pattern in a
+    /// `let` or a `for` does not match every value of `ty`
+    /// (`require_irrefutable`).
+    pub fn require_irrefutable(
+        mut self,
+        mut fcx: FnCtx,
+        pat: HirPattern,
+        ty: Ty,
+        span: Span,
+        what: String,
+    ) {
+        let ty = fcx.icx.apply(ty)
+        match ty {
+            TyVar(_) => return
+            TyParam(_) => return
+            TyError => return
+            TyNever => return
+            _ => ()
+        }
+        let cx = new_match_cx(self.sums).naming_values()
+        let mut rows: Vec<Vec<UPat>> = Vec::new()
+        rows.push(one(to_useful_pat(pat)))
+        let mut col: Vec<Ty> = Vec::new()
+        col.push(ty)
+        let witnesses = cx.usefulness(rows, one(UpWild), col)
+        if witnesses.is_empty() { return }
+        let mut rendered: Vec<String> = Vec::new()
+        for w in witnesses.iter() {
+            if w.is_empty() { continue }
+            let r = "`${self.render_witness(w.at(0), ty)}`"
+            if rendered.is_empty() || rendered.last() != r { rendered.push(r) }
+        }
+        let verb = if rendered.len() == 1 { "is" } else { "are" }
+        let mut d = Diagnostic::error("E0022", "refutable pattern in ${what}")
+        d.add_primary(self.cur_file, span, "${", ".join(rendered.to_array())} ${verb} not matched")
+        d.add_note(
+            "`let` and `for` take a pattern every value matches: names, `_`, tuples of these, and a variant of a sum that has only one; use `match` for the rest",
+        )
+        self.diagnostics.push(d)
+    }
+
+    // Each alternative of an or-pattern in a reachable arm that no value
+    // can reach, in the order the test chain tries them: every value that
+    // matches the arm with it is matched by an earlier arm, or takes an
+    // earlier alternative of this or-pattern or of one it sits in. An
+    // alternative inside one already reported is not reported again
+    // (`check_or_alternatives`).
+    fn check_or_alternatives(
+        mut self,
+        cx: MatchCx,
+        prior: Vec<Vec<UPat>>,
+        pat: UPat,
+        spans: Vec<Vec<Span>>,
+        col: Vec<Ty>,
+        guarded: Bool,
+    ) {
+        let tree = or_tree(pat)
+        let mut dead: Vec<(Int, Int)> = Vec::new()
+        for node in 0..tree.len() {
+            let (parent, parent_alt, alts) = tree.at(node)
+            let up = ancestors(tree, parent, parent_alt)
+            let mut buried = false
+            for (a, k) in up.iter() { if pair_in(dead, a, k) { buried = true } }
+            if buried { continue }
+            // The alternative each enclosing or-pattern takes on the way
+            // here, outermost first.
+            let mut path: Vec<(Int, Int)> = Vec::new()
+            let mut j = up.len()
+            while j > 0 {
+                j -= 1
+                path.push(up.at(j))
+            }
+            // A value reaches an enclosing or-pattern's alternative `j` only
+            // if it matches none of the alternatives before `j`.
+            let mut earlier: Vec<Vec<UPat>> = Vec::new()
+            for i in 0..path.len() {
+                let (a, alt) = path.at(i)
+                if alt > 0 {
+                    let mut keep = only(path, i)
+                    keep.push((a, 0, alt))
+                    earlier.push(one(restrict_or(pat, keep)))
+                }
+            }
+            for k in 0..alts {
+                let mut keep = only(path, path.len())
+                keep.push((node, k, k + 1))
+                let q = restrict_or(pat, keep)
+                let mut matrix: Vec<Vec<UPat>> = Vec::new()
+                for r in prior.iter() { matrix.push(r) }
+                for r in earlier.iter() { matrix.push(r) }
+                if k > 0 {
+                    let mut before = only(path, path.len())
+                    before.push((node, 0, k))
+                    matrix.push(one(restrict_or(pat, before)))
+                }
+                if !cx.usefulness(matrix, one(q), col).is_empty() { continue }
+                dead.push((node, k))
+                if node >= spans.len() || k >= spans.at(node).len() { continue }
+                let span = spans.at(node).at(k)
+                let mut d = Diagnostic::warning("E0021", "unreachable alternative")
+                d.add_primary(self.cur_file, span, "this alternative is never reached")
+                d.add_note(
+                    "an earlier arm, or an earlier alternative of this or-pattern, already matches every value this one would",
+                )
+                if guarded && !cx.usefulness(prior, one(q), col).is_empty() {
+                    d.add_note(
+                        "the arm's guard runs once, with the bindings of the first alternative that matches; when it is false, matching goes on with the next arm, not with this alternative",
+                    )
+                }
+                self.diagnostics.push(d)
+            }
+        }
+    }
+}
+
+/// A checked pattern in the usefulness algorithm's form: a binding and a
+/// wildcard both match anything; variants and tuples recurse, and
+/// or-patterns are kept (`to_useful_pat`).
+pub fn to_useful_pat(p: HirPattern) -> UPat {
+    match p {
+        PatWildcard => UpWild
+        PatBind(_) => UpWild
+        PatInt(v) => UpCtor(CtorInt(v), Vec::new())
+        PatBool(v) => UpCtor(CtorBool(v), Vec::new())
+        PatStr(v) => UpCtor(CtorStr(v), Vec::new())
+        PatChar(c) => UpCtor(CtorChar(c), Vec::new())
+        PatRange(lo, hi) => UpCtor(CtorRange(lo, hi), Vec::new())
+        PatVariant(sum, variant, fields) => UpCtor(CtorVariant(sum, variant), useful_pats(fields))
+        PatTuple(elems) => UpCtor(CtorTuple(elems.len()), useful_pats(elems))
+        PatOr(alts) => UpOr(useful_pats(alts))
+    }
+}
+
+fn useful_pats(ps: Vec<HirPattern>) -> Vec<UPat> {
+    let mut out: Vec<UPat> = Vec::new()
+    for p in ps.iter() { out.push(to_useful_pat(p)) }
+    out
+}
+
+/// A row of one pattern.
+pub fn one(p: UPat) -> Vec<UPat> {
+    let mut row: Vec<UPat> = Vec::new()
+    row.push(p)
+    row
+}
+
+/// The spans of each or-pattern's alternatives in `hir`, in the pre-order
+/// `or_tree` numbers them in: the checked pattern follows the source's
+/// shape wherever it has an or-pattern inside it; where it does not, it
+/// has none to number (`or_alternative_spans`).
+pub fn or_alternative_spans(ast: Spanned<Pattern>, hir: HirPattern, mut out: Vec<Vec<Span>>) {
+    let pairs: Option<(Vec<Spanned<Pattern>>, Vec<HirPattern>)> = match (ast.value, hir) {
+        (PatternOr(a), PatOr(h)) => {
+            if a.len() == h.len() {
+                let mut spans: Vec<Span> = Vec::new()
+                for x in a.iter() { spans.push(x.span) }
+                out.push(spans)
+                Some((a, h))
+            } else {
+                None
+            }
+        }
+        (PatternTupleStruct(_, a), PatVariant(_, _, h)) => if a.len() == h.len() {
+            Some((a, h))
+        } else {
+            None
+        }
+        (PatternTuple(a), PatTuple(h)) => if a.len() == h.len() { Some((a, h)) } else { None }
+        _ => None
+    }
+    match pairs {
+        Some((a, h)) => for i in 0..a.len() { or_alternative_spans(a.at(i), h.at(i), out) }
+        None => {
+            // Keep the numbering: one entry, with no spans, per or-pattern.
+            let count = or_tree(to_useful_pat(hir)).len()
+            for _ in 0..count { out.push(Vec::new()) }
+        }
+    }
+}
+
+// Each or-pattern of `pat`, in pre-order: the or-pattern and alternative
+// it sits in, the node -1 at the top, and its number of alternatives
+// (`or_tree`).
+fn or_tree(pat: UPat) -> Vec<(Int, Int, Int)> {
+    let mut out: Vec<(Int, Int, Int)> = Vec::new()
+    or_walk(pat, -1, 0, out)
+    out
+}
+
+fn or_walk(p: UPat, parent: Int, parent_alt: Int, mut out: Vec<(Int, Int, Int)>) {
+    match p {
+        UpWild => ()
+        UpCtor(_, args) => for a in args.iter() { or_walk(a, parent, parent_alt, out) }
+        UpOr(alts) => {
+            let me = out.len()
+            out.push((parent, parent_alt, alts.len()))
+            for k in 0..alts.len() { or_walk(alts.at(k), me, k, out) }
+        }
+    }
+}
+
+// The or-pattern and alternative `(node, alt)` names, and those it sits
+// in, innermost first; none when `node` is -1 (`ancestors`).
+fn ancestors(tree: Vec<(Int, Int, Int)>, node: Int, alt: Int) -> Vec<(Int, Int)> {
+    let mut out: Vec<(Int, Int)> = Vec::new()
+    let mut n = node
+    let mut k = alt
+    while n >= 0 {
+        out.push((n, k))
+        let (p, pk, _) = tree.at(n)
+        n = p
+        k = pk
+    }
+    out
+}
+
+// Whether `pairs` holds `(a, k)`.
+fn pair_in(pairs: Vec<(Int, Int)>, a: Int, k: Int) -> Bool {
+    for (x, y) in pairs.iter() { if x == a && y == k { return true } }
+    false
+}
+
+// The first `n` steps of `path`, each a restriction to its one
+// alternative, `(node, k, k + 1)` (`only`).
+fn only(path: Vec<(Int, Int)>, n: Int) -> Vec<(Int, Int, Int)> {
+    let mut out: Vec<(Int, Int, Int)> = Vec::new()
+    for i in 0..n {
+        let (node, k) = path.at(i)
+        out.push((node, k, k + 1))
+    }
+    out
+}
+
+// `pat` with each or-pattern `keep` names, counted as `or_tree` counts,
+// cut to the alternatives in its range `lo..hi` (`restrict_or`).
+fn restrict_or(pat: UPat, keep: Vec<(Int, Int, Int)>) -> UPat {
+    restrict_go(pat, keep, Counter { n: 0 })
+}
+
+fn restrict_go(p: UPat, keep: Vec<(Int, Int, Int)>, mut n: Counter) -> UPat {
+    match p {
+        UpWild => UpWild
+        UpCtor(c, args) => {
+            let mut out: Vec<UPat> = Vec::new()
+            for a in args.iter() { out.push(restrict_go(a, keep, n)) }
+            UpCtor(c, out)
+        }
+        UpOr(alts) => {
+            let me = n.n
+            n.n += 1
+            let mut lo = -1
+            let mut hi = -1
+            for (t, a, b) in keep.iter() {
+                if t == me {
+                    lo = a
+                    hi = b
+                    break
+                }
+            }
+            let mut kept: Vec<UPat> = Vec::new()
+            for k in 0..alts.len() {
+                let a = restrict_go(alts.at(k), keep, n)
+                if lo < 0 || (k >= lo && k < hi) { kept.push(a) }
+            }
+            UpOr(kept)
+        }
+    }
+}
+
+/// A destructuring `let`'s pattern as E0060's note quotes it after
+/// `let mut `: its head with the rest elided, `(…)` for a tuple, `W(…)` or
+/// `Wrap::W(…)` for a variant (`let_head`).
+pub fn let_head(pattern: Pattern) -> String {
+    match pattern {
+        PatternTupleStruct(path, _) => {
+            let mut names: Vec<String> = Vec::new()
+            for s in path.segments.iter() { names.push(s.value) }
+            "${"::".join(names.to_array())}(…)"
+        }
+        PatternTuple(_) => "(…)"
+        _ => "…"
+    }
+}
+
+// --- Rust's `{:?}` of a `String` and a `Char` ---
+
+/// `s` as Rust's `{:?}` prints it: in double quotes, with `\0`, `\t`,
+/// `\r`, `\n`, `\\` and `\"` escaped, and a character that is not
+/// printable or that extends a grapheme as its code point's escape, a
+/// backslash, `u` and the hex digits in braces.
+pub fn debug_str(s: String) -> String {
+    let mut out = StringBuilder::new()
+    out.push("\"")
+    for c in s.chars().iter() { out.push(debug_escape(c, true)) }
+    out.push("\"")
+    out.to_string()
+}
+
+/// `c` as Rust's `{:?}` prints it: in single quotes, `\'` escaped where a
+/// string's `\"` is.
+pub fn debug_char(c: Char) -> String { "'${debug_escape(c, false)}'" }
+
+// One character of `debug_str` (`in_str`) or `debug_char`
+// (`char::escape_debug_ext`).
+fn debug_escape(c: Char, in_str: Bool) -> String {
+    let v = c.to_int()
+    if v == 0 { return "\\0" }
+    if v == 9 { return "\\t" }
+    if v == 13 { return "\\r" }
+    if v == 10 { return "\\n" }
+    if v == 92 { return "\\\\" }
+    if v == 34 && in_str { return "\\\"" }
+    if v == 39 && !in_str { return "\\'" }
+    if v >= 32 && v < 127 { return string_from_chars([c]) }
+    if grapheme_extend(v) || !printable(v) { return "\\" + "u{${hex(v)}}" }
+    string_from_chars([c])
+}
+
+// `v` in lowercase hex, no leading zeros.
+fn hex(v: Int) -> String {
+    if v == 0 { return "0" }
+    let digits = "0123456789abcdef"
+    let mut out = ""
+    let mut n = v
+    while n > 0 {
+        out = digits.byte_slice(n & 15, (n & 15) + 1) + out
+        n = n >> 4
+    }
+    out
+}
+
+// Whether the code point `v` extends a grapheme (`is_grapheme_extended`),
+// over the ranges a source's text most often holds: combining marks,
+// variation selectors and the zero-width non-joiner.
+fn grapheme_extend(v: Int) -> Bool {
+    (v >= 0x300 && v <= 0x36F)
+        || (v >= 0x483 && v <= 0x489)
+        || (v >= 0x591 && v <= 0x5BD)
+        || (v >= 0x610 && v <= 0x61A)
+        || (v >= 0x64B && v <= 0x65F)
+        || (v >= 0x1AB0 && v <= 0x1AFF)
+        || (v >= 0x1DC0 && v <= 0x1DFF)
+        || v == 0x200C
+        || (v >= 0x20D0 && v <= 0x20F0)
+        || (v >= 0xFE00 && v <= 0xFE0F)
+        || (v >= 0xFE20 && v <= 0xFE2F)
+        || (v >= 0xE0100 && v <= 0xE01EF)
+}
+
+// Whether the code point `v` prints (`is_printable`): not the controls, nor
+// the format characters, separators and private uses Rust's table marks
+// as not; any other character outside ASCII does.
+fn printable(v: Int) -> Bool {
+    if v < 0x20 || (v >= 0x7F && v <= 0x9F) { return false }
+    if v == 0xAD || v == 0x61C || v == 0x180E || v == 0xFEFF { return false }
+    if v >= 0x600 && v <= 0x605 { return false }
+    if v >= 0x200B && v <= 0x200F { return false }
+    if v >= 0x2028 && v <= 0x202E { return false }
+    if v >= 0x2060 && v <= 0x206F { return false }
+    if v >= 0xD800 && v <= 0xF8FF { return false }
+    if v >= 0xFFF0 && v <= 0xFFFB { return false }
+    if v >= 0xE0000 && v <= 0xE0FFF { return false }
+    if v >= 0xF0000 { return false }
+    true
+}

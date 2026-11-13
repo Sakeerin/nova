@@ -4888,14 +4888,15 @@ fn n_bodies_on(
 /// `n_bodies.txt` lists, and N refuses every other input, printing
 /// `UNPORTED` and why (5.3b, while it is being built, ADR 0056): every
 /// listed input agrees, and an input not listed is one N refuses. std's
-/// full part, which holds std's bodies, N refuses too (part 4's).
+/// full part of each mode, which holds std's bodies, is listed as
+/// `<mode> std` (5.3b part 4).
 #[test]
 fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
     let listed = n_bodies_listed();
     let root = root();
     let mut sets: Vec<(Mode, PathBuf, Vec<String>, String)> = vec![
-        (Mode::Check, root.clone(), loose_corpus(), String::new()),
         (Mode::Check, root.clone(), package_corpus(), String::new()),
+        (Mode::Check, root.clone(), loose_corpus(), String::new()),
         (Mode::Wasm, root.clone(), wasm_corpus(), String::new()),
         (Mode::Test, root.clone(), test_corpus(), String::new()),
     ];
@@ -4923,15 +4924,44 @@ fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
             ));
         }
     }
+    // Each set's roots in batches, taken in turn by as many threads as there
+    // are cores; a set holding N's own package roots, each a dump of all of
+    // N, in batches of three, or its thread would be the test's long pole.
+    // Each of N's runs checks std's bodies once, so other sets keep whole
+    // batches.
+    let jobs: Vec<(Mode, &Path, &[String], &str)> = sets
+        .iter()
+        .flat_map(|(mode, dir, roots, prefix)| {
+            let size = if roots.iter().any(|r| r.starts_with("selfhost/")) {
+                3
+            } else {
+                BATCH
+            };
+            roots
+                .chunks(size)
+                .map(move |chunk| (*mode, dir.as_path(), chunk, prefix.as_str()))
+        })
+        .collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
     let compared: Vec<BodiesCompared> = std::thread::scope(|scope| {
-        let handles: Vec<_> = sets
-            .iter()
-            .map(|(mode, dir, roots, prefix)| {
-                let listed = &listed;
-                scope.spawn(move || n_bodies_on(*mode, dir, roots, prefix, listed))
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let (jobs, next, listed) = (&jobs, &next, &listed);
+                scope.spawn(move || {
+                    let mut done = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(&(mode, dir, roots, prefix)) = jobs.get(i) else {
+                            break;
+                        };
+                        done.push(n_bodies_on(mode, dir, roots, prefix, listed));
+                    }
+                    done
+                })
             })
             .collect();
-        joined(handles)
+        joined(handles).into_iter().flatten().collect()
     });
     let mut all = BodiesCompared::default();
     for c in compared {
@@ -4939,6 +4969,36 @@ fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
         all.refused.extend(c.refused);
         all.unlisted.extend(c.unlisted);
         all.differ.extend(c.differ);
+    }
+    // std's full part of each mode, listed as `<mode> std`: N's is S0's,
+    // byte for byte, or N refuses it, as a root's.
+    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
+        let key = (mode_name(mode).to_string(), "std".to_string());
+        let std_dir = std_dir();
+        let mut args = vec!["hir", "--std", std_dir.as_str()];
+        args.extend(mode.flags());
+        args.push("--std-part");
+        let n = run(selfhost(), &args, &root, &[]).unwrap_or_else(|e| panic!("{e}"));
+        let n_text = String::from_utf8(n.stdout).expect("N's dump is UTF-8");
+        if let Some(why) = n_text.strip_prefix("UNPORTED ") {
+            assert_eq!(n.code, Some(3), "{mode:?}: {}", n.stderr);
+            all.refused.push((key, why.trim_end().to_string()));
+            continue;
+        }
+        assert_eq!(n.code, Some(0), "{mode:?}: {}", n.stderr);
+        let mut s0_args: Vec<&str> = HIR_S0.iter().chain(mode.flags()).copied().collect();
+        s0_args.push("--std");
+        let s0 = run(&nova(), &s0_args, &root, &[]).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(s0.code, Some(0), "S0's std part, {mode:?}: {}", s0.stderr);
+        let s0_text = String::from_utf8(s0.stdout).expect("S0's dump is UTF-8");
+        if !listed.contains(&key) {
+            all.unlisted.push(format!("{} std", key.0));
+        } else if s0_text != n_text {
+            let at = first_difference(s0_text.as_bytes(), n_text.as_bytes());
+            all.differ.push(format!("{} std: {at:?}", key.0));
+        } else {
+            all.agree += 1;
+        }
     }
     let stale: Vec<&(String, String)> = all
         .refused
@@ -4972,17 +5032,7 @@ fn n_gives_the_full_dump_of_the_listed_inputs_and_refuses_the_rest() {
         all.agree
     );
     // 5.3b's part 2: 384 inputs, 352 cases and 32 corpus roots.
-    assert!(all.agree >= 380, "only {} inputs", all.agree);
-    for mode in [Mode::Check, Mode::Wasm, Mode::Test] {
-        let std_dir = std_dir();
-        let mut args = vec!["hir", "--std", std_dir.as_str()];
-        args.extend(mode.flags());
-        args.push("--std-part");
-        let n = run(selfhost(), &args, &root, &[]).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(n.code, Some(3), "{mode:?}: {}", n.stderr);
-        assert_eq!(
-            String::from_utf8_lossy(&n.stdout),
-            "UNPORTED std's bodies (5.3b part 4)\n"
-        );
-    }
+    // 5.3b's part 4: 1,161 inputs, 808 cases, 350 corpus roots and std's
+    // three parts.
+    assert!(all.agree >= 1150, "only {} inputs", all.agree);
 }
