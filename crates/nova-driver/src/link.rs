@@ -138,8 +138,11 @@ fn beside_exe(exe: &Path) -> Result<PathBuf> {
 /// `getrandom` (pulled in transitively by `ring`) resolves its Windows
 /// entropy source, `BCryptGenRandom`, through the former, with the latter
 /// backing `SystemFunction036` as its fallback on older Windows versions.
+/// `synchronization.lib` was added for Rust 1.100: the runtime it builds
+/// calls `WaitOnAddress`, `WakeByAddressSingle` and `WakeByAddressAll`, and
+/// without the library the link fails with LNK2019.
 #[cfg(windows)]
-const MSVC_LIBS: [&str; 8] = [
+const MSVC_LIBS: [&str; 9] = [
     "bcrypt.lib",
     "advapi32.lib",
     "kernel32.lib",
@@ -148,6 +151,7 @@ const MSVC_LIBS: [&str; 8] = [
     "ws2_32.lib",
     "dbghelp.lib",
     "msvcrt.lib",
+    "synchronization.lib",
 ];
 
 #[cfg(windows)]
