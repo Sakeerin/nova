@@ -8,7 +8,9 @@
 // `body_result_span`), function by function and with the same names (spec
 // docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
 // §4.1 and §4.2, ADR 0056). typeck_expr.nova checks expressions,
-// typeck_call.nova calls; infer.nova is the unifier.
+// typeck_call.nova calls and `?`, typeck_method.nova record literals,
+// fields and methods, typeck_place.nova assignments, typeck_closure.nova
+// closures and functions as values; infer.nova is the unifier.
 //
 // - N checks the program's bodies only: std's are std's part of the dump
 //   (spec §4.5), which the shared path never checks for a program, in
@@ -630,7 +632,7 @@ impl Checker {
 pub fn place_key(file: String, span: Span) -> String { "${file}:${span.start}:${span.end}" }
 
 // `names` sorted in byte order, each once.
-fn sorted_unique(names: Vec<String>) -> Vec<String> {
+pub fn sorted_unique(names: Vec<String>) -> Vec<String> {
     let mut out: Vec<String> = Vec::new()
     for n in names.iter() {
         let mut k = 0

@@ -9,8 +9,9 @@
 // §3.2, ADR 0055). 5.3b adds what the bodies' unknown values need: the
 // `Need`s of a value, a call's callee and a qualifier, `STD_ONLY_PUBLIC_FORMS`,
 // `offers`, `arity`, `variant_arity`, `variant_named` and `has_member`, and
-// `Binding` (ADR 0056); the rest of fixes.rs comes with the parts that use
-// it.
+// `Binding` (ADR 0056); then a record literal's `Need`, `mutable_fix`,
+// `immutable_note`, `field_fix` and `method_fix` (5.3b part 3); the rest
+// of fixes.rs comes with the parts that use it.
 
 import ast
 import diagnostic
@@ -18,16 +19,19 @@ import hir
 import resolver
 import token
 import typeck
+import typeck_body
+import typeck_method
 
 /// What an unknown name must be at its site (`Need`): the item passes
 /// meet a type and a trait; the bodies a value, a call's callee with its
-/// argument count, and `T` in `T::member`, with the call's argument count
-/// when it is a callee's, -1 when it is not.
+/// argument count, a record literal's record, and `T` in `T::member`, with
+/// the call's argument count when it is a callee's, -1 when it is not.
 pub type Need =
     | NeedType
     | NeedTrait
     | NeedValue
     | NeedCall(Int)
+    | NeedRecord
     // member, call
     | NeedQualifier(String, Int)
 
@@ -62,6 +66,109 @@ const STD_ONLY_PUBLIC_FORMS: [(String, String)] = [
 const PRIMITIVES: [String] = ["Bool", "Bytes", "Char", "Float", "Future", "Int", "String"]
 
 impl Checker {
+    /// "make `x` mutable": `mut ` before the name of a local bound by a
+    /// `let` or as a parameter, `decl` that name's span in the current
+    /// file; never for `self`, nor in a module this project does not own
+    /// (`mutable_fix`).
+    pub fn mutable_fix(self, name: String, decl: Span) -> Option<Fix> {
+        if name == "self" || !self.owned(self.cur_module) { return None }
+        let ok = match self.bindings.get(place_key(self.cur_file, decl)) {
+            Some(BindingLet) => true
+            Some(BindingParam) => true
+            _ => false
+        }
+        if !ok { return None }
+        let mut edits: Vec<Edit> = Vec::new()
+        edits.push(Edit::insert(decl.start, self.cur_file, "mut "))
+        Some(Fix { title: "make `${name}` mutable", edits: edits })
+    }
+
+    /// The note of an E0060 at `name`, declared at `decl`, when no fix is
+    /// offered: how to make it mutable where it is bound, to allow `what`
+    /// (`immutable_note`).
+    pub fn immutable_note(self, name: String, decl: Span, what: String) -> String {
+        match self.bindings.get(place_key(self.cur_file, decl)) {
+            Some(
+                BindingLetPattern(h),
+            ) => "`${name}` is bound by a pattern, whose bindings are immutable: a destructuring `let mut ${h} = …` makes each of them mutable, or rebind it as `let mut ${name} = ${name}` to allow ${what}"
+            Some(
+                BindingPattern,
+            ) => "`${name}` is bound by a pattern, whose bindings are immutable: rebind it as `let mut ${name} = ${name}` to allow ${what}"
+            Some(
+                BindingOther,
+            ) => "a `for` loop's variable is immutable: rebind it inside the loop's body as `let mut ${name} = ${name}` to allow ${what}"
+            _ => "declare it as `let mut ${name}` to allow ${what}"
+        }
+    }
+
+    /// "change `f` to `g`" among the fields of `ty`, a record
+    /// (`field_fix`).
+    pub fn field_fix(self, ty: Ty, field: Spanned<String>) -> Option<Fix> {
+        let def_id = match ty {
+            TyRecord(d, _) => d
+            _ => return None
+        }
+        for r in self.records.iter() {
+            if r.def_id == def_id {
+                let mut names: Vec<String> = Vec::new()
+                for f in r.fields.iter() { names.push(f.name) }
+                return change_to(self.cur_file, field, names.to_array())
+            }
+        }
+        None
+    }
+
+    /// "change `m` to `n`" among the methods a call on `recv` resolves: its
+    /// inherent methods and those of every trait implemented for it
+    /// (`method_fix`).
+    pub fn method_fix(self, recv: Ty, fcx: FnCtx, method: Spanned<String>) -> Option<Fix> {
+        let mut names: Vec<String> = Vec::new()
+        match recv {
+            TyParam(k) => {
+                if k < fcx.param_bounds.len() {
+                    for tid in fcx.param_bounds.at(k).iter() { self.trait_method_names(tid, names) }
+                }
+            }
+            _ => {
+                match head(recv) {
+                    Some(h) => {
+                        for imp in self.impls.iter() {
+                            if !head_eq(imp.self_head, h) { continue }
+                            for (n, _) in imp.methods.iter() { names.push(n) }
+                            if imp.trait_id >= 0 { self.trait_method_names(imp.trait_id, names) }
+                        }
+                    }
+                    None => ()
+                }
+            }
+        }
+        let mut kept: Vec<String> = Vec::new()
+        for n in sorted_unique(names).iter() {
+            match self.resolve_method_on(recv, fcx, n) {
+                MethodResInherent(_) => kept.push(n)
+                MethodResTrait(_, _) => kept.push(n)
+                _ => ()
+            }
+        }
+        // An array's `len` is built in, not a method of an impl.
+        let is_array = match recv {
+            TyArray(_) => true
+            _ => false
+        }
+        if is_array {
+            kept.push("len")
+            kept = sorted_unique(kept)
+        }
+        change_to(self.cur_file, method, kept.to_array())
+    }
+
+    // Every method name of each trait whose id is `tid`, added to `out`.
+    fn trait_method_names(self, tid: Int, mut out: Vec<String>) {
+        for t in self.traits.iter() {
+            if t.def_id == tid { for m in t.methods.iter() { out.push(m.name) } }
+        }
+    }
+
     /// `fix`, if there is one, added to the diagnostic just pushed, unless
     /// the module being checked is not this project's (`push_fix`).
     pub fn push_fix(mut self, fix: Option<Fix>) {
@@ -143,6 +250,17 @@ impl Checker {
                         match self.kind_of(id) {
                             DefKindRecord(_) => true
                             DefKindSum(_, _) => true
+                            _ => false
+                        }
+                    }
+                    None => false
+                }
+            }
+            NeedRecord => {
+                match e.types.get(x) {
+                    Some(id) => {
+                        match self.kind_of(id) {
+                            DefKindRecord(_) => true
                             _ => false
                         }
                     }
@@ -378,6 +496,14 @@ impl Checker {
             match need {
                 NeedType => for n in scope.types.keys().iter() { candidates.push(n) }
                 NeedQualifier(_, _) => for n in scope.types.keys().iter() { candidates.push(n) }
+                NeedRecord => {
+                    for n in scope.types.keys().iter() {
+                        match self.kind_of(scope.types.get(n).unwrap() + offset) {
+                            DefKindRecord(_) => candidates.push(n)
+                            _ => ()
+                        }
+                    }
+                }
                 NeedTrait => for n in scope.traits.keys().iter() { candidates.push(n) }
                 _ => ()
             }
