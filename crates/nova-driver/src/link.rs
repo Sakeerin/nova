@@ -138,8 +138,11 @@ fn beside_exe(exe: &Path) -> Result<PathBuf> {
 /// `getrandom` (pulled in transitively by `ring`) resolves its Windows
 /// entropy source, `BCryptGenRandom`, through the former, with the latter
 /// backing `SystemFunction036` as its fallback on older Windows versions.
+///
+/// `synchronization.lib` holds `WaitOnAddress` and `WakeByAddress*`, which
+/// std's futex-based locks call from Rust 1.100 on.
 #[cfg(windows)]
-const MSVC_LIBS: [&str; 8] = [
+const MSVC_LIBS: [&str; 9] = [
     "bcrypt.lib",
     "advapi32.lib",
     "kernel32.lib",
@@ -148,6 +151,7 @@ const MSVC_LIBS: [&str; 8] = [
     "ws2_32.lib",
     "dbghelp.lib",
     "msvcrt.lib",
+    "synchronization.lib",
 ];
 
 #[cfg(windows)]
