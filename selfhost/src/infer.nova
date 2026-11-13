@@ -1,0 +1,152 @@
+// The unification engine: a port of crates/nova-typeck/src/infer.rs
+// (`InferCtx`: `fresh`, `shallow_resolve`, `apply`, the occurs check and
+// `unify`), function by function (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). Plain substitution, as S0's: no union-find. A failed
+// unification keeps the bindings it made before it failed, as S0's does,
+// since `?N` and what each variable is bound to reach messages.
+//
+// `?N` numbers as S0's only if every `fresh` call in N stands where S0
+// makes it, in the same order: each call site in typeck_*.nova keeps its
+// place in the code it mirrors.
+
+import hir
+
+/// A function body's inference variables and their solutions
+/// (`InferCtx`): `vars[v]` is what `?v` is bound to, or `None`.
+pub record InferCtx { pub vars: Vec<Option<Ty>> }
+
+/// No variable yet (`InferCtx::default`).
+pub fn new_infer() -> InferCtx { InferCtx { vars: Vec::new() } }
+
+impl InferCtx {
+    /// A new unsolved variable (`fresh`).
+    pub fn fresh(mut self) -> Ty {
+        let id = self.vars.len()
+        self.vars.push(None)
+        TyVar(id)
+    }
+
+    /// `ty` with its variable bindings followed one level at a time, to a
+    /// type that is not a variable or to an unsolved variable
+    /// (`shallow_resolve`).
+    pub fn shallow_resolve(self, ty: Ty) -> Ty {
+        let mut t = ty
+        while true {
+            match t {
+                TyVar(v) => {
+                    match self.vars.at(v) {
+                        Some(bound) => t = bound
+                        None => return t
+                    }
+                }
+                _ => return t
+            }
+        }
+        t
+    }
+
+    /// `ty` with the substitution applied all through (`apply`).
+    pub fn apply(self, ty: Ty) -> Ty {
+        match self.shallow_resolve(ty) {
+            TyFn(params, ret) => TyFn(self.apply_all(params), self.apply(ret))
+            TySum(d, args) => TySum(d, self.apply_all(args))
+            TyRecord(d, args) => TyRecord(d, self.apply_all(args))
+            TyArray(e) => TyArray(self.apply(e))
+            TyTuple(es) => TyTuple(self.apply_all(es))
+            TyFuture(o) => TyFuture(self.apply(o))
+            TyAssoc(on, assoc) => TyAssoc(self.apply(on), assoc)
+            other => other
+        }
+    }
+
+    fn apply_all(self, tys: Vec<Ty>) -> Vec<Ty> {
+        let mut out: Vec<Ty> = Vec::new()
+        for t in tys.iter() { out.push(self.apply(t)) }
+        out
+    }
+
+    // Whether `?v` occurs in `ty`, its bindings followed (`occurs`).
+    fn occurs(self, v: Int, ty: Ty) -> Bool {
+        match self.shallow_resolve(ty) {
+            TyVar(w) => v == w
+            TyFn(params, ret) => {
+                for p in params.iter() { if self.occurs(v, p) { return true } }
+                self.occurs(v, ret)
+            }
+            TySum(_, args) => self.occurs_any(v, args)
+            TyRecord(_, args) => self.occurs_any(v, args)
+            TyArray(e) => self.occurs(v, e)
+            TyTuple(es) => self.occurs_any(v, es)
+            TyFuture(o) => self.occurs(v, o)
+            TyAssoc(on, _) => self.occurs(v, on)
+            _ => false
+        }
+    }
+
+    fn occurs_any(self, v: Int, tys: Vec<Ty>) -> Bool {
+        for t in tys.iter() { if self.occurs(v, t) { return true } }
+        false
+    }
+
+    /// Unify `a` and `b`, binding variables; `false` on a mismatch, which
+    /// the caller reports (`unify`). `!` and the error type unify with
+    /// anything; a projection only with the same projection.
+    pub fn unify(mut self, a: Ty, b: Ty) -> Bool {
+        let a = self.shallow_resolve(a)
+        let b = self.shallow_resolve(b)
+        match (a, b) {
+            (TyVar(v), _) => {
+                match b {
+                    TyVar(w) => if v == w { return true }
+                    _ => ()
+                }
+                if self.occurs(v, b) { return false }
+                self.vars.set(v, Some(b))
+                true
+            }
+            (_, TyVar(w)) => {
+                if self.occurs(w, a) { return false }
+                self.vars.set(w, Some(a))
+                true
+            }
+            (TyError, _) => true
+            (_, TyError) => true
+            (TyNever, _) => true
+            (_, TyNever) => true
+            (TyInt, TyInt) => true
+            (TyFloat, TyFloat) => true
+            (TyBool, TyBool) => true
+            (TyChar, TyChar) => true
+            (TyString, TyString) => true
+            (TyBytes, TyBytes) => true
+            (TyUnit, TyUnit) => true
+            (TyParam(i), TyParam(j)) => i == j
+            (TyFn(p1, r1), TyFn(p2, r2)) => p1.len() == p2.len()
+                && self.unify_all(p1, p2)
+                && self.unify(r1, r2)
+            (TySum(d1, a1), TySum(d2, a2)) => d1 == d2
+                && a1.len() == a2.len()
+                && self.unify_all(a1, a2)
+            (TyRecord(d1, a1), TyRecord(d2, a2)) => d1 == d2
+                && a1.len() == a2.len()
+                && self.unify_all(a1, a2)
+            (TyArray(e1), TyArray(e2)) => self.unify(e1, e2)
+            (TyTuple(t1), TyTuple(t2)) => t1.len() == t2.len() && self.unify_all(t1, t2)
+            (TyFuture(o1), TyFuture(o2)) => self.unify(o1, o2)
+            (TyAssoc(o1, x), TyAssoc(o2, y)) => x == y && self.unify(o1, o2)
+            _ => false
+        }
+    }
+
+    // Each pair of two lists of one length unified in order, stopping at
+    // the first that fails, as `zip(…).all(…)` does.
+    fn unify_all(mut self, xs: Vec<Ty>, ys: Vec<Ty>) -> Bool {
+        let mut i = 0
+        while i < xs.len() {
+            if !self.unify(xs.at(i), ys.at(i)) { return false }
+            i += 1
+        }
+        true
+    }
+}

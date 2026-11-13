@@ -5,8 +5,9 @@
 // `normalize_ty` with its limits, `self_types_overlap`), function by
 // function and with the same names (spec
 // docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
-// §3.1, ADR 0055). The bodies' nodes (`Function`, `Expr`, `Pattern`) come
-// in 5.3b.
+// §3.1, ADR 0055), and its bodies' nodes (`Function`, `Local`, `LocalId`,
+// `Expr` with its 36 kinds, `Callee`, `BinOp`, `UnOp`, `Arm`, `Pattern`
+// with its 10 kinds) and `Ty::has_vars` (5.3b, spec §4.2, ADR 0056).
 //
 // The Rust's idioms, translated one way everywhere (ADR 0055 lists them):
 //
@@ -17,6 +18,17 @@
 //   (`HirVariant`, `HirField`), as one module may not import two of a name.
 // - A span carries no file in N (ADR 0052), so a span kept in a table,
 //   which a diagnostic or the dump prints with its file, is a `FileSpan`.
+// - A `LocalId` is an `Int`, the local's index in its function's `locals`,
+//   as a `DefId` is.
+// - An `Expr` is a record of its kind, type and span, so that finalizing
+//   and remapping locals rewrite it in place (spec §4.2): a kind is a sum,
+//   whose payloads are not rewritten but replaced, the record keeping its
+//   identity. A `Box<Expr>` is a `HirExpr`, an `Option<Box<Expr>>` an
+//   `Option<HirExpr>`. The bodies' names that ast.nova holds too carry
+//   `Hir` (`HirFunction`, `HirExpr`, `HirArm`, `HirPattern`, `HirBinOp`,
+//   `HirUnOp`); a kind's variant is `Ek` and its Rust name (`EkCall`), a
+//   pattern's `Pat` and the dump's name (`PatBind`), an operator's `Op`
+//   (`OpAdd`), a callee's `Callee` (`CalleeDef`).
 
 import token
 
@@ -583,3 +595,171 @@ fn unify_all(xs: Vec<Ty>, ys: Vec<Ty>, s: Vec<Option<Ty>>) -> Bool {
     }
     true
 }
+
+// ---------------------------------------------------------------------------
+// The bodies (5.3b)
+// ---------------------------------------------------------------------------
+
+/// The note an E0013 on a tuple carries (`TUPLE_HAS_NO_IMPLS`).
+pub const TUPLE_HAS_NO_IMPLS: String = "a tuple has no impls, so it has no `==`, `Hash`, `Display`, `Debug` or any other trait: compare or print its elements, or use a record that implements the trait"
+
+/// Whether `ty` holds an inference variable anywhere (`Ty::has_vars`).
+pub fn has_vars(ty: Ty) -> Bool {
+    match ty {
+        TyVar(_) => true
+        TyFn(params, ret) => {
+            for p in params.iter() { if has_vars(p) { return true } }
+            has_vars(ret)
+        }
+        TySum(_, args) => any_vars(args)
+        TyRecord(_, args) => any_vars(args)
+        TyArray(e) => has_vars(e)
+        TyTuple(es) => any_vars(es)
+        TyFuture(o) => has_vars(o)
+        TyAssoc(on, _) => has_vars(on)
+        _ => false
+    }
+}
+
+fn any_vars(tys: Vec<Ty>) -> Bool {
+    for t in tys.iter() { if has_vars(t) { return true } }
+    false
+}
+
+/// A local of a function (`Local`): parameters first, then each binding as
+/// it was met, a closure's captures first among its own.
+pub record Local { pub name: String, pub ty: Ty, pub is_mut: Bool, pub span: Span }
+
+/// A checked function, method, constant, closure or wrapper (`Function`).
+/// `span` is its name's, or a constant's value's, or a closure's own, in
+/// its module's file.
+pub record HirFunction {
+    pub def_id: Int,
+    pub name: String,
+    pub generics: Int,
+    pub bounds: Vec<Vec<Int>>,
+    pub takes_env: Bool,
+    pub capture_count: Int,
+    pub params: Int,
+    pub locals: Vec<Local>,
+    pub ret_ty: Ty,
+    pub is_async: Bool,
+    pub body: HirExpr,
+    pub span: FileSpan,
+}
+
+/// An expression (`Expr`): its kind, its type and its span in its
+/// function's file.
+pub record HirExpr { pub kind: ExprKind, pub ty: Ty, pub span: Span }
+
+/// What a call calls (`Callee`): a definition, a builtin (its index in
+/// `BUILTIN_VARIANTS`) or a local holding a function value.
+pub type Callee = | CalleeDef(Int) | CalleeBuiltin(Int) | CalleeLocal(Int)
+
+/// A binary operator (`BinOp`).
+pub type HirBinOp =
+    | OpAdd
+    | OpSub
+    | OpMul
+    | OpDiv
+    | OpRem
+    | OpEq
+    | OpNe
+    | OpLt
+    | OpLe
+    | OpGt
+    | OpGe
+    | OpBitAnd
+    | OpBitOr
+    | OpBitXor
+    | OpShl
+    | OpShr
+
+/// A unary operator (`UnOp`).
+pub type HirUnOp = | OpNeg | OpNot | OpBitNot
+
+/// An expression's kind (`ExprKind`), the 36 of them; the comment after a
+/// variant names its fields.
+pub type ExprKind =
+    | EkIntLit(Int)
+    | EkFloatLit(Float)
+    | EkBoolLit(Bool)
+    | EkStrLit(String)
+    | EkCharLit(Char)
+    | EkUnit
+    | EkLocal(Int)
+    // func, type_args, captures
+    | EkMakeClosure(Int, Vec<Ty>, Vec<HirExpr>)
+    // func, type_args, args
+    | EkCall(Callee, Vec<Ty>, Vec<HirExpr>)
+    // sum, variant, args
+    | EkMakeVariant(Int, Int, Vec<HirExpr>)
+    // record, fields
+    | EkMakeRecord(Int, Vec<HirExpr>)
+    // elems
+    | EkMakeTuple(Vec<HirExpr>)
+    // target, index
+    | EkFieldGet(HirExpr, Int)
+    // target, index, value
+    | EkFieldSet(HirExpr, Int, HirExpr)
+    // elems
+    | EkMakeArray(Vec<HirExpr>)
+    // init, len
+    | EkArrayRepeat(HirExpr, HirExpr)
+    // target, index
+    | EkIndex(HirExpr, HirExpr)
+    // target, index, value
+    | EkIndexSet(HirExpr, HirExpr, HirExpr)
+    // target
+    | EkArrayLen(HirExpr)
+    // trait_id, method, self_ty, type_args, receiver, args
+    | EkTraitCall(Int, Int, Ty, Vec<Ty>, Option<HirExpr>, Vec<HirExpr>)
+    // op, lhs, rhs
+    | EkBinary(HirBinOp, HirExpr, HirExpr)
+    // lhs, rhs
+    | EkLogicalAnd(HirExpr, HirExpr)
+    // lhs, rhs
+    | EkLogicalOr(HirExpr, HirExpr)
+    // op, expr
+    | EkUnary(HirUnOp, HirExpr)
+    // local, init
+    | EkLet(Int, HirExpr)
+    // local, value
+    | EkAssign(Int, HirExpr)
+    // stmts, trailing
+    | EkBlock(Vec<HirExpr>, Option<HirExpr>)
+    // cond, then, else_
+    | EkIf(HirExpr, HirExpr, Option<HirExpr>)
+    // cond, body
+    | EkWhile(HirExpr, HirExpr)
+    | EkBreak
+    | EkContinue
+    // scrutinee, arms
+    | EkMatch(HirExpr, Vec<HirArm>)
+    | EkReturn(Option<HirExpr>)
+    | EkToStr(HirExpr)
+    | EkStrConcat(Vec<HirExpr>)
+    | EkAwait(HirExpr)
+
+/// A `match` arm (`Arm`): its span is its pattern's through its body's.
+pub record HirArm {
+    pub pattern: HirPattern,
+    pub guard: Option<HirExpr>,
+    pub body: HirExpr,
+    pub span: Span,
+}
+
+/// A pattern (`Pattern`), the 10 kinds, with no span or type.
+pub type HirPattern =
+    | PatWildcard
+    | PatBind(Int)
+    | PatInt(Int)
+    | PatBool(Bool)
+    | PatStr(String)
+    | PatChar(Char)
+    // lo, hi, both included
+    | PatRange(Int, Int)
+    // sum, variant, fields
+    | PatVariant(Int, Int, Vec<HirPattern>)
+    | PatTuple(Vec<HirPattern>)
+    | PatOr(Vec<HirPattern>)

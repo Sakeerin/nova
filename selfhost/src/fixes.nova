@@ -6,8 +6,11 @@
 // `line_before_item`, `comments_before`), which place the import fix's
 // edit by the source text, function by function (spec
 // docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
-// §3.2, ADR 0055). The rest of fixes.rs, for the bodies' errors, comes in
-// 5.3b.
+// §3.2, ADR 0055). 5.3b adds what the bodies' unknown values need: the
+// `Need`s of a value, a call's callee and a qualifier, `STD_ONLY_PUBLIC_FORMS`,
+// `offers`, `arity`, `variant_arity`, `variant_named` and `has_member`, and
+// `Binding` (ADR 0056); the rest of fixes.rs comes with the parts that use
+// it.
 
 import ast
 import diagnostic
@@ -17,8 +20,42 @@ import token
 import typeck
 
 /// What an unknown name must be at its site (`Need`): the item passes
-/// meet a type and a trait.
-pub type Need = | NeedType | NeedTrait
+/// meet a type and a trait; the bodies a value, a call's callee with its
+/// argument count, and `T` in `T::member`, with the call's argument count
+/// when it is a callee's, -1 when it is not.
+pub type Need =
+    | NeedType
+    | NeedTrait
+    | NeedValue
+    | NeedCall(Int)
+    // member, call
+    | NeedQualifier(String, Int)
+
+/// How a local the user wrote was bound (`Binding`): by a `let`, as a
+/// parameter, by a name inside a destructuring `let`'s pattern (with that
+/// pattern's head as E0060's note quotes it), inside a `match` arm's or a
+/// `for` loop's pattern, or as a `for` loop's plain name.
+pub type Binding =
+    | BindingLet
+    | BindingParam
+    | BindingLetPattern(String)
+    | BindingPattern
+    | BindingOther
+
+/// The std-only builtins whose work std's public surface does, with the
+/// form a program writes instead (`STD_ONLY_PUBLIC_FORMS`).
+const STD_ONLY_PUBLIC_FORMS: [(String, String)] = [
+    ("char_to_int", "the method `to_int`, as in `c.to_int()`"),
+    ("int_to_char", "`char_from_int(n)`, which is `None` when `n` is not a character"),
+    ("str_from_chars", "`string_from_chars(cs)`"),
+    (
+        "str_as_bytes",
+        "a `String`'s `byte_len()`, `byte_at(i)` and `byte_slice(a, b)`, or `bytes_from_string(s)` for a copy",
+    ),
+    ("str_is_float", "the method `parse_float`, as in `s.parse_float()`"),
+    ("str_to_float", "the method `parse_float`, as in `s.parse_float()`"),
+    ("float_to_bits", "the method `to_bits`, as in `x.to_bits()`"),
+]
 
 /// The primitive types' names, which "did you mean" offers for a type
 /// (`PRIMITIVES`).
@@ -44,6 +81,24 @@ impl Checker {
     /// the diagnostic just pushed (`name_fixes`); `nearby` holds the type
     /// parameters in scope.
     pub fn name_fixes(mut self, name: Spanned<String>, need: Need, nearby: Vec<String>) {
+        // A std-only builtin that std wraps gets its public form as a note
+        // instead of a guess, where a value or a function is wanted.
+        let builtin = match need {
+            NeedValue => true
+            NeedCall(_) => true
+            _ => false
+        }
+        if builtin {
+            for (b, form) in STD_ONLY_PUBLIC_FORMS.iter() {
+                if b == name.value {
+                    if !self.diagnostics.is_empty() {
+                        let mut d = self.diagnostics.last()
+                        d.notes.push("`${name.value}` is internal to std; use ${form}")
+                    }
+                    return
+                }
+            }
+        }
         let import_fix = self.import_fix(name, need)
         let change = self.did_you_mean(name, need, nearby)
         self.push_fix(import_fix)
@@ -95,7 +150,115 @@ impl Checker {
                 }
             }
             NeedTrait => e.traits.contains_key(x)
+            NeedValue => {
+                match e.values.get(x) {
+                    Some(ResDef(id)) => {
+                        match self.kind_of(id) {
+                            DefKindFn(_) => true
+                            DefKindConst(_) => true
+                            _ => false
+                        }
+                    }
+                    Some(ResVariant(sum, vi)) => self.variant_arity(sum, vi) == 0
+                    _ => false
+                }
+            }
+            NeedCall(n) => {
+                match e.values.get(x) {
+                    Some(ResDef(id)) => self.arity(id) == n
+                    Some(ResVariant(sum, vi)) => self.variant_arity(sum, vi) == n
+                    _ => false
+                }
+            }
+            NeedQualifier(member, call) => {
+                match e.types.get(x) {
+                    Some(id) => self.has_member(id, member, call)
+                    None => false
+                }
+            }
         }
+    }
+
+    // A function's or an extern function's parameter count, or -1
+    // (`arity`).
+    fn arity(self, id: Int) -> Int {
+        match self.kind_of(id) {
+            DefKindFn(_) => {
+                match self.sigs.at(id) {
+                    Some(s) => s.params.len()
+                    None => -1
+                }
+            }
+            DefKindExternFn(_, _) => {
+                for e in self.externs.iter() { if e.def_id == id { return e.params.len() } }
+                -1
+            }
+            _ => -1
+        }
+    }
+
+    /// The field count of variant `vi` of sum type `sum`, or -1
+    /// (`variant_arity`).
+    pub fn variant_arity(self, sum: Int, vi: Int) -> Int {
+        match self.kind_of(sum) {
+            DefKindSum(_, variants) => if vi >= 0 && vi < variants.len() {
+                variants.at(vi).arity
+            } else {
+                -1
+            }
+            _ => -1
+        }
+    }
+
+    /// Sum type `sum`'s variant `name`: its index and field count, or
+    /// `(-1, -1)` (`variant_named`).
+    pub fn variant_named(self, sum: Int, name: String) -> (Int, Int) {
+        match self.kind_of(sum) {
+            DefKindSum(_, variants) => {
+                for i in 0..variants.len() {
+                    if variants.at(i).name == name { return (i, variants.at(i).arity) }
+                }
+                (-1, -1)
+            }
+            _ => (-1, -1)
+        }
+    }
+
+    // Whether type `id` has `member` for `T::member`: a variant without
+    // fields, or, as a call's callee with `call` arguments, a variant with
+    // that many or an inherent associated function taking them
+    // (`has_member`).
+    fn has_member(self, id: Int, member: String, call: Int) -> Bool {
+        let h = match self.kind_of(id) {
+            DefKindRecord(_) => TyHeadRecord(id)
+            DefKindSum(_, _) => TyHeadSum(id)
+            _ => return false
+        }
+        let (vi, arity) = self.variant_named(id, member)
+        if vi >= 0 { return arity == (if call < 0 { 0 } else { call }) }
+        if call < 0 { return false }
+        let fns = self.find_assoc_fns(h, member)
+        if fns.len() != 1 { return false }
+        match self.sigs.at(fns.at(0)) {
+            Some(s) => s.params.len() == call
+            None => false
+        }
+    }
+
+    /// Each inherent impl of `h`'s associated function `name`, one with no
+    /// `self` (`find_assoc_fns`).
+    pub fn find_assoc_fns(self, h: TyHead, name: String) -> Vec<Int> {
+        let mut out: Vec<Int> = Vec::new()
+        for imp in self.impls.iter() {
+            if imp.trait_id >= 0 || !head_eq(imp.self_head, h) { continue }
+            for (n, d) in imp.methods.iter() {
+                if n == name && self.selfless.at(d) {
+                    out.push(d)
+                    break
+                }
+            }
+        }
+        out
     }
 
     // What `scope` binds to `x` that no std module exports under it, in
@@ -206,16 +369,51 @@ impl Checker {
         for n in nearby.iter() { candidates.push(n) }
         if self.cur_module >= 0 && self.cur_module < self.defs.modules.len() {
             let scope = self.defs.modules.at(self.cur_module)
+            let offset = self.offset_of(self.cur_module)
+            for n in scope.values.keys().iter() {
+                if self.offers_value(need, shift_res(scope.values.get(n).unwrap(), offset)) {
+                    candidates.push(n)
+                }
+            }
             match need {
                 NeedType => for n in scope.types.keys().iter() { candidates.push(n) }
+                NeedQualifier(_, _) => for n in scope.types.keys().iter() { candidates.push(n) }
                 NeedTrait => for n in scope.traits.keys().iter() { candidates.push(n) }
+                _ => ()
             }
         }
         match need {
             NeedType => for p in PRIMITIVES.iter() { candidates.push(p) }
-            NeedTrait => ()
+            NeedQualifier(_, _) => for p in PRIMITIVES.iter() { candidates.push(p) }
+            _ => ()
         }
         change_to(self.cur_file, name, candidates.to_array())
+    }
+
+    // Whether "did you mean" offers a value bound to `r` where `need`
+    // holds (`offers`'s values); a type and a trait are offered by
+    // namespace alone.
+    fn offers_value(self, need: Need, r: Res) -> Bool {
+        match (need, r) {
+            (NeedValue, ResDef(id)) => {
+                match self.kind_of(id) {
+                    DefKindFn(_) => true
+                    DefKindConst(_) => true
+                    _ => false
+                }
+            }
+            (NeedValue, ResVariant(sum, vi)) => self.variant_arity(sum, vi) == 0
+            (NeedCall(_), ResDef(id)) => {
+                match self.kind_of(id) {
+                    DefKindFn(_) => true
+                    DefKindExternFn(_, _) => true
+                    _ => false
+                }
+            }
+            (NeedCall(_), ResVariant(_, _)) => true
+            (NeedCall(_), ResBuiltin(_)) => true
+            _ => false
+        }
     }
 }
 

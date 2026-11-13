@@ -24,14 +24,21 @@
 //   selfhost resolve --std DIR [--target native|wasm] [--test] --std-part
 //                             prints std's part, as `nova check
 //                             --dump-resolution --std` does
-//   selfhost hir --std DIR [--target native|wasm] [--test] FILE...
-//   selfhost hir --std DIR [--target native|wasm] [--test] --std-part
-//                             the same, with the HIR dump of the type
-//                             checker's item stage, as `nova check
-//                             --dump-hir` prints it, std's item tables
-//                             collected once (spec
+//   selfhost hir --std DIR [--target native|wasm] [--test] [--items] FILE...
+//   selfhost hir --std DIR [--target native|wasm] [--test] [--items] --std-part
+//                             the same, with the HIR dump, as `nova check
+//                             --dump-hir` prints it: the type checker's
+//                             item tables, std's collected once (spec
 //                             docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
-//                             §3.3, ADR 0055)
+//                             §3.3, ADR 0055), then every function of the
+//                             program, its body checked (§4.3, ADR 0056);
+//                             with `--items`, the item part alone, as the
+//                             hidden `nova check --dump-hir-items` prints
+//                             it. While 5.3b is being built, a root whose
+//                             bodies need what N does not check yet, std's
+//                             bodies among them, prints `UNPORTED` and why
+//                             after its header, and the exit code is then
+//                             3; so does std's part, without `--items`.
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -45,6 +52,7 @@ import dump
 import fixes
 import hir
 import hir_dump
+import infer
 import lexer
 import lexer_tests
 import loader
@@ -56,6 +64,10 @@ import resolver
 import resolver_tests
 import token
 import typeck
+import typeck_body
+import typeck_body_tests
+import typeck_call
+import typeck_expr
 import typeck_tests
 import typeck_traits
 import typeck_ty
@@ -109,14 +121,18 @@ async fn main() {
 //
 // `selfhost hir` takes the same arguments and refuses the same shapes, as
 // S0's `check --dump-hir` shares `check --dump-resolution`'s parser, and
-// prints the HIR dump in place of the resolution dump.
+// prints the HIR dump in place of the resolution dump; `--items`, a flag
+// taken once, prints its item part alone.
 async fn dump_command(argv: Vec<String>, command: String) {
-    let usage = "usage: selfhost ${command} --std DIR [--target native|wasm] [--test] (--std-part | FILE...)"
+    let hir = command == "hir"
+    let items_flag = if hir { " [--items]" } else { "" }
+    let usage = "usage: selfhost ${command} --std DIR [--target native|wasm] [--test]${items_flag} (--std-part | FILE...)"
     let mut std_dir = ""
     let mut target_name = ""
     let mut target_given = false
     let mut test = false
     let mut std_part = false
+    let mut items_only = false
     let mut bad = false
     let mut files: Vec<String> = Vec::new()
     let mut i = 2
@@ -152,6 +168,9 @@ async fn dump_command(argv: Vec<String>, command: String) {
         } else if a == "--test" {
             if test { bad = true }
             test = true
+        } else if hir && a == "--items" {
+            if items_only { bad = true }
+            items_only = true
         } else if a.starts_with("--test=") {
             // A flag takes no value, as clap refuses one for S0.
             bad = true
@@ -182,8 +201,13 @@ async fn dump_command(argv: Vec<String>, command: String) {
             return
         }
     }
-    let hir = command == "hir"
     if std_part {
+        if hir && !items_only {
+            // 5.3b part 4: std's part holds std's bodies.
+            print("UNPORTED std's bodies (5.3b part 4)\n")
+            exit(3)
+            return
+        }
         let resolved = resolve_program_for(target, Vec::new(), std_set)
         if hir {
             let (labels, texts) = labels_and_texts(Vec::new(), std_set)
@@ -209,9 +233,10 @@ async fn dump_command(argv: Vec<String>, command: String) {
         if shared.shareable && s.shareable { items = Some(s) }
     }
     let mut failed = false
+    let mut unported = false
     for path in files.iter() {
         let dumped = if hir {
-            dump_hir(path, target, test, shared, items).await
+            dump_hir(path, target, test, shared, items, !items_only).await
         } else {
             dump_resolution(path, target, test, shared).await
         }
@@ -226,14 +251,24 @@ async fn dump_command(argv: Vec<String>, command: String) {
                 exit(1)
                 return
             }
+            DumpedUnported(what) => {
+                print("== ${path}\nUNPORTED ${what}\n")
+                unported = true
+            }
         }
     }
     if failed { exit(2) }
+    if unported { exit(3) }
 }
 
 // What `dump_resolution` gives for one root: its part; the error that
-// kept its root from being read, `IOERR`; or why N refuses its package.
-type Dumped = | DumpedText(String) | DumpedIoError(IoError) | DumpedRefused(String)
+// kept its root from being read, `IOERR`; why N refuses its package; or,
+// while 5.3b is being built, what in its bodies N does not check yet.
+type Dumped =
+    | DumpedText(String)
+    | DumpedIoError(IoError)
+    | DumpedRefused(String)
+    | DumpedUnported(String)
 
 // What every program's resolution reads for `target`, under test mode
 // when `test`: the target's std modules, each read from under `dir` and
@@ -351,7 +386,8 @@ async fn dump_resolution(
 
 // The HIR dump of the program whose root is `path` (nova-driver's
 // `HirDumps::dump`): `dump_resolution`'s pipeline, then, when it stopped
-// on no error, the type checker's item passes. With std's tables `items`,
+// on no error, the type checker's item passes, then, when `bodies`, the
+// program's bodies (5.3b). With std's tables `items`,
 // the program is resolved with std's definitions after its own and reads
 // std's tables rebased past them; without, because std alone gave a
 // diagnostic or holds a test, it is resolved and checked in full, as
@@ -364,6 +400,7 @@ async fn dump_hir(
     test: Bool,
     shared: SharedStd,
     items: Option<SharedItems>,
+    bodies: Bool,
 ) -> Dumped {
     let std_set = shared.std_set
     let mut graph: Option<Graph> = None
@@ -413,9 +450,24 @@ async fn dump_hir(
     }
     if failed { return DumpedText(dump_hir_program(target, test, None, diagnostics)) }
     let (labels, texts) = labels_and_texts(sources, std_set)
-    let tables = match items {
+    let mut tables = match items {
         Some(s) => check_items_shared(resolved.items, resolved.definitions, labels, texts, s)
         None => check_items(resolved.items, resolved.definitions, labels, texts)
+    }
+    if bodies {
+        // 5.3b part 4: a program checked in full, because std alone gave a
+        // diagnostic or because it implements anything on a type it does
+        // not own, checks std's bodies too (ADR 0056 §4).
+        if items.is_none() {
+            return DumpedUnported("std's bodies, checked with each program (5.3b part 4)")
+        }
+        if tables.implements_on_a_type_it_does_not_own() {
+            return DumpedUnported(
+                "std's bodies, checked with a program that implements on a type it does not own (5.3b part 4)",
+            )
+        }
+        tables.check_bodies(resolved.newline_splits)
+        if tables.unported != "" { return DumpedUnported(tables.unported) }
     }
     for d in tables.diagnostics.iter() { diagnostics.push(d) }
     DumpedText(dump_hir_program(target, test, Some((resolved, tables)), diagnostics))

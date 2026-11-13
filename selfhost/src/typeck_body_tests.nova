@@ -1,0 +1,292 @@
+// N's own tests of the unifier and of the bodies' expressions (5.3b): the
+// tests of crates/nova-typeck/src/infer.rs, which stay Rust-only there
+// (ADR 0056 §5), mirrored one for one on N's `InferCtx`, and that a failed
+// unification keeps the bindings it made; then a few programs whose bodies
+// N checks, each expected value what S0's `nova check --dump-hir` gives for
+// the same source: inference variables numbered as S0 numbers them, the
+// newline rule's E0103 and its note, E0081 in id order, E0086 and E0087,
+// and a call through a value that is not a local. The differential
+// compares every other input.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import builtins
+import diagnostic
+import hir
+import infer
+import lexer
+import parser
+import resolver
+import token
+import typeck
+import typeck_body
+
+fn tys(list: [Ty]) -> Vec<Ty> { Vec::from_array(list) }
+
+// --- infer.rs's tests ---
+
+@test
+fn unify_var_binds() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(cx.unify(v, TyInt), "it unifies")
+    assert(ty_eq(cx.apply(v), TyInt), "it is bound")
+}
+
+@test
+fn unify_mismatch_fails() {
+    let mut cx = new_infer()
+    assert(!cx.unify(TyInt, TyString), "it fails")
+}
+
+@test
+fn occurs_check_rejects_infinite_type() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(!cx.unify(v, TyFn(tys([v]), TyUnit)), "it fails")
+}
+
+@test
+fn never_unifies_with_anything() {
+    let mut cx = new_infer()
+    assert(cx.unify(TyNever, TyInt), "it unifies")
+    assert(cx.unify(TyString, TyNever), "it unifies")
+}
+
+@test
+fn fn_types_unify_structurally() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(cx.unify(TyFn(tys([TyInt]), v), TyFn(tys([TyInt]), TyBool)), "it unifies")
+    assert(ty_eq(cx.apply(v), TyBool), "it is bound")
+}
+
+@test
+fn assoc_unifies_only_with_the_same_projection() {
+    let mut cx = new_infer()
+    let a = TyAssoc(TyInt, 7)
+    assert(cx.unify(a, TyAssoc(TyInt, 7)), "same projection on same Self")
+    assert(!cx.unify(a, TyAssoc(TyBool, 7)), "same name, different Self")
+    assert(!cx.unify(a, TyAssoc(TyInt, 8)), "different associated type")
+    assert(!cx.unify(a, TyInt), "a projection is not Int")
+}
+
+@test
+fn assoc_unification_solves_a_var_inside_the_self_type() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(cx.unify(TyAssoc(v, 7), TyAssoc(TyInt, 7)), "it unifies")
+    assert(ty_eq(cx.apply(v), TyInt), "it is bound")
+}
+
+@test
+fn occurs_looks_inside_a_projection() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(!cx.unify(v, TyAssoc(v, 7)), "occurs check must reject ?0 = ?0::Item")
+}
+
+@test
+fn occurs_does_not_reject_a_var_unrelated_to_the_projections_self_type() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    let proj = TyAssoc(TyInt, 7)
+    assert(cx.unify(v, proj), "v does not occur in `proj`'s Self type")
+    assert(ty_eq(cx.apply(v), proj), "it is bound")
+}
+
+@test
+fn apply_resolves_a_solved_var_inside_a_top_level_projection() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(cx.unify(v, TyInt), "it unifies")
+    assert(ty_eq(cx.apply(TyAssoc(v, 7)), TyAssoc(TyInt, 7)), "apply resolves `on`")
+}
+
+@test
+fn unify_solves_vars_inside_tuples_element_by_element() {
+    let mut cx = new_infer()
+    let a = cx.fresh()
+    let b = cx.fresh()
+    let pat = TyTuple(tys([a, TyTuple(tys([b]))]))
+    let ground = TyTuple(tys([TyInt, TyTuple(tys([TyString]))]))
+    assert(cx.unify(pat, ground), "it unifies")
+    assert(ty_eq(cx.apply(pat), ground), "both are bound")
+}
+
+@test
+fn tuples_of_different_arity_or_elements_do_not_unify() {
+    let mut cx = new_infer()
+    let two = TyTuple(tys([TyInt, TyInt]))
+    assert(!cx.unify(two, TyTuple(tys([TyInt, TyInt, TyInt]))), "arity")
+    assert(!cx.unify(two, TyTuple(tys([TyInt, TyBool]))), "elements")
+    // A tuple of one is not its element.
+    assert(!cx.unify(TyTuple(tys([TyInt])), TyInt), "a tuple of one")
+    assert(!cx.unify(two, TyUnit), "unit")
+}
+
+@test
+fn occurs_check_reaches_inside_a_tuple() {
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    assert(!cx.unify(v, TyTuple(tys([TyInt, v]))), "it fails")
+}
+
+// --- N's own ---
+
+@test
+fn a_failed_unification_keeps_the_bindings_it_made() {
+    // S0's unifier binds `?0` before it meets `Int` against `String`, and
+    // keeps the binding: messages show what a variable was bound to so.
+    let mut cx = new_infer()
+    let v = cx.fresh()
+    let w = cx.fresh()
+    assert(
+        !cx.unify(TyTuple(tys([v, TyInt, w])), TyTuple(tys([TyBool, TyString, TyChar]))),
+        "it fails",
+    )
+    assert(ty_eq(cx.apply(v), TyBool), "the binding before the mismatch stays")
+    assert(ty_eq(cx.apply(w), w), "the pair after it is never met")
+    // `?2` takes the next number, and a variable bound to a variable is
+    // followed to its end.
+    let x = cx.fresh()
+    assert(ty_eq(x, TyVar(2)), "it numbers on")
+    assert(cx.unify(x, w), "it unifies")
+    assert(cx.unify(w, TyArray(v)), "it unifies")
+    assert(ty_eq(cx.apply(x), TyArray(TyBool)), "it follows the chain")
+    assert(has_vars(TyFn(tys([TyInt]), TyFuture(w))), "a variable inside")
+    assert(!has_vars(cx.apply(TyFn(tys([TyInt]), TyFuture(w)))), "none once applied")
+}
+
+// The program of the module `source`, resolved natively with no std
+// module, its items and its bodies checked.
+fn check_bodies_of(source: String) -> Checker {
+    let (tokens, _) = lex(source)
+    let (file, errors) = parse(tokens)
+    if !errors.is_empty() { panic("a test source does not parse") }
+    let mut m = module_source("t", "t", file)
+    m.text = Some(source)
+    let std_set = StdSet { modules: Vec::new(), natives: Vec::new(), builtins: builtin_table() }
+    let r = resolve_program_for(CompileTargetNative, Vec::from_array([m]), std_set)
+    if !r.diagnostics.is_empty() {
+        panic("a test source does not resolve: ${r.diagnostics.at(0).message}")
+    }
+    let mut labels: Vec<String> = Vec::new()
+    labels.push("t")
+    let mut texts: Vec<Option<String>> = Vec::new()
+    texts.push(Some(source))
+    let mut c = check_items(r.items, r.definitions, labels, texts)
+    c.check_bodies(r.newline_splits)
+    if c.unported != "" { panic("a test source needs ${c.unported}") }
+    c
+}
+
+// Each diagnostic's code, message, primary span and notes, one a line.
+fn diagnostic_lines(c: Checker) -> String {
+    let mut out: Vec<String> = Vec::new()
+    for d in c.diagnostics.iter() {
+        let at = d.labels.at(0).span
+        out.push("${d.code} ${d.message} ${at.start}..${at.end}")
+        for n in d.notes.iter() { out.push("  ${n}") }
+    }
+    "\n".join(out.to_array())
+}
+
+@test
+fn inference_variables_number_as_s0_numbers_them() {
+    // `[]` takes `?0`, `[[]]` `?1` then `?2` inside; `id(a)` `?3`. Each
+    // place still holding a variable is E0011, the locals first, then the
+    // body's nodes in order.
+    let c = check_bodies_of(
+        "fn f() {\n    let a = []\n    let b = [[]]\n    let c: Int = b\n    let d = id(a)\n}\nfn id<T>(t: T) -> T { t }\n",
+    )
+    let e0011 = "E0011 cannot infer the type here; add a type annotation"
+    let want = [
+        "E0010 type mismatch: expected `Int`, found `[[?2]]` 58..59",
+        "${e0011} 17..18",
+        "${e0011} 32..33",
+        "${e0011} 68..69",
+        "${e0011} 21..23",
+        "${e0011} 36..40",
+        "${e0011} 37..39",
+        "${e0011} 72..77",
+        "${e0011} 72..77",
+        "${e0011} 75..76",
+    ]
+    assert(diagnostic_lines(c) == "\n".join(want), diagnostic_lines(c))
+}
+
+@test
+fn e0103_notes_a_split_and_e0081_follows_in_id_order() {
+    let c = check_bodies_of(
+        "fn g() -> Int {\n    let x = 1\n    x\n    -x\n    (x)\n    x + 1\n}\nconst A: Int = B + 1\nconst B: Int = A\nconst C: Int = 2\n",
+    )
+    let want = [
+        "E0103 this value is not used 34..35",
+        "E0103 this value is not used 40..42",
+        "  a line break ended the statement before this one; a line that starts with `(`, `[` or `-` begins a new statement: to continue the line before, end that line with the operator, or put the `(` or `[` on it; to keep two statements, end that line with `;`",
+        "E0103 this value is not used 47..50",
+        "E0081 constant `A` is defined in terms of itself 69..70",
+        "  a constant's value cannot depend on its own value",
+        "E0081 constant `B` is defined in terms of itself 90..91",
+        "  a constant's value cannot depend on its own value",
+    ]
+    assert(diagnostic_lines(c) == "\n".join(want), diagnostic_lines(c))
+}
+
+@test
+fn await_is_e0086_outside_an_async_fn_and_e0087_on_what_is_not_a_future() {
+    let c = check_bodies_of(
+        "async fn h() -> Int { 1 }\nfn k() -> Int { h().await }\nasync fn m() -> Int { 3.await + h().await }\n",
+    )
+    let want = [
+        "E0086 `.await` is only allowed inside an `async fn` 42..51",
+        "  make the enclosing function `async`, or drive the future to completion with `block_on`",
+        "E0087 `.await` expects a future, found `Int` 76..77",
+    ]
+    assert(diagnostic_lines(c) == "\n".join(want), diagnostic_lines(c))
+    // `h()`'s type is `Future<Int>`, its `.await`'s `Int`.
+    let m = c.functions.at(2)
+    assert(m.name == "m" && m.is_async, "the third function is `m`")
+    assert(ty_eq(m.ret_ty, TyFuture(TyInt)), "an async function returns a future")
+}
+
+@test
+fn a_call_through_a_value_that_is_not_a_local_binds_it_first() {
+    // `id(g)(1)`: the callee goes into the checker's own local `__callee`,
+    // evaluated before the arguments; `g(2)` calls the parameter itself.
+    let c = check_bodies_of(
+        "fn id<T>(t: T) -> T { t }\nfn f(g: fn(Int) -> Int) -> Int { id(g)(1) + g(2) }\n",
+    )
+    assert(c.diagnostics.is_empty(), diagnostic_lines(c))
+    let f = c.functions.at(1)
+    assert(f.locals.len() == 2 && f.locals.at(1).name == "__callee", "a local of its own")
+    assert(ty_eq(f.locals.at(1).ty, TyFn(tys([TyInt]), TyInt)), "of the callee's type")
+    let sum = match f.body.kind {
+        EkBlock(_, Some(t)) => t
+        _ => return assert(false, "a block with a tail")
+    }
+    match sum.kind {
+        EkBinary(OpAdd, lhs, rhs) => {
+            match lhs.kind {
+                EkBlock(stmts, Some(call)) => {
+                    match stmts.at(0).kind {
+                        EkLet(1, _) => ()
+                        _ => assert(false, "the callee bound first")
+                    }
+                    match call.kind {
+                        EkCall(CalleeLocal(1), _, _) => ()
+                        _ => assert(false, "then called through it")
+                    }
+                }
+                _ => assert(false, "a block")
+            }
+            match rhs.kind {
+                EkCall(CalleeLocal(0), _, _) => ()
+                _ => assert(false, "the parameter called itself")
+            }
+        }
+        _ => assert(false, "an addition")
+    }
+}

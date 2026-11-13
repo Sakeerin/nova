@@ -12,6 +12,11 @@
 // - Types print by structure, with ids (`ty_text`).
 // - Tables print in the order the type checker collected them; the
 //   signatures, a map in S0, by id.
+// - The full dump (5.3b, ADR 0056 §2) prints every function after the
+//   externs, when the bodies were checked: its line, bounds, return type,
+//   locals and body, one node a line, a node's children a level deeper.
+//   A closure or wrapper prints as though its part's own came right after
+//   that part's definitions (ADR 0056 §3).
 
 import builtins
 import diagnostic
@@ -31,7 +36,13 @@ pub fn dump_hir_program(
     checked: Option<(ProgramResolution, Checker)>,
     diagnostics: Vec<Diagnostic>,
 ) -> String {
-    let mut d = HirDump { out: StringBuilder::new(), std_def: 9223372036854775807, fresh: true }
+    let mut d = HirDump {
+        out: StringBuilder::new(),
+        std_def: 9223372036854775807,
+        fresh: true,
+        closures: 9223372036854775807,
+        std_closures: 9223372036854775807,
+    }
     d.open(0, "Hir")
     d.field("target", compile_target_name(target))
     d.mode(test)
@@ -46,6 +57,11 @@ pub fn dump_hir_program(
             d.field("item", "${item}")
             d.close()
             d.tables(resolution.definitions, tables, false)
+            if tables.bodies {
+                d.closures = tables.closures
+                d.std_closures = tables.std_closures
+                d.functions(tables.functions, false)
+            }
         }
         None => ()
     }
@@ -67,7 +83,13 @@ pub fn dump_hir_std(
 ) -> String {
     let defs = resolution.definitions
     let (_, std_def, _) = std_start_of(defs)
-    let mut d = HirDump { out: StringBuilder::new(), std_def: std_def, fresh: true }
+    let mut d = HirDump {
+        out: StringBuilder::new(),
+        std_def: std_def,
+        fresh: true,
+        closures: 9223372036854775807,
+        std_closures: 9223372036854775807,
+    }
     d.open(0, "HirStd")
     d.field("target", compile_target_name(target))
     d.mode(test)
@@ -99,8 +121,10 @@ pub fn dump_hir_std(
 }
 
 // The text being written, the first std definition's id, from which ids
-// print as `s<n>`, and whether the text is empty or ends a line (`Dump`).
-record HirDump { out: StringBuilder, std_def: Int, fresh: Bool }
+// print as `s<n>`, whether the text is empty or ends a line, and the first
+// closure's or wrapper's id (`defs.len()`) and the first of std's, the
+// largest `Int` when no body was checked (`Dump`).
+record HirDump { out: StringBuilder, std_def: Int, fresh: Bool, closures: Int, std_closures: Int }
 
 impl HirDump {
     // A line, up to its kind (`open`).
@@ -142,9 +166,27 @@ impl HirDump {
         self.out.push(":${at.span.start}..${at.span.end}")
     }
 
-    // A definition's id: `u<n>` for the program's own, `s<n>` for std's.
+    // A definition's id: `u<n>` for the program's own, `s<n>` for std's. A
+    // closure or wrapper, past every definition, prints as though its
+    // part's own came right after that part's definitions: the program's
+    // from `u<std_def>` on, std's from `s<n>`, `n` std's definitions, on.
     fn id(self, id: Int) -> String {
-        if id >= self.std_def { "s${id - self.std_def}" } else { "u${id}" }
+        if id >= self.std_closures {
+            "s${self.closures - self.std_def + (id - self.std_closures)}"
+        } else if id >= self.closures {
+            "u${self.std_def + (id - self.closures)}"
+        } else if id >= self.std_def {
+            "s${id - self.std_def}"
+        } else {
+            "u${id}"
+        }
+    }
+
+    // Whether the function `id` is std's part's (`std`) or the program's
+    // (`ours`).
+    fn ours(self, id: Int, std: Bool) -> Bool {
+        let in_std = if id >= self.closures { id >= self.std_closures } else { id >= self.std_def }
+        in_std == std
     }
 
     fn opt_id(self, id: Int) -> String { if id < 0 { "None" } else { self.id(id) } }
@@ -350,5 +392,397 @@ impl HirDump {
             self.signature(2, e.params, e.ret)
             self.close()
         }
+    }
+
+    // --- The functions (5.3b) ---
+
+    // Each function of std's part (`std`) or of the program's, in
+    // `hir::Module`'s order (`functions`).
+    fn functions(mut self, functions: Vec<HirFunction>, std: Bool) {
+        for f in functions.iter() { if self.ours(f.def_id, std) { self.function(f) } }
+    }
+
+    // A function: its line, bounds, return type, locals and body. A
+    // closure's or wrapper's name holds its id as printed (`function`).
+    fn function(mut self, f: HirFunction) {
+        self.open(1, "Function")
+        let id = self.id(f.def_id)
+        self.value(id)
+        if f.def_id >= self.closures {
+            let stem = match f.name.index_of("$") {
+                Some(at) => f.name.byte_slice(0, at)
+                None => f.name
+            }
+            self.string("${stem}$" + id)
+        } else {
+            self.string(f.name)
+        }
+        self.field("generics", "${f.generics}")
+        self.bool_field("takes_env", f.takes_env)
+        self.field("captures", "${f.capture_count}")
+        self.field("params", "${f.params}")
+        self.bool_field("async", f.is_async)
+        self.place(f.span)
+        self.bounds(2, f.bounds)
+        self.open(2, "Ret")
+        self.value(self.ty_text(f.ret_ty))
+        self.close()
+        for k in 0..f.locals.len() {
+            let local = f.locals.at(k)
+            self.open(2, "LocalDecl")
+            self.out.push(" l${k}")
+            self.string(local.name)
+            self.bool_field("mut", local.is_mut)
+            self.span(local.span)
+            self.value(self.ty_text(local.ty))
+            self.close()
+        }
+        self.expr(2, f.body)
+        self.close()
+    }
+
+    // ` start..end`: every node of a function is in its file.
+    fn span(mut self, span: Span) { self.out.push(" ${span.start}..${span.end}") }
+
+    // A node's span and type, after its values (`node_end`).
+    fn node_end(mut self, e: HirExpr) {
+        self.span(e.span)
+        self.value(self.ty_text(e.ty))
+    }
+
+    // `(TypeArgs ty…)` at `depth`, when there are any (`type_args`).
+    fn type_args(mut self, depth: Int, tys: Vec<Ty>) {
+        if tys.is_empty() { return }
+        self.open(depth, "TypeArgs")
+        for t in tys.iter() { self.value(self.ty_text(t)) }
+        self.close()
+    }
+
+    // An expression at `depth`: `(Kind values… span type`, its type
+    // arguments, then its children a level deeper, then `)` (`expr`).
+    fn expr(mut self, depth: Int, e: HirExpr) {
+        let d = depth + 1
+        let mut children: Vec<HirExpr> = Vec::new()
+        match e.kind {
+            EkIntLit(n) => {
+                self.open(depth, "IntLit")
+                self.out.push(" ${n}")
+                self.node_end(e)
+            }
+            EkFloatLit(f) => {
+                self.open(depth, "FloatLit")
+                self.value(hex16(f.to_bits()))
+                self.node_end(e)
+            }
+            EkBoolLit(b) => {
+                self.open(depth, "BoolLit")
+                self.out.push(" ${b}")
+                self.node_end(e)
+            }
+            EkStrLit(text) => {
+                self.open(depth, "StrLit")
+                self.string(text)
+                self.node_end(e)
+            }
+            EkCharLit(c) => {
+                self.open(depth, "CharLit")
+                self.out.push(" ${c.to_int()}")
+                self.node_end(e)
+            }
+            EkUnit => {
+                self.open(depth, "Unit")
+                self.node_end(e)
+            }
+            EkLocal(l) => {
+                self.open(depth, "Local")
+                self.out.push(" l${l}")
+                self.node_end(e)
+            }
+            EkMakeClosure(func, type_args, captures) => {
+                self.open(depth, "MakeClosure")
+                self.value(self.id(func))
+                self.node_end(e)
+                self.type_args(d, type_args)
+                children = captures
+            }
+            EkCall(func, type_args, args) => {
+                self.open(depth, "Call")
+                match func {
+                    CalleeDef(id) => self.out.push(" Def ${self.id(id)}")
+                    CalleeBuiltin(b) => self.out.push(" Builtin ${BUILTIN_VARIANTS[b]}")
+                    CalleeLocal(l) => self.out.push(" Local l${l}")
+                }
+                self.node_end(e)
+                self.type_args(d, type_args)
+                children = args
+            }
+            EkMakeVariant(sum, variant, args) => {
+                self.open(depth, "MakeVariant")
+                self.out.push(" ${self.id(sum)} ${variant}")
+                self.node_end(e)
+                children = args
+            }
+            EkMakeRecord(rec, fields) => {
+                self.open(depth, "MakeRecord")
+                self.value(self.id(rec))
+                self.node_end(e)
+                children = fields
+            }
+            EkMakeTuple(elems) => {
+                self.open(depth, "MakeTuple")
+                self.node_end(e)
+                children = elems
+            }
+            EkFieldGet(target, index) => {
+                self.open(depth, "FieldGet")
+                self.out.push(" ${index}")
+                self.node_end(e)
+                children.push(target)
+            }
+            EkFieldSet(target, index, value) => {
+                self.open(depth, "FieldSet")
+                self.out.push(" ${index}")
+                self.node_end(e)
+                children.push(target)
+                children.push(value)
+            }
+            EkMakeArray(elems) => {
+                self.open(depth, "MakeArray")
+                self.node_end(e)
+                children = elems
+            }
+            EkArrayRepeat(init, len) => {
+                self.open(depth, "ArrayRepeat")
+                self.node_end(e)
+                children.push(init)
+                children.push(len)
+            }
+            EkIndex(target, index) => {
+                self.open(depth, "Index")
+                self.node_end(e)
+                children.push(target)
+                children.push(index)
+            }
+            EkIndexSet(target, index, value) => {
+                self.open(depth, "IndexSet")
+                self.node_end(e)
+                children.push(target)
+                children.push(index)
+                children.push(value)
+            }
+            EkArrayLen(target) => {
+                self.open(depth, "ArrayLen")
+                self.node_end(e)
+                children.push(target)
+            }
+            EkTraitCall(trait_id, method, self_ty, type_args, receiver, args) => {
+                self.open(depth, "TraitCall")
+                self.out.push(" ${self.id(trait_id)} ${method}")
+                self.bool_field("receiver", receiver.is_some())
+                self.node_end(e)
+                self.open(d, "SelfType")
+                self.value(self.ty_text(self_ty))
+                self.close()
+                self.type_args(d, type_args)
+                match receiver {
+                    Some(r) => children.push(r)
+                    None => ()
+                }
+                for a in args.iter() { children.push(a) }
+            }
+            EkBinary(op, lhs, rhs) => {
+                self.open(depth, "Binary")
+                self.value(bin_op_name(op))
+                self.node_end(e)
+                children.push(lhs)
+                children.push(rhs)
+            }
+            EkLogicalAnd(lhs, rhs) => {
+                self.open(depth, "LogicalAnd")
+                self.node_end(e)
+                children.push(lhs)
+                children.push(rhs)
+            }
+            EkLogicalOr(lhs, rhs) => {
+                self.open(depth, "LogicalOr")
+                self.node_end(e)
+                children.push(lhs)
+                children.push(rhs)
+            }
+            EkUnary(op, inner) => {
+                self.open(depth, "Unary")
+                self.value(
+                    match op {
+                        OpNeg => "Neg"
+                        OpNot => "Not"
+                        OpBitNot => "BitNot"
+                    },
+                )
+                self.node_end(e)
+                children.push(inner)
+            }
+            EkLet(local, init) => {
+                self.open(depth, "Let")
+                self.out.push(" l${local}")
+                self.node_end(e)
+                children.push(init)
+            }
+            EkAssign(local, value) => {
+                self.open(depth, "Assign")
+                self.out.push(" l${local}")
+                self.node_end(e)
+                children.push(value)
+            }
+            EkBlock(stmts, trailing) => {
+                self.open(depth, "Block")
+                self.bool_field("tail", trailing.is_some())
+                self.node_end(e)
+                for s in stmts.iter() { children.push(s) }
+                match trailing {
+                    Some(t) => children.push(t)
+                    None => ()
+                }
+            }
+            EkIf(cond, then, else_) => {
+                self.open(depth, "If")
+                self.bool_field("else", else_.is_some())
+                self.node_end(e)
+                children.push(cond)
+                children.push(then)
+                match else_ {
+                    Some(x) => children.push(x)
+                    None => ()
+                }
+            }
+            EkWhile(cond, body) => {
+                self.open(depth, "While")
+                self.node_end(e)
+                children.push(cond)
+                children.push(body)
+            }
+            EkBreak => {
+                self.open(depth, "Break")
+                self.node_end(e)
+            }
+            EkContinue => {
+                self.open(depth, "Continue")
+                self.node_end(e)
+            }
+            EkMatch(scrutinee, arms) => {
+                self.open(depth, "Match")
+                self.node_end(e)
+                self.expr(d, scrutinee)
+                for arm in arms.iter() {
+                    self.open(d, "Arm")
+                    self.bool_field("guard", arm.guard.is_some())
+                    self.span(arm.span)
+                    self.pattern(d + 1, arm.pattern)
+                    match arm.guard {
+                        Some(g) => self.expr(d + 1, g)
+                        None => ()
+                    }
+                    self.expr(d + 1, arm.body)
+                    self.close()
+                }
+                self.close()
+                return
+            }
+            EkReturn(value) => {
+                self.open(depth, "Return")
+                self.bool_field("value", value.is_some())
+                self.node_end(e)
+                match value {
+                    Some(v) => children.push(v)
+                    None => ()
+                }
+            }
+            EkToStr(inner) => {
+                self.open(depth, "ToStr")
+                self.node_end(e)
+                children.push(inner)
+            }
+            EkStrConcat(parts) => {
+                self.open(depth, "StrConcat")
+                self.node_end(e)
+                children = parts
+            }
+            EkAwait(inner) => {
+                self.open(depth, "Await")
+                self.node_end(e)
+                children.push(inner)
+            }
+        }
+        for c in children.iter() { self.expr(d, c) }
+        self.close()
+    }
+
+    // A pattern at `depth`, with no span or type: `(PatKind values…`, its
+    // sub-patterns a level deeper, then `)` (`pattern`).
+    fn pattern(mut self, depth: Int, p: HirPattern) {
+        let mut subs: Vec<HirPattern> = Vec::new()
+        match p {
+            PatWildcard => self.open(depth, "PatWildcard")
+            PatBind(l) => {
+                self.open(depth, "PatBind")
+                self.out.push(" l${l}")
+            }
+            PatInt(n) => {
+                self.open(depth, "PatInt")
+                self.out.push(" ${n}")
+            }
+            PatBool(b) => {
+                self.open(depth, "PatBool")
+                self.out.push(" ${b}")
+            }
+            PatStr(text) => {
+                self.open(depth, "PatStr")
+                self.string(text)
+            }
+            PatChar(c) => {
+                self.open(depth, "PatChar")
+                self.out.push(" ${c.to_int()}")
+            }
+            PatRange(lo, hi) => {
+                self.open(depth, "PatRange")
+                self.out.push(" ${lo} ${hi}")
+            }
+            PatVariant(sum, variant, fields) => {
+                self.open(depth, "PatVariant")
+                self.out.push(" ${self.id(sum)} ${variant}")
+                subs = fields
+            }
+            PatTuple(elems) => {
+                self.open(depth, "PatTuple")
+                subs = elems
+            }
+            PatOr(alts) => {
+                self.open(depth, "PatOr")
+                subs = alts
+            }
+        }
+        for q in subs.iter() { self.pattern(depth + 1, q) }
+        self.close()
+    }
+}
+
+// A binary operator's name, as `hir::BinOp` names it (`bin_op`).
+fn bin_op_name(op: HirBinOp) -> String {
+    match op {
+        OpAdd => "Add"
+        OpSub => "Sub"
+        OpMul => "Mul"
+        OpDiv => "Div"
+        OpRem => "Rem"
+        OpEq => "Eq"
+        OpNe => "Ne"
+        OpLt => "Lt"
+        OpLe => "Le"
+        OpGt => "Gt"
+        OpGe => "Ge"
+        OpBitAnd => "BitAnd"
+        OpBitOr => "BitOr"
+        OpBitXor => "BitXor"
+        OpShl => "Shl"
+        OpShr => "Shr"
     }
 }
