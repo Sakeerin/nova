@@ -72,8 +72,9 @@ pub fn dump_hir_program(
 }
 
 /// std's part for `target`, under test mode when `test`, from the check
-/// of a program of no module of its own: its tables and every diagnostic,
-/// the resolver's and the item passes' (`dump_std`).
+/// of a program of no module of its own: its tables, its functions when
+/// its bodies were checked, and every diagnostic, the resolver's and the
+/// type checker's (`dump_std`).
 pub fn dump_hir_std(
     target: CompileTarget,
     test: Bool,
@@ -113,7 +114,15 @@ pub fn dump_hir_std(
     d.field("impls", "${impls}")
     d.field("sigs", "${sigs}")
     d.field("externs", "${externs}")
+    if tables.bodies {
+        d.closures = tables.closures
+        d.std_closures = tables.std_closures
+        let mut functions = 0
+        for f in tables.functions.iter() { if d.ours(f.def_id, true) { functions += 1 } }
+        d.field("functions", "${functions}")
+    }
     d.tables(defs, tables, true)
+    if tables.bodies { d.functions(tables.functions, true) }
     d.close()
     d.out.push("\n")
     d.out.push(diagnostics_text(diagnostics))

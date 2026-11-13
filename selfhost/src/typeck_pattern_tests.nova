@@ -1,0 +1,394 @@
+// N's own tests of `match`, patterns, usefulness and `for` (5.3b part 4).
+// The usefulness tests mirror crates/nova-typeck/src/usefulness.rs's,
+// which stay Rust's too; the others check a program, each expected value
+// what S0's `nova check` gives for the same source. The sources need no
+// std (typeck_body_tests.nova's `check_bodies_of`). The differential
+// compares every other input.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import diagnostic
+import hir
+import token
+import typeck
+import typeck_body
+import typeck_body_tests
+import typeck_pattern
+import usefulness
+
+// --- usefulness.rs's tests ---
+
+// A constructor with no argument.
+fn ctor(c: Ctor) -> UPat { UpCtor(c, Vec::new()) }
+
+// The witnesses of a wildcard against `rows`, a column of type `ty`, each
+// its one pattern.
+fn witnesses(cx: MatchCx, rows: Vec<UPat>, ty: Ty) -> Vec<UPat> {
+    let mut matrix: Vec<Vec<UPat>> = Vec::new()
+    for r in rows.iter() { matrix.push(one(r)) }
+    let mut out: Vec<UPat> = Vec::new()
+    for w in cx.usefulness(matrix, one(UpWild), col(ty)).iter() { out.push(w.at(0)) }
+    out
+}
+
+fn col(ty: Ty) -> Vec<Ty> {
+    let mut tys: Vec<Ty> = Vec::new()
+    tys.push(ty)
+    tys
+}
+
+// Whether `q` is useful against the rows `prior`.
+fn useful(cx: MatchCx, prior: Vec<UPat>, q: UPat, ty: Ty) -> Bool {
+    let mut matrix: Vec<Vec<UPat>> = Vec::new()
+    for r in prior.iter() { matrix.push(one(r)) }
+    !cx.usefulness(matrix, one(q), col(ty)).is_empty()
+}
+
+fn pats(ps: [UPat]) -> Vec<UPat> { Vec::from_array(ps) }
+
+fn no_sums() -> MatchCx { new_match_cx(Vec::new()) }
+
+const OPT: Int = 1
+
+const RES: Int = 2
+
+// `Opt<T> = Some(T) | None` and `Res<T, E> = Ok(T) | Err(E)`.
+fn sums() -> MatchCx {
+    let mut out: Vec<SumType> = Vec::new()
+    let mut opt: Vec<HirVariant> = Vec::new()
+    opt.push(HirVariant { name: "Some", fields: Vec::from_array([TyParam(0)]) })
+    opt.push(HirVariant { name: "None", fields: Vec::new() })
+    out.push(SumType { def_id: OPT, name: "Opt", generics: 1, variants: opt })
+    let mut res: Vec<HirVariant> = Vec::new()
+    res.push(HirVariant { name: "Ok", fields: Vec::from_array([TyParam(0)]) })
+    res.push(HirVariant { name: "Err", fields: Vec::from_array([TyParam(1)]) })
+    out.push(SumType { def_id: RES, name: "Res", generics: 2, variants: res })
+    new_match_cx(out)
+}
+
+fn opt(t: Ty) -> Ty { TySum(OPT, Vec::from_array([t])) }
+
+fn res(t: Ty, e: Ty) -> Ty { TySum(RES, Vec::from_array([t, e])) }
+
+fn some(p: UPat) -> UPat { UpCtor(CtorVariant(OPT, 0), one(p)) }
+
+fn none() -> UPat { UpCtor(CtorVariant(OPT, 1), Vec::new()) }
+
+fn ok(p: UPat) -> UPat { UpCtor(CtorVariant(RES, 0), one(p)) }
+
+fn err(p: UPat) -> UPat { UpCtor(CtorVariant(RES, 1), one(p)) }
+
+fn tuple(ps: [UPat]) -> UPat { UpCtor(CtorTuple(ps.len()), Vec::from_array(ps)) }
+
+// Whether `p` is constructor `c` (its arguments not looked at).
+fn is_ctor(p: UPat, c: Ctor) -> Bool {
+    match p {
+        UpCtor(x, _) => ctor_eq(x, c)
+        _ => false
+    }
+}
+
+// `p`'s `i`-th argument.
+fn arg(p: UPat, i: Int) -> UPat {
+    match p {
+        UpCtor(_, args) => args.at(i)
+        _ => UpWild
+    }
+}
+
+fn is_wild(p: UPat) -> Bool {
+    match p {
+        UpWild => true
+        _ => false
+    }
+}
+
+@test
+fn bool_true_and_false_is_exhaustive() {
+    let w = witnesses(no_sums(), pats([ctor(CtorBool(true)), ctor(CtorBool(false))]), TyBool)
+    assert(w.is_empty(), "exhaustive")
+}
+
+@test
+fn bool_missing_false_yields_false_witness() {
+    let w = witnesses(no_sums(), pats([ctor(CtorBool(true))]), TyBool)
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorBool(false)), "`false`")
+}
+
+@test
+fn int_literals_need_a_wildcard() {
+    let w = witnesses(no_sums(), pats([ctor(CtorInt(0)), ctor(CtorInt(1))]), TyInt)
+    assert(w.len() == 1 && is_wild(w.at(0)), "`_`")
+}
+
+@test
+fn int_with_wildcard_is_exhaustive() {
+    assert(witnesses(no_sums(), pats([ctor(CtorInt(0)), UpWild]), TyInt).is_empty(), "exhaustive")
+}
+
+@test
+fn arm_covered_by_earlier_wildcard_is_not_useful() {
+    assert(!useful(no_sums(), pats([UpWild]), ctor(CtorInt(1)), TyInt), "unreachable")
+}
+
+@test
+fn distinct_literal_is_useful() {
+    assert(useful(no_sums(), pats([ctor(CtorInt(0))]), ctor(CtorInt(1)), TyInt), "reachable")
+}
+
+@test
+fn a_nested_witness_names_the_inner_variant() {
+    let w = witnesses(sums(), pats([some(ok(UpWild)), none()]), opt(res(TyInt, TyString)))
+    assert(w.len() == 1, "one witness")
+    assert(is_ctor(w.at(0), CtorVariant(OPT, 0)), "`Some(…)`")
+    assert(is_ctor(arg(w.at(0), 0), CtorVariant(RES, 1)), "`Some(Err(_))`")
+}
+
+@test
+fn a_nested_arm_an_earlier_one_covers_is_not_useful() {
+    let ty = opt(opt(TyInt))
+    assert(!useful(sums(), pats([some(UpWild)]), some(some(ctor(CtorInt(1)))), ty), "covered")
+    // First match wins: the more specific arm first leaves the general one
+    // useful.
+    assert(useful(sums(), pats([some(some(ctor(CtorInt(1))))]), some(UpWild), ty), "useful")
+}
+
+@test
+fn an_or_pattern_row_covers_every_alternative() {
+    let ty = opt(res(TyInt, TyInt))
+    let rows = pats([some(UpOr(pats([ok(UpWild), err(UpWild)]))), none()])
+    assert(witnesses(sums(), rows, ty).is_empty(), "exhaustive")
+    // An or-pattern as the candidate row is useful when one alternative is.
+    let prior = pats([some(ok(UpWild))])
+    assert(useful(sums(), prior, UpOr(pats([some(ok(UpWild)), none()])), ty), "useful")
+    assert(!useful(sums(), prior, UpOr(pats([some(ok(ctor(CtorInt(3))))])), ty), "not useful")
+}
+
+@test
+fn a_tuple_of_sums_needs_every_combination() {
+    let ty = TyTuple(Vec::from_array([opt(TyInt), TyBool]))
+    let mut rows = pats([tuple([some(UpWild), UpWild]), tuple([none(), ctor(CtorBool(true))])])
+    let w = witnesses(sums(), rows, ty)
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorTuple(2)), "one tuple witness")
+    assert(is_ctor(arg(w.at(0), 0), CtorVariant(OPT, 1)), "`(None, …)`")
+    assert(is_ctor(arg(w.at(0), 1), CtorBool(false)), "`(None, false)`")
+    rows.push(tuple([UpWild, ctor(CtorBool(false))]))
+    assert(witnesses(sums(), rows, ty).is_empty(), "exhaustive")
+}
+
+@test
+fn a_tuple_is_one_constructor_even_when_its_type_is_unknown() {
+    assert(witnesses(sums(), pats([tuple([UpWild, UpWild])]), TyError).is_empty(), "exhaustive")
+}
+
+@test
+fn literals_and_ranges_inside_a_variant_need_a_catch_all() {
+    let ty = opt(TyChar)
+    let mut rows = pats([some(ctor(CtorRange(97, 122))), some(ctor(CtorChar('_'))), none()])
+    let w = witnesses(sums(), rows, ty)
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorVariant(OPT, 0)), "`Some(…)`")
+    assert(is_wild(arg(w.at(0), 0)), "`Some(_)`")
+    rows.push(some(UpWild))
+    assert(witnesses(sums(), rows, ty).is_empty(), "exhaustive")
+}
+
+@test
+fn ranges_are_not_split() {
+    // The same range again is not useful; one inside it still is.
+    let prior = pats([ctor(CtorRange(1, 10))])
+    assert(!useful(no_sums(), prior, ctor(CtorRange(1, 10)), TyInt), "the same range")
+    assert(useful(no_sums(), prior, ctor(CtorRange(2, 3)), TyInt), "a range inside")
+    assert(useful(no_sums(), prior, ctor(CtorInt(5)), TyInt), "a literal inside")
+    // A range covering every `Int` still needs a catch-all.
+    let all = pats([ctor(CtorRange(-9223372036854775807 - 1, 9223372036854775807))])
+    assert(useful(no_sums(), all, UpWild, TyInt), "a catch-all")
+}
+
+@test
+fn a_generic_sum_at_depth_takes_its_arguments() {
+    // `Opt<Opt<Bool>>`: `Some(Some(true))`, `Some(Some(false))`, `None`
+    // leave `Some(None)`.
+    let rows = pats([some(some(ctor(CtorBool(true)))), some(some(ctor(CtorBool(false)))), none()])
+    let w = witnesses(sums(), rows, opt(opt(TyBool)))
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorVariant(OPT, 0)), "`Some(…)`")
+    assert(is_ctor(arg(w.at(0), 0), CtorVariant(OPT, 1)), "`Some(None)`")
+}
+
+@test
+fn a_witness_names_a_value_the_literals_miss_where_e0022_asks() {
+    // `0` past a range from 1, `'a'` beside `'b'`, `"a"` past `""`.
+    let cx = no_sums().naming_values()
+    let w = witnesses(cx, pats([ctor(CtorRange(-5, -1)), ctor(CtorInt(0))]), TyInt)
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorInt(1)), "`1`")
+    let w = witnesses(cx, pats([ctor(CtorChar('b'))]), TyChar)
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorChar('a')), "`'a'`")
+    let w = witnesses(cx, pats([ctor(CtorStr(""))]), TyString)
+    assert(w.len() == 1 && is_ctor(w.at(0), CtorStr("a")), "`\"a\"`")
+}
+
+// --- Patterns and `match` in a program ---
+
+// Each diagnostic's code, message and primary label, its notes, and each
+// fix's title and edits, one a line.
+fn report(c: Checker) -> String {
+    let mut out: Vec<String> = Vec::new()
+    for d in c.diagnostics.iter() {
+        let l = d.labels.at(0)
+        out.push("${d.code} ${d.message} ${l.span.start}..${l.span.end} ${l.message}")
+        for n in d.notes.iter() { out.push("  note: ${n}") }
+        for f in d.fixes.iter() {
+            out.push("  fix: ${f.title}")
+            for e in f.edits.iter() { out.push("    ${e.span.start}..${e.span.end} `${e.text}`") }
+        }
+    }
+    "\n".join(out.to_array())
+}
+
+// "" when `c`'s report is `want`, one entry a line, else what it is.
+fn mismatch(c: Checker, want: [String]) -> String {
+    let got = report(c)
+    if got == "\n".join(want) { "" } else { "got: ${" | ".join(got.split("\n"))}" }
+}
+
+@test
+fn a_missing_nested_variant_is_the_witness() {
+    let c = check_bodies_of(
+        "type S = | A | B(Int) | C(Bool)\nfn f(s: S) -> Int {\n    match s {\n        A => 0\n        B(_) => 1\n        C(true) => 2\n    }\n}\n",
+    )
+    let m = mismatch(
+        c,
+        [
+            "E0020 non-exhaustive match: pattern `C(false)` not covered 56..125 here",
+            "  note: add the missing arms or a `_ => ...` catch-all",
+        ],
+    )
+    assert(m == "", m)
+}
+
+@test
+fn an_unreachable_arm_has_its_line_removed() {
+    let c = check_bodies_of(
+        "fn f(x: Int) -> Int {\n    match x {\n        _ => 0\n        1 => 1\n    }\n}\n",
+    )
+    let m = mismatch(
+        c,
+        [
+            "E0021 unreachable match arm 59..60 this arm is never reached",
+            "  note: an earlier arm already matches every value this one would",
+            "  fix: remove the unreachable arm",
+            "    51..66 ``",
+        ],
+    )
+    assert(m == "", m)
+}
+
+@test
+fn a_refutable_let_and_for_name_the_values_they_miss() {
+    let c = check_bodies_of(
+        "fn f(p: (Int, Bool), q: [(Int, Bool)]) -> Int {\n    let (a, true) = p\n    for (1, true) in q { }\n    a\n}\n",
+    )
+    let note = "  note: `let` and `for` take a pattern every value matches: names, `_`, tuples of these, and a variant of a sum that has only one; use `match` for the rest"
+    let m = mismatch(
+        c,
+        [
+            "E0022 refutable pattern in `let` 56..65 `(_, false)` is not matched",
+            note,
+            "E0022 refutable pattern in a `for` loop 78..87 `(0, _)`, `(1, false)` are not matched",
+            note,
+        ],
+    )
+    assert(m == "", m)
+}
+
+@test
+fn an_upper_case_binding_near_a_variant_is_e0104_with_its_fix() {
+    let c = check_bodies_of(
+        "type S = | Apple | Pear\nfn f(s: S) -> Int {\n    match s {\n        Aple => 0\n    }\n}\n",
+    )
+    let m = mismatch(
+        c,
+        [
+            "E0104 `Aple` binds a value: no variant of that name is in scope 66..70 this binding matches any value",
+            "  note: a name that starts with an upper-case letter reads as a variant; if one was meant, check its spelling or import it; to bind a value, use a lower-case name",
+            "  note: did you mean `Apple`?",
+            "  fix: change `Aple` to `Apple`",
+            "    66..70 `Apple`",
+        ],
+    )
+    assert(m == "", m)
+}
+
+@test
+fn alternatives_bind_the_same_names_and_a_range_is_not_empty() {
+    let c = check_bodies_of(
+        "type O = | Some(Int) | None\nfn f(o: O) -> Int {\n    match o {\n        Some(x) | None => 0\n    }\n}\nfn g(c: Char) -> Int {\n    match c {\n        'z'..='a' => 0\n        _ => 1\n    }\n}\n",
+    )
+    let m = mismatch(
+        c,
+        [
+            "E0100 the alternatives bind different names 80..84 `x` is missing from this alternative",
+            "  note: every alternative of an or-pattern binds the same names; the first one binds `x`",
+            "E0101 this range matches nothing 143..152 `'z'` is above `'a'`",
+        ],
+    )
+    assert(m == "", m)
+}
+
+@test
+fn a_string_column_needs_a_catch_all() {
+    let c = check_bodies_of(
+        "fn f(s: String, c: Char) -> Int {\n    match (s, c) {\n        (\"\", 'a') => 0\n        (\"a\", '\\n') => 1\n    }\n}\n",
+    )
+    let m = mismatch(
+        c,
+        [
+            "E0020 non-exhaustive match: pattern `(_, _)` not covered 38..106 here",
+            "  note: add the missing arms or a `_ => ...` catch-all",
+        ],
+    )
+    assert(m == "", m)
+}
+
+@test
+fn a_witness_prints_strings_and_chars_as_rust_does() {
+    assert(debug_str("a\"b\\\n") == "\"a\\\"b\\\\\\n\"", debug_str("a\"b\\\n"))
+    assert(debug_char('\'') == "'\\''", debug_char('\''))
+    assert(debug_char('"') == "'\"'", debug_char('"'))
+    let del = string_from_chars([char_from_int(127).unwrap()])
+    let want = "\"" + "\\" + "u{7f}é\""
+    assert(debug_str("${del}é") == want, debug_str("${del}é"))
+}
+
+// --- `for` ---
+
+// The names of `f`'s locals, in order.
+fn local_names(f: HirFunction) -> String {
+    let mut names: Vec<String> = Vec::new()
+    for l in f.locals.iter() { names.push(l.name) }
+    " ".join(names.to_array())
+}
+
+@test
+fn a_for_loop_makes_its_hidden_locals_where_s0_does() {
+    let c = check_bodies_of(
+        "type Opt<T> = | Some(T) | None\nrecord C { n: Int }\ntrait It { fn next(mut self) -> Opt<Int> }\nimpl It for C { fn next(mut self) -> Opt<Int> { None } }\nfn f(c: C) -> Int {\n    let mut t = 0\n    for x in c { t += x }\n    for i in 0..=3 { t += i }\n    t\n}\n",
+    )
+    assert(c.diagnostics.is_empty(), report(c))
+    let f = c.functions.at(0)
+    assert(f.name == "f", "the first function is `f`")
+    // An iterator's `__it`, then a range's counter and bound, its variable,
+    // and `__run` after the body.
+    let names = local_names(f)
+    assert(names == "c t __it x __i __end i __run", names)
+}
+
+@test
+fn an_array_loop_reads_each_element_by_index() {
+    let c = check_bodies_of(
+        "fn f(a: [Int]) -> Int {\n    let mut t = 0\n    for x in a { t += x }\n    t\n}\n",
+    )
+    assert(c.diagnostics.is_empty(), report(c))
+    let names = local_names(c.functions.at(0))
+    assert(names == "a t __arr __n __i x", names)
+}
