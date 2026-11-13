@@ -820,6 +820,8 @@ enum RawToken {
     Tilde,
 
     // Float literals — must be before Int to get longest match priority
+    // Two patterns sharing one callback is logos's syntax, not a repeated attribute.
+    #[allow(clippy::duplicated_attributes)]
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?", lex_float)]
     #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9]+", lex_float)]
     Float(f64),
