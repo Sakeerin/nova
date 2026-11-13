@@ -1,0 +1,7 @@
+trait A { fn same(self) -> Int }
+trait B: A { fn same(self) -> Int }
+record R { v: Int }
+impl A for R { fn same(self) -> Int { 1 } }
+impl B for R { fn same(self) -> Int { 2 } }
+fn call_same<T: B>(x: T) -> Int { x.same() }
+fn main() { println("${call_same(R { v: 0 })}") }

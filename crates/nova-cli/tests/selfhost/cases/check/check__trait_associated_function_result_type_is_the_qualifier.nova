@@ -1,0 +1,4 @@
+trait Zero { fn zero() -> Self }
+impl Zero for Int { fn zero() -> Int { 0 } }
+fn main() { let n = Int::zero()
+ println("${n}") }

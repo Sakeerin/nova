@@ -1,0 +1,6 @@
+fn main() {
+let z = 1
+let outer = |a: Int| { let inner = |b: Int| a + b
+ inner(100) }
+println("${outer(7)}")
+}

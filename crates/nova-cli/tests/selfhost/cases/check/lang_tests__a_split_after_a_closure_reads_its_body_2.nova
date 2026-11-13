@@ -1,0 +1,6 @@
+fn g(x: Int) -> Int { x }
+fn f(arr: [Int]) -> Int {
+    let f = |i: Int| arr
+    [1][0]
+}
+fn main() {}

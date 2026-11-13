@@ -1,0 +1,5 @@
+record Box<T> { value: T }
+trait Zero { fn zero() -> Self }
+impl Zero for Box<Int> { fn zero() -> Box<Int> { Box { value: 0 } } }
+fn main() { let b: Box<Int> = Box::zero()
+ println("${b.value}") }

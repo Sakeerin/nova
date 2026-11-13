@@ -1,0 +1,8 @@
+fn g() {}
+fn f(c: Bool) {
+    if c {
+        return
+        (g())
+    }
+}
+fn main() {}

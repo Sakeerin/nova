@@ -1,0 +1,5 @@
+trait Tag { fn tag<U>(self, u: U) -> Self }
+impl Tag for Int { fn tag<U>(self, u: U) -> Int { 1 } }
+fn main() { let n = 5
+ let m: Int = n.tag(true)
+ println("${m}") }

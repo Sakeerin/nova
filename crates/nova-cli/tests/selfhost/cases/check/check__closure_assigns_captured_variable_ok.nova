@@ -1,0 +1,7 @@
+fn main() {
+let mut acc = 100
+let keep = 9
+let f = |n: Int| { acc = n
+ keep + n }
+println("${f(5)}")
+}

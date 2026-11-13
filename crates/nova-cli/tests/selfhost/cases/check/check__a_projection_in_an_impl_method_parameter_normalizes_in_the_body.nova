@@ -1,0 +1,6 @@
+trait It { type Item
+ fn put(self, x: Self::Item) -> Int }
+record K { k: Int }
+impl It for K { type Item = Int
+fn put(self, x: Self::Item) -> Int { x + 1 } }
+fn main() { println("${(K { k: 0 }).put(9)}") }

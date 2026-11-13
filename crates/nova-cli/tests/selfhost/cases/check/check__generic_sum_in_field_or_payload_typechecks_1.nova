@@ -1,0 +1,6 @@
+record Slot { tag: Option<Int> }
+type Wrapper = | W(Result<Int, String>) | Empty
+fn main() {
+let s = Slot { tag: Some(1) }
+match s.tag { Some(v) => println("${v}"), None => println("n") }
+}

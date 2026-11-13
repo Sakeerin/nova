@@ -1,0 +1,3 @@
+trait Merge { fn combine(a: Self, b: Self) -> Self }
+impl Merge for Int { fn combine(a: Int, b: Int) -> Int { a + b } }
+fn main() { println("${Int::combine(2, true)}") }

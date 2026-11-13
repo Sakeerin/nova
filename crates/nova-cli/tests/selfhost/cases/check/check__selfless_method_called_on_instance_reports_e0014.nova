@@ -1,0 +1,5 @@
+record P { v: Int }
+impl P { fn make() -> P { P { v: 7 } } }
+fn main() { let p = P { v: 0 }
+ let q = p.make()
+ println("${q.v}") }

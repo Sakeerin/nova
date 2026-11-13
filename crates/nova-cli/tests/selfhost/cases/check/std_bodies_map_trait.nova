@@ -1,0 +1,3 @@
+trait Mine { fn len(self) -> Int }
+impl<K, V> Mine for Map<K, V> { fn len(self) -> Int { 0 } }
+fn main() {}

@@ -1,0 +1,5 @@
+async fn mine() -> Result<(), IoError> { Ok(()) }
+impl Stdout {
+    fn flush(self) -> Future<Result<(), IoError>> { mine() }
+}
+fn main() {}

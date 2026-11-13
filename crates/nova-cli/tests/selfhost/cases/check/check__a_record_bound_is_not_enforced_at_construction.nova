@@ -1,0 +1,5 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+record M<I: It> { it: I }
+fn main() { let m = M { it: 3 }
+ let _ = m }

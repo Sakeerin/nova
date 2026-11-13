@@ -1,0 +1,7 @@
+trait It { type Item
+ fn get_item(self) -> Self::Item }
+record W<T> { v: T }
+impl<T> It for W<T> { type Item = T
+fn get_item(self) -> Self::Item { self.v } }
+fn take<I: It>(y: I::Item, x: I) -> Int { 1 }
+fn main() { println("${take(9, W { v: 7 })}") }

@@ -1,0 +1,8 @@
+record Pair<A, B> { first: A, second: B }
+trait Describe { fn describe(self) -> String }
+impl<T> Pair<T, T> { fn describe(self) -> String { "same" } }
+impl<A, B> Describe for Pair<A, B> { fn describe(self) -> String { "pair" } }
+fn main() {
+let p = Pair { first: 1, second: "x" }
+println(p.describe())
+}

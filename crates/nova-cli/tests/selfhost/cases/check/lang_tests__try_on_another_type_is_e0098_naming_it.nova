@@ -1,0 +1,5 @@
+fn f(x: Int) -> Option<Int> {
+    let y = x?
+    Some(y)
+}
+fn main() {}

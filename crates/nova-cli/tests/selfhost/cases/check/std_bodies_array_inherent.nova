@@ -1,0 +1,4 @@
+impl<T> [T] {
+    fn hash(self) -> Int { 0 }
+}
+fn main() {}

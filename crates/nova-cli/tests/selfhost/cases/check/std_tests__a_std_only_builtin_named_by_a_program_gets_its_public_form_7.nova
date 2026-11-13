@@ -1,0 +1,3 @@
+fn main() {
+    let x = float_to_bits(1.0)
+}

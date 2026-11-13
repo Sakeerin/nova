@@ -1,0 +1,11 @@
+trait X { fn x(self) -> Int }
+trait A: X { fn a(self) -> Int }
+trait B: X { fn b(self) -> Int }
+trait C: A + B { fn c(self) -> Int }
+record R { v: Int }
+impl X for R { fn x(self) -> Int { 1 } }
+impl A for R { fn a(self) -> Int { 2 } }
+impl B for R { fn b(self) -> Int { 3 } }
+impl C for R { fn c(self) -> Int { 4 } }
+fn only_x<T: C>(v: T) -> Int { v.x() }
+fn main() { println("${only_x(R { v: 0 })}") }

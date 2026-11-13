@@ -1,0 +1,1 @@
+fn main() { shutdown_requested() }

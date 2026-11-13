@@ -1,0 +1,7 @@
+@test
+fn alpha() { }
+@test(should_panic)
+fn beta() { }
+@test
+fn gamma() { }
+fn main() { }

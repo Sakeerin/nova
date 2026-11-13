@@ -1,0 +1,1 @@
+fn main() { fs_last_error_message() }

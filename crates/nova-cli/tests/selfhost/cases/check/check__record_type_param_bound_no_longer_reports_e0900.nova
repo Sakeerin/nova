@@ -1,0 +1,5 @@
+trait Hash2 { fn h(self) -> Int }
+record Keyed<K: Hash2, V> { k: K, v: V }
+record NoHash { n: Int }
+fn main() { let x = Keyed { k: NoHash { n: 1 }, v: 2 }
+ println("${x.v}") }

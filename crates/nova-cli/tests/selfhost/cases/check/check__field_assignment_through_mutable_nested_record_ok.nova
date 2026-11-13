@@ -1,0 +1,7 @@
+record Inner { v: Int }
+record Outer { inner: Inner }
+fn main() {
+let mut o = Outer { inner: Inner { v: 1 } }
+o.inner.v = 7
+println("${o.inner.v}")
+}

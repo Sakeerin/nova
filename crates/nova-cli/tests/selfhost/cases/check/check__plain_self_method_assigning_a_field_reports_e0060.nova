@@ -1,0 +1,5 @@
+record P { v: Int }
+impl P { fn bump(self) { self.v = self.v + 1 } }
+fn main() { let p = P { v: 1 }
+ p.bump()
+ println("${p.v}") }

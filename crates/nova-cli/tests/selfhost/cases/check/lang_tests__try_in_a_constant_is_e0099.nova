@@ -1,0 +1,3 @@
+fn n() -> Option<Int> { None }
+const A: Option<Int> = Some(n()? + 1)
+fn main() {}

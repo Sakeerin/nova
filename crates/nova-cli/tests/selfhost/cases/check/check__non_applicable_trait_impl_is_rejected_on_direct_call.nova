@@ -1,0 +1,5 @@
+record Pair<A, B> { first: A, second: B }
+trait Same { fn same(self) -> Int }
+impl<T> Same for Pair<T, T> { fn same(self) -> Int { 1 } }
+fn main() { let p = Pair { first: 1, second: "x" }
+ let n = p.same() }

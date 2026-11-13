@@ -1,0 +1,9 @@
+record Inner { v: Int }
+impl Inner { fn bump(mut self) { self.v = self.v + 1 } }
+record Outer { inner: Inner, data: [Int] }
+impl Outer {
+fn call_mutator(self) { self.inner.bump() }
+fn set_elem(self) { self.data[0] = 1 }
+fn set_field(self) { self.inner.v = 1 }
+}
+fn main() { }

@@ -1,0 +1,10 @@
+fn div_mod(a: Int, b: Int) -> (Int, Int) { (a / b, a % b) }
+fn main() {
+    let p: (String, Int) = ("x", 1)
+    let one: (Int,) = (5,)
+    let q = div_mod(7, 2)
+    let n: ((Int, Int), (Bool, (Char, Float))) = ((1, 2), (true, ('c', 1.5)))
+    let v: Vec<(Int, String)> = Vec::new()
+    let o: Option<(Int, Bool)> = Some((1, true))
+    let u: ((), Int) = ((), 1)
+}

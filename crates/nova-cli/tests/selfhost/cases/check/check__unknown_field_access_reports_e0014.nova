@@ -1,0 +1,3 @@
+record Point { x: Int, y: Int }
+fn main() { let p = Point { x: 3, y: 4 }
+ let z = p.z }

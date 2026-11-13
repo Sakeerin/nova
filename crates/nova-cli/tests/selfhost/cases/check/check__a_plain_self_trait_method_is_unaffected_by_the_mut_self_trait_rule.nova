@@ -1,0 +1,5 @@
+trait Get { fn get(self) -> Int }
+record C { n: Int }
+impl Get for C { fn get(self) -> Int { self.n } }
+fn main() { let c = C { n: 1 }
+ println("${c.get()}") }

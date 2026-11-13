@@ -1,0 +1,6 @@
+fn f() -> Int {
+    let t = (1, "s", true)
+    t.2
+    t.0
+}
+fn main() {}

@@ -1,0 +1,8 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+record M<I: It, U> { it: I, f: fn(I::Item) -> U }
+record Counter { n: Int }
+impl It for Counter { type Item = Int
+ fn next(mut self) -> Option<Int> { None } }
+fn main() { let m = M { f: |x| x + 1, it: Counter { n: 0 } }
+ let _ = m }

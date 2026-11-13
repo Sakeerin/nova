@@ -1,0 +1,9 @@
+record Inner { v: Int }
+record Outer { inner: Inner }
+impl Inner { fn bump(mut self) { self.v = self.v + 1 } }
+impl Outer { fn bump_inner(mut self) { self.inner.bump() } }
+fn main() {
+let mut o = Outer { inner: Inner { v: 1 } }
+o.bump_inner()
+println("${o.inner.v}")
+}

@@ -1,0 +1,1 @@
+fn main() { fs_create_dir_all() }

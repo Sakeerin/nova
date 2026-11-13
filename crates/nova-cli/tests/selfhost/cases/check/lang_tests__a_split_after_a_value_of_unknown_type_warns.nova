@@ -1,0 +1,8 @@
+fn make<T>() -> T {
+    panic("no")
+}
+fn f() -> (Int, Int) {
+    let m = make()
+    (1, 2)
+}
+fn main() {}

@@ -1,0 +1,27 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Res<T, E> =
+  | Win(T)
+  | Fail(E)
+type Tok =
+  | Ident(String)
+  | Num(Int)
+  | Sym(Char)
+  | Eof
+type Wrap =
+  | Wrap(Int, String)
+fn f(p: (Int, Int)) -> Int {
+    match p {
+        (0, 0) => return 0
+        (1, n) => n
+        (a, b) => a + b
+    }
+}
+fn g(p: (Int, Int)) {
+    match p {
+        (0, _) => return
+        (a, b) => {}
+    }
+}
+fn main() {}

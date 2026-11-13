@@ -1,0 +1,11 @@
+import lex::{Tok}
+fn f(o: Opt<Tok>) -> Int {
+    match o {
+        Yes(Eof) => 1
+        _ => 2
+    }
+}
+type Opt<T> =
+  | Yes(T)
+  | No
+fn main() {}

@@ -1,0 +1,5 @@
+record P { v: Int }
+trait T { fn add(self, x: Int) -> Int }
+impl T for P { fn add(self, x: Int) -> Int { self.v + x } }
+fn main() { let p = P { v: 1 }
+ println("${p.add(2)}") }

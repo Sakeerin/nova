@@ -1,0 +1,5 @@
+trait Show { fn fmt(mut self) -> String }
+record C { n: Int }
+impl Show for C { fn fmt(mut self) -> String { "c" } }
+fn main() { let c = C { n: 1 }
+ println("${c}") }

@@ -1,0 +1,6 @@
+fn main() {
+    let mut v: Vec<Int> = Vec::from_array([1])
+    let va = v.to_array()
+    let at = v.at(0)
+    let last = v.last()
+}

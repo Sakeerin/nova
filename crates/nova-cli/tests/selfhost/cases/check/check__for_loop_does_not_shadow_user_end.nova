@@ -1,0 +1,4 @@
+fn main() {
+let __end = 100
+for i in 0..3 { println("${__end}") }
+}

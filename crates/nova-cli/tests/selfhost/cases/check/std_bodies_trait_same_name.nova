@@ -1,0 +1,3 @@
+trait Mine { fn to_string(self) -> Option<String> }
+impl Mine for Bytes { fn to_string(self) -> Option<String> { None } }
+fn main() {}

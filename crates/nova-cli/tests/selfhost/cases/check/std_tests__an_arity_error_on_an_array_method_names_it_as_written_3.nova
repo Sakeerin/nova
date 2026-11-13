@@ -1,0 +1,4 @@
+fn main() {
+    let v: Vec<Int> = Vec::new()
+    let x = v.at()
+}

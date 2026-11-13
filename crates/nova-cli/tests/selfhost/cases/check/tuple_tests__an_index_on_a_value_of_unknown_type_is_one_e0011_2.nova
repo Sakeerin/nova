@@ -1,0 +1,5 @@
+fn main() {
+    let f = |mut p| {
+        p.1 = 2
+    }
+}

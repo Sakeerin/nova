@@ -1,0 +1,6 @@
+fn k(x: Int) -> fn(Int) -> Int { |y: Int| x + y }
+fn main() {
+    let v = k(1)
+    (5)
+    println("${v(2)}")
+}

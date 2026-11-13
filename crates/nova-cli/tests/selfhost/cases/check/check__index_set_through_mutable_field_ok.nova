@@ -1,0 +1,3 @@
+record Box { data: [Int] }
+fn main() { let mut b = Box { data: [1, 2, 3] }
+ b.data[0] = 99 }

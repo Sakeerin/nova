@@ -1,0 +1,3 @@
+record P { v: Int }
+impl P { fn f(a: Int, b: Int) -> Int { b } }
+fn main() { println("ok") }

@@ -1,0 +1,4 @@
+fn swap<A, B>(p: (A, B)) -> (B, A) { (p.1, p.0) }
+fn main() {
+    let s: (Int, Bool) = swap((1, true))
+}

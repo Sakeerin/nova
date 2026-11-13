@@ -1,0 +1,6 @@
+fn p() -> Result<Int, Int> { Ok(1) }
+fn f() -> Result<Int, String> {
+    let v = p()?
+    Ok(v)
+}
+fn main() {}

@@ -1,0 +1,8 @@
+impl [Vec<Int>] {
+    fn bump(mut self) { }
+}
+fn main() {
+    let v: Vec<Int> = Vec::new()
+    let a = [v]
+    a.bump()
+}

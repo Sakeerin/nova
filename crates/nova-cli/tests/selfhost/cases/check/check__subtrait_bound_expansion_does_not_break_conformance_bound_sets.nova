@@ -1,0 +1,13 @@
+trait M { fn m<U: B>(self, u: U) -> Int }
+trait A { fn a(self) -> Int }
+trait B: A { fn b(self) -> Int }
+record R { v: Int }
+record S { w: Int }
+impl A for S { fn a(self) -> Int { 1 } }
+impl B for S { fn b(self) -> Int { 2 } }
+impl M for R { fn m<U: B>(self, u: U) -> Int { u.a() + u.b() } }
+fn main() {
+let r = R { v: 0 }
+let s = S { w: 0 }
+println("${r.m(s)}")
+}

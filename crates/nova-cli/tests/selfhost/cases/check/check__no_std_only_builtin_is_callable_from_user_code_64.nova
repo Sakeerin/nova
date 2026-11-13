@@ -1,0 +1,1 @@
+fn main() { bytes_from_string_intrinsic() }

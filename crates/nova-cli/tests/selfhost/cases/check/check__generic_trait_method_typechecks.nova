@@ -1,0 +1,6 @@
+trait Mapper { fn remap<U>(self, f: fn(Int) -> U) -> U }
+record Thing { v: Int }
+impl Mapper for Thing { fn remap<U>(self, f: fn(Int) -> U) -> U { f(self.v) } }
+fn dbl(n: Int) -> Int { n * 2 }
+fn main() { let t = Thing { v: 21 }
+ println("${t.remap(dbl)}") }

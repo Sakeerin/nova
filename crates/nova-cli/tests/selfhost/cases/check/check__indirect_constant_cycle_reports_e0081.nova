@@ -1,0 +1,3 @@
+const A: Int = B
+const B: Int = A
+fn main() { }

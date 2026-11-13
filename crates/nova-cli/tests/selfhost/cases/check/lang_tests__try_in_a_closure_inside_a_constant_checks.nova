@@ -1,0 +1,2 @@
+const F: fn(Option<Int>) -> Option<Int> = |o: Option<Int>| -> Option<Int> { Some(o? + 1) }
+fn main() {}

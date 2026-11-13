@@ -1,0 +1,4 @@
+record P { v: Int }
+fn main() { let p = P { v: 1 }
+ p.v = 7
+ println("${p.v}") }

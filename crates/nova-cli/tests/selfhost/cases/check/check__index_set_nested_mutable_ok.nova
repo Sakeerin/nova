@@ -1,0 +1,2 @@
+fn main() { let mut grid = [[1, 2], [3, 4]]
+ grid[0][1] = 99 }

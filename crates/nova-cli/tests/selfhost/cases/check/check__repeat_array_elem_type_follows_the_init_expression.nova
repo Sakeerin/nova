@@ -1,0 +1,3 @@
+fn main() { let n = 2
+ let a: [String] = ["hi"; n]
+ println("${a[0]}") }

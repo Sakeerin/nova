@@ -1,0 +1,5 @@
+fn f() -> Int {
+let x = if true { return 0 } else { 5 }
+x + 1
+}
+fn main() { println("${f()}") }

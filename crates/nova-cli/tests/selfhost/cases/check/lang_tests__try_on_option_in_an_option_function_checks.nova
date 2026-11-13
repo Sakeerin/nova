@@ -1,0 +1,5 @@
+fn first(s: String) -> Option<String> {
+    let i = s.index_of(" ")?
+    Some(s.slice(0, i))
+}
+fn main() {}

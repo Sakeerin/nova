@@ -1,0 +1,3 @@
+async fn id<T>(x: T) -> T { x }
+async fn g() -> Float { id(1.5).await }
+fn main() {}

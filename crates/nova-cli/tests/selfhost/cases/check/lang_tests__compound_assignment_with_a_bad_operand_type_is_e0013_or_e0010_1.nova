@@ -1,0 +1,5 @@
+record R { b: Bool }
+fn main() {
+    let mut r = R { b: true }
+    r.b += true
+}

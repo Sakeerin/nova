@@ -1,0 +1,4 @@
+trait Widen { fn widen(self, k: Int) -> Int }
+impl Widen for Int { fn widen(self, k: Int) -> Int { k } }
+fn main() { let n = 5
+ println("${n.widen()}") }

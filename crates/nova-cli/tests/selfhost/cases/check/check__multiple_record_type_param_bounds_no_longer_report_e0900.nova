@@ -1,0 +1,4 @@
+trait A { fn a(self) -> Int }
+trait B { fn b(self) -> Int }
+record Two<K: A, V: B> { k: K, v: V }
+fn main() { }

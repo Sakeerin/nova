@@ -1,0 +1,6 @@
+impl [(Int, Int)] {
+    fn four(self, n: Int) -> Int { n }
+}
+fn main() {
+    let x = [(1, 2)].four()
+}

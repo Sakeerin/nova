@@ -1,0 +1,11 @@
+type Tree<T> =
+  | Leaf(T)
+  | Node(Tree<T>, Tree<T>)
+fn f<T>(t: Tree<T>) -> Int {
+    match t {
+        Leaf(_) => 1
+        Node(Leaf(_), _) => 2
+        Node(Node(_, _), _) => 3
+    }
+}
+fn main() {}
