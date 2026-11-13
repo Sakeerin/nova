@@ -1,0 +1,2 @@
+fn f() { Future::x() }
+fn main() { }

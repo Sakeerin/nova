@@ -1,0 +1,5 @@
+record R { n: Int }
+fn main() {
+    let r = R { n: 1 }
+    r.n += 1
+}

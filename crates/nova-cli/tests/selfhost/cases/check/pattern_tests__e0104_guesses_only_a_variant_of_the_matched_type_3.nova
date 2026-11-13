@@ -1,0 +1,7 @@
+const MAX: Int = 9
+fn f(p: (Int, Int)) -> Int {
+    match p {
+        (Nome, MAX) => 1
+    }
+}
+fn main() {}

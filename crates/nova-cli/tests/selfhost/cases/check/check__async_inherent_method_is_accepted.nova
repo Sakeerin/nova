@@ -1,0 +1,3 @@
+record W { v: Int }
+impl W { async fn get(self) -> Int { self.v } }
+fn main() {}

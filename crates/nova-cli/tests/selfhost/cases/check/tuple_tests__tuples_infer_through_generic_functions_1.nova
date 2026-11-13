@@ -1,0 +1,6 @@
+fn swap<A, B>(p: (A, B)) -> (B, A) { (p.1, p.0) }
+fn first<A, B>(p: (A, B)) -> A { p.0 }
+fn main() {
+    let s: (Bool, Int) = swap((1, true))
+    let n: Int = first(swap(("x", 3)))
+}

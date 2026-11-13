@@ -1,0 +1,5 @@
+import ui
+import ui::html::{div, input}
+fn h() { }
+component A() { view { div(on_: h) } }
+fn main() { }

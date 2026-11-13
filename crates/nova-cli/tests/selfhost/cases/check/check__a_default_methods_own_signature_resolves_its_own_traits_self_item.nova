@@ -1,0 +1,3 @@
+trait It { type Item
+ fn get(self) -> Self::Item { panic("unreachable") } }
+fn main() { }

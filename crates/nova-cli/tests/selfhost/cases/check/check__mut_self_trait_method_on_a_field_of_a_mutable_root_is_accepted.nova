@@ -1,0 +1,9 @@
+trait Bump { fn bump(mut self) }
+record Inner { n: Int }
+record Outer { inner: Inner }
+impl Bump for Inner { fn bump(mut self) { self.n = self.n + 1 } }
+fn main() {
+let mut o = Outer { inner: Inner { n: 1 } }
+o.inner.bump()
+println("${o.inner.n}")
+}

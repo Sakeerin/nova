@@ -1,0 +1,10 @@
+fn main() {
+    let bl = "a".byte_len()
+    let mut sb = StringBuilder::new()
+    sb.push("x")
+    sb.push_char('y')
+    let sl = sb.byte_len()
+    let se = sb.is_empty()
+    let st = sb.to_string()
+    sb.clear()
+}

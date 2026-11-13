@@ -1,0 +1,21 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Res<T, E> =
+  | Win(T)
+  | Fail(E)
+type Tok =
+  | Ident(String)
+  | Num(Int)
+  | Sym(Char)
+  | Eof
+type Wrap =
+  | Wrap(Int, String)
+const MAX: Int = 9
+fn f(o: Opt<Int>) -> Int {
+    match o {
+        Yes(MAX) => 1
+        _ => 0
+    }
+}
+fn main() {}

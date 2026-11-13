@@ -1,0 +1,6 @@
+record R { n: Int }
+fn f() -> Int { 0 }
+fn main() {
+    let mut rs = [R { n: 1 }]
+    rs[f()].n += 1
+}

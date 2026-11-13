@@ -1,0 +1,9 @@
+trait It { type Item
+ fn next(mut self) -> Option<Self::Item> }
+record Once { v: Int, done: Bool }
+impl It for Once { type Item = Int
+fn next(mut self) -> Option<Int> { if self.done { None } else { self.done = true
+ Some(self.v) } } }
+fn make_once() -> Once { Once { v: 7, done: false } }
+fn main() { for x in make_once() {
+match __it.next() { Some(y) => println("stole ${y}"), None => println("none") } } }

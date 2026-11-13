@@ -68,18 +68,21 @@ pub struct SharedItems {
 
 impl SharedItems {
     /// std's item tables, from `file` and `defs`, the resolution of a
-    /// program of no module of its own.
+    /// program of no module of its own. std's bodies are checked once
+    /// too (5.3b, spec 5.3 §4.5): should they give a diagnostic, as its
+    /// items, nothing is shared.
     pub fn new(file: &ast::File, defs: &Definitions, options: &CheckOptions) -> SharedItems {
         let tables = check_items(file, defs, options);
+        let bodies = check_program(file, defs, options);
         SharedItems {
-            shareable: tables.diagnostics.is_empty(),
+            shareable: tables.diagnostics.is_empty() && bodies.diagnostics.is_empty(),
             defs: defs.defs().len() as u32,
             tables,
         }
     }
 
     /// Whether a program may read these tables ([`SharedItems::shareable`]'s
-    /// field): std's items gave no diagnostic.
+    /// field): std's items and bodies gave no diagnostic.
     pub fn shareable(&self) -> bool {
         self.shareable
     }
@@ -103,6 +106,19 @@ pub fn check_items_shared(
     options: &CheckOptions,
     shared: &SharedItems,
 ) -> ItemTables {
+    let mut checker = shared_checker(file, defs, options, shared);
+    checker.collect_items();
+    checker.into_tables()
+}
+
+/// A checker over the program `file` and `defs` that reads std's tables
+/// from `shared` ([`check_items_shared`]).
+fn shared_checker<'a>(
+    file: &'a ast::File,
+    defs: &'a Definitions,
+    options: &CheckOptions<'a>,
+    shared: &'a SharedItems,
+) -> Checker<'a> {
     let own_defs = defs.defs().len() as u32 - shared.defs;
     let rebase = Rebase {
         def: own_defs,
@@ -110,8 +126,110 @@ pub fn check_items_shared(
     };
     let mut checker = Checker::new(file, defs, options, Some((shared, rebase)));
     checker.own_defs = own_defs;
-    checker.collect_items();
-    checker.into_tables()
+    checker
+}
+
+/// What the whole type checker built for a program, for the HIR dump
+/// (5.3b, spec 5.3 §4.3, ADR 0056): the item tables, the functions, and
+/// every diagnostic it gave, the item passes' then the bodies'.
+pub struct Checked {
+    /// The item tables, whose `diagnostics` are the item passes' alone.
+    pub tables: ItemTables,
+    /// Every diagnostic the type checker gave, in order.
+    pub diagnostics: Vec<Diagnostic>,
+    /// Every function as `hir::Module` holds them: the program's, then
+    /// std's when they were checked, then the closures and wrappers in the
+    /// order they were lifted, the program's before std's; `None` when
+    /// only the items were checked ([`Checked::items`]).
+    pub(crate) functions: Option<Vec<hir::Function>>,
+    /// The first closure's or wrapper's id, past every definition
+    /// (`defs.len()`), and the first of std's.
+    pub(crate) closures: u32,
+    pub(crate) std_closures: u32,
+}
+
+impl Checked {
+    /// The item passes' output alone ([`check_items`],
+    /// [`check_items_shared`]), as 5.3a's dump prints it.
+    pub fn items(tables: ItemTables) -> Checked {
+        Checked {
+            diagnostics: tables.diagnostics.clone(),
+            tables,
+            functions: None,
+            closures: u32::MAX,
+            std_closures: u32::MAX,
+        }
+    }
+
+    /// The functions, when the bodies were checked.
+    pub fn functions(&self) -> Option<&[hir::Function]> {
+        self.functions.as_deref()
+    }
+}
+
+/// [`check_with`](super::check_with) over `file`, with the item tables kept
+/// beside the functions, for the HIR dump (5.3b): the program's bodies,
+/// then std's, each in `DefId` order (spec 5.3 §4.1).
+pub fn check_program(file: &ast::File, defs: &Definitions, options: &CheckOptions) -> Checked {
+    let tables = check_items(file, defs, options);
+    let checker = Checker::new(file, defs, options, None);
+    checker.checked(tables)
+}
+
+/// [`check_program`] reading std's tables from `shared`
+/// ([`check_items_shared`]): the program's bodies alone, since std's are
+/// std's part of the dump, checked once by [`SharedItems::new`] (5.3b,
+/// spec 5.3 §4.5). `None` when the program implements anything on a type
+/// it does not own ([`implements_on_a_type_it_does_not_own`]): method
+/// lookup scans every impl, so std's bodies could then check otherwise,
+/// and the caller checks the program in full. The caller checks in full
+/// when `shared` is not shareable, too.
+pub fn check_program_shared(
+    file: &ast::File,
+    defs: &Definitions,
+    options: &CheckOptions,
+    shared: &SharedItems,
+) -> Option<Checked> {
+    let tables = check_items_shared(file, defs, options, shared);
+    let own_defs = defs.defs().len() as u32 - shared.defs;
+    if implements_on_a_type_it_does_not_own(file, &tables, own_defs) {
+        return None;
+    }
+    Some(shared_checker(file, defs, options, shared).checked(tables))
+}
+
+/// Whether the program implements anything on a type it does not own
+/// (5.3b, spec 5.3 §4.5; the user's ruling of 2026-11-12): an impl, a
+/// trait's or an inherent one, whose self type is a primitive, an array
+/// or one of std's records or sums, rather than one of the program's own,
+/// those below `own_defs`. std's bodies look methods up in every impl,
+/// with no filter by the traits in scope, so such an impl can give std's
+/// bodies a diagnostic or bind one of their calls to the program's
+/// method. To err on the safe side, an impl of the program's that the item
+/// passes did not collect counts too: `file` holds the program's items
+/// alone.
+pub fn implements_on_a_type_it_does_not_own(
+    file: &ast::File,
+    tables: &ItemTables,
+    own_defs: u32,
+) -> bool {
+    let written = file
+        .items
+        .iter()
+        .filter(|item| matches!(item.value, ast::Item::Impl(_)))
+        .count();
+    let mut collected = 0;
+    for (imp, &std) in tables.impls.iter().zip(&tables.impl_in_std) {
+        if std {
+            continue;
+        }
+        collected += 1;
+        match imp.self_head {
+            TyHead::Sum(id) | TyHead::Record(id) if id.0 < own_defs => {}
+            _ => return true,
+        }
+    }
+    collected != written
 }
 
 /// How std's ids move in a program: its definitions come after the
@@ -406,6 +524,27 @@ impl<'a> Checker<'a> {
         self.impl_self = tables.impl_self;
     }
 
+    /// This new checker restored from `tables`, as
+    /// [`check_with`](super::check_with) restores it, after the bodies
+    /// ([`Checker::check_bodies`]): the tables, the functions and every
+    /// diagnostic.
+    fn checked(mut self, tables: ItemTables) -> Checked {
+        let items = tables.diagnostics.len();
+        let closures = self.next_closure_def;
+        self.restore(tables);
+        let (functions, std_closures) = self.check_bodies();
+        let mut tables = self.into_tables();
+        let diagnostics = std::mem::take(&mut tables.diagnostics);
+        tables.diagnostics = diagnostics[..items].to_vec();
+        Checked {
+            tables,
+            diagnostics,
+            functions: Some(functions),
+            closures,
+            std_closures,
+        }
+    }
+
     /// Whether the definition `id` is the program's own, which the passes
     /// collect: every one, unless std's tables are shared.
     pub(super) fn own(&self, id: DefId) -> bool {
@@ -581,8 +720,9 @@ mod tests {
         )
     }
 
-    /// The text of a program's part, from its resolution and tables.
-    fn shown(r: &ProgramResolution, t: &ItemTables) -> String {
+    /// The text of a program's part, from its resolution and what the
+    /// type checker built.
+    fn shown(r: &ProgramResolution, t: &Checked) -> String {
         let labels = [(FileId::DUMMY, "main".to_string())];
         let mut diagnostics = r.diagnostics.clone();
         diagnostics.extend(t.diagnostics.iter().cloned());
@@ -705,10 +845,15 @@ mod tests {
         let ast = parse(program);
         let sources = [ModuleSource::new("main", &ast)];
         let full = nova_resolver::resolve_program_with_std(CompileTarget::Native, &sources, &std);
-        let full_tables = check_items(&full.file, &full.definitions, &options);
+        let full_tables = Checked::items(check_items(&full.file, &full.definitions, &options));
         let shared =
             nova_resolver::resolve_program_with_shared_std_for_check(&sources, &shared_std);
-        let shared_tables = check_items_shared(&shared.file, &shared.definitions, &options, &items);
+        let shared_tables = Checked::items(check_items_shared(
+            &shared.file,
+            &shared.definitions,
+            &options,
+            &items,
+        ));
         let text = shown(&full, &full_tables);
         assert!(text.contains("E0074"), "{text}");
         assert!(text.contains("E0105"), "{text}");
@@ -717,7 +862,10 @@ mod tests {
         // the full passes collect, though no item pass reads some of it
         // (std's records, sums, method places and impl selves are the
         // bodies', 5.3b's).
-        assert_eq!(tables_text(&full_tables), tables_text(&shared_tables));
+        assert_eq!(
+            tables_text(&full_tables.tables),
+            tables_text(&shared_tables.tables)
+        );
 
         let broken = ("$std.zz", "pub record Bad { x: Missing }\n");
         let alone = nova_resolver::resolve_program_with_std(
@@ -725,6 +873,110 @@ mod tests {
             &[],
             &std_with(Some(broken)),
         );
+        let items = SharedItems::new(&alone.file, &alone.definitions, &options);
+        assert!(!items.shareable());
+    }
+
+    /// The shared path checks a program's own bodies alone and dumps what
+    /// the full check dumps, std's closures after the program's (5.3b, spec
+    /// 5.3 §4.1, §4.5); a program that implements anything on a type it
+    /// does not own, a std record or a primitive, takes the full check, and
+    /// one whose impls are on its own types does not; std whose bodies give
+    /// a diagnostic, with clean items, is not shareable.
+    #[test]
+    fn shared_bodies_check_what_the_full_check_does() {
+        let extra = (
+            "$std.zz",
+            "pub record Zr { n: Int }
+pub fn zz(x: Int) -> Int {
+    \
+             Some(x).map(|y| y + 1).unwrap_or(0)
+}
+",
+        );
+        let std = std_with(Some(extra));
+        let shared_std = SharedStd::new(CompileTarget::Native, std_with(Some(extra)));
+        let alone = shared_std.alone();
+        let options = CheckOptions::default();
+        let items = SharedItems::new(&alone.file, &alone.definitions, &options);
+        assert!(items.shareable());
+        for (program, takes_full) in [
+            (
+                "fn main() {\n    let f = |x: Int| x * 2\n    let g = zz\n    \
+                 println(\"${f(2)} ${g(1)}\")\n}\n",
+                false,
+            ),
+            (
+                "record Mine { x: Int }\nimpl Mine {\n    fn m(self) -> Int { \"s\" }\n}\n\
+                 trait T {\n    fn t(self) -> Int\n}\nimpl T for Mine {\n    \
+                 fn t(self) -> Int { 1 }\n}\nfn main() {}\n",
+                false,
+            ),
+            (
+                "impl Zr {\n    fn m(self) -> Int { 1 }\n}\nfn main() {}\n",
+                true,
+            ),
+            (
+                "trait T {\n    fn t(self) -> Int\n}\nimpl T for Int {\n    \
+                 fn t(self) -> Int { 1 }\n}\nfn main() {}\n",
+                true,
+            ),
+            (
+                "impl<T> [T] {\n    fn m(self) -> Int { 1 }\n}\nfn main() {}\n",
+                true,
+            ),
+        ] {
+            let ast = parse(program);
+            let sources = [ModuleSource::new("main", &ast)];
+            let full =
+                nova_resolver::resolve_program_with_std(CompileTarget::Native, &sources, &std);
+            let full_checked = check_program(&full.file, &full.definitions, &options);
+            let shared =
+                nova_resolver::resolve_program_with_shared_std_for_check(&sources, &shared_std);
+            let shared_checked =
+                check_program_shared(&shared.file, &shared.definitions, &options, &items);
+            assert_eq!(shared_checked.is_none(), takes_full, "{program}");
+            let text = shown(&full, &full_checked);
+            assert!(text.contains("(Function u"), "{text}");
+            if let Some(shared_checked) = shared_checked {
+                assert_eq!(text, shown(&shared, &shared_checked), "{program}");
+                let lifted = |c: &Checked| {
+                    let defs = full.definitions.defs().len() as u32;
+                    c.functions()
+                        .expect("the bodies")
+                        .iter()
+                        .filter(|f| f.def_id.0 >= defs)
+                        .map(|f| f.def_id.0)
+                        .collect::<Vec<u32>>()
+                };
+                let (all, own) = (lifted(&full_checked), lifted(&shared_checked));
+                assert!(all.len() > own.len(), "{all:?} {own:?}");
+                assert_eq!(all[..own.len()], own[..]);
+            }
+        }
+
+        // A program's closures print alike whatever std's size: std's one
+        // more module moves their ids, not what the dump shows.
+        let program = "fn main() {\n    let f = |x: Int| x * 2\n    println(\"${f(2)}\")\n}\n";
+        let text_with = |std: &ParsedStd| {
+            let ast = parse(program);
+            let sources = [ModuleSource::new("main", &ast)];
+            let r = nova_resolver::resolve_program_with_std(CompileTarget::Native, &sources, std);
+            shown(&r, &check_program(&r.file, &r.definitions, &options))
+        };
+        let text = text_with(&std);
+        assert!(text.contains("\"closure$u1\""), "{text}");
+        assert_eq!(text, text_with(&std_with(None)));
+
+        let broken = ("$std.zz", "pub fn bad() -> Int { \"s\" }\n");
+        let alone = nova_resolver::resolve_program_with_std(
+            CompileTarget::Native,
+            &[],
+            &std_with(Some(broken)),
+        );
+        assert!(check_items(&alone.file, &alone.definitions, &options)
+            .diagnostics
+            .is_empty());
         let items = SharedItems::new(&alone.file, &alone.definitions, &options);
         assert!(!items.shareable());
     }

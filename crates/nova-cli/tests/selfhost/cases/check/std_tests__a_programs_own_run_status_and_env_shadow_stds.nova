@@ -1,0 +1,8 @@
+fn run(n: Int) -> Int { n }
+fn status() -> String { "ok" }
+fn main() {
+    let env = 3
+    let a = run(env)
+    let b = status()
+    println("${a} ${b}")
+}

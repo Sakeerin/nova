@@ -1,0 +1,7 @@
+trait Display { fn fmt(self) -> String }
+record Wrap<T> { inner: T }
+impl<T> Display for Wrap<T> {
+fn fmt(self) -> String { self.inner.fmt() }
+}
+fn main() { let w = Wrap { inner: 1 }
+ println(w.fmt()) }

@@ -1,0 +1,2 @@
+fn f(x: Bool) -> Int { 1 }
+fn main() { }

@@ -1,0 +1,3 @@
+fn first(xs: [Int]) -> Int { xs[0] }
+fn make() -> [Int] { [7, 8, 9] }
+fn main() { println("${first(make())}") }

@@ -1,0 +1,1 @@
+fn main() { log_config_to_stderr() }

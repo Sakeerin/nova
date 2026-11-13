@@ -1,0 +1,5 @@
+fn main() {
+let base = 10
+let f = |n| n + base
+println("${f(5)}")
+}

@@ -1,0 +1,14 @@
+fn main() {
+    let mut m: OrderedMap<String, Int> = OrderedMap::new()
+    let ins = m.insert("a", 1)
+    let g = m.get("a")
+    let rm = m.remove("a")
+    let ck = m.contains_key("a")
+    let n = m.len()
+    let ie = m.is_empty()
+    let ks = m.keys()
+    let vs = m.values()
+    let es = m.entries()
+    let mut it = m.iter()
+    let nx = it.next()
+}

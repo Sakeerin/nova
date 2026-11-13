@@ -1,0 +1,4 @@
+fn main() {
+let o = Some(3)
+match o { Some(v) => println("${v}"), None => println("none") }
+}

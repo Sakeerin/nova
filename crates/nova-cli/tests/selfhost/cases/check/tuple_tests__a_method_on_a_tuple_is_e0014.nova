@@ -1,0 +1,4 @@
+fn main() {
+    let t = (1, 2)
+    let n = t.len()
+}

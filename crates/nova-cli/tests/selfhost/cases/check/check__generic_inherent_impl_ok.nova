@@ -1,0 +1,7 @@
+record Box<T> { value: T }
+impl<T> Box<T> { fn get(self) -> T { self.value } }
+fn main() {
+let a = Box { value: 1 }
+let b = Box { value: "s" }
+println("${a.get()} ${b.get()}")
+}

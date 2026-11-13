@@ -1,0 +1,4 @@
+record P { v: Int }
+trait Zero { fn zero() -> Int }
+impl Zero for P { fn zero() -> Int { 0 } }
+fn main() { println("ok") }

@@ -1,0 +1,4 @@
+impl String {
+    fn len(self, x: Int) -> Int { 0 }
+}
+fn main() {}

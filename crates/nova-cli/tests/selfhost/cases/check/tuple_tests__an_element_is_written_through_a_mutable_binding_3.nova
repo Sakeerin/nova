@@ -1,0 +1,4 @@
+fn main() {
+    let mut t = (1, 2)
+    t.0 = "s"
+}

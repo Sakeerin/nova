@@ -1,0 +1,8 @@
+trait It { type Item
+ fn items(self) -> [Self::Item] }
+record W<T> { v: T }
+impl<T> It for W<T> { type Item = T
+fn items(self) -> [Self::Item] { [self.v] } }
+fn main() { let w = W { v: 7 }
+ let a: [Int] = w.items()
+println("${a.len()}") }

@@ -1,0 +1,6 @@
+async fn get() -> Option<Int> { Some(1) }
+async fn f() -> Option<Int> {
+    let v = get().await?
+    Some(v)
+}
+fn main() {}

@@ -1,0 +1,21 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Res<T, E> =
+  | Win(T)
+  | Fail(E)
+type Tok =
+  | Ident(String)
+  | Num(Int)
+  | Sym(Char)
+  | Eof
+type Wrap =
+  | Wrap(Int, String)
+fn f(xs: [(Int, Int)]) -> Int {
+    let mut n = 0
+    for (A, c) in xs {
+        n += A + c
+    }
+    n
+}
+fn main() {}

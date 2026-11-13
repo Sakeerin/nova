@@ -1,0 +1,4 @@
+impl Int {
+    fn pad(self, w: Int) -> String { "HIJACK" }
+}
+fn main() {}

@@ -1,0 +1,4 @@
+async fn f() -> Float { 1.5 }
+async fn g() -> Float { let h = spawn(f())
+ h.join().await }
+fn main() { }

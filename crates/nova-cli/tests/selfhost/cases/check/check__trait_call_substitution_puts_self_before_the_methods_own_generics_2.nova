@@ -1,0 +1,4 @@
+trait Make { fn make<U>(u: U) -> Self }
+impl Make for Int { fn make<U>(u: U) -> Int { 1 } }
+fn main() { let m: Int = Int::make(true)
+ println("${m}") }

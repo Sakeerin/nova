@@ -1,0 +1,6 @@
+trait Bump { fn bump(mut self) }
+record P { v: Int }
+impl Bump for P { fn bump(mut self) { self.v = self.v + 1 } }
+fn main() { let p = P { v: 1 }
+ p.bump()
+ println("${p.v}") }

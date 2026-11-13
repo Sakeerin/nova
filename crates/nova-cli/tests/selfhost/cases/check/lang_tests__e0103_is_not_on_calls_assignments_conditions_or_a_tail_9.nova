@@ -1,0 +1,4 @@
+fn f(x: Int) -> Int {
+    x
+}
+fn main() {}

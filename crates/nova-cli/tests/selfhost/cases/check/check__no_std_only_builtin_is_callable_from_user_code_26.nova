@@ -1,0 +1,1 @@
+fn main() { task_join_future() }

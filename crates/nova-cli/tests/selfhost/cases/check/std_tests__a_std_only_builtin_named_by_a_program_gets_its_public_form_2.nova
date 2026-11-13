@@ -1,0 +1,3 @@
+fn main() {
+    let x = int_to_char(65)
+}

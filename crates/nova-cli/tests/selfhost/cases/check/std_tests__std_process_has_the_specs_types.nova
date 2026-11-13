@@ -1,0 +1,9 @@
+fn main() {
+    let o = run("p", ["a"]).unwrap()
+    let os = o.status
+    let oo = o.stdout
+    let oe = o.stderr
+    let st = status("p", []).unwrap()
+    let ev = env("HOME")
+    let ce = current_exe().unwrap()
+}

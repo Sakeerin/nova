@@ -1,0 +1,9 @@
+fn g() -> Int { 1 }
+fn main() {
+    let x = 1
+    let y = 2
+    let mut m = 1
+    m = 2
+    m += 1
+    println("${x}")
+}

@@ -1,0 +1,7 @@
+record R { n: Int, a: [Int] }
+fn main() {
+    let mut r = R { n: 1, a: [1, 2] }
+    r.n %= 3
+    r.a[1] %= 2
+    println("${r.n}")
+}

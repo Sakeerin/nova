@@ -1,0 +1,11 @@
+fn main() {
+let mut v = Vec::new()
+v.push(1)
+v.push(2)
+println("${v.len()}")
+match v.get(0) { Some(x) => println("${x}"), None => println("none") }
+match v.pop() { Some(x) => println("${x}"), None => println("none") }
+v.set(0, 9)
+v.clear()
+println("${v.len()}")
+}

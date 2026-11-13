@@ -1,0 +1,9 @@
+trait Two { type A
+ type B
+ fn get_a(self) -> Self::A }
+record W { v: Int }
+impl Two for W { type A = Self::B
+ type B = Int
+fn get_a(self) -> Self::A { self.v } }
+fn main() { let n: Int = W { v: 1 }.get_a()
+ println("${n}") }

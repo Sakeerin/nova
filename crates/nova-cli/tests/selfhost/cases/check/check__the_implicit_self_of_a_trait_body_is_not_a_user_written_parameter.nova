@@ -1,0 +1,7 @@
+trait It { type Item
+ fn get(self) -> Self::Item
+ fn dup(self) -> Self::Item { self.get() } }
+record W { v: Int }
+impl It for W { type Item = Int
+ fn get(self) -> Self::Item { panic("x") } }
+fn main() { }

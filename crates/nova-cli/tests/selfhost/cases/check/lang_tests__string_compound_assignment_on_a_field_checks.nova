@@ -1,0 +1,7 @@
+record R { s: String }
+fn main() {
+    let mut r = R { s: "a" }
+    r.s += "b"
+    let mut v = ["x"]
+    v[0] += "y"
+}

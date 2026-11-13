@@ -1,0 +1,7 @@
+fn main() {
+    let c = char_from_int(65)
+    let i = 'a'.to_int()
+    let s = string_from_chars(['a'])
+    let ba = "a".byte_at(0)
+    let bs = "ab".byte_slice(0, 1)
+}

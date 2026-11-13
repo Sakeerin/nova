@@ -1,0 +1,8 @@
+fn main() {
+let mut m = Map::new()
+let prev = m.insert(1, "one")
+println("${m.len()} ${m.contains_key(1)}")
+match m.get(1) { Some(s) => println(s), None => println("none") }
+match m.remove(1) { Some(s) => println(s), None => println("none") }
+println("${m.len()}")
+}

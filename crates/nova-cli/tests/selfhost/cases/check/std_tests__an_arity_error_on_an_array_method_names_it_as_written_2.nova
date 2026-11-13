@@ -1,0 +1,7 @@
+impl [Int] {
+    fn bump(mut self) { self[0] = 1 }
+}
+fn main() {
+    let a = [1]
+    a.bump()
+}

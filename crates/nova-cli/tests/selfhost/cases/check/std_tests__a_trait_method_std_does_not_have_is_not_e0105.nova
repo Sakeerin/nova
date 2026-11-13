@@ -1,0 +1,38 @@
+trait Size {
+    fn width(self) -> Int
+}
+impl Size for String {
+    fn width(self) -> Int { self.len() }
+}
+trait Bytes {
+    fn byte_len(self) -> Int
+}
+impl Bytes for Int {
+    fn byte_len(self) -> Int { 8 }
+}
+trait Halve {
+    fn half(self) -> Int
+}
+impl Halve for Int {
+    fn half(self) -> Int { self / 2 }
+}
+impl Int {
+    fn half(self) -> Int { self / 2 }
+}
+trait Tr {
+    fn from_array(self) -> Int
+}
+impl Tr for Vec<Int> {
+    fn from_array(self) -> Int { 42 }
+}
+trait Fresh {
+    fn new(self) -> Int
+}
+impl Fresh for Vec<Int> {
+    fn new(self) -> Int { 7 }
+}
+fn main() {
+    let n = 3
+    let v: Vec<Int> = Vec::new()
+    println("${"ab".width()} ${n.byte_len()} ${n.half()} ${v.from_array()} ${v.new()}")
+}

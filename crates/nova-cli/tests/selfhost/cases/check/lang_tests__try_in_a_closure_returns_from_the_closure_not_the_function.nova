@@ -1,0 +1,7 @@
+fn main() {
+    let f = |o: Option<Int>| -> Option<Int> {
+        let v = o?
+        Some(v + 1)
+    }
+    println("${f(Some(1)).is_some()}")
+}

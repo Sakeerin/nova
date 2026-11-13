@@ -1,0 +1,2 @@
+fn main() { let a = [7; "three"]
+ println("${a[0]}") }

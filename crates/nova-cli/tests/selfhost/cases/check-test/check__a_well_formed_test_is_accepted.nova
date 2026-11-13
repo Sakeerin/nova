@@ -1,0 +1,5 @@
+@test
+fn t() { }
+@test(should_panic)
+fn u() { }
+fn main() { }

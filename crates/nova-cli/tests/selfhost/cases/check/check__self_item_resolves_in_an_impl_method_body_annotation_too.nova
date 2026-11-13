@@ -1,0 +1,7 @@
+trait It { type Item
+ fn get(self) -> Self::Item }
+record W { v: Int }
+impl It for W { type Item = Int
+ fn get(self) -> Self::Item { let x: Self::Item = 1
+ x } }
+fn main() { }

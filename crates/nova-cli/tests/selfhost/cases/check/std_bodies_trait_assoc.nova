@@ -1,0 +1,3 @@
+trait Mine { fn default() -> Int }
+impl Mine for Limits { fn default() -> Int { 0 } }
+fn main() {}

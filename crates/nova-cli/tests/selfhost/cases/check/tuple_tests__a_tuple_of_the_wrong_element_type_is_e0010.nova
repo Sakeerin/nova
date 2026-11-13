@@ -1,0 +1,4 @@
+fn want(p: (Int, Int)) -> Int { p.0 }
+fn main() {
+    let x = want(("s", 2))
+}

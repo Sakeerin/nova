@@ -1,0 +1,4 @@
+impl Int {
+    fn hash(self) -> Int { 0 }
+}
+fn main() { println("${(5).hash()}") }

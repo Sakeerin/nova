@@ -1,0 +1,6 @@
+fn g() -> Int { 1 }
+fn f() -> (Int, Int) {
+    g()
+    (1, 2)
+}
+fn main() {}

@@ -1,0 +1,6 @@
+trait Bump { fn bump(mut self) }
+record C { n: Int }
+impl Bump for C { fn bump(mut self) { self.n = self.n + 1 } }
+fn poke<T: Bump>(mut x: T) { x.bump() }
+fn main() { let c = C { n: 1 }
+ poke(c) }

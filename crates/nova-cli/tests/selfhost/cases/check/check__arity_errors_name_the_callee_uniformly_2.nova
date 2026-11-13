@@ -1,0 +1,4 @@
+record P { v: Int }
+impl P { fn of(x: Int) -> P { P { v: x } } }
+fn main() { let p = P::of()
+ println("${p.v}") }

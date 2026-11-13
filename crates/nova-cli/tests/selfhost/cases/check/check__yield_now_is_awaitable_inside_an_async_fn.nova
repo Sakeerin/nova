@@ -1,0 +1,3 @@
+async fn f() -> Int { yield_now().await
+ 1 }
+fn main() { let x = block_on(f()) }

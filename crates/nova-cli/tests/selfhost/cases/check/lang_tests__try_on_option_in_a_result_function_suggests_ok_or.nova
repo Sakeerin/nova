@@ -1,0 +1,5 @@
+fn f(o: Option<Int>) -> Result<Int, String> {
+    let v = o?
+    Ok(v)
+}
+fn main() {}

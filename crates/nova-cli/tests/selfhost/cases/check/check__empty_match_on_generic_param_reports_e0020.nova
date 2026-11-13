@@ -1,0 +1,3 @@
+fn oops<T>(x: T) -> Int { match x { } }
+fn main() { let r = oops(7)
+ println("${r}") }

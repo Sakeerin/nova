@@ -1,0 +1,2 @@
+fn main() { let mut n = 1
+ n[0] = undefined_fn() }

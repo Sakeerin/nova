@@ -1,0 +1,6 @@
+fn k() -> fn(Int) -> Int { |y: Int| y }
+fn f(n: Int, s: String, a: [Int], x: Float) -> Int {
+    let y = x * 2.0
+    -n
+}
+fn main() {}

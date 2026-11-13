@@ -1,0 +1,4 @@
+record Box<T> { value: T }
+impl<T> Box<T> { fn get(self) -> T { 0 } }
+fn main() { let b = Box { value: "s" }
+ let x: String = b.get() }

@@ -1,0 +1,5 @@
+fn main() {
+let mut n = 0
+while (if n > 5 { break } else { true }) { n = n + 1 }
+println("${n}")
+}

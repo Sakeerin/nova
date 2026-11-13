@@ -1,0 +1,4 @@
+fn identity<T>(x: T) -> T { x }
+fn main() { let n = identity(1) + 1
+ let s = identity("s")
+ println("${n}${s}") }

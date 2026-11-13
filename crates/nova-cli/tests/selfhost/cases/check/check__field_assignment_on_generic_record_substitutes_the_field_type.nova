@@ -1,0 +1,4 @@
+record Box<T> { value: T }
+fn main() { let mut b = Box { value: 1 }
+ b.value = 7
+ println("${b.value}") }

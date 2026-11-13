@@ -1,0 +1,14 @@
+trait It { type Item
+ fn get_item(self) -> Self::Item }
+record W<T> { v: T }
+record K { k: Bool }
+impl<T> It for W<T> { type Item = T
+fn get_item(self) -> Self::Item { self.v } }
+impl It for K { type Item = Bool
+fn get_item(self) -> Self::Item { self.k } }
+fn first<I: It>(x: I) -> I::Item { x.get_item() }
+fn take<I: It>(x: I, y: I::Item) -> Int { 1 }
+fn main() { let n: Int = first(W { v: 7 })
+let b: Bool = first(K { k: true })
+let t: Int = take(W { v: 7 }, 9)
+println("${n} ${b} ${t}") }

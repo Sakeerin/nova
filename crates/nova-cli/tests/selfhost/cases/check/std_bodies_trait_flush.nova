@@ -1,0 +1,3 @@
+trait Mine { fn flush(self) -> Int }
+impl Mine for Stdout { fn flush(self) -> Int { 0 } }
+fn main() {}

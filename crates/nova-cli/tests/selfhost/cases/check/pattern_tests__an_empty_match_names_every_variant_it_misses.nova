@@ -1,0 +1,6 @@
+type Color = | Red | Green | Blue
+fn f(c: Color) -> Int {
+    match c {
+    }
+}
+fn main() {}

@@ -1,0 +1,3 @@
+trait Zero { fn zero() -> Int { 5 } }
+impl Zero for Int { }
+fn main() { println("${Int::zero()}") }

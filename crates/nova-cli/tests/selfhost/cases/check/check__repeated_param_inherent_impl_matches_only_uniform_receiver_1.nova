@@ -1,0 +1,4 @@
+record Pair<A, B> { first: A, second: B }
+impl<T> Pair<T, T> { fn both(self) -> T { self.first } }
+fn main() { let p = Pair { first: 1, second: 2 }
+ println("${p.both()}") }

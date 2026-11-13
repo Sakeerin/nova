@@ -1,0 +1,3 @@
+trait Show { fn fmt(self) -> String }
+fn make<T: Show>() -> T { T::zero() }
+fn main() { println("hi") }

@@ -1,0 +1,5 @@
+fn main() {
+    let pi = "1".parse_int()
+    let pr = "1".parse_int_radix(16)
+    let pf = "1".parse_float()
+}

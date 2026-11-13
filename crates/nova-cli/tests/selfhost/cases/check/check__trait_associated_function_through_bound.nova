@@ -1,0 +1,5 @@
+trait Zero { fn zero() -> Self }
+impl Zero for Int { fn zero() -> Int { 0 } }
+fn make<T: Zero>() -> T { T::zero() }
+fn main() { let n: Int = make()
+ println("${n}") }

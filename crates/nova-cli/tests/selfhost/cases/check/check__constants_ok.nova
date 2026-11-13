@@ -1,0 +1,4 @@
+const MAX: Int = 100
+const DOUBLE: Int = MAX * 2
+const NAME: String = "nova"
+fn main() { println("${MAX} ${DOUBLE} ${NAME}") }

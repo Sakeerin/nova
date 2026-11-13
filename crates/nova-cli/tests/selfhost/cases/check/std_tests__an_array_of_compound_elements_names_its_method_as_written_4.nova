@@ -1,0 +1,7 @@
+impl<K, V> [Map<K, V>] {
+    fn three(self, n: Int) -> Int { n }
+}
+fn main() {
+    let m: Map<String, Int> = Map::new()
+    let x = [m].three()
+}

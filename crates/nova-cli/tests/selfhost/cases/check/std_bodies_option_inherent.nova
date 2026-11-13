@@ -1,0 +1,4 @@
+impl<T> Option<T> {
+    fn unwrap_or(self) -> Int { 0 }
+}
+fn main() {}
