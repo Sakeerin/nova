@@ -25,9 +25,7 @@
 //!   with its type arguments, a trait call's self type and its children a
 //!   level deeper; a node's span is `start..end` in its function's file;
 //!   a pattern carries no span or type. The type checker's diagnostics
-//!   are then the bodies' too. `nova check --dump-hir-items` prints 5.3a's
-//!   part, which the differential compares until the self-hosted type
-//!   checker checks bodies.
+//!   are then the bodies' too.
 //! - **Two parts.** std's tables are the same in every program for a
 //!   target and mode, so they print once, by [`dump_std`]; a program's
 //!   part, by [`dump_program`], prints only the program's own entries, and
