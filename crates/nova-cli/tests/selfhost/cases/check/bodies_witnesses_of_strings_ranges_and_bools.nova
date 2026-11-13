@@ -1,0 +1,15 @@
+fn strings(p: (String, Bool)) {
+    let ("a", true) = p
+}
+fn ranges(p: (Int, Bool)) {
+    let (0..2, true) = p
+}
+fn bools(b: Bool) -> Int {
+    match b {
+        x if x => 1
+    }
+}
+fn main() {}
+fn a_range_of_one(p: (Int, Bool)) {
+    let (0..1, true) = p
+}

@@ -1,10 +1,10 @@
 // The type checker's types: a port of check.rs's `convert_ty`,
 // `resolve_projection`, `find_assoc_type`, `normalize`, `resolve_bounds`,
 // `apply_where`, `method_sig_parts`, `collect_signatures`,
-// `collect_externs`, `require_ffi_safe` and view.rs's `component_ret`,
-// function by function (spec
+// `collect_externs` and `require_ffi_safe`, function by function (spec
 // docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
-// §3.1, ADR 0055). typeck.nova gives the idioms.
+// §3.1, ADR 0055). typeck.nova gives the idioms; typeck_view.nova holds
+// view.rs's `component_ret`.
 
 import ast
 import builtins
@@ -14,6 +14,7 @@ import hir
 import resolver
 import token
 import typeck
+import typeck_view
 
 impl Checker {
     /// An AST type as a `Ty`, its names resolved (`convert_ty`): `generics`
@@ -371,32 +372,6 @@ impl Checker {
                 def_id,
                 Some(FnSig { generics: 0, bounds: Vec::new(), params: Vec::new(), ret: ret }),
             )
-        }
-    }
-
-    /// `std/ui`'s `View`, a component's return type (`component_ret`).
-    pub fn component_ret(self) -> Ty {
-        let ui = self.module_named("$std.ui")
-        let html = self.module_named("$std.ui.html")
-        if ui < 0 || html < 0 { return TyError }
-        let view = self.resolve_type_in(ui, "View")
-        let attr = self.resolve_type_in(ui, "Attr")
-        if view < 0 || attr < 0 { return TyError }
-        if !self.is_def_value(html, "on") || !self.is_def_value(html, "text") { return TyError }
-        TySum(view, Vec::new())
-    }
-
-    // The first module named `name`, or -1.
-    fn module_named(self, name: String) -> Int {
-        for m in 0..self.defs.modules.len() { if self.defs.modules.at(m).name == name { return m } }
-        -1
-    }
-
-    // Whether the value `name` in module `m` is a definition.
-    fn is_def_value(self, m: Int, name: String) -> Bool {
-        match self.resolve_value_in(m, name) {
-            Some(ResDef(_)) => true
-            _ => false
         }
     }
 

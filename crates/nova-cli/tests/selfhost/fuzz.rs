@@ -38,7 +38,14 @@
 //!    fixed seeds' inputs: a parameter's, a return's or a field's type, a
 //!    duplicated generic, a trait impl's method dropped, added or retyped,
 //!    an impl duplicated, and items appended that give each aimed code.
-//!    5.3b adds the body mutations.
+//! 6. [`body_mutate`] (5.3b, spec §4.6, ADR 0056): the same programs,
+//!    mutated inside their functions' bodies, so that the body codes occur
+//!    among the fixed seeds' inputs: a literal's type, an argument added
+//!    or dropped, a field renamed, a match arm deleted, `?` on a value that
+//!    is not an `Option` or a `Result`, an assignment to an immutable
+//!    binding (a `let mut` made `let`), a missing method, `break` outside a
+//!    loop, `.await` outside an `async fn`, an annotation removed, and
+//!    functions appended that give each aimed code.
 //!
 //! Beside them, [`edges`]: fixed inputs that no file under `cases/` can
 //! hold as it is, such as a lone `\r` or a NUL.
@@ -1228,4 +1235,412 @@ fn binding_chain() -> String {
     }
     text.push_str("    type A16 = Int\n    fn put(self, y: Self::A0) -> Int { 0 }\n}");
     text
+}
+
+/// Functions [`body_mutate`] appends, `{n}` replaced by a number of the
+/// input's own so that no name repeats, each aimed at a body code: the
+/// code it gives, then the text. The E0001s are the type checker's, an
+/// unknown value and an unknown function.
+pub const BODY_ITEMS: [(&str, &str); 26] = [
+    ("E0001", "fn fz_unknown{n}() -> Int { fz_nowhere{n} }"),
+    ("E0001", "fn fz_nocall{n}() -> Int { fz_absent{n}(1) }"),
+    ("E0010", "fn fz_ret{n}() -> Int { \"fz\" }"),
+    ("E0010", "fn fz_let{n}() {\n    let x: Bool = 1\n}"),
+    ("E0011", "fn fz_infer{n}() {\n    let v = []\n}"),
+    ("E0011", "fn fz_none{n}() {\n    let o = None\n}"),
+    ("E0013", "fn fz_op{n}() -> Bool { true + false }"),
+    ("E0013", "fn fz_show{n}(f: fn() -> Int) { println(\"${f}\") }"),
+    ("E0014", "record FzF{n} { a: Int }\nfn fz_field{n}(r: FzF{n}) -> Int { r.b }"),
+    ("E0014", "fn fz_method{n}(x: Int) -> Int { x.fz_nothing() }"),
+    ("E0015", "trait FzA{n} {\n    fn m(self) -> Int\n}\ntrait FzB{n} {\n    fn m(self) -> Int\n}\nrecord FzM{n} {}\nimpl FzA{n} for FzM{n} {\n    fn m(self) -> Int { 1 }\n}\nimpl FzB{n} for FzM{n} {\n    fn m(self) -> Int { 2 }\n}\nfn fz_amb{n}(x: FzM{n}) -> Int { x.m() }"),
+    ("E0016", "fn fz_args{n}(a: Int) -> Int { a }\nfn fz_call{n}() -> Int { fz_args{n}(1, 2) }"),
+    ("E0016", "fn fz_variant{n}() -> Option<Int> { Some(1, 2) }"),
+    ("E0020", "fn fz_match{n}(o: Option<Int>) -> Int {\n    match o {\n        Some(x) => x\n    }\n}"),
+    ("E0021", "fn fz_unreach{n}(x: Int) -> Int {\n    match x {\n        _ => 0\n        1 => 1\n    }\n}"),
+    ("E0022", "fn fz_refute{n}(o: Option<Int>) -> Int {\n    let Some(x) = o\n    x\n}"),
+    ("E0060", "fn fz_imm{n}() {\n    let x = 1\n    x = 2\n}"),
+    ("E0080", "fn fz_break{n}() {\n    break\n}"),
+    ("E0080", "fn fz_continue{n}() {\n    continue\n}"),
+    ("E0081", "const FZ_A{n}: Int = FZ_B{n}\nconst FZ_B{n}: Int = FZ_A{n}"),
+    ("E0086", "fn fz_await{n}(x: Int) -> Int { x.await }"),
+    ("E0087", "async fn fz_not_future{n}(x: Int) -> Int { x.await }"),
+    ("E0098", "fn fz_try{n}() -> Option<Int> {\n    let x = 1?\n    Some(x)\n}"),
+    ("E0099", "fn fz_ret_try{n}(o: Option<Int>) -> Int { o? }"),
+    ("E0100", "fn fz_alt{n}(o: Option<Int>) -> Int {\n    match o {\n        Some(x) | None => 0\n    }\n}"),
+    ("E0104", "fn fz_bind{n}(o: Option<Int>) -> Int {\n    match o {\n        Somme => 0\n    }\n}"),
+];
+
+/// What [`body_mutate`] edits in place, inside the functions' and methods'
+/// bodies alone: by the tokens there.
+#[derive(Default)]
+struct BodySites {
+    /// Each body's span, its braces included, and whether its function is
+    /// `async`.
+    bodies: Vec<(Range, bool)>,
+    /// Integer literals, each in an `async` body or not.
+    ints: Vec<(Range, bool)>,
+    /// String literals without interpolation, `"` to `"`, and `true` and
+    /// `false`.
+    literals: Vec<Range>,
+    /// Each call's or method call's argument list, `(` to `)`, and where
+    /// its last argument starts (after the last top-level comma, or the
+    /// `(`), `None` for no argument.
+    calls: Vec<(Range, Option<usize>)>,
+    /// A field's name after a `.`, not called.
+    fields: Vec<Range>,
+    /// A method's name after a `.`, called.
+    methods: Vec<Range>,
+    /// A one-line `match` arm: its line, through its line break.
+    arms: Vec<Range>,
+    /// The `mut ` of a `let mut`.
+    muts: Vec<Range>,
+    /// A `let`'s annotation, from its `:` up to the space before its `=`.
+    annotations: Vec<Range>,
+}
+
+fn body_sites(source: &str) -> Option<BodySites> {
+    use nova_ast::Item;
+    use nova_lexer::Token;
+    let (tokens, lex_errors) = nova_lexer::lex(source, FileId::DUMMY);
+    if !lex_errors.is_empty() {
+        return None;
+    }
+    let parsed = nova_parser::parse_recovering(&tokens, FileId::DUMMY);
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    let mut sites = BodySites::default();
+    let body = |f: &nova_ast::item::Function| {
+        (
+            (f.body.span.start as usize, f.body.span.end as usize),
+            f.is_async,
+        )
+    };
+    for item in &parsed.file.items {
+        match &item.value {
+            Item::Function(f) => sites.bodies.push(body(f)),
+            Item::Impl(b) => sites.bodies.extend(b.functions.iter().map(body)),
+            _ => {}
+        }
+    }
+    let toks: Vec<(Token, Range)> = tokens
+        .iter()
+        .map(|t| {
+            (
+                t.value.clone(),
+                (t.span.start as usize, t.span.end as usize),
+            )
+        })
+        .collect();
+    let in_body = |at: usize| sites.bodies.iter().find(|((s, e), _)| *s < at && at < *e);
+    let line_end = |at: usize| source[at..].find('\n').map_or(source.len(), |i| at + i + 1);
+    let mut ints = Vec::new();
+    let mut literals = Vec::new();
+    let mut calls = Vec::new();
+    let mut fields = Vec::new();
+    let mut methods = Vec::new();
+    let mut arms = Vec::new();
+    let mut muts = Vec::new();
+    let mut annotations = Vec::new();
+    for (i, (tok, (start, end))) in toks.iter().enumerate() {
+        let Some((_, is_async)) = in_body(*start) else {
+            continue;
+        };
+        let next = toks.get(i + 1).map(|t| &t.0);
+        let prev = i.checked_sub(1).map(|j| &toks[j].0);
+        match tok {
+            Token::Int(_) if prev != Some(&Token::Dot) => ints.push(((*start, *end), *is_async)),
+            Token::True | Token::False => literals.push((*start, *end)),
+            Token::StrStart if matches!(toks.get(i + 2), Some((Token::StrEnd, _))) => {
+                if let (Some(Token::StrPart(_)), Some((_, (_, close)))) = (next, toks.get(i + 2)) {
+                    literals.push((*start, *close));
+                }
+            }
+            Token::Ident(_) if prev == Some(&Token::Dot) => {
+                if next == Some(&Token::LParen) {
+                    methods.push((*start, *end));
+                } else {
+                    fields.push((*start, *end));
+                }
+            }
+            Token::LParen if matches!(prev, Some(Token::Ident(_))) => {
+                // The matching `)`, and the last top-level comma.
+                let mut depth = 0usize;
+                let mut last = None;
+                for (k, (tok, (_, e))) in toks.iter().enumerate().skip(i) {
+                    match tok {
+                        Token::LParen | Token::LBracket | Token::LBrace | Token::InterpOpen => {
+                            depth += 1
+                        }
+                        Token::RParen | Token::RBracket | Token::RBrace | Token::InterpClose => {
+                            depth -= 1;
+                            if depth == 0 {
+                                let args = (k > i + 1).then(|| last.unwrap_or(*end));
+                                calls.push(((*start, *e), args));
+                                break;
+                            }
+                        }
+                        Token::Comma if depth == 1 => last = Some(*e),
+                        _ => {}
+                    }
+                }
+            }
+            Token::FatArrow => {
+                let from = line_start(source, *start);
+                let to = line_end(*start);
+                let line = &source[from..to];
+                let balanced = |open: char, close: char| {
+                    line.matches(open).count() == line.matches(close).count()
+                };
+                if !line.contains("match ")
+                    && balanced('(', ')')
+                    && balanced('{', '}')
+                    && balanced('[', ']')
+                {
+                    arms.push((from, to));
+                }
+            }
+            Token::Let if next == Some(&Token::Mut) => {
+                let (s, _) = toks[i + 1].1;
+                let (n, _) = toks[i + 2].1;
+                muts.push((s, n));
+            }
+            Token::Colon
+                if matches!(prev, Some(Token::Ident(_)))
+                    && (matches!(toks.get(i.wrapping_sub(2)), Some((Token::Let, _)))
+                        || matches!(toks.get(i.wrapping_sub(2)), Some((Token::Mut, _)))) =>
+            {
+                // Up to the `=` on the same line.
+                let eq = toks[i..].iter().position(|t| t.0 == Token::Eq);
+                if let Some(k) = eq {
+                    let (eq_start, _) = toks[i + k].1;
+                    if !source[*start..eq_start].contains('\n') {
+                        annotations.push((*start, source[..eq_start].trim_end().len()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    sites.ints = ints;
+    sites.literals = literals;
+    sites.calls = calls;
+    sites.fields = fields;
+    sites.methods = methods;
+    sites.arms = arms;
+    sites.muts = muts;
+    sites.annotations = annotations;
+    Some(sites)
+}
+
+/// `source`, a program that checks clean, mutated one to three times
+/// inside its bodies (module docs, 6.): an integer, a string or a `true`
+/// made a value of another type, an argument added to a call or its last
+/// one dropped, a field or a method renamed, a one-line `match` arm
+/// deleted, an integer given `?` or `.await`, a `let mut` made `let`, a
+/// `let`'s annotation removed, `break` put first in a body, or one of
+/// [`BODY_ITEMS`] appended, numbered from `n`. A mutation that would not
+/// parse is skipped; a mutation renames nothing an item declares, and
+/// every name an appended item declares is new, so every input reaches the
+/// type checker, which the harness checks.
+pub fn body_mutate(rng: &mut SplitMix64, source: &str, n: usize) -> String {
+    let mut text = source.to_string();
+    for step in 0..1 + rng.below(3) {
+        let Some(sites) = body_sites(&text) else {
+            break;
+        };
+        let splice =
+            |(start, end): Range, with: &str| format!("{}{with}{}", &text[..start], &text[end..]);
+        let edited = match rng.below(16) {
+            0 if !sites.ints.is_empty() => {
+                let ((s, e), _) = *rng.pick(&sites.ints);
+                Some(splice((s, e), rng.pick(&["\"fz\"", "1.5", "true", "'z'"])))
+            }
+            1 if !sites.literals.is_empty() => Some(splice(
+                *rng.pick(&sites.literals),
+                rng.pick(&["1", "[1]", "()"]),
+            )),
+            2 if !sites.calls.is_empty() => {
+                // An argument added.
+                let ((_, close), last) = *rng.pick(&sites.calls);
+                let with = if last.is_some() { ", 1" } else { "1" };
+                Some(splice((close - 1, close - 1), with))
+            }
+            3 if sites.calls.iter().any(|c| c.1.is_some()) => {
+                // The last argument dropped, with its comma.
+                let with_args: Vec<&(Range, Option<usize>)> =
+                    sites.calls.iter().filter(|c| c.1.is_some()).collect();
+                let &&((open, close), last) = rng.pick(&with_args);
+                let from = last.unwrap_or(open + 1);
+                let from = if from == open + 1 {
+                    from
+                } else {
+                    text[..from].rfind(',').unwrap_or(from)
+                };
+                Some(splice((from, close - 1), ""))
+            }
+            4 if !sites.fields.is_empty() => {
+                let (s, e) = *rng.pick(&sites.fields);
+                let renamed = format!("fz_{}", &text[s..e]);
+                Some(splice((s, e), &renamed))
+            }
+            5 if !sites.methods.is_empty() => {
+                let (s, e) = *rng.pick(&sites.methods);
+                let renamed = format!("fz_{}", &text[s..e]);
+                Some(splice((s, e), &renamed))
+            }
+            6 | 7 if !sites.arms.is_empty() => Some(splice(*rng.pick(&sites.arms), "")),
+            8 if !sites.ints.is_empty() => {
+                let ((s, e), _) = *rng.pick(&sites.ints);
+                let with = format!("({})?", &text[s..e]);
+                Some(splice((s, e), &with))
+            }
+            9 if sites.ints.iter().any(|i| !i.1) => {
+                // In a function that is not `async`.
+                let plain: Vec<Range> = sites.ints.iter().filter(|i| !i.1).map(|i| i.0).collect();
+                let (s, e) = *rng.pick(&plain);
+                let with = format!("({}).await", &text[s..e]);
+                Some(splice((s, e), &with))
+            }
+            10 if !sites.muts.is_empty() => Some(splice(*rng.pick(&sites.muts), "")),
+            11 if !sites.annotations.is_empty() => Some(splice(*rng.pick(&sites.annotations), "")),
+            12 if !sites.bodies.is_empty() => {
+                let ((s, _), _) = *rng.pick(&sites.bodies);
+                Some(splice((s + 1, s + 1), "\n    break\n"))
+            }
+            _ => {
+                let (_, item) = rng.pick(&BODY_ITEMS);
+                let item = item.replace("{n}", &format!("{n}x{step}"));
+                Some(format!("{}\n{item}\n", text.trim_end_matches('\n')))
+            }
+        };
+        if let Some(next) = edited {
+            if body_sites(&next).is_some() {
+                text = next;
+            }
+        }
+    }
+    text
+}
+
+/// The kinds of nesting [`body_deep`] writes for the type checker's bodies
+/// (5.3b, spec §4.6, ADR 0056 §12), beside [`DEEP_KINDS`], each with the
+/// deepest level the parser takes, at most its limit, 128: closures in
+/// closures (called at once, capturing, with parameters), arrays,
+/// indexing, tuples, interpolation, method chains, `?`, a `let`'s
+/// annotation, tuple, variant, or- and `let` patterns, `match` in an arm
+/// and as a scrutinee, and `for` over a range, an array and with a tuple
+/// pattern. A closure called at once, `(|| e)()`, is two of the parser's
+/// levels, its parentheses and the closure, so 64 of them are 128 levels;
+/// a `match` arm's pattern starts a level in, the arm's own, so 127
+/// patterns nest there; and 127 `for` loops nest around the statement in
+/// the innermost, a level of its own.
+pub const BODY_DEEP_KINDS: [(&str, usize); 19] = [
+    ("closures", 64),
+    ("closure-captures", 64),
+    ("closure-params", 64),
+    ("arrays", 128),
+    ("indexes", 128),
+    ("tuples", 128),
+    ("interpolations", 128),
+    ("method-chains", 128),
+    ("questions", 128),
+    ("annotations", 128),
+    ("tuple-patterns", 127),
+    ("variant-patterns", 127),
+    ("or-patterns", 128),
+    ("let-patterns", 128),
+    ("match-arms", 128),
+    ("match-scrutinees", 128),
+    ("for-ranges", 127),
+    ("for-arrays", 127),
+    ("for-patterns", 127),
+];
+
+/// A program nested `depth` times as `kind` names ([`BODY_DEEP_KINDS`]),
+/// which type-checks with no diagnostic.
+pub fn body_deep(kind: &str, depth: usize) -> String {
+    let d = depth;
+    let wrap = |open: &str, inner: &str, close: &str, n: usize| {
+        format!("{}{inner}{}", open.repeat(n), close.repeat(n))
+    };
+    let main = |body: String| format!("fn main() {{\n    {body}\n}}\n");
+    let value = |x: String| main(format!("let x = {x}\n    println(\"${{x}}\")"));
+    let function = |f: String| format!("{f}\n\nfn main() {{}}\n");
+    // `open(k)` for k from `d - 1` down to 0, and `close(k)` from 0 up.
+    let nest = |open: &dyn Fn(usize) -> String, close: &dyn Fn(usize) -> String| {
+        let opens: String = (0..d).rev().map(open).collect();
+        let closes: String = (0..d).map(close).collect();
+        (opens, closes)
+    };
+    match kind {
+        "closures" => value(wrap("(|| ", "1", ")()", d)),
+        "closure-captures" => main(format!(
+            "let y = 1\n    let x = {}\n    println(\"${{x}}\")",
+            wrap("(|| ", "y", ")()", d)
+        )),
+        "closure-params" => {
+            let (o, c) = nest(&|k| format!("(|a{k}: Int| "), &|k| format!(")({k})"));
+            value(format!("{o}a0{c}"))
+        }
+        "arrays" => main(format!("let x = {}\n    let _y = x", wrap("[", "1", "]", d))),
+        "indexes" => value(format!("{}{}", wrap("[", "1", "]", d), "[0]".repeat(d))),
+        "tuples" => main(format!("let x = {}\n    let _y = x", wrap("(", "1", ",)", d))),
+        "interpolations" => value(wrap("\"${", "1", "}\"", d)),
+        "method-chains" => main(format!(
+            "let s = \"a\"\n    let x = s{}\n    println(\"${{x}}\")",
+            ".trim()".repeat(d)
+        )),
+        "questions" => function(format!(
+            "fn f(o: Option<Int>) -> Option<Int> {{\n    let x = {}\n    Some(x)\n}}",
+            wrap("Some(", "o?", ")?", d)
+        )),
+        "annotations" => main(format!(
+            "let x: {} = None\n    let _y = x",
+            wrap("Option<", "Int", ">", d)
+        )),
+        "tuple-patterns" => main(format!(
+            "match {} {{\n        {} => println(\"${{x}}\")\n    }}",
+            wrap("(", "1", ",)", d),
+            wrap("(", "x", ",)", d)
+        )),
+        "variant-patterns" => main(format!(
+            "let v = {}\n    match v {{\n        {} => println(\"${{x}}\")\n        _ => ()\n    }}",
+            wrap("Some(", "1", ")", d),
+            wrap("Some(", "x", ")", d)
+        )),
+        "or-patterns" => {
+            let alternatives: String = (2..=d).map(|k| format!(" | {k})")).collect();
+            function(format!(
+                "fn f(x: Int) -> Int {{\n    match x {{\n        {}1{alternatives} => 1\n        _ => 0\n    }}\n}}",
+                "(".repeat(d - 1)
+            ))
+        }
+        "let-patterns" => function(format!(
+            "fn f(x: {}) -> Int {{\n    let {} = x\n    n\n}}",
+            wrap("(", "Int", ", Int)", d),
+            wrap("(", "n", ", _)", d)
+        )),
+        "match-arms" => {
+            let (o, c) = nest(&|k| format!("match x {{ {k} => "), &|_| ", _ => 1 }".to_string());
+            function(format!("fn f(x: Int) -> Int {{ {o}0{c} }}"))
+        }
+        "match-scrutinees" => function(format!(
+            "fn f(x: Int) -> Int {{ {}x{} }}",
+            "match ".repeat(d),
+            " { 0 => 1, n => n }".repeat(d)
+        )),
+        "for-ranges" | "for-arrays" | "for-patterns" => {
+            let (param, head): (&str, &dyn Fn(usize) -> String) = match kind {
+                "for-ranges" => ("", &|k| format!("for i{k} in 0..2 {{ ")),
+                "for-arrays" => ("a: [Int]", &|k| format!("for i{k} in a {{ ")),
+                _ => ("v: [(Int, Int)]", &|k| format!("for (p{k}, q{k}) in v {{ ")),
+            };
+            let (o, c) = nest(head, &|_| " }".to_string());
+            function(format!(
+                "fn f({param}) -> Int {{\n    let mut t = 0\n    {o}t += 1{c}\n    t\n}}"
+            ))
+        }
+        other => panic!("no kind of nesting {other}"),
+    }
 }

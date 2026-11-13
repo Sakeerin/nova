@@ -11,12 +11,7 @@
 // typeck_method.nova checks record literals, fields and methods,
 // typeck_place.nova assignments, typeck_closure.nova closures and
 // functions as values, typeck_call.nova calls and `?`, typeck_pattern.nova
-// `match`, typeck_for.nova `for` loops.
-//
-// While 5.3b is being built, an expression whose checking a later part
-// ports (views) is a stub, `unported_expr`, which keeps what it is and
-// makes N refuse the program (`Checker::unported`): N never prints a body
-// it has not checked as S0 does.
+// `match`, typeck_for.nova `for` loops, typeck_view.nova views.
 
 import ast
 import builtins
@@ -34,6 +29,7 @@ import typeck_for
 import typeck_method
 import typeck_pattern
 import typeck_place
+import typeck_view
 
 impl Checker {
     /// An expression (`check_expr`).
@@ -127,15 +123,8 @@ impl Checker {
             ExprTry(inner) => self.check_try(fcx, inner, span)
             ExprAwait(inner) => self.check_await(fcx, inner, span)
             ExprCast(_, _) => self.unsupported_expr(span, "`as` casts")
-            ExprView(_) => self.unported_expr("views (5.3b part 5)", span)
+            ExprView(children) => self.check_view(fcx, children, span)
         }
-    }
-
-    /// The stub of a construct a later part of 5.3b checks: `what` is kept
-    /// as the reason N refuses the program (`unported_at`).
-    pub fn unported_expr(mut self, what: String, span: Span) -> HirExpr {
-        self.unported_at(what)
-        error_expr(span)
     }
 
     // `if`, with or without `else` (`check_expr`'s arm).

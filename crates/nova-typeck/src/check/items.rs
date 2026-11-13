@@ -139,9 +139,8 @@ pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     /// Every function as `hir::Module` holds them: the program's, then
     /// std's when they were checked, then the closures and wrappers in the
-    /// order they were lifted, the program's before std's; `None` when
-    /// only the items were checked ([`Checked::items`]).
-    pub(crate) functions: Option<Vec<hir::Function>>,
+    /// order they were lifted, the program's before std's.
+    pub(crate) functions: Vec<hir::Function>,
     /// The first closure's or wrapper's id, past every definition
     /// (`defs.len()`), and the first of std's.
     pub(crate) closures: u32,
@@ -149,21 +148,22 @@ pub struct Checked {
 }
 
 impl Checked {
-    /// The item passes' output alone ([`check_items`],
-    /// [`check_items_shared`]), as 5.3a's dump prints it.
+    /// The item passes' output alone ([`check_items`], [`check_items_shared`])
+    /// and no function, which prints as 5.3a's item dump: for tests alone.
+    #[cfg(test)]
     pub fn items(tables: ItemTables) -> Checked {
         Checked {
             diagnostics: tables.diagnostics.clone(),
             tables,
-            functions: None,
+            functions: Vec::new(),
             closures: u32::MAX,
             std_closures: u32::MAX,
         }
     }
 
-    /// The functions, when the bodies were checked.
-    pub fn functions(&self) -> Option<&[hir::Function]> {
-        self.functions.as_deref()
+    /// The functions, in `hir::Module`'s order.
+    pub fn functions(&self) -> &[hir::Function] {
+        &self.functions
     }
 }
 
@@ -539,7 +539,7 @@ impl<'a> Checker<'a> {
         Checked {
             tables,
             diagnostics,
-            functions: Some(functions),
+            functions,
             closures,
             std_closures,
         }
@@ -943,7 +943,6 @@ pub fn zz(x: Int) -> Int {
                 let lifted = |c: &Checked| {
                     let defs = full.definitions.defs().len() as u32;
                     c.functions()
-                        .expect("the bodies")
                         .iter()
                         .filter(|f| f.def_id.0 >= defs)
                         .map(|f| f.def_id.0)

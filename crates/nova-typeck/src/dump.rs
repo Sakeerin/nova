@@ -25,9 +25,7 @@
 //!   with its type arguments, a trait call's self type and its children a
 //!   level deeper; a node's span is `start..end` in its function's file;
 //!   a pattern carries no span or type. The type checker's diagnostics
-//!   are then the bodies' too. `nova check --dump-hir-items` prints 5.3a's
-//!   part, which the differential compares until the self-hosted type
-//!   checker checks bodies.
+//!   are then the bodies' too.
 //! - **Two parts.** std's tables are the same in every program for a
 //!   target and mode, so they print once, by [`dump_std`]; a program's
 //!   part, by [`dump_program`], prints only the program's own entries, and
@@ -290,10 +288,9 @@ pub fn std_part_of(
         "externs",
         &count(tables.externs.iter().filter(|e| std(e.def_id)).count()),
     );
-    if let Some(functions) = checked.functions() {
-        let n = functions.iter().filter(|f| d.ours(f.def_id, true)).count();
-        d.field("functions", &count(n));
-    }
+    let functions = checked.functions();
+    let n = functions.iter().filter(|f| d.ours(f.def_id, true)).count();
+    d.field("functions", &count(n));
     d.tables(defs, tables, true);
     d.functions(checked, true);
     d.close();
@@ -630,10 +627,7 @@ impl<'a> Dump<'a> {
     /// Each function of std's part (`std`) or of the program's, in
     /// `hir::Module`'s order.
     fn functions(&mut self, checked: &Checked, std: bool) {
-        let Some(functions) = checked.functions() else {
-            return;
-        };
-        for f in functions {
+        for f in checked.functions() {
             if self.ours(f.def_id, std) {
                 self.function(f);
             }

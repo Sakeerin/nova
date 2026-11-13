@@ -178,7 +178,6 @@ pub fn check_bodies_of(source: String) -> Checker {
     texts.push(Some(source))
     let mut c = check_items(r.items, r.definitions, labels, texts)
     c.check_bodies(r.newline_splits)
-    if c.unported != "" { panic("a test source needs ${c.unported}") }
     c
 }
 
