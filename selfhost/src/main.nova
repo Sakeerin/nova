@@ -67,7 +67,11 @@ import typeck
 import typeck_body
 import typeck_body_tests
 import typeck_call
+import typeck_closure
 import typeck_expr
+import typeck_member_tests
+import typeck_method
+import typeck_place
 import typeck_tests
 import typeck_traits
 import typeck_ty

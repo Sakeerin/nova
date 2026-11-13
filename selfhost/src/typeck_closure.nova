@@ -1,0 +1,208 @@
+// The type checker's closures and functions as values: a port of
+// check.rs's `check_closure`, `lift_closure` and `make_fn_wrapper`,
+// function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_body.nova gives the idioms and holds
+// `collect_captures` and `remap_locals`.
+//
+// A closure is lifted into a function of its own, its captures first among
+// its locals, and the closure's value is a `MakeClosure` of its id; a bare
+// function used as a value gets a wrapper, a closure of no capture that
+// calls it. Each takes the next id past every definition
+// (`fresh_closure_def`), in the order met, and is named `closure$<id>` or
+// `fnval$<id>`; the dump prints the id under ADR 0056 §3's rule.
+
+import ast
+import fixes
+import hir
+import infer
+import token
+import typeck
+import typeck_body
+import typeck_expr
+import typeck_ty
+
+impl Checker {
+    /// `|params| body`, lifted into a function of its own; the locals of
+    /// the scopes around it that its body names are captured by value
+    /// (`check_closure`).
+    pub fn check_closure(
+        mut self,
+        mut fcx: FnCtx,
+        params: Vec<Param>,
+        ret: Option<Spanned<Type>>,
+        body: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        // The locals below this index are the enclosing scopes', captures
+        // when the body names them.
+        let snapshot = fcx.locals.len()
+        let generics_scope = fcx.generics
+        fcx.scopes.push(Map::new())
+        let mut param_count = 0
+        let mut param_types: Vec<Ty> = Vec::new()
+        for p in params.iter() {
+            let infer = match p.ty.value {
+                TypeInfer => true
+                _ => false
+            }
+            let ty = if infer {
+                fcx.icx.fresh()
+            } else {
+                self.convert_ty(p.ty, generics_scope, fcx.param_bounds)
+            }
+            let _ = self.bind_local(fcx, p.name.value, ty, p.is_mut, p.name.span, BindingParam)
+            param_count += 1
+            param_types.push(ty)
+        }
+        let ret_ty = match ret {
+            Some(rt) => self.convert_ty(rt, generics_scope, fcx.param_bounds)
+            None => fcx.icx.fresh()
+        }
+        // A `break` or `continue` in the body cannot reach a loop around
+        // the closure; a closure is never async, so `.await` is E0086 in
+        // it; a `return` and a `?` return from the closure, whose return
+        // type a `?` constrains while it is inferred.
+        let saved_loop_depth = fcx.loop_depth
+        fcx.loop_depth = 0
+        let saved_in_async = fcx.in_async
+        fcx.in_async = false
+        let saved_ret_ty = fcx.ret_ty
+        fcx.ret_ty = ret_ty
+        let saved_entry = fcx.entry
+        fcx.entry = false
+        let saved_in_const = fcx.in_const
+        fcx.in_const = false
+        let body_hir = self.check_expr(fcx, body)
+        fcx.loop_depth = saved_loop_depth
+        fcx.in_async = saved_in_async
+        fcx.ret_ty = saved_ret_ty
+        fcx.entry = saved_entry
+        fcx.in_const = saved_in_const
+        if !fcx.icx.unify(body_hir.ty, ret_ty) {
+            self.error(
+                "E0010",
+                "closure body has type `${self.show(body_hir.ty, fcx)}` but its declared return type is `${self.show(ret_ty, fcx)}`",
+                body.span,
+            )
+        }
+        let _ = fcx.scopes.pop()
+        let closure_ty = TyFn(param_types, ret_ty)
+        self.lift_closure(fcx, snapshot, param_count, ret_ty, body_hir, closure_ty, span)
+    }
+
+    // A checked closure body made a function of its own: the captured
+    // locals become its first, the closure's own follow, renumbered; the
+    // `MakeClosure` that makes its value (`lift_closure`).
+    fn lift_closure(
+        mut self,
+        mut fcx: FnCtx,
+        snapshot: Int,
+        param_count: Int,
+        ret_ty: Ty,
+        body: HirExpr,
+        closure_ty: Ty,
+        span: Span,
+    ) -> HirExpr {
+        // The locals below `snapshot` that the body names.
+        let captures: Vec<Int> = Vec::new()
+        collect_captures(body, snapshot, captures)
+        let capture_count = captures.len()
+        // Captures to 0..C, then the closure's own locals.
+        let mut remap: Map<Int, Int> = Map::new()
+        let mut new_locals: Vec<Local> = Vec::new()
+        for i in 0..captures.len() {
+            let cap = captures.at(i)
+            let _ = remap.insert(cap, i)
+            new_locals.push(copy_local(fcx.locals.at(cap)))
+        }
+        let mut old = snapshot
+        while old < fcx.locals.len() {
+            let _ = remap.insert(old, capture_count + (old - snapshot))
+            new_locals.push(copy_local(fcx.locals.at(old)))
+            old += 1
+        }
+        remap_locals(body, remap)
+        let generics = fcx.generics.len()
+        let mut type_args: Vec<Ty> = Vec::new()
+        for k in 0..generics { type_args.push(TyParam(k)) }
+        let cdef = self.fresh_closure_def()
+        let closure_fn = HirFunction {
+            def_id: cdef,
+            name: "closure$" + "${cdef}",
+            generics: generics,
+            bounds: fcx.param_bounds,
+            takes_env: true,
+            capture_count: capture_count,
+            params: param_count,
+            locals: new_locals,
+            ret_ty: ret_ty,
+            // A lifted closure's body is never async.
+            is_async: false,
+            body: body,
+            span: FileSpan { file: self.cur_file, span: span },
+        }
+        fcx.pending_closures.push(closure_fn)
+        let mut capture_exprs: Vec<HirExpr> = Vec::new()
+        for c in captures.iter() {
+            capture_exprs.push(HirExpr { kind: EkLocal(c), ty: fcx.locals.at(c).ty, span: span })
+        }
+        HirExpr { kind: EkMakeClosure(cdef, type_args, capture_exprs), ty: closure_ty, span: span }
+    }
+
+    /// A bare function used as a value: a wrapper `(env, params) {
+    /// target(params) }` of no capture (`make_fn_wrapper`).
+    pub fn make_fn_wrapper(
+        mut self,
+        mut fcx: FnCtx,
+        target: Int,
+        target_type_args: Vec<Ty>,
+        param_types: Vec<Ty>,
+        ret: Ty,
+        span: Span,
+    ) -> HirExpr {
+        let generics = fcx.generics.len()
+        let mut type_args: Vec<Ty> = Vec::new()
+        for k in 0..generics { type_args.push(TyParam(k)) }
+        let cdef = self.fresh_closure_def()
+        let mut locals: Vec<Local> = Vec::new()
+        let mut call_args: Vec<HirExpr> = Vec::new()
+        for i in 0..param_types.len() {
+            let pty = param_types.at(i)
+            locals.push(Local { name: "__a${i}", ty: pty, is_mut: false, span: span })
+            call_args.push(HirExpr { kind: EkLocal(i), ty: pty, span: span })
+        }
+        let body = HirExpr {
+            kind: EkCall(CalleeDef(target), target_type_args, call_args),
+            ty: ret,
+            span: span,
+        }
+        let wrapper = HirFunction {
+            def_id: cdef,
+            name: "fnval$" + "${cdef}",
+            generics: generics,
+            bounds: fcx.param_bounds,
+            takes_env: true,
+            capture_count: 0,
+            params: param_types.len(),
+            locals: locals,
+            ret_ty: ret,
+            // A forwarding call, never a `.await`.
+            is_async: false,
+            body: body,
+            span: FileSpan { file: self.cur_file, span: span },
+        }
+        fcx.pending_closures.push(wrapper)
+        HirExpr {
+            kind: EkMakeClosure(cdef, type_args, Vec::new()),
+            ty: TyFn(param_types, ret),
+            span: span,
+        }
+    }
+}
+
+// A copy of `l`, as S0's `clone`: the lifted function's locals are its
+// own, which finalizing rewrites in place.
+fn copy_local(l: Local) -> Local {
+    Local { name: l.name, ty: l.ty, is_mut: l.is_mut, span: l.span }
+}

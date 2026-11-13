@@ -161,7 +161,7 @@ fn a_failed_unification_keeps_the_bindings_it_made() {
 
 // The program of the module `source`, resolved natively with no std
 // module, its items and its bodies checked.
-fn check_bodies_of(source: String) -> Checker {
+pub fn check_bodies_of(source: String) -> Checker {
     let (tokens, _) = lex(source)
     let (file, errors) = parse(tokens)
     if !errors.is_empty() { panic("a test source does not parse") }
