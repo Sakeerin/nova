@@ -3646,13 +3646,28 @@ fn agree_on_hir_dump(dump: &Dump, dir: &Path, files: &[String], code: i32) -> St
     text
 }
 
+/// The most bytes of root names one HIR dump's command line carries.
+/// Windows caps a command line at 32,767 characters (`CreateProcessW`,
+/// os error 206 past it), and `check`'s 819 cases' names come to about
+/// 51,000; this leaves room for the program's path and the flags.
+const HIR_ARGS_LIMIT: usize = 16_000;
+
 /// [`agree_on_hir_dump`] the HIR dump under `mode` on `files`, each a
-/// program's root.
+/// program's root: in one process a side, or, when their names would pass
+/// [`HIR_ARGS_LIMIT`], in [`agree_in_parts`] side by side, each part under
+/// it.
 fn agree_on_hir_in(mode: Mode, dir: &Path, files: &[String], code: i32) -> String {
     if files.is_empty() {
         return String::new();
     }
-    agree_on_hir_dump(hir_in(mode), dir, files, code)
+    let bytes: usize = files.iter().map(|f| f.len() + 1).sum();
+    let parts = bytes.div_ceil(HIR_ARGS_LIMIT);
+    if parts <= 1 {
+        return agree_on_hir_dump(hir_in(mode), dir, files, code);
+    }
+    agree_in_parts(files, parts, |part| {
+        agree_on_hir_dump(hir_in(mode), dir, part, code)
+    })
 }
 
 /// [`agree_on_resolve_cases`] for the HIR dump: the loose programs and
