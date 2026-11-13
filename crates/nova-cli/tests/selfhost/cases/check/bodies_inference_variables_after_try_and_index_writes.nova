@@ -1,0 +1,15 @@
+fn after_try() {
+    let f = |o: Option<Int>| {
+        let x = o?
+        let v = []
+        let n: Int = v
+        Some(x)
+    }
+}
+fn after_index_write() {
+    let mut a = [1]
+    a[0] = 2
+    let v = []
+    let n: Int = v
+}
+fn main() {}

@@ -1,0 +1,23 @@
+record P { x: Int }
+trait Make { fn make() -> Int }
+trait Build { fn make() -> Int }
+type Color = | Red | Green
+fn bit_not(n: Int) -> Int { ~n }
+fn unknown_field() -> P { P { x: 1, y: 2 } }
+fn both<T: Make + Build>(t: T) -> Int { T::make() }
+fn closure_ret() -> Int {
+    let f = |x: Int| -> Bool { x }
+    1
+}
+fn not_a_variant(o: Option<Int>) -> Int {
+    match o {
+        Some(x) => x
+        Red => 0
+    }
+}
+impl P {
+    fn set(self) {
+        self = P { x: 2 }
+    }
+}
+fn main() {}
