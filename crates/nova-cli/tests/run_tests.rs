@@ -10103,24 +10103,24 @@ fn bench_http_server_and_generator_agree() {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
 
-    // `assert_cmd::cargo::cargo_bin("nova-bench-http")` resolves a binary
-    // belonging to a different crate, which is what makes the failure mode
-    // below worth spelling out. If `nova-bench-http` has never been built,
-    // `cargo_bin` panics on its own rather than handing back a bad path --
-    // checked against the installed assert_cmd (2.2.1) source rather than
-    // assumed: `legacy_cargo_bin` looks in the shared `target/debug`
-    // directory and returns `None` when its own `.exists()` check fails (and
-    // earlier, if it cannot resolve a target directory at all), so
-    // `cargo_bin` never returns a path that isn't there. That panic
-    // misdirects here, though. It reports `CARGO_BIN_EXE_nova-bench-http` as
-    // unset and then lists the binary names it does have -- just "nova" --
-    // because `missing_cargo_bin` takes that branch whenever any
-    // `CARGO_BIN_EXE_` variable is set, which one always is for this
-    // integration test. So it points at a variable when the real cause is
-    // that `cargo test -p nova-cli` does not build other workspace members'
-    // binaries the way `cargo test --workspace` does, and the fix is
-    // `cargo build --locked --workspace` first.
-    let generator = assert_cmd::cargo::cargo_bin("nova-bench-http");
+    // `nova-bench-http` belongs to a different crate, so cargo gives this
+    // test no `CARGO_BIN_EXE_nova-bench-http`, and `assert_cmd`'s
+    // `cargo_bin` falls back to guessing the target directory from this
+    // test's own path, a guess cargo's layout can break: Rust 1.100's cargo
+    // runs this test from `target/debug/build/nova-cli/<hash>/out/`, where
+    // the guess finds nothing and the panic blames an unset variable. Cargo
+    // leaves every workspace binary in one directory, so the generator is
+    // looked for beside `nova`, whose path cargo does give. It is there only
+    // if something built it: `cargo test --workspace` does, `cargo test -p
+    // nova-cli` does not, and `cargo build --locked --workspace` first fixes
+    // that.
+    let generator = std::path::Path::new(env!("CARGO_BIN_EXE_nova"))
+        .with_file_name(format!("nova-bench-http{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        generator.exists(),
+        "{} does not exist: build it with `cargo build --locked --workspace`",
+        generator.display()
+    );
 
     let mut server = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova"))
         .arg("run")
@@ -10153,7 +10153,7 @@ fn bench_http_server_and_generator_agree() {
         }
     };
 
-    let out = std::process::Command::new(generator)
+    let out = std::process::Command::new(&generator)
         .arg("--addr")
         .arg(format!("127.0.0.1:{port}"))
         .args(["--connections", "1", "--duration", "1", "--warmup", "0"])
@@ -10188,7 +10188,7 @@ fn bench_http_server_and_generator_agree() {
     // `--self-test` -- see this test's own doc comment for why it is here.
     // No `--addr`: the mode binds its own in-process fixed-response server.
     // The assertions are the target run's, minus any throughput number.
-    let selftest = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova-bench-http"))
+    let selftest = std::process::Command::new(&generator)
         .arg("--self-test")
         .args(["--connections", "1", "--duration", "1", "--warmup", "0"])
         .output()
@@ -10246,7 +10246,7 @@ fn bench_http_server_and_generator_agree() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         l.local_addr().expect("read the bound port").port()
     };
-    let dead = std::process::Command::new(assert_cmd::cargo::cargo_bin("nova-bench-http"))
+    let dead = std::process::Command::new(&generator)
         .arg("--addr")
         .arg(format!("127.0.0.1:{dead_port}"))
         .args(["--connections", "1", "--duration", "1", "--warmup", "0"])

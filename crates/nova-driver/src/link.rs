@@ -112,10 +112,19 @@ fn find_runtime_lib() -> Result<PathBuf> {
 /// The runtime library in the executable's directory or one of the two
 /// above it, where cargo leaves it in a checkout: the CLI binary and the
 /// staticlib share a target directory, and test binaries sit one level
-/// deeper, in `deps/`.
+/// deeper, in `deps/`. Rust 1.100's cargo runs an integration test from
+/// `<profile>/build/<package>/<hash>/out/` instead, so when one of the
+/// executable's four nearest directories is named `build`, the directory
+/// holding it is tried last.
 fn beside_exe(exe: &Path) -> Result<PathBuf> {
     let name = runtime_lib_name();
-    for dir in exe.ancestors().skip(1).take(3) {
+    let profile_of_build = exe
+        .ancestors()
+        .skip(1)
+        .take(4)
+        .find(|dir| dir.file_name().is_some_and(|n| n == "build"))
+        .and_then(Path::parent);
+    for dir in exe.ancestors().skip(1).take(3).chain(profile_of_build) {
         let candidate = dir.join(name);
         if candidate.exists() {
             return Ok(candidate);
@@ -226,5 +235,30 @@ mod tests {
         assert!(error.contains("NOVA_EMBED_RUNTIME=1"), "{error}");
         assert!(error.contains("NOVA_RUNTIME_LIB"), "{error}");
         assert!(error.contains("cargo install"), "{error}");
+    }
+
+    /// Rust 1.100's cargo runs an integration test from
+    /// `<profile>/build/<package>/<hash>/out/`, four directories below the
+    /// runtime cargo leaves in `<profile>/`; older cargo ran it from
+    /// `<profile>/deps/`. Both find it, and a `build` directory further up
+    /// than that is not searched.
+    #[test]
+    fn a_test_binary_finds_the_runtime_in_either_cargo_layout() {
+        let dir = std::env::temp_dir().join("nova-beside-exe-layouts");
+        let _ = std::fs::remove_dir_all(&dir);
+        let profile = dir.join("target/debug");
+        std::fs::create_dir_all(profile.join("deps")).unwrap();
+        std::fs::create_dir_all(profile.join("build/nova-cli/0123abcd/out")).unwrap();
+        let runtime = profile.join(runtime_lib_name());
+        std::fs::write(&runtime, b"").unwrap();
+
+        let new_layout = profile.join("build/nova-cli/0123abcd/out/run_tests-0123abcd");
+        assert_eq!(beside_exe(&new_layout).unwrap(), runtime);
+        let old_layout = profile.join("deps/run_tests-0123abcd");
+        assert_eq!(beside_exe(&old_layout).unwrap(), runtime);
+
+        let too_deep = profile.join("build/a/b/c/d/nova");
+        std::fs::create_dir_all(too_deep.parent().unwrap()).unwrap();
+        assert!(beside_exe(&too_deep).is_err());
     }
 }
