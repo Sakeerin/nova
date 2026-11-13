@@ -426,6 +426,9 @@ dump (spec
 
 - **`return` inside a closure** checks against the closure's return
   type, not the enclosing function's.
+- **`nova build` on Windows with a runtime built by Rust 1.100** failed to
+  link, with LNK2019 for `WaitOnAddress`, `WakeByAddressSingle` and
+  `WakeByAddressAll`: the linker is now also given `synchronization.lib`.
 
 ## [0.4.0] - 2026-10-23
 
