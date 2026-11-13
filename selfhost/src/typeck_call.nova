@@ -1,0 +1,457 @@
+// The type checker's calls: a port of check.rs's `check_call`,
+// `check_direct_call`, `instantiate`, `check_builtin_call`, `make_variant`,
+// `variant_index`, `qualifier_self_ty`'s test of a qualifier, and the free
+// `builtin_signature`, function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_body.nova gives the idioms; a builtin is its
+// index in `BUILTIN_VARIANTS` (builtins.nova), and `builtin_signature`
+// reads its Rust variant's name.
+//
+// While 5.3b is being built, a method call, a call through a type
+// parameter's bounds and an associated function's call are stubs
+// (typeck_expr.nova's `unported_expr`), which part 3 ports.
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import infer
+import resolver
+import token
+import typeck
+import typeck_body
+import typeck_expr
+import typeck_ty
+
+impl Checker {
+    /// A call (`check_call`): a method call; a function's, a variant's or a
+    /// builtin's by name; `Type::Variant(…)`, `T::f(…)` or `Type::f(…)`; or
+    /// a call through any value of a function type.
+    pub fn check_call(
+        mut self,
+        mut fcx: FnCtx,
+        callee: Spanned<Expr>,
+        args: Vec<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        match callee.value {
+            // 5.3b part 3: `receiver.method(args)` (`check_method_call`).
+            ExprField(_, _) => return self.unported_expr("method calls (5.3b part 3)", span)
+            ExprPath(path) => {
+                let segs = path.segments
+                if segs.len() == 1 {
+                    let name = segs.at(0).value
+                    if fcx.lookup(name) < 0 {
+                        match self.resolve_value_in(self.cur_module, name) {
+                            Some(ResDef(def_id)) => {
+                                let direct = match self.kind_of(def_id) {
+                                    DefKindFn(_) => true
+                                    DefKindExternFn(_, _) => true
+                                    _ => false
+                                }
+                                if direct { return self.check_direct_call(fcx, def_id, args, span) }
+                            }
+                            Some(ResVariant(sum_id, vi)) => {
+                                let checked = self.check_args(fcx, args)
+                                return self.make_variant(fcx, sum_id, vi, checked, span)
+                            }
+                            Some(ResBuiltin(b)) => return self.check_builtin_call(
+                                fcx,
+                                b,
+                                args,
+                                span,
+                            )
+                            None => {
+                                if !self.missing_on_target(name, callee.span) {
+                                    self.error(
+                                        "E0001",
+                                        "cannot find function `${name}` in this scope",
+                                        callee.span,
+                                    )
+                                    let nearby = fcx.visible_locals()
+                                    self.name_fixes(segs.at(0), NeedCall(args.len()), nearby)
+                                }
+                                return error_expr(span)
+                            }
+                        }
+                    }
+                } else if segs.len() == 2 {
+                    let ty_name = segs.at(0).value
+                    let name = segs.at(1).value
+                    // 5.3b part 3: `T::f()` through `T`'s bounds
+                    // (`emit_trait_call`).
+                    if fcx.generics.contains_key(ty_name) {
+                        return self.unported_expr(
+                            "calls through a type parameter's bounds (5.3b part 3)",
+                            span,
+                        )
+                    }
+                    // `Type::Variant(args)`, before any associated function.
+                    let def_id = self.resolve_type_in(self.cur_module, ty_name)
+                    if def_id >= 0 {
+                        let vi = self.variant_index(def_id, name)
+                        if vi >= 0 {
+                            let checked = self.check_args(fcx, args)
+                            return self.make_variant(fcx, def_id, vi, checked, span)
+                        }
+                    }
+                    // 5.3b part 3: an associated function, an inherent
+                    // impl's or a trait's, when the qualifier names a type
+                    // (`qualifier_self_ty`, `emit_assoc_call`).
+                    if self.qualifier_names_a_type(ty_name) {
+                        return self.unported_expr("associated functions (5.3b part 3)", span)
+                    }
+                }
+            }
+            _ => ()
+        }
+        // A call through any value of a function type. A two-segment
+        // callee's E0900 knows it is a call's, and its argument count.
+        let two = match callee.value {
+            ExprPath(p) => p.segments.len() == 2
+            _ => false
+        }
+        if two { self.qualified_callee = args.len() }
+        let callee_expr = self.check_expr(fcx, callee)
+        self.qualified_callee = -1
+        let checked = self.check_args(fcx, args)
+        let ret = fcx.icx.fresh()
+        let mut params: Vec<Ty> = Vec::new()
+        for a in checked.iter() { params.push(a.ty) }
+        let expected = TyFn(params, ret)
+        if !fcx.icx.unify(callee_expr.ty, expected) {
+            self.error(
+                "E0010",
+                "this value has type `${self.show(callee_expr.ty, fcx)}` and cannot be called with these arguments",
+                callee_expr.span,
+            )
+            return error_expr(span)
+        }
+        // Through a local, or a new one bound to the callee first, which is
+        // evaluated before the arguments.
+        match callee_expr.kind {
+            EkLocal(local) => return HirExpr {
+                kind: EkCall(CalleeLocal(local), Vec::new(), checked),
+                ty: ret,
+                span: span,
+            }
+            _ => ()
+        }
+        let tmp = fcx.new_local_unscoped("__callee", callee_expr.ty, false, callee_expr.span)
+        let mut stmts: Vec<HirExpr> = Vec::new()
+        stmts.push(HirExpr { kind: EkLet(tmp, callee_expr), ty: TyUnit, span: span })
+        let call = HirExpr {
+            kind: EkCall(CalleeLocal(tmp), Vec::new(), checked),
+            ty: ret,
+            span: span,
+        }
+        HirExpr { kind: EkBlock(stmts, Some(call)), ty: ret, span: span }
+    }
+
+    // Each argument checked, in order.
+    fn check_args(mut self, mut fcx: FnCtx, args: Vec<Spanned<Expr>>) -> Vec<HirExpr> {
+        let mut out: Vec<HirExpr> = Vec::new()
+        for a in args.iter() { out.push(self.check_expr(fcx, a)) }
+        out
+    }
+
+    // Whether `qualifier_self_ty` gives the qualifier `name` a type: a
+    // primitive's name but `Future`'s, or a record or sum in scope.
+    fn qualifier_names_a_type(self, name: String) -> Bool {
+        if name == "Int"
+            || name == "Float"
+            || name == "Bool"
+            || name == "Char"
+            || name == "String"
+            || name == "Bytes" {
+            return true
+        }
+        if name == "Future" { return false }
+        let def_id = self.resolve_type_in(self.cur_module, name)
+        if def_id < 0 { return false }
+        match self.kind_of(def_id) {
+            DefKindRecord(_) => true
+            DefKindSum(_, _) => true
+            _ => false
+        }
+    }
+
+    // A call of the function or extern function `def_id` by name
+    // (`check_direct_call`).
+    fn check_direct_call(
+        mut self,
+        mut fcx: FnCtx,
+        def_id: Int,
+        args: Vec<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        let sig = match self.sigs.at(def_id) {
+            Some(s) => s
+            None => return error_expr(span)
+        }
+        let name = self.name_of(def_id)
+        if args.len() != sig.params.len() {
+            self.error(
+                "E0016",
+                "`${name}` takes ${sig.params.len()} argument(s) but ${args.len()} were supplied",
+                span,
+            )
+            return error_expr(span)
+        }
+        let mut type_args: Vec<Ty> = Vec::new()
+        for _ in 0..sig.generics { type_args.push(fcx.icx.fresh()) }
+        let mut checked: Vec<HirExpr> = Vec::new()
+        for k in 0..args.len() {
+            let a = self.check_expr(fcx, args.at(k))
+            // Normalization seam: a parameter may be a projection on one of
+            // the function's own type parameters.
+            let expected = self.instantiate(sig.params.at(k), type_args, fcx.icx, a.span)
+            if !fcx.icx.unify(a.ty, expected) {
+                self.error(
+                    "E0010",
+                    "argument to `${name}` has type `${self.show(a.ty, fcx)}` but `${self.show(expected, fcx)}` was expected",
+                    a.span,
+                )
+            }
+            checked.push(a)
+        }
+        let ret = self.instantiate(sig.ret, type_args, fcx.icx, span)
+        HirExpr { kind: EkCall(CalleeDef(def_id), type_args, checked), ty: ret, span: span }
+    }
+
+    /// `ty` with `args` substituted, its projections then resolved
+    /// (`instantiate`).
+    pub fn instantiate(mut self, ty: Ty, args: Vec<Ty>, icx: InferCtx, span: Span) -> Ty {
+        let t = subst(ty, args)
+        if !has_assoc(t) { return t }
+        self.normalize(icx.apply(t), self.cur_file, span)
+    }
+
+    // A builtin's call, by its signature (`check_builtin_call`).
+    fn check_builtin_call(
+        mut self,
+        mut fcx: FnCtx,
+        builtin: Int,
+        args: Vec<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        let (params, ret) = builtin_signature(builtin)
+        let name = BUILTIN_NAMES[builtin]
+        if args.len() != params.len() {
+            let plural = if params.len() == 1 { "" } else { "s" }
+            self.error(
+                "E0016",
+                "`${name}` takes ${params.len()} argument${plural} but ${args.len()} were supplied",
+                span,
+            )
+            return error_expr(span)
+        }
+        // The print family's hint: a non-`String` there is nearly always a
+        // missing interpolation. `$` and `{` apart, so that it is no hole.
+        let variant = BUILTIN_VARIANTS[builtin]
+        let hint = if variant == "Println"
+            || variant == "Print"
+            || variant == "EPrint"
+            || variant == "EPrintln"
+            || variant == "Panic" {
+            " (use string interpolation: \"$" + "{value}\")"
+        } else {
+            ""
+        }
+        let mut checked: Vec<HirExpr> = Vec::new()
+        for k in 0..args.len() {
+            let arg = self.check_expr(fcx, args.at(k))
+            let param = params.at(k)
+            if !fcx.icx.unify(arg.ty, param) {
+                self.error(
+                    "E0010",
+                    "`${name}` expects a `${self.show(param, fcx)}`, found `${self.show(arg.ty, fcx)}`${hint}",
+                    arg.span,
+                )
+            }
+            checked.push(arg)
+        }
+        HirExpr { kind: EkCall(CalleeBuiltin(builtin), Vec::new(), checked), ty: ret, span: span }
+    }
+
+    /// Variant `variant` of sum `sum_id` made of `args`, already checked
+    /// (`make_variant`).
+    pub fn make_variant(
+        mut self,
+        mut fcx: FnCtx,
+        sum_id: Int,
+        variant: Int,
+        args: Vec<HirExpr>,
+        span: Span,
+    ) -> HirExpr {
+        let mut found: Option<SumType> = None
+        for s in self.sums.iter() {
+            if s.def_id == sum_id {
+                found = Some(s)
+                break
+            }
+        }
+        let sum = match found {
+            Some(s) => s
+            None => return error_expr(span)
+        }
+        let v = sum.variants.at(variant)
+        if args.len() != v.fields.len() {
+            self.error(
+                "E0016",
+                "variant `${v.name}` has ${v.fields.len()} field(s) but ${args.len()} were supplied",
+                span,
+            )
+            return error_expr(span)
+        }
+        let mut type_args: Vec<Ty> = Vec::new()
+        for _ in 0..sum.generics { type_args.push(fcx.icx.fresh()) }
+        for k in 0..args.len() {
+            let arg = args.at(k)
+            let expected = subst(v.fields.at(k), type_args)
+            if !fcx.icx.unify(arg.ty, expected) {
+                self.error(
+                    "E0010",
+                    "field of `${v.name}` has type `${self.show(expected, fcx)}` but `${self.show(arg.ty, fcx)}` was supplied",
+                    arg.span,
+                )
+            }
+        }
+        HirExpr {
+            kind: EkMakeVariant(sum_id, variant, args),
+            ty: TySum(sum_id, type_args),
+            span: span,
+        }
+    }
+
+    /// The index of sum `sum_id`'s variant `name`, or -1 (`variant_index`).
+    pub fn variant_index(self, sum_id: Int, name: String) -> Int {
+        for s in self.sums.iter() {
+            if s.def_id == sum_id {
+                for k in 0..s.variants.len() { if s.variants.at(k).name == name { return k } }
+                return -1
+            }
+        }
+        -1
+    }
+}
+
+/// Every builtin's parameter types and result type (`builtin_signature`).
+/// `TyParam(0)` is the caller's first type parameter, as in S0.
+pub fn builtin_signature(builtin: Int) -> (Vec<Ty>, Ty) {
+    match BUILTIN_VARIANTS[builtin] {
+        "Println" | "Print" | "EPrint" | "EPrintln" => (Vec::from_array([TyString]), TyUnit)
+        "Panic" => (Vec::from_array([TyString]), TyNever)
+        "StrCmp" => (Vec::from_array([TyString, TyString]), TyInt)
+        "StrHash" => (Vec::from_array([TyString]), TyInt)
+        "CharToInt" => (Vec::from_array([TyChar]), TyInt)
+        "StrLenChars" => (Vec::from_array([TyString]), TyInt)
+        "StrChars" => (Vec::from_array([TyString]), TyArray(TyChar))
+        "StrFromChars" => (Vec::from_array([TyArray(TyChar)]), TyString)
+        "StrJoin" => (Vec::from_array([TyString, TyArray(TyString)]), TyString)
+        "StrIndexOf" => (Vec::from_array([TyString, TyString]), TyInt)
+        "JsonQuote" => (Vec::from_array([TyString]), TyString)
+        "StrToUpper" | "StrToLower" => (Vec::from_array([TyString]), TyString)
+        "FloatFixed" => (Vec::from_array([TyFloat, TyInt]), TyString)
+        "StrToFloat" => (Vec::from_array([TyString]), TyFloat)
+        "StrIsFloat" => (Vec::from_array([TyString]), TyBool)
+        "FloatToBits" => (Vec::from_array([TyFloat]), TyInt)
+        "IntToChar" => (Vec::from_array([TyInt]), TyChar)
+        "StrAsBytes" => (Vec::from_array([TyString]), TyBytes)
+        "TestSelector" => (Vec::new(), TyInt)
+        "TaskSpawn" => (Vec::from_array([TyFuture(TyParam(0))]), TyInt)
+        "TaskIsDone" => (Vec::from_array([TyFuture(TyParam(0))]), TyBool)
+        "TaskRelease" => (Vec::from_array([TyFuture(TyParam(0))]), TyUnit)
+        "TaskDrive" => (Vec::from_array([TyFuture(TyParam(0))]), TyUnit)
+        "TaskOutput" => (Vec::from_array([TyFuture(TyParam(0))]), TyParam(0))
+        "TaskYieldFuture" => (Vec::new(), TyFuture(TyUnit))
+        "TaskSleepFutureNanos" => (Vec::from_array([TyInt]), TyFuture(TyUnit))
+        "TaskJoinFuture" => (Vec::from_array([TyFuture(TyParam(0))]), TyFuture(TyUnit))
+        "TaskTimeoutFuture" => (Vec::from_array([TyInt, TyFuture(TyParam(0))]), TyFuture(TyInt))
+        "FsReadToString" => (Vec::from_array([TyString]), TyInt)
+        "FsWriteString" => (Vec::from_array([TyString, TyString]), TyInt)
+        "FsTakeString" => (Vec::new(), TyString)
+        "FsLastErrorMessage" => (Vec::new(), TyString)
+        "FsTempDir" => (Vec::new(), TyString)
+        "FsExists" => (Vec::from_array([TyString]), TyBool)
+        "FsCreateDir" => (Vec::from_array([TyString]), TyInt)
+        "FsCreateDirAll" => (Vec::from_array([TyString]), TyInt)
+        "FsRemoveFile" => (Vec::from_array([TyString]), TyInt)
+        "FsRemoveDirAll" => (Vec::from_array([TyString]), TyInt)
+        "FsRename" => (Vec::from_array([TyString, TyString]), TyInt)
+        "FsReadDir" => (Vec::from_array([TyString]), TyInt)
+        "FsTakeStringArray" => (Vec::new(), TyArray(TyString))
+        "FsKind" => (Vec::from_array([TyString]), TyInt)
+        "FsRead" => (Vec::from_array([TyString]), TyInt)
+        "FsTakeBytes" => (Vec::new(), TyBytes)
+        "FsWrite" => (Vec::from_array([TyString, TyBytes]), TyInt)
+        "FileOpen" => (
+            Vec::from_array([TyString, TyBool, TyBool, TyBool, TyBool, TyBool, TyBool]),
+            TyInt,
+        )
+        "FileClose" => (Vec::from_array([TyInt]), TyInt)
+        "FileRead" => (Vec::from_array([TyInt, TyInt]), TyInt)
+        "FileWrite" => (Vec::from_array([TyInt, TyBytes]), TyInt)
+        "FileFlush" => (Vec::from_array([TyInt]), TyInt)
+        "IoStdinRead" => (Vec::from_array([TyInt]), TyInt)
+        "IoStdoutWrite" => (Vec::from_array([TyBytes]), TyInt)
+        "IoStderrWrite" => (Vec::from_array([TyBytes]), TyInt)
+        "IoStdoutFlush" => (Vec::new(), TyInt)
+        "IoStderrFlush" => (Vec::new(), TyInt)
+        "NetConnect" => (Vec::from_array([TyString]), TyFuture(TyInt))
+        "NetClose" => (Vec::from_array([TyInt]), TyInt)
+        "NetRead" => (Vec::from_array([TyInt, TyInt]), TyFuture(TyInt))
+        "NetWrite" => (Vec::from_array([TyInt, TyBytes]), TyFuture(TyInt))
+        "NetReadTimeout" => (Vec::from_array([TyInt, TyInt, TyInt]), TyFuture(TyInt))
+        "NetListen" => (Vec::from_array([TyString]), TyInt)
+        "NetLocalPort" => (Vec::from_array([TyInt]), TyInt)
+        "NetAccept" => (Vec::from_array([TyInt]), TyFuture(TyInt))
+        "BytesLen" => (Vec::from_array([TyBytes]), TyInt)
+        "BytesFromString" => (Vec::from_array([TyString]), TyBytes)
+        "BytesIsUtf8" => (Vec::from_array([TyBytes]), TyBool)
+        "BytesToStringUnchecked" => (Vec::from_array([TyBytes]), TyString)
+        "BytesAt" => (Vec::from_array([TyBytes, TyInt]), TyInt)
+        "BytesSlice" => (Vec::from_array([TyBytes, TyInt, TyInt]), TyBytes)
+        "BytesConcat" => (Vec::from_array([TyBytes, TyBytes]), TyBytes)
+        "BytesToInts" => (Vec::from_array([TyBytes]), TyArray(TyInt))
+        "BytesFromInts" => (Vec::from_array([TyArray(TyInt)]), TyBytes)
+        "BytesEq" => (Vec::from_array([TyBytes, TyBytes]), TyBool)
+        "IntHashSeed" => (Vec::new(), TyInt)
+        "HttpParseRequest" => (Vec::from_array([TyBytes]), TyArray(TyInt))
+        "CryptoHash" => (Vec::from_array([TyInt, TyBytes, TyBytes, TyBytes]), TyInt)
+        "CryptoRandomBytes" => (Vec::from_array([TyInt]), TyInt)
+        "CryptoRandomInt" => (Vec::from_array([TyInt, TyInt]), TyInt)
+        "CryptoPbkdf2Sha256" => (Vec::from_array([TyBytes, TyBytes, TyInt, TyInt]), TyInt)
+        "CryptoPbkdf2Sha256Verify" => (Vec::from_array([TyBytes, TyBytes, TyInt, TyBytes]), TyInt)
+        "TimeNowNanos" => (Vec::new(), TyInt)
+        "TimeNowEpochNanos" => (Vec::new(), TyInt)
+        "LogConfigLevel" => (Vec::new(), TyInt)
+        "LogConfigToStderr" => (Vec::new(), TyInt)
+        "LogSetConfig" => (Vec::from_array([TyInt, TyInt]), TyUnit)
+        "ShutdownRequested" => (Vec::new(), TyBool)
+        "ProcessArgCount" => (Vec::new(), TyInt)
+        "ProcessArg" => (Vec::from_array([TyInt]), TyString)
+        "ProcessExit" => (Vec::from_array([TyInt]), TyUnit)
+        "ProcessRun" => (Vec::from_array([TyString, TyArray(TyString), TyBool]), TyInt)
+        "ProcessTakeStatus" | "ProcessCurrentExe" => (Vec::new(), TyInt)
+        "ProcessTakeStdout" | "ProcessTakeStderr" => (Vec::new(), TyBytes)
+        "ProcessEnv" => (Vec::from_array([TyString]), TyBool)
+        "UiStatePresent" => (Vec::new(), TyBool)
+        "UiStateLoad" => (Vec::new(), TyParam(0))
+        "UiStateStore" => (Vec::from_array([TyParam(0)]), TyUnit)
+        "RouterStatePresent" => (Vec::new(), TyBool)
+        "RouterStateLoad" => (Vec::new(), TyParam(0))
+        "RouterStateStore" => (Vec::from_array([TyParam(0)]), TyUnit)
+        "MemLoad8" | "MemLoad64" => (Vec::from_array([TyInt]), TyInt)
+        "MemStore8" | "MemStore64" => (Vec::from_array([TyInt, TyInt]), TyUnit)
+        "MemCopy" | "MemFill" => (Vec::from_array([TyInt, TyInt, TyInt]), TyUnit)
+        "MemPages" | "HeapBase" => (Vec::new(), TyInt)
+        "MemGrow" => (Vec::from_array([TyInt]), TyInt)
+        "FuturePoll" => (Vec::from_array([TyInt]), TyInt)
+        "HostAbort" => (Vec::new(), TyUnit)
+        "ClosureWord" => (Vec::from_array([TyFn(Vec::from_array([TyInt]), TyUnit)]), TyInt)
+        "ClosureCall" => (Vec::from_array([TyInt, TyInt]), TyUnit)
+        _ => (Vec::new(), TyError)
+    }
+}

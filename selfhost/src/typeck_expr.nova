@@ -1,0 +1,637 @@
+// The type checker's expressions: a port of check.rs's `check_expr` (with
+// `.await`, E0086 and E0087), `check_interp`, `check_path`,
+// `check_binary`, `binary_result_ty`, `op_not_defined`,
+// `note_tuple_has_no_impls`, `check_unary`, `check_array_literal`,
+// `check_array_repeat`, `check_index`, `expect_ty`, `show`,
+// `unsupported_expr`, and the free `lit_expr`, `error_expr` and
+// `convert_binop`, function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md
+// §4.2, ADR 0056). typeck_body.nova gives the idioms.
+//
+// While 5.3b is being built, an expression whose checking a later part
+// ports (record literals, fields, method calls, `?`, closures and
+// functions as values, assignment, `for`, `match`, interpolation through
+// `Display`, views) is a stub, `unported_expr`, which keeps what it is
+// and makes N refuse the program (`Checker::unported`): N never prints a
+// body it has not checked as S0 does.
+
+import ast
+import builtins
+import diagnostic
+import fixes
+import hir
+import infer
+import resolver
+import token
+import typeck
+import typeck_body
+import typeck_call
+
+impl Checker {
+    /// An expression (`check_expr`).
+    pub fn check_expr(mut self, mut fcx: FnCtx, expr: Spanned<Expr>) -> HirExpr {
+        let span = expr.span
+        match expr.value {
+            ExprLit(lit) => lit_expr(lit, span)
+            ExprStringInterp(parts) => self.check_interp(fcx, parts, span)
+            ExprPath(path) => self.check_path(fcx, path, span)
+            ExprCall(callee, args) => self.check_call(fcx, callee, args, span)
+            ExprBinary(op, lhs, rhs) => self.check_binary(fcx, op, lhs, rhs, span)
+            ExprUnary(op, inner) => self.check_unary(fcx, op, inner, span)
+            ExprBlock(block) => self.check_block(fcx, block, span)
+            ExprIf(cond, then, else_) => self.check_if(fcx, cond, then, else_, span)
+            ExprWhile(cond, body) => {
+                // The condition is inside the loop, for `break` and
+                // `continue`.
+                fcx.loop_depth += 1
+                let cond = self.check_expr(fcx, cond)
+                self.expect_ty(fcx, cond, TyBool, "a `while` condition")
+                let body = self.check_block(fcx, body.value, body.span)
+                fcx.loop_depth -= 1
+                HirExpr { kind: EkWhile(cond, body), ty: TyUnit, span: span }
+            }
+            ExprMatch(_, _) => self.unported_expr("`match` (5.3b part 4)", span)
+            ExprReturn(value) => {
+                let checked: Option<HirExpr> = match value {
+                    Some(v) => Some(self.check_expr(fcx, v))
+                    None => None
+                }
+                let value_ty = match checked {
+                    Some(v) => v.ty
+                    None => TyUnit
+                }
+                let ret_ty = fcx.ret_ty
+                if !fcx.icx.unify(value_ty, ret_ty) {
+                    self.error(
+                        "E0010",
+                        "`return` value has type `${self.show(value_ty, fcx)}` but the function returns `${self.show(ret_ty, fcx)}`",
+                        span,
+                    )
+                }
+                HirExpr { kind: EkReturn(checked), ty: TyNever, span: span }
+            }
+            ExprAssign(_, _, _) => self.unported_expr("assignment (5.3b part 3)", span)
+            ExprTuple(items) => {
+                if items.is_empty() { return HirExpr { kind: EkUnit, ty: TyUnit, span: span } }
+                // A tuple literal: its elements left to right, its type
+                // theirs.
+                let mut elems: Vec<HirExpr> = Vec::new()
+                for e in items.iter() { elems.push(self.check_expr(fcx, e)) }
+                let mut tys: Vec<Ty> = Vec::new()
+                for e in elems.iter() { tys.push(e.ty) }
+                HirExpr { kind: EkMakeTuple(elems), ty: TyTuple(tys), span: span }
+            }
+            ExprFor(_, _, _) => self.unported_expr("`for` loops (5.3b part 4)", span)
+            ExprRange(_, _, _) => {
+                self.unsupported(span, "ranges outside a `for` loop")
+                error_expr(span)
+            }
+            ExprBreak(value) => {
+                if value.is_some() {
+                    self.unsupported(span, "`break` with a value")
+                    return error_expr(span)
+                }
+                if fcx.loop_depth == 0 {
+                    self.error("E0080", "`break` outside of a loop", span)
+                    return error_expr(span)
+                }
+                HirExpr { kind: EkBreak, ty: TyNever, span: span }
+            }
+            ExprContinue => {
+                if fcx.loop_depth == 0 {
+                    self.error("E0080", "`continue` outside of a loop", span)
+                    return error_expr(span)
+                }
+                HirExpr { kind: EkContinue, ty: TyNever, span: span }
+            }
+            ExprArray(elems) => self.check_array_literal(fcx, elems, span)
+            ExprArrayRepeat(init, len) => self.check_array_repeat(fcx, init, len, span)
+            ExprIndex(target, index) => self.check_index(fcx, target, index, span)
+            ExprClosure(_, _, _) => self.unported_expr("closures (5.3b part 3)", span)
+            ExprRecord(_, _, _) => self.unported_expr("record literals (5.3b part 3)", span)
+            ExprField(_, _) => self.unported_expr("fields (5.3b part 3)", span)
+            ExprTry(_) => self.unported_expr("`?` (5.3b part 3)", span)
+            ExprAwait(inner) => self.check_await(fcx, inner, span)
+            ExprCast(_, _) => self.unsupported_expr(span, "`as` casts")
+            ExprView(_) => self.unported_expr("views (5.3b part 5)", span)
+        }
+    }
+
+    /// The stub of a construct a later part of 5.3b checks: `what` is kept
+    /// as the reason N refuses the program (`unported_at`).
+    pub fn unported_expr(mut self, what: String, span: Span) -> HirExpr {
+        self.unported_at(what)
+        error_expr(span)
+    }
+
+    // `if`, with or without `else` (`check_expr`'s arm).
+    fn check_if(
+        mut self,
+        mut fcx: FnCtx,
+        cond: Spanned<Expr>,
+        then: Spanned<Block>,
+        else_: Option<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        let cond = self.check_expr(fcx, cond)
+        self.expect_ty(fcx, cond, TyBool, "an `if` condition")
+        let then_expr = self.check_block(fcx, then.value, then.span)
+        match else_ {
+            Some(else_branch) => {
+                let else_expr = self.check_expr(fcx, else_branch)
+                // The branches unify only when neither diverges; the `if`'s
+                // type is the branch that does not.
+                let then_d = match fcx.icx.apply(then_expr.ty) {
+                    TyNever => true
+                    _ => false
+                }
+                let else_d = match fcx.icx.apply(else_expr.ty) {
+                    TyNever => true
+                    _ => false
+                }
+                if !then_d && !else_d && !fcx.icx.unify(then_expr.ty, else_expr.ty) {
+                    self.error(
+                        "E0010",
+                        "`if` and `else` have incompatible types: `${self.show(then_expr.ty, fcx)}` vs `${self.show(else_expr.ty, fcx)}`",
+                        else_expr.span,
+                    )
+                }
+                let ty = if then_d { else_expr.ty } else { then_expr.ty }
+                HirExpr { kind: EkIf(cond, then_expr, Some(else_expr)), ty: ty, span: span }
+            }
+            None => {
+                if !fcx.icx.unify(then_expr.ty, TyUnit) {
+                    self.error(
+                        "E0010",
+                        "an `if` without `else` must have type `()`, found `${self.show(then_expr.ty, fcx)}`",
+                        then_expr.span,
+                    )
+                }
+                HirExpr { kind: EkIf(cond, then_expr, None), ty: TyUnit, span: span }
+            }
+        }
+    }
+
+    // `inner.await` (`check_expr`'s arm): E0086 outside an async body,
+    // E0087 on what is not a future.
+    fn check_await(mut self, mut fcx: FnCtx, inner: Spanned<Expr>, span: Span) -> HirExpr {
+        let e = self.check_expr(fcx, inner)
+        if !fcx.in_async {
+            let mut d = Diagnostic::error("E0086", "`.await` is only allowed inside an `async fn`")
+            d.add_primary(self.cur_file, span, "await outside an async function")
+            d.add_note(
+                "make the enclosing function `async`, or drive the future to completion with `block_on`",
+            )
+            self.diagnostics.push(d)
+            return error_expr(span)
+        }
+        let out = match fcx.icx.apply(e.ty) {
+            TyFuture(o) => o
+            TyError => return error_expr(span)
+            other => {
+                let mut d = Diagnostic::error(
+                    "E0087",
+                    "`.await` expects a future, found `${display_ty(other, self.defs)}`",
+                )
+                d.add_primary(self.cur_file, inner.span, "not a future")
+                self.diagnostics.push(d)
+                return error_expr(span)
+            }
+        }
+        HirExpr { kind: EkAwait(e), ty: out, span: span }
+    }
+
+    // A string with interpolation: its pieces concatenated, each hole a
+    // `String`, or a primitive turned into one (`check_interp`).
+    fn check_interp(mut self, mut fcx: FnCtx, parts: Vec<StringPart>, span: Span) -> HirExpr {
+        let mut pieces: Vec<HirExpr> = Vec::new()
+        for part in parts.iter() {
+            match part {
+                StringPartLit(s) => pieces.push(
+                    HirExpr { kind: EkStrLit(s), ty: TyString, span: span },
+                )
+                StringPartExpr(e) => {
+                    let value = self.check_expr(fcx, e)
+                    match fcx.icx.apply(value.ty) {
+                        TyString => pieces.push(value)
+                        TyInt | TyFloat | TyBool | TyChar | TyError => {
+                            let part_span = value.span
+                            pieces.push(
+                                HirExpr { kind: EkToStr(value), ty: TyString, span: part_span },
+                            )
+                        }
+                        // 5.3b part 3: `try_display` looks `fmt` up as a
+                        // method, and E0013 follows when it finds none.
+                        _ => pieces.push(
+                            self.unported_expr(
+                                "interpolating a value through `Display` (5.3b part 3)",
+                                span,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        HirExpr { kind: EkStrConcat(pieces), ty: TyString, span: span }
+    }
+
+    // A path as a value: a local, a constant, a variant, `Type::Variant`
+    // (`check_path`).
+    fn check_path(mut self, mut fcx: FnCtx, path: Path, span: Span) -> HirExpr {
+        let callee_args = self.qualified_callee
+        self.qualified_callee = -1
+        let segs = path.segments
+        if segs.len() == 2 {
+            // `Type::Variant`.
+            let ty_name = segs.at(0).value
+            let v_name = segs.at(1).value
+            let def_id = self.resolve_type_in(self.cur_module, ty_name)
+            if def_id >= 0 {
+                let vi = self.variant_index(def_id, v_name)
+                if vi >= 0 { return self.make_variant(fcx, def_id, vi, Vec::new(), span) }
+                self.error("E0001", "no variant `${v_name}` on type `${ty_name}`", span)
+                return error_expr(span)
+            }
+            if self.missing_on_target(ty_name, segs.at(0).span) { return error_expr(span) }
+            self.unsupported(span, "module-qualified paths")
+            // A qualifier this module never imported, or misspelled.
+            self.name_fixes(
+                segs.at(0),
+                NeedQualifier(v_name, callee_args),
+                Vec::from_array(fcx.generics.keys()),
+            )
+            return error_expr(span)
+        }
+        if segs.len() != 1 {
+            self.unsupported(span, "module-qualified paths")
+            return error_expr(span)
+        }
+        let name = segs.at(0).value
+        let local = fcx.lookup(name)
+        if local >= 0 {
+            return HirExpr { kind: EkLocal(local), ty: fcx.locals.at(local).ty, span: span }
+        }
+        match self.resolve_value_in(self.cur_module, name) {
+            Some(ResDef(def_id)) => {
+                match self.kind_of(def_id) {
+                    DefKindFn(_) => {
+                        if self.sigs.at(def_id).is_none() { return error_expr(span) }
+                        // 5.3b part 3: a function as a value is a wrapper,
+                        // a closure (`make_fn_wrapper`).
+                        self.unported_expr("functions as values (5.3b part 3)", span)
+                    }
+                    DefKindConst(_) => {
+                        // A constant is a call of its function of no
+                        // argument.
+                        let ret = match self.sigs.at(def_id) {
+                            Some(s) => s.ret
+                            None => TyError
+                        }
+                        HirExpr {
+                            kind: EkCall(CalleeDef(def_id), Vec::new(), Vec::new()),
+                            ty: ret,
+                            span: span,
+                        }
+                    }
+                    _ => {
+                        self.unsupported(span, "referencing this kind of definition as a value")
+                        error_expr(span)
+                    }
+                }
+            }
+            Some(ResVariant(sum_id, vi)) => self.make_variant(fcx, sum_id, vi, Vec::new(), span)
+            Some(ResBuiltin(_)) => {
+                self.unsupported(span, "using builtins as values")
+                error_expr(span)
+            }
+            None => {
+                if !self.missing_on_target(name, span) {
+                    self.error("E0001", "cannot find `${name}` in this scope", span)
+                    let nearby = fcx.visible_locals()
+                    self.name_fixes(segs.at(0), NeedValue, nearby)
+                }
+                error_expr(span)
+            }
+        }
+    }
+
+    // A binary operator; `&&` and `||` have nodes of their own
+    // (`check_binary`).
+    fn check_binary(
+        mut self,
+        mut fcx: FnCtx,
+        op: BinOp,
+        lhs: Spanned<Expr>,
+        rhs: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        let logical = match op {
+            BinOpAnd => 1
+            BinOpOr => 2
+            _ => 0
+        }
+        if logical > 0 {
+            let l = self.check_expr(fcx, lhs)
+            let r = self.check_expr(fcx, rhs)
+            self.expect_ty(fcx, l, TyBool, "a logical operand")
+            self.expect_ty(fcx, r, TyBool, "a logical operand")
+            let kind = if logical == 1 { EkLogicalAnd(l, r) } else { EkLogicalOr(l, r) }
+            return HirExpr { kind: kind, ty: TyBool, span: span }
+        }
+        let l = self.check_expr(fcx, lhs)
+        let r = self.check_expr(fcx, rhs)
+        let hir_op = convert_binop(op)
+        let ty = self.binary_result_ty(fcx, hir_op, l, r, span)
+        HirExpr { kind: EkBinary(hir_op, l, r), ty: ty, span: span }
+    }
+
+    // A binary operation's type, its operands' checked: E0010 when they
+    // differ, E0013 when the operator is not defined on them
+    // (`binary_result_ty`).
+    fn binary_result_ty(
+        mut self,
+        mut fcx: FnCtx,
+        op: HirBinOp,
+        lhs: HirExpr,
+        rhs: HirExpr,
+        span: Span,
+    ) -> Ty {
+        if !fcx.icx.unify(lhs.ty, rhs.ty) {
+            self.error(
+                "E0010",
+                "mismatched operand types: `${self.show(lhs.ty, fcx)}` vs `${self.show(rhs.ty, fcx)}`",
+                span,
+            )
+            // `+` joins two `String`s only.
+            let is_add = match op {
+                OpAdd => true
+                _ => false
+            }
+            if is_add && (is_string(fcx.icx.apply(lhs.ty)) || is_string(fcx.icx.apply(rhs.ty))) {
+                let mut d = self.diagnostics.last()
+                // `$` and `{` apart, so that the note's example is no hole.
+                d.notes.push(
+                    "`+` joins two `String`s; to add any other value to a string, interpolate it: `\"$"
+                        + "{a}$"
+                        + "{b}\"`",
+                )
+            }
+            return TyError
+        }
+        let mut operand = fcx.icx.apply(lhs.ty)
+        match operand {
+            TyVar(_) => {
+                // An operand nothing constrains defaults to `Int`, as a
+                // literal does.
+                let _ = fcx.icx.unify(operand, TyInt)
+                operand = TyInt
+            }
+            _ => ()
+        }
+        match op {
+            OpAdd | OpSub | OpMul | OpDiv | OpRem => {
+                let string_add = match (op, operand) {
+                    (OpAdd, TyString) => true
+                    _ => false
+                }
+                if string_add { return TyString }
+                match operand {
+                    TyInt | TyFloat | TyNever | TyError => operand
+                    other => {
+                        self.op_not_defined(fcx, "arithmetic", other, span)
+                        TyError
+                    }
+                }
+            }
+            OpLt | OpLe | OpGt | OpGe => {
+                match operand {
+                    TyInt | TyFloat | TyChar | TyNever | TyError => TyBool
+                    other => {
+                        self.op_not_defined(fcx, "comparison", other, span)
+                        TyBool
+                    }
+                }
+            }
+            OpEq | OpNe => {
+                match operand {
+                    TyInt
+                        | TyFloat
+                        | TyBool
+                        | TyChar
+                        | TyString
+                        | TyUnit
+                        | TyNever
+                        | TyError => TyBool
+                    other => {
+                        self.op_not_defined(fcx, "equality", other, span)
+                        TyBool
+                    }
+                }
+            }
+            OpBitAnd | OpBitOr | OpBitXor | OpShl | OpShr => {
+                match operand {
+                    TyInt | TyNever | TyError => TyInt
+                    other => {
+                        self.op_not_defined(fcx, "bitwise", other, span)
+                        TyError
+                    }
+                }
+            }
+        }
+    }
+
+    // E0013: an operator of `kind` is not defined on `ty`
+    // (`op_not_defined`).
+    fn op_not_defined(mut self, mut fcx: FnCtx, kind: String, ty: Ty, span: Span) {
+        self.error(
+            "E0013",
+            "${kind} operators are not defined for `${self.show(ty, fcx)}` (operator traits arrive later in Phase 1)",
+            span,
+        )
+        self.note_tuple_has_no_impls(ty)
+    }
+
+    /// On the E0013 just reported, when `ty` is a tuple, why
+    /// (`note_tuple_has_no_impls`).
+    pub fn note_tuple_has_no_impls(mut self, ty: Ty) {
+        match ty {
+            TyTuple(_) => {
+                if !self.diagnostics.is_empty() {
+                    let mut d = self.diagnostics.last()
+                    d.notes.push(TUPLE_HAS_NO_IMPLS)
+                }
+            }
+            _ => ()
+        }
+    }
+
+    // A unary operator (`check_unary`).
+    fn check_unary(
+        mut self,
+        mut fcx: FnCtx,
+        op: UnOp,
+        inner: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        let value = self.check_expr(fcx, inner)
+        let (hir_op, ty) = match op {
+            UnOpNeg => {
+                let t = fcx.icx.apply(value.ty)
+                let t = match t {
+                    TyVar(_) => {
+                        let _ = fcx.icx.unify(t, TyInt)
+                        TyInt
+                    }
+                    TyInt | TyFloat | TyNever | TyError => t
+                    other => {
+                        self.op_not_defined(fcx, "negation", other, span)
+                        TyError
+                    }
+                }
+                (OpNeg, t)
+            }
+            UnOpNot => {
+                self.expect_ty(fcx, value, TyBool, "the `!` operator")
+                (OpNot, TyBool)
+            }
+            UnOpBitNot => {
+                self.expect_ty(fcx, value, TyInt, "the `~` operator")
+                (OpBitNot, TyInt)
+            }
+            _ => {
+                self.unsupported(span, "reference operators")
+                return error_expr(span)
+            }
+        }
+        HirExpr { kind: EkUnary(hir_op, value), ty: ty, span: span }
+    }
+
+    // An array literal: its elements share a type (`check_array_literal`).
+    fn check_array_literal(
+        mut self,
+        mut fcx: FnCtx,
+        elems: Vec<Spanned<Expr>>,
+        span: Span,
+    ) -> HirExpr {
+        let elem_ty = fcx.icx.fresh()
+        let mut checked: Vec<HirExpr> = Vec::new()
+        for e in elems.iter() {
+            let v = self.check_expr(fcx, e)
+            if !fcx.icx.unify(v.ty, elem_ty) {
+                self.error(
+                    "E0010",
+                    "array elements must share a type: expected `${self.show(elem_ty, fcx)}`, found `${self.show(v.ty, fcx)}`",
+                    e.span,
+                )
+            }
+            checked.push(v)
+        }
+        HirExpr { kind: EkMakeArray(checked), ty: TyArray(elem_ty), span: span }
+    }
+
+    // `[init; n]`: the element type is `init`'s, `n` an `Int`
+    // (`check_array_repeat`).
+    fn check_array_repeat(
+        mut self,
+        mut fcx: FnCtx,
+        init: Spanned<Expr>,
+        len: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        let init_hir = self.check_expr(fcx, init)
+        let len_hir = self.check_expr(fcx, len)
+        self.expect_ty(fcx, len_hir, TyInt, "an array length")
+        let elem_ty = fcx.icx.apply(init_hir.ty)
+        HirExpr { kind: EkArrayRepeat(init_hir, len_hir), ty: TyArray(elem_ty), span: span }
+    }
+
+    // `target[index]` (`check_index`).
+    fn check_index(
+        mut self,
+        mut fcx: FnCtx,
+        target: Spanned<Expr>,
+        index: Spanned<Expr>,
+        span: Span,
+    ) -> HirExpr {
+        let arr = self.check_expr(fcx, target)
+        let idx = self.check_expr(fcx, index)
+        self.expect_ty(fcx, idx, TyInt, "an array index")
+        let elem_ty = fcx.icx.fresh()
+        if !fcx.icx.unify(arr.ty, TyArray(elem_ty)) {
+            self.error(
+                "E0014",
+                "cannot index a value of type `${self.show(arr.ty, fcx)}`",
+                target.span,
+            )
+            return error_expr(span)
+        }
+        HirExpr { kind: EkIndex(arr, idx), ty: elem_ty, span: span }
+    }
+
+    /// E0010 unless `expr`'s type unifies with `expected`, `what` naming
+    /// the place (`expect_ty`).
+    pub fn expect_ty(mut self, mut fcx: FnCtx, expr: HirExpr, expected: Ty, what: String) {
+        if !fcx.icx.unify(expr.ty, expected) {
+            self.error(
+                "E0010",
+                "${what} must have type `${self.show(expected, fcx)}`, found `${self.show(expr.ty, fcx)}`",
+                expr.span,
+            )
+        }
+    }
+
+    /// A type as a diagnostic shows it, the substitution applied (`show`).
+    pub fn show(self, ty: Ty, mut fcx: FnCtx) -> String { display_ty(fcx.icx.apply(ty), self.defs) }
+
+    /// E0900 for `what`, and the error expression (`unsupported_expr`).
+    pub fn unsupported_expr(mut self, span: Span, what: String) -> HirExpr {
+        self.unsupported(span, what)
+        error_expr(span)
+    }
+}
+
+/// A literal's node (`lit_expr`).
+pub fn lit_expr(lit: Literal, span: Span) -> HirExpr {
+    match lit {
+        LiteralInt(v) => HirExpr { kind: EkIntLit(v), ty: TyInt, span: span }
+        LiteralFloat(v) => HirExpr { kind: EkFloatLit(v), ty: TyFloat, span: span }
+        LiteralStr(v) => HirExpr { kind: EkStrLit(v), ty: TyString, span: span }
+        LiteralChar(v) => HirExpr { kind: EkCharLit(v), ty: TyChar, span: span }
+        LiteralBool(v) => HirExpr { kind: EkBoolLit(v), ty: TyBool, span: span }
+    }
+}
+
+/// The node an error leaves: `()` of the error type (`error_expr`).
+pub fn error_expr(span: Span) -> HirExpr { HirExpr { kind: EkUnit, ty: TyError, span: span } }
+
+fn is_string(t: Ty) -> Bool {
+    match t {
+        TyString => true
+        _ => false
+    }
+}
+
+/// An AST binary operator as HIR's (`convert_binop`); `&&` and `||` never
+/// reach it.
+pub fn convert_binop(op: BinOp) -> HirBinOp {
+    match op {
+        BinOpAdd => OpAdd
+        BinOpSub => OpSub
+        BinOpMul => OpMul
+        BinOpDiv => OpDiv
+        BinOpRem => OpRem
+        BinOpEq => OpEq
+        BinOpNe => OpNe
+        BinOpLt => OpLt
+        BinOpLe => OpLe
+        BinOpGt => OpGt
+        BinOpGe => OpGe
+        BinOpBitAnd => OpBitAnd
+        BinOpBitOr => OpBitOr
+        BinOpBitXor => OpBitXor
+        BinOpShl => OpShl
+        BinOpShr => OpShr
+        BinOpAnd => OpEq
+        BinOpOr => OpEq
+    }
+}
