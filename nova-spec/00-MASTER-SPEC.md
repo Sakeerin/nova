@@ -821,6 +821,23 @@ type checker's cases and a type-level fuzzer's programs. From here a
 change to item collection changes both compilers in one pull request.
 5.3b ports the bodies and the full HIR.
 
+**Amended 2026-11-13 (branch `claude/loving-archimedes-frtf5q-53b`, ADR
+0056):** `selfhost/` checks every body as `nova-typeck` does (inference
+with its variables in S0's order, expressions, calls, methods, places,
+closures, `?`, `.await`, `match` with its patterns and exhaustiveness,
+`for`, views, the 38 codes with their notes and fixes), and `selfhost hir`
+prints the full HIR dump S0's `nova check --dump-hir` prints: the item
+tables, then every function's locals and typed body. std's bodies are
+checked once per process and mode on both sides, but for a program that
+implements anything on a type it does not own. The differential compares
+them on std's three parts, every corpus root in each mode, the cases
+with both line endings, a type-level and a body-level fuzzer's programs
+and programs nested 128 levels deep, or as deep as the parser takes them
+(64 levels of closures, 127 of patterns in a `match` arm and of `for`
+loops). S0 now checks a program's methods in declaration order. From
+here a change to the type checker changes both compilers in one pull
+request.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)

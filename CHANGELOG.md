@@ -22,7 +22,8 @@ resolver for loose programs and the resolution dump (spec
 §3; ADR 0053). Phase 5.3a, the self-hosted item collection and the HIR
 dump (spec
 `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
-§3; ADR 0055).
+§3; ADR 0055), and 5.3b, the self-hosted type checker's bodies and the
+full HIR dump (§4; ADR 0056).
 
 ### Added
 
@@ -254,9 +255,41 @@ dump (spec
   compilers in one pull request (ADR 0055). Nothing a user sees changes
   with 5.3a: `nova check`, `nova test` and `nova build` give what they
   gave, byte for byte, on every file of the repository.
+- **The full HIR dump:** from 5.3b, `nova check --dump-hir` prints, after
+  the item tables, every function the type checker built, the program's
+  functions, methods, constants, closures and wrappers, each with its
+  generics, bounds, parameters, return type, locals and its body, a tree
+  of every node's kind, type and span with its callee, type arguments and
+  patterns; `--std` prints std's functions in std's part. std's bodies are
+  checked once for all the roots, but for a program that implements
+  anything on a type it does not own, which is checked in full
+  (5.3b, ADR 0056).
+- **The self-hosted type checker, in `selfhost/`:** N checks a program's
+  bodies as `nova-typeck` does, function for function: inference with
+  its variables numbered in S0's order, expressions, calls and builtins,
+  records, fields and methods, assignment and places, closures and
+  functions as values, `?`, `.await`, `match` with its patterns,
+  exhaustiveness and witnesses, `for`, destructuring `let`, views and
+  components, and all 38 of the type checker's codes word for word with
+  their notes, labels and fixes. `selfhost hir` prints the full dump, as
+  `nova check --dump-hir` does; the differential compares them on std's
+  three parts, every corpus root in three modes, the type checker's 831
+  cases with both line endings, a type-level and a body-level fuzzer's
+  programs, and programs nested 128 levels deep in every way that
+  type-checks, or as deep as the parser takes it (64 levels of closures,
+  127 of patterns in a `match` arm and of `for` loops), which N checks
+  on a 1 MB stack. A change to the type checker now changes both
+  compilers in one pull request (ADR 0056).
 
 ### Changed
 
+- **Methods are checked in declaration order.** The type checker checks
+  a program's functions, then its methods, then its constants, each in
+  the order they are declared, and then std's, so the errors inside
+  methods are reported in the order the methods are written, where they
+  came in an order of their own before. Closures and functions used as
+  values are numbered in the same order, the program's before std's, and
+  their numbers show only in the names of the symbols they compile to.
 - **Deeply nested source is now P0002, not a crash.** Past 128 levels of
   nesting, "this is nested too deeply (more than 128 levels)" at the token
   where the limit was crossed; the parser stops there, so it is the

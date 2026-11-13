@@ -61,6 +61,17 @@ diagnostics; the bodies follow. The self-hosted compiler ports the item
 stage first (5.3a, `selfhost hir`, compared with the hidden `nova check
 --dump-hir`) and the bodies in 5.3b.
 
+**Amended 2026-11-13 (branch `claude/loving-archimedes-frtf5q-53b`, ADR
+0056):** the bodies come in a fixed order: the program's functions, then
+its methods by their ids, which is their declaration order, then its
+constants, and then std's in the same order; the constant cycles (E0081)
+and the newline splits (E0103) follow, and the closures and wrappers are
+lifted in the order met, the program's before std's. Inference variables
+are numbered in the order the checker makes them, which `?N` in a
+message shows. The self-hosted compiler checks the bodies in the same
+order, word for word (5.3b, `selfhost hir`, compared with
+`nova check --dump-hir`'s full dump).
+
 ---
 
 ## 3. Core Type Representation
