@@ -509,6 +509,26 @@ against a release runtime, with no coverage cut: `cargo test --workspace`
 skips it (`test = false`), `cargo test --workspace --test selfhost` runs
 it (ADR 0055 §15).
 
+**Done 2026-11-13 (5.3b, the prototype on `proto/5-3b-whole`, ADR 0056;
+the plan's branch `claude/loving-archimedes-frtf5q-53b`):** S0 checks a
+program's bodies, then std's, each in `DefId` order, methods by their
+sorted ids, so their diagnostics come in declaration order. N checks
+every body as S0 does (`infer.nova`, `typeck_body.nova`,
+`typeck_expr.nova`, `typeck_call.nova`, `typeck_method.nova`,
+`typeck_place.nova`, `typeck_closure.nova`, `typeck_pattern.nova`,
+`usefulness.nova`, `typeck_for.nova`, `typeck_view.nova`, the rest of
+`fixes.nova`), and `selfhost hir` gives `nova check --dump-hir`'s full
+dump, every function's locals and typed body, byte for byte on std's
+three full parts, every corpus root in the three modes, the 826 cases of
+the three modes with both line endings, the type fuzzer's and the body
+fuzzer's 120 inputs each and programs nested 128 levels deep in 45 ways,
+which N checks on a 1 MB stack; every one of the 38 codes occurs among
+the cases and the corpus. The gate (spec §4.7) holds locally; CI's
+figures, and the user's answer on them, are ADR 0056 §14's
+(`selfhost.rs` locally 94-99 s on the debug runtime and 43-47 s on the
+release runtime CI uses, against 5.3a's 19-22 s on the release runtime
+today, projected past the lines; options measured, none applied).
+
 - **Needs first:** 5.2; tuples and nested patterns throughout.
 - **Gate:**
   - N type-checks all of std and the corpus;

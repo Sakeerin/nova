@@ -7,10 +7,12 @@ Proposed (2026-11-12), written as 5.3b's prototype is built (spec
 §4). Part 1 (S0's side) wrote §1 to §7: S0's order of bodies, the full
 dump's function forms with one example of every form, the closure-id
 rule, std's bodies shared with the fallback and the bug it works around,
-the body cases, the harness's switch, and part 1's figures. Part 2 (N's
-frame and expressions) wrote §8. Parts 3 to 5 (the rest of N's side, the
-comparison, the fuzzer's body mutations, the depth cases, CI and the
-figures) finish it.
+the body cases, the harness's switch, and part 1's figures. Parts 2 to
+4 (N's frame and expressions, members, control flow, patterns and std's
+bodies) wrote §8. Part 5 (views, the harness in its final form, the body
+fuzzer, the depth cases and the figures) wrote §9 to §16 and finished §4,
+§6 and §8. CI's figures are §14's placeholder, which the measurement run
+fills.
 
 ## Decision
 
@@ -413,10 +415,16 @@ that takes it costs a second resolution and a full check.
 
 **The guard:** the driver's
 `std_checked_once_dumps_what_std_checked_for_each_program_dumps` compares
-the shared and unshared dumps, the full dumps and 5.3a's item dumps, over
-every corpus root and case of each mode, in order and reversed, checks
-that every `std_bodies_*` case takes the full check, and lists those that
-do.
+the shared and unshared full dumps over every corpus root and case of
+each mode, in order and reversed, checks that every `std_bodies_*` case
+takes the full check, and lists those that do (at part 5: 76 natively,
+one for the WASM target, one under test mode). Parts 1 to 4 compared
+5.3a's item dumps too; part 5 dropped them with the item-only dump (§10):
+the full dump holds the item tables, and on a root that takes the full
+check the shared item tables are built and set aside, printed nowhere.
+The unshared pass, which keeps nothing from one root to the next, runs
+in three parts on threads of its own beside the shared path's forward
+and backward passes (95 s locally in one thread, 47 s so).
 
 ### 5. The body cases
 
@@ -453,17 +461,17 @@ or std.
 `tuple_tests::a_tuple_displays_as_written`; and `items.rs`'s 2. 5.3b adds
 two more: the order test (§1) and `items.rs`'s shared bodies (§4).
 
-### 6. The harness, S0's side
+### 6. The harness, S0's side (part 1)
 
-`selfhost.rs` gains `N_BODIES`, false in part 1. Until N checks bodies,
+`selfhost.rs` gained `N_BODIES`, false in part 1. Until N checks bodies,
 every comparison with N takes S0's `check --dump-hir-items` (`hir_s0`),
 so 5.3a's checks hold as they did, and the full dump's sets run through
 S0 alone, through `run`: std's three parts, the corpus natively, for the
 WASM target and under test mode, and the cases with both line endings;
 each dump well formed (`assert_well_formed`: every line at its depth,
 the parentheses balanced), every form of `KINDS` and `BODY_KINDS` and
-each of the 38 codes present, std's parts free of a program's id. Later
-parts set `N_BODIES`, and every set is then compared byte for byte.
+each of the 38 codes present, std's parts free of a program's id. Part 5
+removed `N_BODIES` and compares every set byte for byte (§10).
 
 ### 7. Part 1's figures
 
@@ -485,7 +493,7 @@ parts set `N_BODIES`, and every set is then compared byte for byte.
   39.89 s (52 tests); after, 47.85, 48.36 and 47.49 s (55 tests), the full dump's
   sets on S0 alone and the 659 new cases among them.
 
-### 8. N's bodies, part by part (parts 2 to 4)
+### 8. N's bodies, part by part (parts 2 to 5)
 
 N checks the program's bodies as S0 does, function by function:
 `infer.nova` (S0's `infer.rs`: plain substitution, the occurs check, `!`
@@ -537,7 +545,8 @@ part 2's idioms:
 - A lifted closure's locals are copies of the enclosing function's, as
   S0's `clone`, since finalizing rewrites a local in place.
 
-**Until N checks every body** (`N_BODIES` false), `selfhost hir` checks
+**Until N checked every body** (`N_BODIES` false, parts 2 to 4; this
+paragraph is their record), `selfhost hir` checks
 the program's bodies and prints the full dump, and `selfhost hir
 --items` prints 5.3a's item part, which every 5.3a comparison takes (the
 harness's `n_hir`, beside S0's `--dump-hir-items`). A construct a later
@@ -642,3 +651,349 @@ both runtimes, the least stack 200 to 216 KB for the expressions and
 `cases/check/` take S0 6.5 s, N 21.8 s on the debug runtime and 5.6 s
 on the release one. `selfhost.rs` locally: 115 to 117 s (56 tests),
 against part 3's 74 to 82 s.
+
+Part 5 adds views: `typeck_view.nova` (S0's `check/view.rs`: `ui`,
+`component_ret`, which moves there from `typeck_ty.nova`, `check_view`
+with E0094, `view_node`, `view_text`, `element` with E0095,
+`element_builder` with E0096 and the type checker's E0001, `view_attr`
+and `view_handler` with E0097, `reader`, `ui_variant`, and the free
+`text_child`, `is_str_lit`, `sum`, `str_lit` and `array`). S0's
+`note_use` calls are the language server's index (decision 8), not
+ported. `view_handler`'s two guards keep S0's order, each unification
+kept when a later one fails. Of `fixes.rs`, nothing was left after part
+4: every function has its N counterpart (`visible_locals` is `FnCtx`'s,
+`offers` is `offers_value` for a value, a type's and a trait's being
+offered by namespace), which the cases' fixes and the body fuzzer
+compare. Part 5 then removed the scaffolding of the paragraph above: the
+stubs, `Checker::unported`, `UNPORTED`, exit 3, `selfhost hir --items`,
+S0's hidden `check --dump-hir-items` with the driver's item-only dumps,
+`n_bodies.txt` and its test. No hidden form remains but `check
+--dump-hir` (S0) and `selfhost hir` (N); `--dump-hir-items` is refused
+as the base refuses any unknown argument, byte for byte (§10).
+
+**Part 5's figures** (2026-11-12, at `dd765c16`): N refuses nothing. Of
+1,217 roots (826 cases of the three modes, 391 corpus roots: 251 loose
+programs, 88 package files, 39 WASM programs, 13 files with tests) all
+agree, and std's three full parts; none differs. With CRLF line endings
+the 814 loose cases of `cases/check/` agree, and every input of the
+type (120), name (162), mutation (750), soup (6,000), depth (190) and
+edge (93) fuzzers, the body fuzzer's 120 (§11), the 45 depth cases (§12)
+and 26 hand cases, one per aimed code of the body fuzzer's appended
+functions. N's files: `infer.nova` 152 lines, `typeck_body.nova` 1,065,
+`typeck_expr.nova` 665, `typeck_call.nova` 797, `typeck_method.nova`
+857, `typeck_place.nova` 403, `typeck_closure.nova` 208,
+`typeck_pattern.nova` 1,275, `usefulness.nova` 532, `typeck_for.nova`
+438, `typeck_view.nova` 377, and the tests `typeck_body_tests.nova` 291,
+`typeck_member_tests.nova` 195, `typeck_pattern_tests.nova` 394;
+`fixes.nova` 758, `hir.nova` 765, `hir_dump.nova` 797, `typeck.nova`
+1,134, `typeck_ty.nova` 486; N is 25,531 lines. N's `nova test`: 93
+tests, all passing on both runtimes.
+
+### 9. Inference variables in S0's order
+
+`fresh` stands in N where S0 calls it, in the same order: 19 sites in
+N (`typeck_call.nova` 5, `typeck_method.nova` 5, `typeck_expr.nova` 3,
+`typeck_pattern.nova` 3, `typeck_closure.nova` 2, `typeck_place.nova`
+1) against S0's 19 (`check.rs` 18, `patterns.rs` 1), each in the
+function it mirrors, at the place S0's stands, so a `?N` in a message
+and every type the dump prints number alike. N's own tests pin a
+program's numbering (`typeck_body_tests.nova`), and every input above
+compares them. **If wrong:** a call moved renumbers
+every later variable of that function; the dump, which prints a type on
+every node, shows it at the first node it reaches.
+
+### 10. The differential, in its final form
+
+`selfhost.rs`'s HIR tests, each through `run` and `settled_stdout`, S0's
+`check --dump-hir` against N's `selfhost hir --std DIR`, byte for byte,
+exit codes included, every compared dump well formed
+(`assert_well_formed`, now by bytes):
+
+- `the_hir_dumps_agree_on_std_the_corpus_and_the_cases`: std's three
+  full parts (each with its functions, no program's id), the corpus
+  natively (loose programs and package files), for the WASM target and
+  under test mode, and the cases of each mode; each root's part is there
+  and most reach the type checker; every form printed is listed, every
+  form of `KINDS` and `BODY_KINDS` occurs and none of `LATER_KINDS`; the
+  item passes' E0092 for the WASM target; each of the 38 codes occurs.
+- `the_hir_dumps_agree_on_the_cases_with_windows_line_endings`: the
+  cases of each mode as a Windows checkout has them; each part there,
+  the codes those of the cases as they are.
+- `the_hir_dump_has_a_header_per_root_and_std_its_own_part`,
+  `the_hir_dump_flag_is_hidden_and_refused_as_the_resolution_dumps`
+  (`--dump-hir-items` among the unknown arguments now),
+  `every_run_of_a_hir_dump_settles_e0004s_paths_on_windows`,
+  `the_well_formedness_check_refuses_what_it_should`,
+  `n_checks_std_for_each_program_when_std_gives_an_item_diagnostic`,
+  `both_sides_refuse_no_file` and
+  `both_sides_take_test_in_every_position_alike`: 5.3a's, on the full
+  dump.
+- `n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread` (§12), 5.3a's
+  item test generalised; `the_type_fuzzers_item_inputs_agree_and_hold_each_aimed_code`
+  (ADR 0055 §6, on the full dump); `the_body_fuzzers_inputs_agree_and_hold_each_aimed_code`
+  (§11).
+
+**Merged, each removing a run without removing a check:** 5.3a's
+`the_hir_dumps_agree_on_std_the_corpus_and_the_cases` and part 1's
+`the_full_hir_dumps_agree_on_std_the_corpus_and_the_cases` ran the same
+inputs, one comparing the item part with N, one the full dump on S0
+alone: one test now, with both sets of assertions (5.3a's floors, the
+checked share, `LATER_KINDS` absent, the item E0092; part 1's std
+functions, `BODY_KINDS`, the 38 codes). The two CRLF tests likewise, the
+temporary directory `crlf-full-hir` gone. The header test's std-part
+loop, a weaker copy of the corpus test's std checks, went. The type and
+body fuzzers' bases are read from the loose corpus's compared dump
+(`loose_hir`, once a run) rather than from an S0 run of their own; the
+cases of each mode are dumped once a run (`hir_cases`) for the corpus and
+CRLF tests; the forms are read on the thread that made each dump, each
+distinct line once. The 38-code assertion holds on the cases and the
+corpus alone, which is stronger than on the differential's inputs with
+the fuzzers' (spec §4.6); the fuzzers' counts are reported beside it.
+
+**Each check this part added, and what it guards** (for the plan's
+mutants): the views' comparison (any line of `typeck_view.nova`, through
+the cases' E0094 to E0097 and the corpus's components); the merged
+corpus test's `BODY_KINDS` and 38 codes (a form or a code no input
+reaches); `--dump-hir-items` refused as the base refuses it (the removed
+form left half in place); the depth test's body kinds and its check that
+only `items` and `optionals` give a diagnostic (a generator gone wrong,
+or N's stack); the body fuzzer's checked-only, per-seed count, body-E0001
+and floors assertions (a mutation that stops before the type checker, a
+seed that writes fewer inputs, an item E0001 counted as a body's, an
+aimed code no longer reached); the driver test's three unshared parts
+(the same comparisons as before, by parts).
+
+### 11. The body fuzzer
+
+`fuzz::body_mutate` (spec §4.6) mutates the type fuzzer's bases (loose
+corpus programs that import nothing and check clean) one to
+three times inside their functions' and methods' bodies, by the tokens
+there: an integer, a string or a `true` made a value of another type; an
+argument added to a call, or its last one dropped; a field or a method
+renamed (`fz_<name>`); a one-line `match` arm deleted; an integer given
+`?` or `.await` (outside an `async fn`); a `let mut` made `let`; a
+`let`'s annotation removed; `break` put first in a body; or one of
+`fuzz::BODY_ITEMS` appended, 26 functions each aimed at a code (the
+type checker's E0001 for a value and for a function, E0010, E0011,
+E0013, E0014, E0015, E0016, E0020, E0021, E0022, E0060, E0080, E0081,
+E0086, E0087, E0098, E0099, E0100, E0104), each name numbered from the
+input's own. A mutation that would not parse is skipped; none renames
+what an item declares, so every input reaches the type checker, which
+the test asserts. **Seeds 501, 502 and 503**, 40 inputs each, in one
+process a side. Counts over the fixed seeds: E0001 13 (all the body's,
+by their messages), E0010 28, E0011 25, E0013 7, E0014 31, E0015 4,
+E0016 33, E0020 25, E0021 4, E0022 4, E0060 12, E0080 15, E0081 14,
+E0086 11, E0087 3, E0098 11, E0099 9, E0100 2, E0103 4, E0104 7: every
+floor of two (E0001, E0010, E0011, E0013, E0014, E0015, E0016, E0020,
+E0021, E0060, E0080, E0098, E0099) holds. The type fuzzer, now on the
+full dump: E0001 32, E0010 28, E0011 13, E0012 53, E0013 5, E0015 10,
+E0070 21, E0071 18, E0072 15, E0073 14, E0074 18, E0076 5, E0077 20,
+E0078 21, E0105 9, E0403 23, E0900 48. Among the cases and the corpus
+every one of the 38 codes occurs (E0098 and E0087 once each, E0086 and
+E0094 twice; E0001 905 times).
+
+### 12. The depth cases, and N's stack
+
+`n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread` runs N's
+`selfhost hir` on 45 programs under `ulimit -s 1024` (Linux, macOS; on
+Windows the main thread as it is), its dump S0's: 5.3a's ten written
+nestings of a type in all twelve item positions; every kind of
+`fuzz::DEEP_KINDS` at 128 levels (parentheses, blocks, `if`, `else if`,
+`match`, `while`, `for`, calls, prefix and binary operators, postfix
+chains, types, optionals, patterns, nested items, and a mixed one); and
+`fuzz::BODY_DEEP_KINDS` at the deepest level the parser takes: closures
+in closures, called at once, capturing and with parameters (64), arrays,
+indexing, tuples, interpolation, method chains, `?`, a `let`'s
+annotation, or- and `let` patterns, `match` in an arm and as a scrutinee
+(128), tuple and variant patterns in a `match` arm and `for` over a
+range, an array and with a tuple pattern (127). **Why not 128:** a
+closure called at once, `(|| e)()`, is two of the parser's levels, its
+parentheses and the closure, so 64 closures are 128 levels; a `match`
+arm's pattern starts a level in, the arm's own, so 127 patterns nest
+there; 127 `for` loops nest around the statement in the innermost, a
+level of its own. Every program reaches the type checker and none but
+`items` and `optionals` (E0900) gives a diagnostic. **N passes every
+one on 1 MB on both runtimes**; nothing overflows, so answer 2's
+departure is not needed here (ADR 0055 §12's normalized type stays the
+one recorded).
+
+Least stack (Linux, `ulimit -s`, 4 KB bisection, each run's dump
+compared with S0's, 2026-11-12):
+
+| Input | Levels | Debug runtime | Release runtime |
+|---|---:|---:|---:|
+| body `annotations` | 128 | 68 KB | 64 KB |
+| body `arrays` | 128 | 204 KB | 200 KB |
+| body `binary` | 128 | 44 KB | 44 KB |
+| body `blocks` | 128 | 212 KB | 212 KB |
+| body `calls` | 128 | 200 KB | 200 KB |
+| body `closure-captures` | 64 | 200 KB | 200 KB |
+| body `closure-params` | 64 | 200 KB | 196 KB |
+| body `closures` | 64 | 200 KB | 196 KB |
+| body `else-ifs` | 128 | 56 KB | 48 KB |
+| body `for-arrays` | 127 | 216 KB | 208 KB |
+| body `for-patterns` | 127 | 212 KB | 212 KB |
+| body `for-ranges` | 127 | 212 KB | 208 KB |
+| body `fors` | 128 | 216 KB | 212 KB |
+| body `ifs` | 128 | 220 KB | 224 KB |
+| body `indexes` | 128 | 204 KB | 196 KB |
+| body `interpolations` | 128 | 196 KB | 196 KB |
+| body `items` | 128 | 68 KB | 68 KB |
+| body `let-patterns` | 128 | 56 KB | 52 KB |
+| body `match-arms` | 128 | 208 KB | 204 KB |
+| body `match-scrutinees` | 128 | 200 KB | 192 KB |
+| body `matches` | 128 | 208 KB | 204 KB |
+| body `method-chains` | 128 | 52 KB | 44 KB |
+| body `mixed` | 128 | 160 KB | 160 KB |
+| body `optionals` | 128 | 44 KB | 40 KB |
+| body `or-patterns` | 128 | 52 KB | 56 KB |
+| body `parentheses` | 128 | 200 KB | 192 KB |
+| body `patterns` | 128 | 48 KB | 48 KB |
+| body `postfix` | 128 | 48 KB | 48 KB |
+| body `prefix` | 128 | 44 KB | 40 KB |
+| body `questions` | 128 | 200 KB | 200 KB |
+| body `tuple-patterns` | 127 | 200 KB | 196 KB |
+| body `tuples` | 128 | 200 KB | 196 KB |
+| body `types` | 128 | 60 KB | 60 KB |
+| body `variant-patterns` | 127 | 196 KB | 196 KB |
+| body `whiles` | 128 | 212 KB | 212 KB |
+| item type, `arrays` | 128 | 60 KB | 48 KB |
+| item type, `fn-parameters` | 128 | 52 KB | 52 KB |
+| item type, `fn-returns` | 128 | 52 KB | 52 KB |
+| item type, `generics` | 128 | 68 KB | 60 KB |
+| item type, `mutable-references` | 128 | 56 KB | 48 KB |
+| item type, `optionals` | 128 | 44 KB | 40 KB |
+| item type, `parentheses` | 128 | 52 KB | 52 KB |
+| item type, `pointers` | 128 | 56 KB | 48 KB |
+| item type, `references` | 128 | 56 KB | 52 KB |
+| item type, `tuples` | 128 | 48 KB | 52 KB |
+
+The least stacks are the parser's: up to 224 KB for nested expressions
+and blocks (200 to 216 KB in part 4), 40 to 68 KB for patterns, chains,
+types and items; the release runtime within 8 KB of the debug one.
+
+### 13. N's memory and GC pauses
+
+ADR 0055 §13's method: wall best of three and peak RSS (`wait4`), GC
+pauses from `nova_gc_collect_roots` to the return of its caller, after
+the sweep, under gdb, and `NOVA_GC_DEBUG`'s collections and largest live
+heap (2026-11-12, a script, not committed: `heap.sh`, with 5.3a's
+`meas.py` and `gcpause.py`):
+
+| Runtime | Input | Wall | Peak RSS | Pauses (median / p95 / max, total) | Collections, max live |
+|---|---|---:|---:|---|---:|
+| debug | `hir --std-part` | 0.84 s | 33.4 MB | 9.4 / 59.5 / 91.4 ms, 326 ms | 14, 13.5 MB |
+| debug | `hir --target wasm --std-part` | 1.02 s | 35.3 MB | 13.8 / 83.6 / 126.7 ms, 451 ms | 15, 17.8 MB |
+| debug | `hir --test --std-part` | 0.82 s | 33.4 MB | 10.4 / 63.5 / 85.3 ms, 312 ms | 14, 13.6 MB |
+| debug | `hir` N's root | 5.16 s | 152.0 MB | 45.0 / 332.2 / 459.6 ms, 2,048 ms | 21, 46.7 MB |
+| debug | `hir` the loose corpus | 9.46 s | 43.9 MB | 64.0 / 90.6 / 109.1 ms, 3,649 ms | 60, 12.1 MB |
+| release | `hir --std-part` | 0.17 s | 32.6 MB | 2.2 / 13.1 / 19.7 ms, 74 ms | 14, 13.5 MB |
+| release | `hir --target wasm --std-part` | 0.21 s | 34.5 MB | 3.9 / 20.0 / 27.9 ms, 106 ms | 15, 17.8 MB |
+| release | `hir --test --std-part` | 0.17 s | 32.6 MB | 2.3 / 13.5 / 17.9 ms, 71 ms | 14, 13.6 MB |
+| release | `hir` N's root | 1.11 s | 151.1 MB | 7.0 / 78.4 / 98.7 ms, 468 ms | 21, 46.7 MB |
+| release | `hir` the loose corpus | 2.01 s | 42.8 MB | 14.1 / 22.2 / 29.7 ms, 816 ms | 60, 12.1 MB |
+
+Against ADR 0055 §13 (5.3a's item stage): std's part's live heap goes
+from 3.9 to 13.5 MB (3.5×), N's root's from 13.6 to 46.7 MB (3.4×). ADR
+0054 §10 projected pauses of 0.5 to 1 s on the debug runtime at five to
+ten times 5.2's live heap; the longest measured is 0.46 s, on N's root,
+and 0.13 s on std's parts; the release runtime's longest is 0.10 s. The
+debug runtime spends 39% of the loose corpus's run (3.6 of 9.5 s) in 60
+collections. Recorded, no threshold (spec §4.6).
+
+### 14. The time, and CI's projection
+
+Local, debug S0, 4 cores (2026-11-12):
+
+- **`selfhost.rs`, three runs:** on the debug runtime 98.66, 94.16 and
+  95.71 s (54 tests; part 4: 115 to 117 s with 56); on the release
+  runtime CI uses (`NOVA_EMBED_RUNTIME=1`) 43.07, 47.41 and 45.10 s
+  (user 142 to 157 s). The base, `e5c555d0` (5.3a), on the release
+  runtime the same day: 19.38, 20.83 and 21.84 s (52 tests).
+- **The slowest tests,** each run alone (N's build, about 5.5 s, in
+  each): on the release runtime the corpus test 24.8 s (70 s of CPU),
+  the CRLF test 18.8 s, the resolution dump's corpus test 11.4 s, the
+  type fuzzer 10.1 s, the depth test 9.5 s (the body fuzzer 8.6 s); on
+  the debug runtime the corpus test 55.1 s, the CRLF test 50.3 s, the
+  resolution dump's 21.0 s, the type fuzzer 18.6 s, the mutated corpus
+  15.0 s. Of the corpus test's process time, N's 44 package roots, each a
+  dump of most of N, take 26 s (S0 10.3 s, N 15.6 s on the release
+  runtime), the files with tests 5.7 s, `cases/check/` 10.7 s.
+- **The Test job:** `cargo test --workspace` gives 2,832 passed, one
+  failure (the container's IPv6 test, as at the base) and 10 ignored, as
+  before part 5; its slowest is `nova-driver`'s unit tests, 61.6 s, the
+  equivalence test (§4) 47 s of it (95 s before its unshared pass went
+  to threads of its own), then `nova-typeck`'s 589 tests in 23.4 s.
+
+**CI, projected (not measured):** 5.3a's CI run 42774093193 (its
+release-runtime job, at `cc38ac37`, 5.3a's tree) gave 37.10, 27.53 and
+55.38 s, against the base's 20.7 s here: factors 1.79 (Linux), 1.33
+(macOS) and 2.68 (Windows), which put 5.3b's `selfhost.rs` at about **81
+s on Linux, 60 s on macOS and 121 s on Windows**, past the lines (60 s,
+60 s, 70 s). Per answer 3 the user decides, with CI's figures.
+
+**Options measured, none applied** (each `selfhost.rs` on the release
+runtime, two runs):
+
+| Option | Coverage | Local | Projected Linux / macOS / Windows |
+|---|---|---:|---:|
+| none (this branch) | all | 43.1-47.4 s | 81 / 60 / 121 s |
+| (a) of N's own package roots and files with tests, `selfhost/src/main.nova` alone in the HIR test | a cut: 43 of N's 44 package roots and 8 of its 13 files with tests leave the HIR dump's corpus (the resolution and AST dumps keep them) | 32.3, 35.5 s | 61 / 45 / 91 s |
+| (b) S0 built at `opt-level = 1` in the Selfhost job (`CARGO_PROFILE_DEV_OPT_LEVEL=1`) | none: the same source, debug assertions and overflow checks kept | 30.4, 28.3 s; the workspace's build 1 min 46 s and the test's 61 s locally | 53 / 39 / 79 s |
+| (a) and (b) | as (a) | 23.9, 22.6 s | 42 / 31 / 62 s |
+
+Not measured: N and S0 parsing a package's modules once per process for
+all of its roots (no output changes; about a quarter of a package root's
+time on each side).
+
+**CI's figures:** _(placeholder: the main session fills this from the
+measurement run on `claude/loving-archimedes-frtf5q-53b-ci`: `selfhost.rs`
+per system, the Test job's totals, and the user's answer.)_
+
+### 15. Departures from the spec, and decisions it does not settle
+
+- **(differs) The closure-id rule** (§3) is the dump's: a program's
+  closures print `u<D+k>` and std's `s<S+k>`, and the names hold the
+  printed id (`closure$u7`), where spec §4.1 says "`u<n>`, names as they
+  are". S0's own ids and symbols are §1's.
+- **(differs) The depth cases** reach 128 written levels but for
+  closures (64), patterns in a `match` arm and `for` loops (127), by the
+  parser's count (§12).
+- **(differs) The 38-code assertion** holds on the cases and the corpus
+  alone, not on the differential's inputs with the fuzzers' (§10):
+  stronger.
+- **(differs) Witnesses' strings and characters** approximate Rust's
+  `{:?}` (§8, part 4).
+- **(differs) 5.3a's item-only dump** (`check --dump-hir-items`) existed
+  only while 5.3b was built and is gone; the full dump holds the item
+  part, and the driver's equivalence test compares the full dumps alone
+  (§4).
+- **CI past the lines** (§14): the user's, per answer 3; nothing cut.
+- **N checks std's bodies on the checker its tables come from**, where
+  S0 collects std's items a second time (part 4); the fallback re-resolves
+  a program in full on both sides (§4).
+- **The body fuzzer's bases** are the type fuzzer's, now read from the
+  full dump, so a base checks clean in its bodies too; the type fuzzer's
+  inputs changed with it (its floors hold).
+
+### 16. The rule
+
+From 5.3b the whole type checker exists twice, in `nova-typeck` and in
+`selfhost/`: a change to either (a pass, the order of bodies, a
+diagnostic's words, order, notes, labels or fixes, a `fresh` call, a HIR
+node, std's sharing or its fallback) changes both in one pull request,
+and the full dump's differential (§10) holds them equal (phase plan
+decision 6, ADR 0055 §14 extended). The dump's grammar (§2) changes with
+them, on both sides.
+
+## Consequences
+
+- 5.4 starts from the HIR the full dump shows, the same on both sides
+  for every input the differential holds.
+- `selfhost.rs` doubles locally on the release runtime (21 to 45 s) and
+  projects past CI's lines; the user decides among the measured options
+  (§14), with CI's figures.
+- The bug of §4 (std's bodies see a program's impls) stays in S0, worked
+  around by the fallback, to be fixed later in both compilers at once.
+- N on a 1 MB stack meets the depth cases with room (at most 224 KB),
+  and the debug runtime's pauses stay under half a second.

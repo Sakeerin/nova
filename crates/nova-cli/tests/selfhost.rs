@@ -4270,7 +4270,7 @@ fn n_args_on_stack(dir: &Path, stack: Option<u32>, args: &[&str]) -> (Option<i32
 }
 
 /// N's type checker on its own stack (spec 5.3 §3.7 and §4.6, ADR 0055
-/// §12, ADR 0056 §11): N's `selfhost hir` on a main thread of 1 MB, as
+/// §12, ADR 0056 §12): N's `selfhost hir` on a main thread of 1 MB, as
 /// [`n_parses_128_levels_of_every_kind_on_a_1_mb_main_thread`] runs N's
 /// parser, on every written nesting at its deepest, its dump S0's, which
 /// S0 checks on its 64 MB thread. The bodies: every kind the deep

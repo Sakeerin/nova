@@ -1524,7 +1524,7 @@ pub fn body_mutate(rng: &mut SplitMix64, source: &str, n: usize) -> String {
 }
 
 /// The kinds of nesting [`body_deep`] writes for the type checker's bodies
-/// (5.3b, spec §4.6, ADR 0056 §11), beside [`DEEP_KINDS`], each with the
+/// (5.3b, spec §4.6, ADR 0056 §12), beside [`DEEP_KINDS`], each with the
 /// deepest level the parser takes, at most its limit, 128: closures in
 /// closures (called at once, capturing, with parameters), arrays,
 /// indexing, tuples, interpolation, method chains, `?`, a `let`'s
