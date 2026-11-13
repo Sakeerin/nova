@@ -2261,8 +2261,13 @@ impl<'a> Checker<'a> {
                 // the impl honors: an impl that drops a bound accepts calls the
                 // trait forbids (unsound), and one that adds a bound rejects
                 // trait-valid calls only later, at monomorphization.
-                for k in 0..trait_method.generics as usize {
-                    let want = trait_method.bounds[k].as_slice();
+                for (k, want) in trait_method
+                    .bounds
+                    .iter()
+                    .take(trait_method.generics as usize)
+                    .enumerate()
+                {
+                    let want = want.as_slice();
                     let got = impl_sig
                         .bounds
                         .get(impl_count as usize + k)
@@ -5667,10 +5672,10 @@ impl<'a> Checker<'a> {
             remap.insert(cap.0, i as u32);
             new_locals.push(fcx.locals[cap.0 as usize].clone());
         }
-        for old in (snapshot as usize)..fcx.locals.len() {
+        for (old, local) in fcx.locals.iter().enumerate().skip(snapshot as usize) {
             let new_id = capture_count + (old as u32 - snapshot);
             remap.insert(old as u32, new_id);
-            new_locals.push(fcx.locals[old].clone());
+            new_locals.push(local.clone());
         }
 
         let mut lifted_body = body;
