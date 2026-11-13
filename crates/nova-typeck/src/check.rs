@@ -149,29 +149,7 @@ pub fn check_with(file: &ast::File, defs: &Definitions, options: &CheckOptions) 
     let tables = check_items(file, defs, options);
     let mut checker = Checker::new(file, defs, options, None);
     checker.restore(tables);
-
-    let mut functions = Vec::new();
-    let fn_ids: Vec<(DefId, usize)> = defs.functions().collect();
-    for (def_id, item_index) in fn_ids {
-        if let Some(f) = checker.check_function(def_id, item_index) {
-            functions.push(f);
-        }
-    }
-    let method_ids: Vec<DefId> = checker.method_locs.keys().copied().collect();
-    for def_id in method_ids {
-        if let Some(f) = checker.check_method(def_id) {
-            functions.push(f);
-        }
-    }
-    for (def_id, item_index) in checker.const_ids() {
-        if let Some(f) = checker.check_const(def_id, item_index) {
-            functions.push(f);
-        }
-    }
-    checker.check_const_cycles(&functions);
-    checker.warn_newline_splits();
-    // Closure and bare-fn-wrapper functions synthesized while checking.
-    functions.append(&mut checker.extra_functions);
+    let (functions, _) = checker.check_bodies();
 
     CheckResult {
         module: hir::Module {
@@ -3249,6 +3227,56 @@ impl<'a> Checker<'a> {
     }
 
     // === Function bodies ===
+
+    /// Passes 6 to 8 (spec
+    /// `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
+    /// §4.1, ADR 0056): the program's bodies, then std's, each in `DefId`
+    /// order, functions, then methods, then constants; the constant cycles
+    /// and the newline splits; then the closures and wrappers in the order
+    /// they were lifted. So the program's closures and wrappers take ids
+    /// from `defs.len()` and std's follow them, and no map's order reaches
+    /// the output. With std's tables shared (5.3b, `check_program_shared`)
+    /// std's bodies are not checked: they are std's part of the HIR dump.
+    /// Returns the functions and the first id a std closure or wrapper
+    /// takes.
+    fn check_bodies(&mut self) -> (Vec<hir::Function>, u32) {
+        let (_, std_def, _) = nova_resolver::dump::std_start(self.defs);
+        let fn_ids: Vec<(DefId, usize)> = self.defs.functions().collect();
+        let mut method_ids: Vec<DefId> = self.method_locs.keys().copied().collect();
+        method_ids.sort();
+        let const_ids = self.const_ids();
+        let mut functions = Vec::new();
+        let mut std_closures = self.next_closure_def;
+        for in_std in [false, true] {
+            if in_std {
+                std_closures = self.next_closure_def;
+                if self.shared.is_some() {
+                    break;
+                }
+            }
+            let ours = |id: DefId| (id.0 >= std_def) == in_std;
+            for &(def_id, item_index) in fn_ids.iter().filter(|(id, _)| ours(*id)) {
+                if let Some(f) = self.check_function(def_id, item_index) {
+                    functions.push(f);
+                }
+            }
+            for &def_id in method_ids.iter().filter(|id| ours(**id)) {
+                if let Some(f) = self.check_method(def_id) {
+                    functions.push(f);
+                }
+            }
+            for &(def_id, item_index) in const_ids.iter().filter(|(id, _)| ours(*id)) {
+                if let Some(f) = self.check_const(def_id, item_index) {
+                    functions.push(f);
+                }
+            }
+        }
+        self.check_const_cycles(&functions);
+        self.warn_newline_splits();
+        // Closure and bare-fn-wrapper functions synthesized while checking.
+        functions.append(&mut self.extra_functions);
+        (functions, std_closures)
+    }
 
     fn check_function(&mut self, def_id: DefId, item_index: usize) -> Option<hir::Function> {
         let ast::Item::Function(f) = &self.file.items[item_index].value else {
@@ -9606,6 +9634,69 @@ mod tests {
             .filter(|d| d.severity == nova_diagnostics::Severity::Error)
             .map(|d| d.code.as_str())
             .collect()
+    }
+
+    /// S0 checks the program's bodies before std's, each in `DefId` order
+    /// (5.3b, spec 5.3 §4.1, ADR 0056): eight methods' diagnostics come in
+    /// declaration order, the module's functions are the program's, then
+    /// std's, then the lifted ones, and the program's closures and wrappers
+    /// take the first ids past every definition, std's after them, in the
+    /// order they were lifted.
+    #[test]
+    fn bodies_are_checked_the_programs_first_each_in_def_id_order() {
+        let methods: String = (1..=8)
+            .map(|k| format!("    fn m{k}(self) -> Int {{ \"s{k}\" }}\n"))
+            .collect();
+        let src = format!(
+            "record A {{ x: Int }}\nimpl A {{\n{methods}}}\n\
+             fn twice(x: Int) -> Int {{ x * 2 }}\n\
+             fn main() {{\n    let f = |x: Int| x + 1\n    let g = twice\n    \
+             println(\"${{f(1)}} ${{g(2)}}\")\n}}\n"
+        );
+        let (tokens, _) = lex(&src, FileId::DUMMY);
+        let (ast, errors) = parse(&tokens, FileId::DUMMY);
+        assert!(errors.is_empty(), "{errors:?}");
+        let resolved = resolve(&ast.expect("an AST"));
+        let checked = check(&resolved.file, &resolved.definitions);
+        let shown: Vec<usize> = checked
+            .diagnostics
+            .iter()
+            .map(|d| {
+                assert_eq!(d.code, "E0010", "{d:?}");
+                let at = d.labels[0].span.start as usize;
+                src.as_bytes()[at + 2] as usize - b'0' as usize
+            })
+            .collect();
+        assert_eq!(shown, [1, 2, 3, 4, 5, 6, 7, 8]);
+        let defs = resolved.definitions.defs().len() as u32;
+        let (_, std_def, _) = nova_resolver::dump::std_start(&resolved.definitions);
+        let ids: Vec<u32> = checked
+            .module
+            .functions
+            .iter()
+            .map(|f| f.def_id.0)
+            .collect();
+        let lifted = ids.iter().position(|&id| id >= defs).expect("a closure");
+        let own = ids.iter().take_while(|&&id| id < std_def).count();
+        assert!(own >= 10, "{ids:?}");
+        assert!(ids[own..lifted]
+            .iter()
+            .all(|&id| id >= std_def && id < defs));
+        // The program's closure and wrapper, then std's, numbered in turn.
+        let lifted_ids = &ids[lifted..];
+        assert!(lifted_ids.len() > 2, "{lifted_ids:?}");
+        assert!(lifted_ids
+            .iter()
+            .enumerate()
+            .all(|(k, &id)| id == defs + k as u32));
+        let names: Vec<&str> = checked.module.functions[lifted..lifted + 2]
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            [format!("closure${defs}"), format!("fnval${}", defs + 1)]
+        );
     }
 
     /// Every expression in the named function's body, outermost first, for
