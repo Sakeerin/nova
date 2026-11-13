@@ -429,6 +429,12 @@ dump (spec
 - **`nova build` on Windows with a runtime built by Rust 1.100** failed to
   link, with LNK2019 for `WaitOnAddress`, `WakeByAddressSingle` and
   `WakeByAddressAll`: the linker is now also given `synchronization.lib`.
+- **A `nova` without a runtime of its own, run from a cargo build
+  directory**, looks for the runtime library in the directory above a
+  `build/` among its four nearest directories too, where Rust 1.100's
+  cargo runs integration tests (`<profile>/build/<package>/<hash>/out/`);
+  it looked only in its own directory and the two above it, which found
+  nothing there.
 
 ## [0.4.0] - 2026-10-23
 
