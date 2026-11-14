@@ -4213,8 +4213,9 @@ fn loose_hir() -> &'static String {
 /// each a dump of all of N, are most of the corpus's dump. Six since 5.4,
 /// where three gave a process about 40 s alone on N's debug runtime and
 /// 103 to 111 s in a full local run, near [`CHILD_LIMIT`], before the MIR
-/// dump's N side ran beside it.
-const HIR_PACKAGE_PARTS: usize = 6;
+/// dump's N side ran beside it; eight once N's MIR dump compared both
+/// forms, when six gave 103 to 105 s.
+const HIR_PACKAGE_PARTS: usize = 8;
 
 /// How many parts the files with tests are dealt into under test mode, as
 /// [`HIR_PACKAGE_PARTS`] (5.4): in one process they took 88 to 96 s in a
