@@ -187,7 +187,7 @@ impl ResolutionDumps {
         } else {
             Resolve::Full
         };
-        self.front(path, resolve, |front| {
+        self.front(path, resolve, false, |front| {
             nova_resolver::dump::dump_program(
                 self.target,
                 self.test,
@@ -201,11 +201,15 @@ impl ResolutionDumps {
 
     /// The pipeline [`ResolutionDumps::dump`] describes, up to the
     /// resolver, resolving as `resolve` says, handed to `then`. `Err` when
-    /// the root cannot be read.
+    /// the root cannot be read. With `only_if_runs`, a root whose program
+    /// does not run, a package module but `src/main.nova`, as `check`
+    /// decides it (`Program::for_file_with`), is handed on before the
+    /// loader, with nothing built (the MIR dump's `runs=false`, 5.4).
     fn front<R>(
         &self,
         path: &Path,
         resolve: Resolve,
+        only_if_runs: bool,
         then: impl FnOnce(Front<'_>) -> R,
     ) -> std::io::Result<R> {
         let db = self.std_db.clone();
@@ -214,9 +218,20 @@ impl ResolutionDumps {
             mut db,
             graph,
             roots,
+            runs,
             diagnostics: graph_diagnostics,
-            ..
         } = Program::for_file_with(path, db);
+        if only_if_runs && !runs {
+            return Ok(then(Front {
+                db: &db,
+                sources: &[],
+                labels: &labels,
+                runs,
+                resolved: None,
+                diagnostics: Vec::new(),
+                registry: &HashSet::new(),
+            }));
+        }
         labels.extend(manifest_labels(graph.as_ref(), &graph_diagnostics));
         let has_error = |ds: &[Diagnostic]| ds.iter().any(|d| d.severity == Severity::Error);
         if has_error(&graph_diagnostics) {
@@ -224,6 +239,7 @@ impl ResolutionDumps {
                 db: &db,
                 sources: &[],
                 labels: &labels,
+                runs,
                 resolved: None,
                 diagnostics: graph_diagnostics,
                 registry: &HashSet::new(),
@@ -274,6 +290,7 @@ impl ResolutionDumps {
             db: &db,
             sources: &sources,
             labels: &labels,
+            runs,
             resolved: resolved.as_ref(),
             diagnostics,
             registry: &registry,
@@ -292,12 +309,14 @@ enum Resolve {
 }
 
 /// What [`ResolutionDumps::front`] built: the files, the modules, their
-/// labels, the resolution once it got that far, every diagnostic so far,
-/// and the registry packages' files, whose warnings are not shown.
+/// labels, whether the program runs, the resolution once it got that far,
+/// every diagnostic so far, and the registry packages' files, whose
+/// warnings are not shown.
 struct Front<'a> {
     db: &'a FileDb,
     sources: &'a [ModuleSource<'a>],
     labels: &'a [(FileId, String)],
+    runs: bool,
     resolved: Option<&'a nova_resolver::ProgramResolution>,
     diagnostics: Vec<Diagnostic>,
     registry: &'a HashSet<FileId>,
@@ -370,36 +389,66 @@ impl HirDumps {
     /// stopped before the type checker, `checked=false` and the
     /// diagnostics. `Err` when the root cannot be read.
     pub fn dump(&self, path: &Path) -> std::io::Result<String> {
+        let dumps = self.dumps(path, Wanted::HIR)?;
+        Ok(dumps.hir.unwrap_or_default())
+    }
+
+    /// The dumps `wanted` names of the program whose root is `path`, from
+    /// one check: shared when it can be, in full otherwise, the root then
+    /// listed among the fallbacks. `Err` when the root cannot be read.
+    fn dumps(&self, path: &Path, wanted: Wanted) -> std::io::Result<RootDumps> {
         if self.shared {
-            if let Some(dump) = self.dump_with(path, Resolve::SharedForCheck)? {
-                return Ok(dump);
+            if let Some(dumps) = self.dumps_with(path, Resolve::SharedForCheck, wanted)? {
+                return Ok(dumps);
             }
             if let Ok(mut fallbacks) = self.fallbacks.lock() {
                 fallbacks.push(path.to_path_buf());
             }
         }
-        Ok(self.dump_with(path, Resolve::Full)?.unwrap_or_default())
+        Ok(self
+            .dumps_with(path, Resolve::Full, wanted)?
+            .unwrap_or_default())
     }
 
-    /// [`HirDumps::dump`], resolving as `resolve` says: `None` when the
+    /// [`HirDumps::dumps`], resolving as `resolve` says: `None` when the
     /// shared path cannot check the program, which the full path then
-    /// checks.
-    fn dump_with(&self, path: &Path, resolve: Resolve) -> std::io::Result<Option<String>> {
+    /// checks. The MIR dump's program is checked as the HIR dump's, then,
+    /// when it gave no error, its entry `main` kept
+    /// ([`keep_the_entry_main`]) and lowered natively ([`MirDumps`]).
+    fn dumps_with(
+        &self,
+        path: &Path,
+        resolve: Resolve,
+        wanted: Wanted,
+    ) -> std::io::Result<Option<RootDumps>> {
         let target = self.front.target;
         let test = self.front.test;
-        self.front.front(path, resolve, |front| {
+        let mir_only = !wanted.hir;
+        self.front.front(path, resolve, mir_only, |front| {
+            let mut dumps = RootDumps::default();
             let stopped = front
                 .diagnostics
                 .iter()
                 .any(|d| d.severity == Severity::Error);
             let Some(resolved) = front.resolved.filter(|_| !stopped) else {
-                return Some(nova_typeck::dump::dump_program(
-                    target,
-                    test,
-                    front.labels,
-                    None,
-                    &front.diagnostics,
-                ));
+                if wanted.hir {
+                    dumps.hir = Some(nova_typeck::dump::dump_program(
+                        target,
+                        test,
+                        front.labels,
+                        None,
+                        &front.diagnostics,
+                    ));
+                }
+                let runs = front.runs;
+                dumps.mir_forms(front.labels, wanted, |_| {
+                    if runs {
+                        nova_mir::dump::Reached::NotChecked
+                    } else {
+                        nova_mir::dump::Reached::NotRun
+                    }
+                });
+                return Some(dumps);
             };
             let options = nova_typeck::CheckOptions {
                 sources: Some(front.db),
@@ -412,22 +461,160 @@ impl HirDumps {
                 }
                 _ => nova_typeck::check_program(file, defs, &options),
             };
-            let mut diagnostics = front.diagnostics;
-            diagnostics.extend(
-                checked
-                    .diagnostics
-                    .iter()
-                    .filter(|d| !program::a_dependencys_warning(d, front.registry))
-                    .cloned(),
-            );
-            Some(nova_typeck::dump::dump_program(
-                target,
-                test,
-                front.labels,
-                Some((resolved, &checked)),
-                &diagnostics,
-            ))
+            let shown: Vec<Diagnostic> = checked
+                .diagnostics
+                .iter()
+                .filter(|d| !program::a_dependencys_warning(d, front.registry))
+                .cloned()
+                .collect();
+            let checked_clean = !shown.iter().any(|d| d.severity == Severity::Error);
+            if wanted.hir {
+                let mut diagnostics = front.diagnostics.clone();
+                diagnostics.extend(shown);
+                dumps.hir = Some(nova_typeck::dump::dump_program(
+                    target,
+                    test,
+                    front.labels,
+                    Some((resolved, &checked)),
+                    &diagnostics,
+                ));
+            }
+            if !(wanted.mir || wanted.before) {
+                return Some(dumps);
+            }
+            if !front.runs {
+                dumps.mir_forms(front.labels, wanted, |_| nova_mir::dump::Reached::NotRun);
+                return Some(dumps);
+            }
+            if !checked_clean {
+                dumps.mir_forms(front.labels, wanted, |_| {
+                    nova_mir::dump::Reached::NotChecked
+                });
+                return Some(dumps);
+            }
+            let mut module = checked.into_module();
+            keep_the_entry_main(&mut module, defs);
+            let lowered = |stop_before_async: bool| {
+                nova_mir::lower_module_with(
+                    &module,
+                    &nova_mir::Options {
+                        stop_before_async,
+                        ..mir_options(None)
+                    },
+                )
+            };
+            let after = wanted.mir.then(|| lowered(false));
+            let before = wanted.before.then(|| lowered(true));
+            dumps.mir_forms(front.labels, wanted, |before_async| {
+                let result = if before_async { &before } else { &after };
+                nova_mir::dump::Reached::Lowered {
+                    result: result.as_ref().expect("a form asked for is lowered"),
+                    async_lowered: !before_async,
+                }
+            });
+            Some(dumps)
         })
+    }
+}
+
+/// Which dumps of a root one check gives: the HIR dump's, and the MIR
+/// dump's after the async transform and before it (5.4).
+#[derive(Clone, Copy)]
+struct Wanted {
+    hir: bool,
+    mir: bool,
+    before: bool,
+}
+
+impl Wanted {
+    const HIR: Wanted = Wanted {
+        hir: true,
+        mir: false,
+        before: false,
+    };
+}
+
+/// One root's dumps, as [`Wanted`] asked for them.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RootDumps {
+    hir: Option<String>,
+    mir: Option<String>,
+    before: Option<String>,
+}
+
+impl RootDumps {
+    /// The MIR forms `wanted` names, each from `reached`, given whether it
+    /// is the before form.
+    fn mir_forms<'a>(
+        &mut self,
+        labels: &[(FileId, String)],
+        wanted: Wanted,
+        reached: impl Fn(bool) -> nova_mir::dump::Reached<'a>,
+    ) {
+        if wanted.mir {
+            self.mir = Some(nova_mir::dump::dump_program(labels, reached(false)));
+        }
+        if wanted.before {
+            self.before = Some(nova_mir::dump::dump_program(labels, reached(true)));
+        }
+    }
+}
+
+/// The MIR dumps of programs, natively (`nova_mir::dump`; spec
+/// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3.3, ADR
+/// 0057): for each root, a program that does not run, as `check` decides
+/// it, is `runs=false`, before the front end; otherwise [`HirDumps`]'s
+/// pipeline and check, std's shared, and, when neither gave an error, the
+/// entry `main` kept and the module lowered natively, after the async
+/// transform or, with `before_async`, before it. A user sees nothing of
+/// it: `check`, `build`, `run`, `test` and the language server keep their
+/// own paths.
+pub struct MirDumps {
+    hir: HirDumps,
+    before_async: bool,
+}
+
+impl MirDumps {
+    /// std's modules, natively, parsed, resolved, their items collected
+    /// and their bodies checked once, each program's dump after the async
+    /// transform or, with `before_async`, before it.
+    pub fn new(before_async: bool) -> MirDumps {
+        MirDumps {
+            hir: HirDumps::unshared(Target::Native, false),
+            before_async,
+        }
+    }
+
+    /// [`MirDumps::new`], each program resolving and checking std again,
+    /// as `check` does: the dumps are the same, which a test checks.
+    pub fn unshared(before_async: bool) -> MirDumps {
+        MirDumps {
+            hir: HirDumps::unshared(Target::Native, false),
+            before_async,
+        }
+    }
+
+    /// The roots whose check the shared path handed to the full one, in
+    /// the order they were dumped ([`HirDumps::fallbacks`]).
+    pub fn fallbacks(&self) -> Vec<std::path::PathBuf> {
+        self.hir.fallbacks()
+    }
+
+    /// The MIR dump of the program whose root is `path` (the type's docs).
+    /// `Err` when the root cannot be read.
+    pub fn dump(&self, path: &Path) -> std::io::Result<String> {
+        let wanted = Wanted {
+            hir: false,
+            mir: !self.before_async,
+            before: self.before_async,
+        };
+        let dumps = self.hir.dumps(path, wanted)?;
+        Ok(if self.before_async {
+            dumps.before
+        } else {
+            dumps.mir
+        }
+        .unwrap_or_default())
     }
 }
 
@@ -751,7 +938,10 @@ fn runtime_impls(module: &hir::Module, definitions: &Definitions) -> nova_mir::R
 
 /// The options MIR lowering takes for this context's target.
 fn mir_options(runtime: Option<&nova_mir::RuntimeImpls>) -> nova_mir::Options<'_> {
-    nova_mir::Options { runtime }
+    nova_mir::Options {
+        runtime,
+        ..Default::default()
+    }
 }
 
 /// Rename every `main` declared outside the entry module, `ModuleId(0)`,

@@ -540,19 +540,56 @@ impl DumpKind {
     }
 }
 
+/// `nova check --dump-mir …` (5.4, spec
+/// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3.1, ADR
+/// 0057): the MIR dump, natively, for the self-hosted compiler's
+/// differential test. Hidden, with no stability promise, taken as
+/// [`DumpResolutionCmd`] is, only when `--dump-mir` is the first argument
+/// after `check`, by this parser of its own: after the flag it takes
+/// `--before-async` and files, `--` before a file that starts with `-`,
+/// the option once; it refuses everything else, `--std`, `--target`,
+/// `--test`, `--help` and `-h` included, in clap's words under the usage
+/// `nova check --dump-mir`. MIR has no std part, and the WASM target's and
+/// test mode's MIR are not compared.
+#[derive(clap::Parser)]
+#[command(
+    name = "nova check --dump-mir",
+    bin_name = "nova check --dump-mir",
+    no_binary_name = true,
+    disable_help_flag = true,
+    disable_version_flag = true
+)]
+pub struct DumpMirCmd {
+    /// The module as lowering left it, before the async transform.
+    #[arg(long)]
+    before_async: bool,
+
+    /// Each a program's root. Taken as they are, so that an empty one is a
+    /// file that is not there.
+    #[arg(value_parser = OsStringValueParser::new().map(PathBuf::from))]
+    files: Vec<PathBuf>,
+}
+
 /// A hidden dump's command line: which dump, and its arguments.
-pub struct DumpCmd {
-    kind: DumpKind,
-    args: DumpResolutionCmd,
+pub enum DumpCmd {
+    /// The resolution dump or the HIR dump, with [`DumpResolutionCmd`]'s
+    /// arguments.
+    Front {
+        kind: DumpKind,
+        args: DumpResolutionCmd,
+    },
+    /// The MIR dump (5.4).
+    Mir(DumpMirCmd),
 }
 
 impl DumpCmd {
     /// The hidden command, parsed from `args` (a process's arguments,
-    /// `argv[0]` first), when they are `check --dump-resolution` or `check
-    /// --dump-hir` and more; `None` for every other command line, which the
-    /// ordinary parser takes. A misuse after the flag exits as clap's
-    /// errors do, under the usage `nova check --dump-resolution` or `nova
-    /// check --dump-hir`.
+    /// `argv[0]` first), when they are `check --dump-resolution`, `check
+    /// --dump-hir` or `check --dump-mir` and more; `None` for every other
+    /// command line, which the ordinary parser takes. A misuse after the
+    /// flag exits as clap's errors do, under the usage `nova check
+    /// --dump-resolution`, `nova check --dump-hir` or `nova check
+    /// --dump-mir`.
     pub fn from_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<Self> {
         let mut args = args.into_iter().skip(1);
         if args.next()? != "check" {
@@ -560,10 +597,13 @@ impl DumpCmd {
         }
         let flag = args.next()?;
         if flag == "--dump-resolution" {
-            return Some(DumpCmd {
+            return Some(DumpCmd::Front {
                 kind: DumpKind::Resolution,
                 args: <DumpResolutionCmd as clap::Parser>::parse_from(args),
             });
+        }
+        if flag == "--dump-mir" {
+            return Some(DumpCmd::Mir(<DumpMirCmd as clap::Parser>::parse_from(args)));
         }
         if flag != "--dump-hir" {
             return None;
@@ -575,7 +615,7 @@ impl DumpCmd {
             .get_matches_from(args);
         let args = <DumpResolutionCmd as clap::FromArgMatches>::from_arg_matches(&matches)
             .unwrap_or_else(|e| e.exit());
-        Some(DumpCmd {
+        Some(DumpCmd::Front {
             kind: DumpKind::Hir,
             args,
         })
@@ -589,9 +629,14 @@ impl DumpCmd {
 /// does; with `--test`, each as `nova test` resolves and checks it. With
 /// `--test` and `--target wasm`, with neither a file nor `--std`, or with
 /// both, it prints one line to stderr, nothing to stdout, and exits 2, as
-/// N does.
+/// N does. The MIR dump (5.4) takes files alone, `--before-async` the
+/// module before the async transform; with no file it prints one line to
+/// stderr and exits 2.
 pub fn dump(cmd: DumpCmd) -> Result<()> {
-    let code = dump_code(&cmd)?;
+    let code = match &cmd {
+        DumpCmd::Front { kind, args } => dump_code(*kind, args)?,
+        DumpCmd::Mir(args) => dump_mir_code(args)?,
+    };
     if code != 0 {
         std::process::exit(code);
     }
@@ -601,9 +646,18 @@ pub fn dump(cmd: DumpCmd) -> Result<()> {
 /// One program's part of a dump, from its root.
 type DumpOne = dyn Fn(&Path) -> std::io::Result<String>;
 
-fn dump_code(cmd: &DumpCmd) -> Result<i32> {
-    let flag = cmd.kind.flag();
-    let args = &cmd.args;
+fn dump_mir_code(args: &DumpMirCmd) -> Result<i32> {
+    if args.files.is_empty() {
+        eprintln!("error: --dump-mir needs a FILE");
+        return Ok(2);
+    }
+    // std is parsed, resolved and checked once for every program.
+    let dumps = nova_driver::MirDumps::new(args.before_async);
+    dump_files(&args.files, &move |file| dumps.dump(file))
+}
+
+fn dump_code(kind: DumpKind, args: &DumpResolutionCmd) -> Result<i32> {
+    let flag = kind.flag();
     let target: nova_driver::Target = args.target.into();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -616,7 +670,7 @@ fn dump_code(cmd: &DumpCmd) -> Result<i32> {
             eprintln!("error: {flag} --std takes no FILE");
             return Ok(2);
         }
-        let std = match cmd.kind {
+        let std = match kind {
             DumpKind::Resolution => nova_driver::dump_std_resolution(target, args.test),
             DumpKind::Hir => nova_driver::dump_std_hir(target, args.test),
         };
@@ -630,7 +684,7 @@ fn dump_code(cmd: &DumpCmd) -> Result<i32> {
     }
     // std is parsed once for every program, as N parses it, and resolved
     // and its items collected once.
-    let dumps: Box<DumpOne> = match cmd.kind {
+    let dumps: Box<DumpOne> = match kind {
         DumpKind::Resolution => {
             let dumps = nova_driver::ResolutionDumps::new(target, args.test);
             Box::new(move |file| dumps.dump(file))
@@ -640,8 +694,18 @@ fn dump_code(cmd: &DumpCmd) -> Result<i32> {
             Box::new(move |file| dumps.dump(file))
         }
     };
+    drop(out);
+    dump_files(&args.files, &*dumps)
+}
+
+/// For each of `files`, `== FILE` (the path as given), then its part from
+/// `dumps`, or `IOERR` and the error's kind for a root that cannot be
+/// read; the exit code, 2 when one could not be read.
+fn dump_files(files: &[PathBuf], dumps: &DumpOne) -> Result<i32> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
     let mut code = 0;
-    for file in &args.files {
+    for file in files {
         writeln!(out, "== {}", file.display())?;
         match dumps(file) {
             Ok(dump) => out.write_all(dump.as_bytes())?,
