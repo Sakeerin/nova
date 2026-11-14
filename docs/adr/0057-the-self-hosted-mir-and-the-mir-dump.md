@@ -23,9 +23,15 @@ Part 2 (N's lowering and monomorphization) wrote §10 to §12:
 - §11, the harness in part 2: the before form compared on every input;
 - §12, part 2's figures.
 
-Later parts write N's `async_lower` and the after form, the MIR fuzzer,
-the depth cases and N's stack, CI's figures, the rule that a change to
-MIR changes both compilers, and the Consequences.
+Part 3 (N's `async_lower`) wrote §13 to §15:
+- §13, N's port of the async transform, its asserts as panics;
+- §14, the harness in part 3: the after form compared on every input,
+  the before form narrowed to the roots the transform changes;
+- §15, part 3's figures.
+
+Later parts write the MIR fuzzer, the depth cases and N's stack, CI's
+figures, the rule that a change to MIR changes both compilers, and the
+Consequences.
 
 ## Decision
 
@@ -794,7 +800,7 @@ refuses `--std-part`, `--target`, `--test`, any other option, an option
 twice and no file with exit 2 and nothing on stdout; an unreadable root
 is `IOERR`, exit 2 after the rest; a manifest N's reader refuses stops it
 with exit 1. **Until N ports `async_lower`, plain `selfhost mir` exits 3**
-with one line on stderr.
+with one line on stderr (part 3 removed the refusal, §13).
 
 ### 11. The harness in part 2
 
@@ -806,7 +812,8 @@ HIR cases that reach MIR and `cases/mir/`, with both line endings), root
 lists in parts under `HIR_ARGS_LIMIT`. The after form stays S0's alone
 while `N_MIR_AFTER` is false; part 3 sets it and removes N's exit-3
 refusal, and the after form is then compared on every input with no other
-change. No frozen list: every input is compared in the before form.
+change (part 3 retired the switch instead, §14). No frozen list: every
+input is compared in the before form.
 
 New tests: `both_sides_refuse_the_mir_dumps_shapes_alike` (no root,
 `--target` either way, `--test`, an option twice, std's part);
@@ -875,3 +882,168 @@ commands, `cargo fmt`, `nova fmt --check std examples selfhost` and the
 scripts against the base's `nova` show no difference (`nova check` 1,943,
 `parse` 3,674 runs, packages 22, `--help` 22, usage 474 and 10 in a
 terminal, the hidden forms' refusals 114 and 330).
+
+### 13. N's `async_lower` (part 3)
+
+`async_lower.nova` (692 lines, 482 of code) ports `async_lower.rs`'s
+`transform` and everything it calls, lines 1 to 1,036 (590 code lines;
+its 30 tests after them stay Rust-only, §7). It has
+`split_into_poll_and_wrapper`, `highest_state_slot`, `state_slot_count`,
+`build_wrapper`, `push_temp`, `Spiller` (`load`, `reload`, `const_i64`,
+`body`, `block_pieces`, `finish`, `spill`, `terminator`, `slot`),
+`split_at_awaits`, `await_count` and `visit_temps`, with S0's names and
+layout constants. Each async function's place in the module is taken by
+`<name>$poll`, `(state, task_ctx) -> i64`. Its body is split at each
+await into a poll, a suspend and a continuation, and every value it names
+is kept in its state slot, original temp `i` at slot `2 + i`. A resumable
+body enters at a switch on the resume tag. The wrapper keeps the old
+symbol, allocates and seeds the state object, and returns the
+`{ poll_code, state }` future. The wrappers follow every function, in
+their async functions' order. Temps, blocks and statements come out in
+S0's order.
+
+**Idioms,** beyond §10's:
+- S0 rewrites each async function in place. N builds a new module,
+  function, block and statement, its temps substituted, and never writes
+  into the module lowering left (the test below checks it).
+- `visit_temps` hands every temp a statement names to `SpillVisit`'s
+  `visit`, which is S0's callback: the spiller and that statement's loads
+  and stores. It calls `visit` in S0's order, reads before the write,
+  since the scratch temps are numbered in that order. Each read goes into
+  a local before the new statement is built, so the order of a
+  constructor's arguments never decides it.
+- `split_at_awaits`'s segments are read by index, and a block's original
+  terminator waits in a `TermSlot` until the piece that ends the block
+  takes it.
+- **Asserts as panics, with S0's words** (spec §6.2). These are the four
+  `expect`s, at `:517`, `:690`, `:782` and `:807`, and the
+  `debug_assert!`s: the returned class against the declared one, no await
+  left, the two state-size cross-checks, the minimum size, the three block
+  ids (each original block's start, the block count, each poll block's
+  own id) and the resume count. `mono.rs`'s two checks on the transform's
+  output, no function left flagged and no await left, are panics in
+  `mono.nova` too. No input reaches any of them.
+- `RT_ALLOC` is `RtFunc::Alloc`'s index, held to its name by the
+  runtime-function test.
+
+`mono.nova` calls `transform` where `mono.rs` does, after the async
+`main`'s shim, unless `stop_before_async` stops it first. **`selfhost mir
+--std DIR FILE…` prints the after form**, and the exit-3 refusal is gone.
+`--before-async` stops where S0's hook stops.
+
+**N's test,**
+`the_async_transform_keeps_values_live_across_two_awaits_in_their_slots`
+(spec §6.3). It hand-builds `async fn f(x: Int) -> Int { let a =
+g(x).await; let b = g(a).await; x + b }` as lowering leaves it and checks:
+- the names, `f.0$poll` then `f.0`;
+- the poll function's ABI and its 26 temps;
+- every block's state accesses in order: `bb0 R0 | bb1 | bb2 R2 W3 | bb3
+  R3 | bb4 W0 | bb5 R3 W4 R4 W5 | bb6 R5 | bb7 W0 | bb8 R5 W6 R2 R6 W7 R7
+  W1`, so `x` in slot 2 is read after both awaits;
+- the dispatch's arms, `0:bb2 1:bb3 2:bb6` and `bb1` otherwise;
+- the wrapper's 64 bytes and its seeds of the tag and `x`;
+- the function it was given, unchanged.
+
+Resume tags counted from 0, or slots one off, each fail it. N's `nova
+test`: 101 passed.
+
+### 14. The harness in part 3
+
+`N_MIR_AFTER`, `MirForm::n_prints` and
+`n_refuses_the_after_form_until_it_ports_the_async_transform` are gone.
+`agree_on_mir_forms(dir, files, code)` takes both forms of a set of
+roots:
+- **the after form**, compared through `compare_batch` on every root, in
+  parts under `HIR_ARGS_LIMIT` (`mir_dump_in`);
+- **the before form**, compared on the roots whose part in S0's after
+  form holds a `$poll` function, the roots the transform changed (spec
+  §7.2);
+- on the other roots, S0's before form alone, on a second thread. Its
+  parts are dealt back among the compared ones in the roots' order
+  (`headed_parts`, now shared with `agree_in_parts`).
+
+A root that cannot be read holds no poll function, so the roots compared
+in the before form exit 0. The set is read from S0's dump on every run,
+so it follows the inputs and needs no list. §8's checks run on S0's two
+whole outputs, among them the two forms equal on every root that holds
+no poll function: where N's before form is not compared, its after form
+pins the lowering.
+
+**The before form's set:** 75 of the 251 loose programs, 1 of the 10
+packages' mains (N's own), 2 of the 342 HIR cases and 17 of the 83 MIR
+cases. That is 95 of 686 roots, and the 19 cases again with `\r\n`. The
+test prints the counts by set.
+
+Other changes:
+- The corpus test runs the loose programs, the packages' mains and the
+  cases side by side. Before, it ran the two forms side by side.
+  `mir_cases` keeps both forms of the cases, once a run (`MirCases`).
+- The refusals are compared in both forms (`--before-async` twice for
+  the after form).
+- `a_manifest_n_cannot_read_stops_n_with_a_message` runs plain `mir`.
+- The header test compares N's after form on every root and its before
+  form on the one that holds a poll function.
+
+**The HIR dump's package corpus in eight parts.** A full local plain run
+was timed with a scratch timer on every process. With N's MIR dump
+comparing both forms beside it, the HIR test's six package parts took 103
+to 105 s a process, near the 120 s `CHILD_LIMIT` (95 s at part 2).
+`HIR_PACKAGE_PARTS` is now 8, which brings the longest to 97 s, with the
+same inputs and comparison in the same order. The MIR dump's longest
+process is N's after form on the 251 loose programs, 70.5 s.
+
+### 15. Part 3's figures
+
+Measured locally on 4 cores, 2026-11-14.
+
+**Agreement,** byte for byte with exit codes:
+
+| Set | Roots | After form, agree / differ | Before form, agree / differ |
+|---|---:|---:|---:|
+| native corpus's roots that run (N's own included) | 261 | 261 / 0 | 76 / 0 |
+| HIR cases that reach MIR | 342 | 342 / 0 | 2 / 0 |
+| `cases/mir/` | 83 | 83 / 0 | 17 / 0 |
+| the cases again with `\r\n` | 425 | 425 / 0 | 19 / 0 |
+
+The after form agreed on the first run. Inputs per code, each agreeing:
+E0601 13, E0013 at `mono.rs:276` 12, E0075 1, E0078 2, E0079 1.
+
+**N against S0,** one process a set as the harness runs them, best of
+three; peak RSS from `wait4`; N's collections from `NOVA_GC_DEBUG`. After
+form, with the before form's time beside it from the same session:
+
+| Set | Roots | S0 opt 0 | N debug runtime (before) | S0 opt 1 | N release runtime (before) | N RSS (before) | N GCs |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| N's root | 1 | 1.14 s | 7.40 s (7.38) | 0.46 s | 1.87 s (2.05) | 208 MB (178) | 23 |
+| loose corpus | 251 | 4.64 | 17.49 (17.19) | 1.77 | 4.33 (4.42) | 41 (40) | 103 |
+| packages' mains but N's | 9 | 0.33 | 1.85 (1.68) | 0.14 | 0.40 (0.42) | 42 (43) | 18 |
+| HIR cases | 342 | 6.19 | 21.49 (21.31) | 2.27 | 5.41 (5.55) | 38 (37) | 116 |
+| `cases/mir/` | 83 | 1.34 | 5.10 (5.48) | 0.59 | 1.31 (1.29) | 35 (36) | 38 |
+
+The transform itself costs N too little to measure. On N's root it holds
+the module lowering left beside the new one, about 30 MB more at the
+peak. S0's peak RSS is 110 to 117 MB on N's root and 35 to 44 MB on the
+sets. These runs are slower than §12's: N's root's before form, a path
+part 3 leaves as it was, took 7.38 s here and 5.82 s there, so compare
+within this table. **The stack:**
+N on a 1 MB main stack (`ulimit -s 1024`, release runtime) gives the
+after form of all 686 inputs, every one equal to S0's. No input needed
+more than the default stack.
+
+**`selfhost.rs`** (61 tests):
+- as CI's Selfhost job runs it, 61.10, 57.49 and 53.18 s (part 2: 55.84,
+  54.84 and 55.32 s with 62 tests); the six MIR tests alone 19.64 and
+  20.46 s (part 2's seven, 21.05 s);
+- plain, 190.05, 189.38 and 209.89 s (part 2: 186.49, 201.56 and 183.34
+  s); the MIR tests alone 63.69 and 69.49 s (65.00 s).
+
+**Verification:**
+- the full suite 2,835 passed, 1 failed (the IPv6 test, as on the base),
+  10 ignored;
+- N's `nova test` 101 passed;
+- both clippy commands, `cargo fmt`, `nova fmt --check std examples
+  selfhost` and the 1.78 `cargo check` clean; `Cargo.lock` unchanged;
+- part 1's byte-identity scripts against the base's `nova` show no
+  difference: `nova check` 1,943, `parse` 3,674 runs, packages 22,
+  `--help` 22, usage 474 and 10 in a terminal, the hidden forms' refusals
+  114 and 330.
