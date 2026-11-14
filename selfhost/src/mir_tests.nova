@@ -2,13 +2,15 @@
 // docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.3): each
 // type's code in a symbol (`mangle_ty`, mono.rs's tests' `mangle_ty`
 // cases), the lowering's runtime functions by name, a generic function
-// instantiated twice with its own nodes unchanged, and std's functions
-// spliced into a program twice with std's shared functions unchanged. The
-// differential compares everything else with S0.
+// instantiated twice with its own nodes unchanged, std's functions
+// spliced into a program twice with std's shared functions unchanged, and
+// the async transform's state slots for values live across two awaits.
+// The differential compares everything else with S0.
 //
 // They live in `src/`, imported by `main.nova`, for the reason
 // lexer_tests.nova gives.
 
+import async_lower
 import builtins
 import hir
 import lexer
@@ -66,6 +68,7 @@ fn the_lowerings_runtime_functions_are_named_as_s0_names_them() {
         (RT_BOOL_TO_STR, "BoolToStr"),
         (RT_CHAR_TO_STR, "CharToStr"),
         (RT_STR_EQ, "StrEq"),
+        (RT_ALLOC, "Alloc"),
         (RT_CHECK_BOUNDS, "CheckBounds"),
         (RT_PANIC, "Panic"),
         (RT_TASK_BLOCK_ON, "TaskBlockOn"),
@@ -232,4 +235,90 @@ fn a_splice_done_twice_leaves_stds_shared_functions_as_they_were() {
     let mut std_last: Vec<String> = Vec::new()
     for f in items.tables.functions.iter() { std_last.push(function_text(f)) }
     assert_eq("\n".join(std_last.to_array()), "\n".join(std_before.to_array()))
+}
+
+// --- The async transform's state slots ---
+
+// Each block's accesses to the state object `state`, in order: `R<slot>`
+// a load, `W<slot>` a store.
+fn state_slots_text(blocks: Vec<MirBlock>, state: Int) -> String {
+    let mut lines: Vec<String> = Vec::new()
+    for i in 0..blocks.len() {
+        let mut line = "bb${i}"
+        for s in blocks.at(i).stmts.iter() {
+            match s {
+                SRecordField(_, rec, index, _) => if rec == state { line = line + " R${index}" }
+                SSetField(rec, index, _, _) => if rec == state { line = line + " W${index}" }
+                _ => ()
+            }
+        }
+        lines.push(line)
+    }
+    " | ".join(lines.to_array())
+}
+
+@test
+fn the_async_transform_keeps_values_live_across_two_awaits_in_their_slots() {
+    // `async fn f(x: Int) -> Int { let a = g(x).await; let b = g(a).await;
+    // x + b }` as lowering leaves it: `x` t0, `g(x)` t1, `a` t2, `g(a)` t3,
+    // `b` t4, `x + b` t5. `x` is live across both awaits, `a` across the
+    // second's call.
+    let mut stmts: Vec<MirStmt> = Vec::new()
+    stmts.push(SCall(1, "g.1", Vec::from_array([0])))
+    stmts.push(SAwait(2, 1))
+    stmts.push(SCall(3, "g.1", Vec::from_array([2])))
+    stmts.push(SAwait(4, 3))
+    stmts.push(SBin(5, OpAdd, OC_INT, 0, 4))
+    let f = MirFunction {
+        name: "f.0",
+        params: 1,
+        takes_env: false,
+        capture_count: 0,
+        temps: Vec::from_array([MIR_I64, MIR_PTR, MIR_I64, MIR_PTR, MIR_I64, MIR_I64]),
+        ret: MIR_I64,
+        is_async: true,
+        blocks: Vec::from_array([MirBlock { stmts: stmts, term: TermReturn(5) }]),
+    }
+    let program = MirModule { functions: Vec::from_array([f]), externs: Vec::new() }
+    let out = transform(program)
+    let mut names: Vec<String> = Vec::new()
+    for g in out.functions.iter() { names.push(g.name) }
+    assert_eq(" ".join(names.to_array()), "f.0" + "$" + "poll f.0")
+    // The poll function: the state object t0, task_ctx t1, then the
+    // dispatch on the tag, the trap, the piece before the first await and
+    // a poll, suspend and continuation per await. Each original temp `i`
+    // is slot `2 + i`: `x` slot 2, stored by the wrapper, read after the
+    // second await; `a` slot 4 and `b` slot 6, stored by their
+    // continuations; the output slot 1 last.
+    let poll = out.functions.at(0)
+    assert(poll.takes_env && poll.params == 1 && !poll.is_async, "the poll function's ABI")
+    assert_eq(MIR_TY_NAMES[poll.ret], "I64")
+    assert(poll.temps.len() == 26, "${poll.temps.len()} temps in the poll function")
+    assert_eq(
+        state_slots_text(poll.blocks, 0),
+        "bb0 R0 | bb1 | bb2 R2 W3 | bb3 R3 | bb4 W0 | bb5 R3 W4 R4 W5 | bb6 R5 | bb7 W0 | bb8 R5 W6 R2 R6 W7 R7 W1",
+    )
+    match poll.blocks.at(0).term {
+        TermSwitch(_, arms, default) => {
+            let mut text: Vec<String> = Vec::new()
+            for (tag, b) in arms.iter() { text.push("${tag}:bb${b}") }
+            assert_eq(
+                " ".join(text.to_array()) + " else bb${default}",
+                "0:bb2 1:bb3 2:bb6 else bb1",
+            )
+        }
+        _ => panic("the poll function enters at a switch on the tag")
+    }
+    // The wrapper: 8 slots, 64 bytes, its state t2, the tag and `x` seeded.
+    let wrapper = out.functions.at(1)
+    assert(!wrapper.is_async && wrapper.params == 1, "the wrapper keeps the signature")
+    match wrapper.blocks.at(0).stmts.at(0) {
+        SConstInt(1, bytes) => assert(bytes == 64, "${bytes} bytes")
+        _ => panic("the wrapper sizes its state object first")
+    }
+    assert_eq(state_slots_text(wrapper.blocks, 2), "bb0 W0 W2")
+    // The module lowering left is as it was.
+    let before = program.functions.at(0)
+    assert(before.is_async && before.temps.len() == 6, "the async function is unchanged")
+    assert(before.blocks.len() == 1 && before.blocks.at(0).stmts.len() == 5, "its body too")
 }

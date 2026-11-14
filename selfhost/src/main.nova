@@ -33,18 +33,17 @@
 //                             ADR 0055), then every function of the
 //                             program, its body checked, std's bodies
 //                             checked once (§4.3, §4.5, ADR 0056)
-//   selfhost mir --std DIR --before-async FILE...
+//   selfhost mir --std DIR [--before-async] FILE...
 //                             prints the MIR dump of each program whose
 //                             root is FILE, after the same header, as
-//                             `nova check --dump-mir --before-async`
-//                             does: natively, monomorphized from `main`
-//                             and lowered, before the async transform,
-//                             std's checked functions spliced into each
-//                             program (spec
+//                             `nova check --dump-mir [--before-async]`
+//                             does: natively, monomorphized from `main`,
+//                             lowered and through the async transform, or
+//                             before it with `--before-async`, std's
+//                             checked functions spliced into each program
+//                             (spec
 //                             docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md
-//                             §5, §6, ADR 0057); without `--before-async`
-//                             it refuses with the exit code 3 until N's
-//                             async transform is ported
+//                             §5, §6, ADR 0057)
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -52,6 +51,7 @@
 // with the exit code 2 and nothing printed.
 
 import ast_dump
+import async_lower
 import builtins
 import diagnostic
 import dump
@@ -278,11 +278,10 @@ async fn dump_command(argv: Vec<String>, command: String) {
 // taken once, and `--` before a root that starts with `-`. With no `--std
 // DIR`, with a second `--std` or `--before-async`, `--std-part`,
 // `--target`, `--test` or another option, or with no file, nothing is
-// printed and the exit code is 2, as S0's form refuses its shapes. Until
-// N's async transform is ported, the dump after it is refused with the
-// exit code 3 and one line on stderr: only `--before-async` is printed. A
-// root whose package's manifest N's reader refuses stops the run with the
-// exit code 1, as `selfhost hir`.
+// printed and the exit code is 2, as S0's form refuses its shapes. The
+// dump is after the async transform, or before it with `--before-async`.
+// A root whose package's manifest N's reader refuses stops the run with
+// the exit code 1, as `selfhost hir`.
 async fn mir_command(argv: Vec<String>) {
     let usage = "usage: selfhost mir --std DIR [--before-async] FILE..."
     let mut std_dir = ""
@@ -317,13 +316,6 @@ async fn mir_command(argv: Vec<String>) {
     if bad || std_dir == "" || files.is_empty() {
         eprintln(usage)
         exit(2)
-        return
-    }
-    if !before {
-        eprintln(
-            "error: selfhost mir prints only --before-async until N's async transform is ported",
-        )
-        exit(3)
         return
     }
     let std_set = match load_std(std_dir, CompileTargetNative, false).await {
@@ -368,7 +360,8 @@ async fn mir_command(argv: Vec<String>) {
 // are read; otherwise `dump_hir`'s pipeline and check, shared when it can
 // be and in full otherwise, and, when neither gave an error, the full
 // check's module, std's functions spliced in, its entry `main` kept and
-// the module lowered natively, before the async transform when `before`.
+// the module lowered natively, through the async transform or, when
+// `before`, before it.
 async fn dump_mir(
     path: String,
     shared: SharedStd,

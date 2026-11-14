@@ -1,0 +1,692 @@
+// The async state-machine transform: a port of
+// crates/nova-mir/src/async_lower.rs's `transform` and everything it
+// calls, function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.1, ADR
+// 0057). It runs on the finished module, after the async `main`'s shim:
+// each async function becomes `<name>$poll`, `(state, task_ctx) -> i64`,
+// its body split at its awaits and every value it names kept in a state
+// object; a wrapper under the old symbol allocates the state object, seeds
+// it with the arguments and returns the `{ poll_code, state }` future; the
+// wrappers follow every function, in their async functions' order. S0's
+// module comment gives the reasons (the split, the spill of every value,
+// no unwind through a poll function); the layout is the runtime's
+// (`nova-runtime/src/task.rs`).
+//
+// The Rust's idioms, beyond mir.nova's (ADR 0057):
+//
+// - S0 rewrites each async function in place; here every node is new: the
+//   module, the poll function, each block and each statement, its temps
+//   substituted. The module lowering left is never written into (spec
+//   §6.2).
+// - `visit_temps` gives each temp a statement mentions to `SpillVisit`'s
+//   `visit`, S0's callback, in the order S0's match does, reads before the
+//   write: the scratch temps are numbered in that order.
+// - `split_at_awaits`'s segments are read by index, and a block's
+//   original terminator is held in a `TermSlot` until a piece takes it.
+// - S0's `debug_assert!`s and its four `expect`s are `panic`s with S0's
+//   words, never reached on a valid input (spec §6.2).
+
+import mir
+
+/// The resume tag's state slot, at byte offset 0 (`STATE_SLOT_TAG`):
+/// which of a poll function's states to enter.
+pub const STATE_SLOT_TAG: Int = 0
+
+/// The first per-temp state slot, at byte offset 16
+/// (`STATE_SLOT_TEMPS`): original temp `i` lives at slot
+/// `STATE_SLOT_TEMPS + i`.
+pub const STATE_SLOT_TEMPS: Int = 2
+
+/// The smallest state object the transform may emit, the tag and output
+/// slots (`STATE_MIN_SIZE`, `STATE_SLOT_TEMPS * 8`).
+pub const STATE_MIN_SIZE: Int = 16
+
+/// A poll function stopped at an await whose future was not ready
+/// (`POLL_PENDING`).
+pub const POLL_PENDING: Int = 0
+
+/// A poll function wrote its final value to the output slot
+/// (`POLL_READY`).
+pub const POLL_READY: Int = 1
+
+// The state object pointer inside a poll function, its environment
+// parameter, temp 0 (`STATE`).
+const STATE: Int = 0
+
+// The task context pointer inside a poll function, its one real
+// parameter, temp 1 (`TASK_CTX`).
+const TASK_CTX: Int = 1
+
+// The block a resumable poll function enters at, which switches on the
+// resume tag (`DISPATCH`).
+const DISPATCH: Int = 0
+
+// The one block every unrecognized resume tag and poll status goes to,
+// a trap (`BAD_DISCRIMINANT`).
+const BAD_DISCRIMINANT: Int = 1
+
+// How many blocks a resumable poll function reserves ahead of the
+// body's own (`RESERVED_BLOCKS`).
+const RESERVED_BLOCKS: Int = 2
+
+// How many blocks one await expands to beyond the piece before it: the
+// poll, the suspend and the continuation (`BLOCKS_PER_AWAIT`).
+const BLOCKS_PER_AWAIT: Int = 3
+
+// The lowest tag a suspend may store; tag 0 is the entry state
+// (`FIRST_RESUME_TAG`).
+const FIRST_RESUME_TAG: Int = 1
+
+/// Every async function of `program` rewritten into a poll function plus
+/// a wrapper (`transform`): a new module, each poll function in its async
+/// function's place and the wrappers after every function. A function
+/// that is not async is kept as it is, so a module with none comes out
+/// with the same functions.
+pub fn transform(program: MirModule) -> MirModule {
+    let mut functions: Vec<MirFunction> = Vec::new()
+    let mut wrappers: Vec<MirFunction> = Vec::new()
+    for i in 0..program.functions.len() {
+        let f = program.functions.at(i)
+        if !f.is_async {
+            functions.push(f)
+            continue
+        }
+        let (poll, wrapper) = split_into_poll_and_wrapper(f)
+        functions.push(poll)
+        wrappers.push(wrapper)
+    }
+    for i in 0..wrappers.len() { functions.push(wrappers.at(i)) }
+    MirModule { functions: functions, externs: program.externs }
+}
+
+// `f`'s `$poll` function, new, and the wrapper that takes over its old
+// symbol (`split_into_poll_and_wrapper`).
+fn split_into_poll_and_wrapper(f: MirFunction) -> (MirFunction, MirFunction) {
+    // The precondition the output store depends on: a returned temp's
+    // class is the class the body produces (`lower::body_return_ty`).
+    for b in f.blocks.iter() {
+        match b.term {
+            TermReturn(t) => {
+                if t >= 0 && f.temps.at(t) != f.ret {
+                    panic(
+                        "`${f.name}` returns a temp whose class is not its declared return class ${MIR_TY_NAMES[f.ret]}; see `lower::body_return_ty`",
+                    )
+                }
+            }
+            _ => ()
+        }
+    }
+    let wrapper = build_wrapper(f)
+    // Every original temp becomes a state slot, so the rewritten body is
+    // indexed against the old temps, while the poll function's own start
+    // fresh: the state pointer, task_ctx, then a scratch per load and per
+    // result.
+    let mut sp = Spiller { temps: Vec::from_array([MIR_PTR, MIR_PTR]), orig: f.temps }
+    let blocks = sp.body(f.blocks)
+    // Every await must have been consumed by the split.
+    for b in blocks.iter() {
+        for s in b.stmts.iter() {
+            match s {
+                SAwait(_, _) => panic(
+                    "`${f.name}$poll` still holds an await marker after the split",
+                )
+                _ => ()
+            }
+        }
+    }
+    // The two halves of the state object's size must agree: the highest
+    // slot any access names, against the slots the wrapper allocated.
+    let highest = highest_state_slot(blocks, STATE)
+    if highest >= wrapper.state_slots {
+        panic(
+            "`${f.name}$poll` addresses state slot ${highest}, which is past the ${wrapper.state_slots} slots (${wrapper.state_slots * 8} bytes) its wrapper allocated: a slot added to the rewrite must be added to `state_slot_count` in the same edit",
+        )
+    }
+    let seeded = highest_state_slot(wrapper.function.blocks, wrapper.state)
+    if seeded >= wrapper.state_slots {
+        panic(
+            "`${f.name}` seeds state slot ${seeded}, which is past the ${wrapper.state_slots} slots it allocated",
+        )
+    }
+    let poll = MirFunction {
+        name: f.name + "$poll",
+        params: 1,
+        takes_env: true,
+        capture_count: 0,
+        temps: sp.temps,
+        ret: MIR_I64,
+        is_async: false,
+        blocks: blocks,
+    }
+    (poll, wrapper.function)
+}
+
+// The highest state slot any field access in `blocks` addresses through
+// `state`, `STATE_SLOT_TAG` when there is none (`highest_state_slot`).
+fn highest_state_slot(blocks: Vec<MirBlock>, state: Int) -> Int {
+    let mut highest = -1
+    for b in blocks.iter() {
+        for s in b.stmts.iter() {
+            match s {
+                SRecordField(_, rec, index, _) => {
+                    if rec == state && index > highest { highest = index }
+                }
+                SSetField(rec, index, _, _) => {
+                    if rec == state && index > highest { highest = index }
+                }
+                _ => ()
+            }
+        }
+    }
+    if highest < 0 { STATE_SLOT_TAG } else { highest }
+}
+
+// How many 8-byte slots a state object needs for a body with `n_temps`
+// temps (`state_slot_count`), the one place it is decided.
+fn state_slot_count(n_temps: Int) -> Int { STATE_SLOT_TEMPS + n_temps }
+
+// A wrapper, the slot count its allocation used and the temp holding the
+// state pointer (`Wrapper`).
+record Wrapper { function: MirFunction, state_slots: Int, state: Int }
+
+// The function that keeps `f`'s symbol: allocate the state object, seed
+// it, and return the `{ poll_code, state }` future (`build_wrapper`).
+// Reads `f` as lowering left it.
+fn build_wrapper(f: MirFunction) -> Wrapper {
+    // The temps the ABI hands the function, the environment pointer if it
+    // has one, then the real parameters, numbered as `lower_function`
+    // numbered them.
+    let env = if f.takes_env { 1 } else { 0 }
+    let abi_count = f.params + env
+    let mut temps: Vec<Int> = Vec::new()
+    for i in 0..abi_count { temps.push(f.temps.at(i)) }
+    let mut stmts: Vec<MirStmt> = Vec::new()
+    // Sized from the temps before the rewrite chooses the slots;
+    // `split_into_poll_and_wrapper` checks the two against each other.
+    let state_slots = state_slot_count(f.temps.len())
+    let bytes = state_slots * 8
+    if bytes < STATE_MIN_SIZE {
+        panic(
+            "a state object must hold at least the tag and output slots, since the executor reads the output slot on completion even for a future with no temps at all",
+        )
+    }
+    let size = push_temp(temps, MIR_I64)
+    stmts.push(SConstInt(size, bytes))
+    let state = push_temp(temps, MIR_PTR)
+    stmts.push(SCallRuntime(state, RT_ALLOC, Vec::from_array([size])))
+    // The resume tag, the entry state.
+    let zero = push_temp(temps, MIR_I64)
+    stmts.push(SConstInt(zero, 0))
+    stmts.push(SSetField(state, STATE_SLOT_TAG, zero, MIR_I64))
+    // The incoming ABI temps, each into its slot, a unit one too.
+    for i in 0..abi_count { stmts.push(SSetField(state, STATE_SLOT_TEMPS + i, i, temps.at(i))) }
+    // The future value: a closure of no captures over the poll function,
+    // its word 1 then the state object itself.
+    let future = push_temp(temps, MIR_PTR)
+    stmts.push(SMakeClosure(future, f.name + "$poll", Vec::new()))
+    stmts.push(SSetField(future, FUTURE_SLOT_STATE, state, MIR_PTR))
+    let mut blocks: Vec<MirBlock> = Vec::new()
+    blocks.push(MirBlock { stmts: stmts, term: TermReturn(future) })
+    Wrapper {
+        function: MirFunction {
+            name: f.name,
+            params: f.params,
+            takes_env: f.takes_env,
+            // The wrapper loads nothing from an environment record.
+            capture_count: 0,
+            temps: temps,
+            ret: MIR_PTR,
+            is_async: false,
+            blocks: blocks,
+        },
+        state_slots: state_slots,
+        state: state,
+    }
+}
+
+// Append a temp of class `ty` to `temps` and give its id, the list's
+// length before (`push_temp`).
+fn push_temp(mut temps: Vec<Int>, ty: Int) -> Int {
+    let t = temps.len()
+    temps.push(ty)
+    t
+}
+
+// Rewrites a pre-transform body into the poll function's (`Spiller`):
+// every value it names moves into the state object, and every suspend
+// point becomes the blocks that poll, suspend and resume.
+record Spiller {
+    // The poll function's temps, one more per load and per result.
+    temps: Vec<Int>,
+    // The pre-transform temps' classes, by original temp, which is also
+    // the temp's state slot past `STATE_SLOT_TEMPS`.
+    orig: Vec<Int>,
+}
+
+// One suspend point lifted out of a block's statements (`AwaitPoint`):
+// where the awaited value goes, -1 when the awaited output is unit, and
+// the pre-transform temp holding the awaited future.
+record AwaitPoint { dst: Int, future: Int }
+
+// A block's statements split at its awaits (`split_at_awaits`): the runs
+// between them, always one more than the awaits, and the awaits, in
+// order.
+fn split_at_awaits(stmts: Vec<MirStmt>) -> (Vec<Vec<MirStmt>>, Vec<AwaitPoint>) {
+    let mut segments: Vec<Vec<MirStmt>> = Vec::new()
+    segments.push(Vec::new())
+    let mut awaits: Vec<AwaitPoint> = Vec::new()
+    for i in 0..stmts.len() {
+        match stmts.at(i) {
+            SAwait(dst, future) => {
+                awaits.push(AwaitPoint { dst: dst, future: future })
+                segments.push(Vec::new())
+            }
+            other => {
+                if segments.is_empty() {
+                    panic("segments starts with one entry and only ever grows")
+                }
+                let mut last = segments.at(segments.len() - 1)
+                last.push(other)
+            }
+        }
+    }
+    (segments, awaits)
+}
+
+// The run of `segments` at `k`, the `k`-th taken (S0's `segments.next()`).
+fn next_segment(segments: Vec<Vec<MirStmt>>, k: Int) -> Vec<MirStmt> {
+    if k >= segments.len() { panic("one segment more than awaits") }
+    segments.at(k)
+}
+
+// How many suspend points `b` holds (`await_count`).
+fn await_count(b: MirBlock) -> Int {
+    let mut n = 0
+    for s in b.stmts.iter() {
+        match s {
+            SAwait(_, _) => { n += 1 }
+            _ => ()
+        }
+    }
+    n
+}
+
+// Whether a statement's operand is consumed or produced (`Role`): a load
+// goes before the statement, a store after it.
+type Role = | RoleRead | RoleWrite
+
+// A block's original terminator, until the piece that ends the block
+// takes it (S0's `Option<Terminator>` taken once).
+record TermSlot { term: Option<MirTerm> }
+
+impl Spiller {
+    fn scratch(mut self, ty: Int) -> Int { push_temp(self.temps, ty) }
+
+    fn orig_ty(self, t: Int) -> Int { self.orig.at(t) }
+
+    // Field `index` of `record` loaded into a fresh scratch temp, one per
+    // load site (`load`).
+    fn load(mut self, mut out: Vec<MirStmt>, rec: Int, index: Int, ty: Int) -> Int {
+        let dst = self.scratch(ty)
+        out.push(SRecordField(dst, rec, index, ty))
+        dst
+    }
+
+    // Original temp `t` loaded out of its state slot into a fresh scratch
+    // temp (`reload`).
+    fn reload(mut self, out: Vec<MirStmt>, t: Int) -> Int {
+        let ty = self.orig_ty(t)
+        self.load(out, STATE, slot(t), ty)
+    }
+
+    // A fresh scratch temp holding the i64 constant `v` (`const_i64`).
+    fn const_i64(mut self, mut out: Vec<MirStmt>, v: Int) -> Int {
+        let t = self.scratch(MIR_I64)
+        out.push(SConstInt(t, v))
+        t
+    }
+
+    // A whole pre-transform body rewritten (`body`): split at its suspend
+    // points, every value it names spilled, and a resumable body given its
+    // entry dispatch. An await-free body reserves no block, so its blocks
+    // keep their ids.
+    fn body(mut self, orig: Vec<MirBlock>) -> Vec<MirBlock> {
+        let mut per_block: Vec<Int> = Vec::new()
+        let mut total = 0
+        for i in 0..orig.len() {
+            let a = await_count(orig.at(i))
+            per_block.push(a)
+            total += a
+        }
+        let reserved = if total == 0 { 0 } else { RESERVED_BLOCKS }
+        // Where each original block's leading piece lands, decided before
+        // anything is emitted: a terminator can name a block not rewritten
+        // yet.
+        let mut next = reserved
+        let mut starts: Vec<Int> = Vec::new()
+        for i in 0..per_block.len() {
+            starts.push(next)
+            next += 1 + BLOCKS_PER_AWAIT * per_block.at(i)
+        }
+        let mut out: Vec<MirBlock> = Vec::new()
+        // Placeholders: `BAD_DISCRIMINANT` is already what it needs to be,
+        // `DISPATCH` is overwritten below.
+        for _ in 0..reserved { out.push(MirBlock { stmts: Vec::new(), term: TermTrap }) }
+        let mut resume: Vec<Int> = Vec::new()
+        for i in 0..orig.len() {
+            if out.len() != starts.at(i) {
+                panic(
+                    "block ${i}'s pieces must land at the id reserved for them, or every terminator naming it is off by however far the two drifted",
+                )
+            }
+            self.block_pieces(orig.at(i), starts, out, resume)
+        }
+        if out.len() != next { panic("the emitted block count must match the ids reserved for it") }
+        if total > 0 {
+            if resume.len() != total { panic("one resume point per await, in tag order") }
+            let mut stmts: Vec<MirStmt> = Vec::new()
+            let tag = self.load(stmts, STATE, STATE_SLOT_TAG, MIR_I64)
+            let mut arms: Vec<(Int, Int)> = Vec::new()
+            arms.push((0, starts.at(0)))
+            for k in 0..resume.len() { arms.push((FIRST_RESUME_TAG + k, resume.at(k))) }
+            out.set(
+                DISPATCH,
+                MirBlock { stmts: stmts, term: TermSwitch(tag, arms, BAD_DISCRIMINANT) },
+            )
+        }
+        out
+    }
+
+    // One original block's pieces (`block_pieces`): the statements before
+    // its first await, then a poll, suspend and continuation per await,
+    // each await's poll block appended to `resume`, in tag order.
+    fn block_pieces(
+        mut self,
+        b: MirBlock,
+        starts: Vec<Int>,
+        mut out: Vec<MirBlock>,
+        mut resume: Vec<Int>,
+    ) {
+        let base = out.len()
+        let (segments, awaits) = split_at_awaits(b.stmts)
+        let n = awaits.len()
+        // Whichever piece is last takes the block's original terminator,
+        // and exactly one does.
+        let orig_term = TermSlot { term: Some(b.term) }
+        // The leading piece, which a resume skips.
+        let mut lead: Vec<MirStmt> = Vec::new()
+        self.spill(next_segment(segments, 0), lead)
+        if n == 0 {
+            let term = self.finish(orig_term, lead, starts)
+            out.push(MirBlock { stmts: lead, term: term })
+            return
+        }
+        out.push(MirBlock { stmts: lead, term: TermGoto(base + 1) })
+        for k in 0..n {
+            let aw = awaits.at(k)
+            let poll = base + 1 + BLOCKS_PER_AWAIT * k
+            let suspend = poll + 1
+            let cont = poll + 2
+            let tag = FIRST_RESUME_TAG + resume.len()
+            resume.push(poll)
+            // The poll, entered by falling out of the code before the
+            // await and by a resume at `tag`: the poll alone.
+            if out.len() != poll { panic("the poll block's own id") }
+            let mut polls: Vec<MirStmt> = Vec::new()
+            let future = self.reload(polls, aw.future)
+            let status = self.scratch(MIR_I64)
+            polls.push(
+                SCallIndirect(
+                    status,
+                    future,
+                    Vec::from_array([MIR_PTR]),
+                    MIR_I64,
+                    Vec::from_array([TASK_CTX]),
+                ),
+            )
+            // Exactly the two statuses the ABI defines, and a trap for the
+            // rest.
+            let statuses = Vec::from_array([(POLL_READY, cont), (POLL_PENDING, suspend)])
+            out.push(
+                MirBlock { stmts: polls, term: TermSwitch(status, statuses, BAD_DISCRIMINANT) },
+            )
+            // The suspend stores this await's own tag, so the next poll
+            // polls the same future again.
+            let mut suspends: Vec<MirStmt> = Vec::new()
+            let t = self.const_i64(suspends, tag)
+            suspends.push(SSetField(STATE, STATE_SLOT_TAG, t, MIR_I64))
+            let pending = self.const_i64(suspends, POLL_PENDING)
+            out.push(MirBlock { stmts: suspends, term: TermReturn(pending) })
+            // The continuation, reached only from the ready arm: the
+            // awaited value, the inner state object's output slot, copied
+            // into the await result's slot before the statements that
+            // followed the await; a unit output has nothing to copy.
+            let mut conts: Vec<MirStmt> = Vec::new()
+            if aw.dst >= 0 && self.orig_ty(aw.dst) != MIR_UNIT {
+                let ty = self.orig_ty(aw.dst)
+                let fut = self.reload(conts, aw.future)
+                let inner = self.load(conts, fut, FUTURE_SLOT_STATE, MIR_PTR)
+                let value = self.load(conts, inner, STATE_SLOT_OUTPUT, ty)
+                conts.push(SSetField(STATE, slot(aw.dst), value, ty))
+            }
+            self.spill(next_segment(segments, k + 1), conts)
+            let term = if k + 1 < n {
+                // The next await's poll block, the very next one emitted.
+                TermGoto(cont + 1)
+            } else {
+                self.finish(orig_term, conts, starts)
+            }
+            out.push(MirBlock { stmts: conts, term: term })
+        }
+    }
+
+    // The original terminator taken and rewritten (`finish`); a second
+    // piece asking for it is a bug.
+    fn finish(mut self, mut orig_term: TermSlot, out: Vec<MirStmt>, starts: Vec<Int>) -> MirTerm {
+        let term = match orig_term.term {
+            Some(t) => t
+            None => panic("exactly one piece of a block takes its original terminator")
+        }
+        orig_term.term = None
+        self.terminator(term, out, starts)
+    }
+
+    // Every value one straight-line run of statements names moved into
+    // the state object, the rewritten statements appended to `out`
+    // (`spill`): each statement's loads, the statement, its stores.
+    fn spill(mut self, stmts: Vec<MirStmt>, mut out: Vec<MirStmt>) {
+        for i in 0..stmts.len() {
+            let v = SpillVisit { sp: self, loads: Vec::new(), stores: Vec::new() }
+            let s = visit_temps(stmts.at(i), v)
+            for l in v.loads.iter() { out.push(l) }
+            out.push(s)
+            for st in v.stores.iter() { out.push(st) }
+        }
+    }
+
+    // One terminator rewritten (`terminator`): whatever it reads reloaded,
+    // the blocks it names renumbered through `starts`, a `Return` turned
+    // into a completion that stores the output and returns the ready
+    // status.
+    fn terminator(mut self, term: MirTerm, mut out: Vec<MirStmt>, starts: Vec<Int>) -> MirTerm {
+        match term {
+            TermGoto(target) => TermGoto(starts.at(target))
+            TermBranch(cond, then_block, else_block) => {
+                let c = self.reload(out, cond)
+                TermBranch(c, starts.at(then_block), starts.at(else_block))
+            }
+            TermSwitch(disc, arms, default) => {
+                let d = self.reload(out, disc)
+                let mut mapped: Vec<(Int, Int)> = Vec::new()
+                for (v, b) in arms.iter() { mapped.push((v, starts.at(b))) }
+                TermSwitch(d, mapped, starts.at(default))
+            }
+            TermReturn(value) => {
+                if value >= 0 && self.orig_ty(value) != MIR_UNIT {
+                    let ty = self.orig_ty(value)
+                    let v = self.reload(out, value)
+                    out.push(SSetField(STATE, STATE_SLOT_OUTPUT, v, ty))
+                } else {
+                    // A unit output has no value, but the executor reads
+                    // the output slot regardless: an explicit zero.
+                    let z = self.const_i64(out, 0)
+                    out.push(SSetField(STATE, STATE_SLOT_OUTPUT, z, MIR_I64))
+                }
+                let ready = self.const_i64(out, POLL_READY)
+                TermReturn(ready)
+            }
+            // A trap aborts rather than unwinding.
+            TermTrap => TermTrap
+        }
+    }
+}
+
+// Original temp `t`'s state slot (`Spiller::slot`).
+fn slot(t: Int) -> Int { STATE_SLOT_TEMPS + t }
+
+// What `spill`'s callback holds for one statement (S0's closure): the
+// spiller, and the loads and stores that go before and after it.
+record SpillVisit { sp: Spiller, loads: Vec<MirStmt>, stores: Vec<MirStmt> }
+
+impl SpillVisit {
+    // Temp `t`, read or written, as the rewritten statement names it: a
+    // read is reloaded from its slot into a scratch temp before the
+    // statement; a write goes to a scratch temp stored into its slot
+    // after.
+    fn visit(mut self, t: Int, role: Role) -> Int {
+        match role {
+            RoleRead => self.sp.reload(self.loads, t)
+            RoleWrite => {
+                let ty = self.sp.orig_ty(t)
+                let dst = self.sp.scratch(ty)
+                self.stores.push(SSetField(STATE, slot(t), dst, ty))
+                dst
+            }
+        }
+    }
+
+    // Each of `ts` read, in order.
+    fn reads(mut self, ts: Vec<Int>) -> Vec<Int> {
+        let mut out: Vec<Int> = Vec::new()
+        for i in 0..ts.len() { out.push(self.visit(ts.at(i), RoleRead)) }
+        out
+    }
+
+    // Each temp of `pairs` read, in order, its class kept.
+    fn read_pairs(mut self, pairs: Vec<(Int, Int)>) -> Vec<(Int, Int)> {
+        let mut out: Vec<(Int, Int)> = Vec::new()
+        for (t, class) in pairs.iter() { out.push((self.visit(t, RoleRead), class)) }
+        out
+    }
+
+    // An optional destination written, -1 kept.
+    fn write_opt(mut self, dst: Int) -> Int {
+        if dst < 0 { -1 } else { self.visit(dst, RoleWrite) }
+    }
+}
+
+// `stmt` with every temp it mentions given to `v`, read or written, and
+// replaced by what `v` gives (`visit_temps`), in S0's order: a new
+// statement. Exhaustive, as S0's: each variant decides which of its temps
+// are operands and which results.
+fn visit_temps(stmt: MirStmt, mut v: SpillVisit) -> MirStmt {
+    match stmt {
+        SConstInt(dst, value) => SConstInt(v.visit(dst, RoleWrite), value)
+        SConstFloat(dst, value) => SConstFloat(v.visit(dst, RoleWrite), value)
+        SConstBool(dst, value) => SConstBool(v.visit(dst, RoleWrite), value)
+        SConstStr(dst, value) => SConstStr(v.visit(dst, RoleWrite), value)
+        SConstUnit(dst) => SConstUnit(v.visit(dst, RoleWrite))
+        SCopy(dst, src) => {
+            let s = v.visit(src, RoleRead)
+            SCopy(v.visit(dst, RoleWrite), s)
+        }
+        SBin(dst, op, class, lhs, rhs) => {
+            let l = v.visit(lhs, RoleRead)
+            let r = v.visit(rhs, RoleRead)
+            SBin(v.visit(dst, RoleWrite), op, class, l, r)
+        }
+        SNeg(dst, class, src) => {
+            let s = v.visit(src, RoleRead)
+            SNeg(v.visit(dst, RoleWrite), class, s)
+        }
+        SNot(dst, src) => {
+            let s = v.visit(src, RoleRead)
+            SNot(v.visit(dst, RoleWrite), s)
+        }
+        SBitNot(dst, src) => {
+            let s = v.visit(src, RoleRead)
+            SBitNot(v.visit(dst, RoleWrite), s)
+        }
+        SCall(dst, callee, args) => {
+            let a = v.reads(args)
+            SCall(v.write_opt(dst), callee, a)
+        }
+        SCallRuntime(dst, func, args) => {
+            let a = v.reads(args)
+            SCallRuntime(v.write_opt(dst), func, a)
+        }
+        SCallIndirect(dst, callee, params, ret, args) => {
+            let c = v.visit(callee, RoleRead)
+            let a = v.reads(args)
+            SCallIndirect(v.write_opt(dst), c, params, ret, a)
+        }
+        // Not reached: `block_pieces` takes every await out before the
+        // spill; classified as `SCallIndirect` is, as S0's is.
+        SAwait(dst, future) => {
+            let f = v.visit(future, RoleRead)
+            SAwait(v.write_opt(dst), f)
+        }
+        SMakeClosure(dst, code, captures) => {
+            let c = v.read_pairs(captures)
+            SMakeClosure(v.visit(dst, RoleWrite), code, c)
+        }
+        SMakeSum(dst, tag, fields) => {
+            let f = v.read_pairs(fields)
+            SMakeSum(v.visit(dst, RoleWrite), tag, f)
+        }
+        SMakeRecord(dst, fields) => {
+            let f = v.read_pairs(fields)
+            SMakeRecord(v.visit(dst, RoleWrite), f)
+        }
+        SSumTag(dst, sum) => {
+            let s = v.visit(sum, RoleRead)
+            SSumTag(v.visit(dst, RoleWrite), s)
+        }
+        SSumField(dst, sum, index, ty) => {
+            let s = v.visit(sum, RoleRead)
+            SSumField(v.visit(dst, RoleWrite), s, index, ty)
+        }
+        SRecordField(dst, rec, index, ty) => {
+            let r = v.visit(rec, RoleRead)
+            SRecordField(v.visit(dst, RoleWrite), r, index, ty)
+        }
+        SSetField(rec, index, value, ty) => {
+            let r = v.visit(rec, RoleRead)
+            let val = v.visit(value, RoleRead)
+            SSetField(r, index, val, ty)
+        }
+        SMakeArray(dst, elems) => {
+            let e = v.read_pairs(elems)
+            SMakeArray(v.visit(dst, RoleWrite), e)
+        }
+        SArrayAlloc(dst, len) => {
+            let l = v.visit(len, RoleRead)
+            SArrayAlloc(v.visit(dst, RoleWrite), l)
+        }
+        SArrayLen(dst, arr) => {
+            let a = v.visit(arr, RoleRead)
+            SArrayLen(v.visit(dst, RoleWrite), a)
+        }
+        SArrayGet(dst, arr, index, ty) => {
+            let a = v.visit(arr, RoleRead)
+            let i = v.visit(index, RoleRead)
+            SArrayGet(v.visit(dst, RoleWrite), a, i, ty)
+        }
+        SArraySet(arr, index, value, ty) => {
+            let a = v.visit(arr, RoleRead)
+            let i = v.visit(index, RoleRead)
+            let val = v.visit(value, RoleRead)
+            SArraySet(a, i, val, ty)
+        }
+    }
+}
