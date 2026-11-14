@@ -151,13 +151,15 @@ jobs:
   # What this job does not cover: N on the debug runtime, except for its
   # own `@test`s, which the last step runs with `NOVA_RUNTIME_LIB` naming
   # the debug runtime `cargo build` leaves beside `nova` (that variable
-  # outranks the embedded runtime): the runtime's debug assertions and
-  # overflow checks still run under N, and every other test that links a
-  # program still runs on the debug runtime in the Test job. The two 1 MB
-  # stack tests, of N's parser and of its item passes, run on release
-  # frames; N's depth there is the debug runtime's within 4 KB (ADR 0055
-  # §12). Clippy lints the file in its
-  # own job, by name, since `--all-targets` skips a `test = false` target.
+  # outranks the embedded runtime), built here at opt-level 1 like the
+  # rest of the workspace: the runtime's debug assertions and overflow
+  # checks still run under N, and every other test that links a program
+  # still runs on the debug runtime, at opt-level 0, in the Test job. The
+  # two 1 MB stack tests, of N's parser and of its type checker, items
+  # and bodies, run on release frames, whose least stacks on the type
+  # checker's 45 depth programs are within 12 KB of the debug runtime's
+  # (ADR 0056 §12). Clippy lints the file in its own job, by name, since
+  # `--all-targets` skips a `test = false` target.
   selfhost:
     name: Selfhost (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

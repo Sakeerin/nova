@@ -1,0 +1,22 @@
+fn thai(p: (String, Bool)) {
+    let ("สวัสดีที่นี่", true) = p
+}
+fn separators(p: (String, Bool)) {
+    let ("10 km　!", true) = p
+}
+fn marks(p: (String, Bool)) {
+    let ("नमस्ते هٰذا שָׁלוֹם", true) = p
+}
+fn unassigned(p: (Char, Bool)) {
+    let ('͸', true) = p
+}
+fn a_range_before_an_unassigned_point(p: (Char, Bool)) {
+    let ('a'..='ͷ', true) = p
+}
+fn an_empty_range(c: Char) -> Int {
+    match c {
+        '　'..=' ' => 0
+        _ => 1
+    }
+}
+fn main() {}

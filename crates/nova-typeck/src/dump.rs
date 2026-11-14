@@ -190,11 +190,12 @@ pub const BODY_KINDS: &[&str] = &[
 pub const LATER_KINDS: &[&str] = &["(Help", "(NoteDiagnostic"];
 
 /// A program's part (module docs) for `target`, under test mode when
-/// `test`: when the program reached the type checker, its resolution and
-/// item tables, and every diagnostic so far, the package graph's, the
-/// loader's, the resolver's and the item passes', in order. A program that
+/// `test`: when the program reached the type checker, its resolution, its
+/// item tables and its functions, each with its locals and its typed body
+/// (5.3b), and every diagnostic, the package graph's, the loader's, the
+/// resolver's, the item passes' and the bodies', in order. A program that
 /// stopped before the type checker prints `checked=false` and the
-/// diagnostics.
+/// diagnostics so far.
 pub fn dump_program(
     target: CompileTarget,
     test: bool,
@@ -229,7 +230,8 @@ pub fn dump_program(
 
 /// std's part (module docs) for `target`, under test mode when `test`, from
 /// the check of a program of no module of its own: its resolution, its
-/// item tables, and every diagnostic, the resolver's and the item passes'.
+/// item tables and its functions (5.3b), and every diagnostic, the
+/// resolver's, the item passes' and the bodies'.
 pub fn dump_std(
     target: CompileTarget,
     test: bool,
