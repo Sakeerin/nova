@@ -18,10 +18,14 @@ branch `proto/5-4`
 - §8, the harness's switch;
 - §9, part 1's figures.
 
-Later parts write N's port, its idioms, the differential in its final
-form, the MIR fuzzer, the depth cases and N's stack, the time and CI's
-figures, the rule that a change to MIR changes both compilers, and the
-Consequences.
+Part 2 (N's lowering and monomorphization) wrote §10 to §12:
+- §10, N's port, its idioms, its splice and `selfhost mir`;
+- §11, the harness in part 2: the before form compared on every input;
+- §12, part 2's figures.
+
+Later parts write N's `async_lower` and the after form, the MIR fuzzer,
+the depth cases and N's stack, CI's figures, the rule that a change to
+MIR changes both compilers, and the Consequences.
 
 ## Decision
 
@@ -609,7 +613,7 @@ Three sites have no case:
 
 `selfhost.rs` gains `MIR_S0`, `MIR_BEFORE_S0`, `MirForm`, `mir_in` (N's
 side, `mir --std DIR [--before-async]`, for later parts) and `N_MIR`,
-false in part 1. While it is false, the MIR inputs run through S0 alone,
+false in part 1 (part 2 replaced it, §11). While it is false, the MIR inputs run through S0 alone,
 through `run`, so `settled_stdout` settles them. `settled_stdout` now
 takes S0's `check --dump-mir` and N's `mir` as it takes the HIR dump's;
 no MIR message names a path, so nothing changes today.
@@ -717,3 +721,157 @@ and `nova-typeck`'s `shared_module_is_the_full_checks_module`.
   error, exit 2, nothing on stdout.
 
 `Cargo.lock` is unchanged.
+
+### 10. N's port (part 2)
+
+N's lowering and monomorphization are a port of `nova-mir`'s native path,
+function by function and with S0's names (spec §6.1 but `async_lower`):
+
+| N | lines (code) | ports |
+|---|---:|---|
+| `mir.nova` | 390 (252) | `lib.rs`'s native types, `mir_ty`, `mangle`, `mangle_ty`, `RtFunc::ALL`'s 111 names (about 405 code lines natively) |
+| `lower.nova` | 526 (435) | `lower.rs`: `lower_function`, the helpers, `lower_expr` |
+| `lower_call.nova` | 476 (409) | `lower.rs`: `lower_call` and its builtin table, `lower_trait_call`, operators, `if`, array repeat |
+| `lower_match.nova` | 382 (320) | `lower.rs`: `match` (with the two above, 1,361 code lines) |
+| `mono.nova` | 586 (502) | `mono.rs` natively (about 547 of its 692 code lines), the driver's `keep_the_entry_main` |
+| `splice.nova` | 259 (203) | `items.rs`'s `shared_module`, `Shift` and `Checked::into_module` (273) |
+| `mir_dump.nova` | 415 (347) | `dump.rs` (429 non-test code lines) |
+| `mir_tests.nova` | 235 (195) | N's `@test`s |
+
+`hir.nova` gains `has_params`, `is_flat`, `HirModule` and its lookups and
+`resolve_method_full` (173 lines); `main.nova` the command (217).
+
+**Idioms,** beyond ADR 0055's and 0056's:
+- a class (`MirTy`), an operand class and a runtime function are `Int`
+  codes, the last its index in `RT_FUNC_VARIANTS`; the runtime functions
+  the lowering names itself are constants that a test holds to their
+  names; a `Temp` and a `BlockId` are `Int`s, an absent one -1;
+- the builtin table is `BUILTIN_LOWERING`, one entry per builtin in
+  `BUILTIN_VARIANTS`' order (a runtime function's name, `=Reinterpret`,
+  `=FutureOutput` or `=Mem` and its operation), read once per program
+  into a list of `Lowering`s; a `Mem` builtin, which no native program
+  reaches, panics;
+- the worklist is a `Vec` used as a stack, `done` a `Map<String, Bool>`
+  read by lookup only; `Module::function` reads an index from `DefId` to
+  position, the same answer as S0's scan, a function's id being unique;
+- `Specializer` builds every node of an instance afresh, in the order
+  S0's struct literals evaluate them, so that the first unresolved or
+  overflowing projection is the one S0 names; the generic function is
+  never written (a test instantiates one twice and compares it, as text,
+  before and after);
+- S0's `request` callback is the worklist itself, which the lowerer
+  pushes onto; S0's `debug_assert!`s are panics with S0's words; the
+  after-transform path panics until part 3;
+- `module` and `record` are keywords in Nova: S0's `module` is `program`
+  wherever it names a module, and `Module::record` is `record_type`;
+- the hot loops walk their lists by index: an iterator allocates an
+  `Option` per element, which N's debug runtime does at about 1,400
+  instructions (§12).
+
+**The splice on N's side** (§5). N's `SharedItems` keeps its whole
+checker, std's checked functions with it (5.3b). For a program on the
+shared path, `shared_module` copies std's functions in after the
+program's functions, methods and constants and std's closures after the
+program's, each id moved exactly as S0's `Shift` moves it (below `S` by
+`D`, closures and wrappers from `S` by `D + P`, `closure$N` and `fnval$N`
+renamed), as new functions, nodes, types and patterns; std's shared
+functions are never written (a test splices twice and compares std's
+functions, as text, before and after, and renames a copy). A fallback
+root (an impl on a type the program does not own) and every root when
+std alone gives a diagnostic take the full check, whose module is
+`full_module`; N decides them as its HIR dump does. Sharing the nodes no
+id moves under, instead of copying them, was tried: it saved nothing
+measurable, and was dropped.
+
+**The command,** `selfhost mir --std DIR [--before-async] FILE…` (spec
+§6.3): std read from DIR, parsed, resolved, its items collected and its
+bodies checked once. A package's module that does not run is
+`runs=false`, decided as S0's `Program::for_file_with` decides it,
+before the root or its manifests are read; otherwise `selfhost hir`'s
+pipeline and check, `checked=false` on an error before MIR, then the
+module, `keep_the_entry_main`, `lower_module_with` and the dump. It
+refuses `--std-part`, `--target`, `--test`, any other option, an option
+twice and no file with exit 2 and nothing on stdout; an unreadable root
+is `IOERR`, exit 2 after the rest; a manifest N's reader refuses stops it
+with exit 1. **Until N ports `async_lower`, plain `selfhost mir` exits 3**
+with one line on stderr.
+
+### 11. The harness in part 2
+
+`N_MIR` became `MirForm::n_prints`: the before form is compared through
+`compare_batch`, N's `mir --std DIR --before-async` against S0's `check
+--dump-mir --before-async`, byte for byte and with exit codes, on every
+input of §8 (the native corpus's roots that run, N's own among them, the
+HIR cases that reach MIR and `cases/mir/`, with both line endings), root
+lists in parts under `HIR_ARGS_LIMIT`. The after form stays S0's alone
+while `N_MIR_AFTER` is false; part 3 sets it and removes N's exit-3
+refusal, and the after form is then compared on every input with no other
+change. No frozen list: every input is compared in the before form.
+
+New tests: `both_sides_refuse_the_mir_dumps_shapes_alike` (no root,
+`--target` either way, `--test`, an option twice, std's part);
+`n_refuses_the_after_form_until_it_ports_the_async_transform`; and
+`a_manifest_n_cannot_read_stops_n_with_a_message` runs N's `mir` too. The
+header test compares N's before form.
+
+**The HIR dump's longest batches in more parts.** Measured with a scratch
+timer on every process of a full local run on N's debug runtime: the HIR
+test's three package parts took 103 to 111 s a process before part 2,
+near the 120 s `CHILD_LIMIT`, and the test-mode files in one process 88
+to 96 s; with the MIR dump's N side beside them, two package parts passed
+the limit. `HIR_PACKAGE_PARTS` is now 6 and the files with tests are
+dealt into 2 (`HIR_TEST_PARTS`): the same inputs and comparison, in
+order. The longest process of a full run then took 95 s.
+
+### 12. Part 2's figures
+
+Measured locally on 4 cores, 2026-11-14.
+
+**Agreement, the before form,** every input:
+
+| Set | Roots | Agree | Differ |
+|---|---:|---:|---:|
+| native corpus's roots that run (N's own included) | 261 | 261 | 0 |
+| HIR cases that reach MIR | 342 | 342 | 0 |
+| `cases/mir/` | 83 | 83 | 0 |
+| the cases again with `\r\n` | 425 | 425 | 0 |
+
+Inputs per code, each agreeing: E0601 13 (10 corpus roots, 1 HIR case,
+2 MIR cases), E0013 at `mono.rs:276` 12, E0075 1, E0078 2, E0079 1; again
+with `\r\n`, the cases' 3, 12, 1, 2 and 1.
+
+**N against S0,** one process a set as the harness runs them, best of
+three, before form; N's peak RSS from `wait4`; N's collections and its
+largest live heap from `NOVA_GC_DEBUG` (the runtime reports neither
+pauses nor their length):
+
+| Set | Roots | S0 opt 0 | N debug runtime | S0 opt 1 | N release runtime | N RSS | N GCs | N live |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| N's root | 1 | 1.08 s | 5.82 s | 0.46 s | 1.81 s | 183 MB | 22 | 58 MB |
+| loose corpus | 251 | 4.51 | 15.99 | 1.67 | 4.62 | 40 | 103 | 12 |
+| packages' mains but N's | 9 | 0.32 | 1.68 | 0.14 | 0.43 | 43 | 18 | 13 |
+| HIR cases | 342 | 5.27 | 19.36 | 2.43 | 5.55 | 39 | 116 | 11 |
+| `cases/mir/` | 83 | 1.39 | 4.98 | 0.55 | 1.31 | 36 | 38 | 10 |
+
+S0's peak RSS is 107 to 115 MB on N's root and 35 to 45 MB on the sets.
+On N's root, N spent about 4.9 s (debug runtime, before the index loops)
+in its front end and type check, 0.3 s in the splice, little in lowering
+and 1.9 s printing 4.5 MB. **The splice**
+of std (681 functions) costs N about 22 ms a program on the debug runtime
+and 5.9 ms on the release runtime, against S0's 4.2 and 2.0 ms (§9): on
+the corpus and the cases it is a third of N's time. No input needed more
+than the default stack.
+
+**`selfhost.rs`** (62 tests): as CI's Selfhost job runs it
+(`NOVA_EMBED_RUNTIME=1 CARGO_PROFILE_DEV_OPT_LEVEL=1`) 55.84, 54.84 and
+55.32 s, against part 1's 44.27, 43.75 and 42.66 s (60 tests); plain
+186.49, 201.56 and 183.34 s, against 147.10 and 149.09 s. The seven MIR
+tests alone take 21.05 s CI-style and 65.00 s plain.
+
+**Verification:** the full suite 2,835 passed, 1 failed (the IPv6 test,
+as on the base), 10 ignored; N's `nova test` 100 passed; both clippy
+commands, `cargo fmt`, `nova fmt --check std examples selfhost` and the
+1.78 `cargo check` clean; `Cargo.lock` unchanged; part 1's byte-identity
+scripts against the base's `nova` show no difference (`nova check` 1,943,
+`parse` 3,674 runs, packages 22, `--help` 22, usage 474 and 10 in a
+terminal, the hidden forms' refusals 114 and 330).
