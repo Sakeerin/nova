@@ -33,6 +33,18 @@
 //                             ADR 0055), then every function of the
 //                             program, its body checked, std's bodies
 //                             checked once (§4.3, §4.5, ADR 0056)
+//   selfhost mir --std DIR --before-async FILE...
+//                             prints the MIR dump of each program whose
+//                             root is FILE, after the same header, as
+//                             `nova check --dump-mir --before-async`
+//                             does: natively, monomorphized from `main`
+//                             and lowered, before the async transform,
+//                             std's checked functions spliced into each
+//                             program (spec
+//                             docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md
+//                             §5, §6, ADR 0057); without `--before-async`
+//                             it refuses with the exit code 3 until N's
+//                             async transform is ported
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -51,7 +63,14 @@ import lexer
 import lexer_tests
 import loader
 import loader_tests
+import lower
+import lower_call
+import lower_match
 import manifest
+import mir
+import mir_dump
+import mir_tests
+import mono
 import parser_tests
 import resolution_dump
 import resolver
@@ -80,6 +99,10 @@ async fn main() {
     let command = if argv.len() < 2 { "" } else { argv.at(1) }
     if command == "resolve" || command == "hir" {
         dump_command(argv, command).await
+        return
+    }
+    if command == "mir" {
+        mir_command(argv).await
         return
     }
     // No file is refused, as S0's clap refuses it.
@@ -245,6 +268,199 @@ async fn dump_command(argv: Vec<String>, command: String) {
         }
     }
     if failed { exit(2) }
+}
+
+// `selfhost mir --std DIR [--before-async] FILE...`: std's modules are
+// read from DIR, parsed, resolved, their items collected and their bodies
+// checked once, then each program's MIR dump after its header, natively,
+// as S0's `check --dump-mir` prints it (spec 5.4 §6.3). Each option is
+// taken once, and `--` before a root that starts with `-`. With no `--std
+// DIR`, with a second `--std` or `--before-async`, `--std-part`,
+// `--target`, `--test` or another option, or with no file, nothing is
+// printed and the exit code is 2, as S0's form refuses its shapes. Until
+// N's async transform is ported, the dump after it is refused with the
+// exit code 3 and one line on stderr: only `--before-async` is printed. A
+// root whose package's manifest N's reader refuses stops the run with the
+// exit code 1, as `selfhost hir`.
+async fn mir_command(argv: Vec<String>) {
+    let usage = "usage: selfhost mir --std DIR [--before-async] FILE..."
+    let mut std_dir = ""
+    let mut before = false
+    let mut bad = false
+    let mut only_files = false
+    let mut files: Vec<String> = Vec::new()
+    let mut i = 2
+    while i < argv.len() {
+        let a = argv.at(i)
+        if only_files {
+            files.push(a)
+        } else if a == "--" {
+            only_files = true
+        } else if a == "--std" && i + 1 < argv.len() {
+            if std_dir != "" { bad = true }
+            std_dir = argv.at(i + 1)
+            if std_dir == "" { bad = true }
+            i += 1
+        } else if a == "--before-async" {
+            if before { bad = true }
+            before = true
+        } else if a.starts_with("-") {
+            // `--std` with no value, `--std-part`, `--target`, `--test`,
+            // `--before-async=…` and every other option.
+            bad = true
+        } else {
+            files.push(a)
+        }
+        i += 1
+    }
+    if bad || std_dir == "" || files.is_empty() {
+        eprintln(usage)
+        exit(2)
+        return
+    }
+    if !before {
+        eprintln(
+            "error: selfhost mir prints only --before-async until N's async transform is ported",
+        )
+        exit(3)
+        return
+    }
+    let std_set = match load_std(std_dir, CompileTargetNative, false).await {
+        Ok(s) => s
+        Err(message) => {
+            eprintln(message)
+            exit(2)
+            return
+        }
+    }
+    // std is resolved once, its items collected and its bodies checked
+    // once, and every root reads them (ADR 0055, ADR 0056); its checked
+    // functions are spliced into each program (spec 5.4 §5).
+    let shared = share_std(CompileTargetNative, std_set)
+    let mut items: Option<SharedItems> = None
+    let (labels, texts) = labels_and_texts(Vec::new(), std_set)
+    let alone = shared.alone
+    let s = share_items(alone.items, alone.definitions, labels, texts)
+    if shared.shareable && s.shareable { items = Some(s) }
+    let mut failed = false
+    for path in files.iter() {
+        match dump_mir(path, shared, items, before).await {
+            DumpedText(out) => print("== ${path}\n${out}")
+            DumpedIoError(e) => {
+                print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
+                failed = true
+            }
+            DumpedRefused(why) => {
+                eprintln("error: selfhost mir cannot dump ${path}: ${why}")
+                exit(1)
+                return
+            }
+        }
+    }
+    if failed { exit(2) }
+}
+
+// The MIR dump of the program whose root is `path` (nova-driver's
+// `MirDumps::dump`): a package's module that does not run, as `check`
+// decides it (`Program::for_file_with`: a module of a package runs as its
+// `src/main.nova` alone), is `runs=false`, before its root or manifests
+// are read; otherwise `dump_hir`'s pipeline and check, shared when it can
+// be and in full otherwise, and, when neither gave an error, the full
+// check's module, std's functions spliced in, its entry `main` kept and
+// the module lowered natively, before the async transform when `before`.
+async fn dump_mir(
+    path: String,
+    shared: SharedStd,
+    items: Option<SharedItems>,
+    before: Bool,
+) -> Dumped {
+    let mut graph: Option<Graph> = None
+    let mut kind = RootLoose
+    match package_of(path).await {
+        Some((dir, k)) => {
+            let runs = match k {
+                RootSrc => module_name(path) == "main"
+                _ => false
+            }
+            if !runs { return DumpedText(dump_mir_program(ReachedNotRun)) }
+            match read_graph(dir).await {
+                Ok(g) => graph = Some(g)
+                Err(why) => return DumpedRefused(why)
+            }
+            kind = k
+        }
+        None => ()
+    }
+    let load = match load_program(graph, path, kind).await {
+        Ok(l) => l
+        Err(e) => return DumpedIoError(e)
+    }
+    let modules = load.modules
+    let mut failed = false
+    for d in load.diagnostics.iter() { if d.is_error() { failed = true } }
+    if failed { return DumpedText(dump_mir_program(ReachedNotChecked)) }
+    strip_test_functions(modules, false)
+    let mut sources: Vec<ModuleSource> = Vec::new()
+    for m in modules.iter() {
+        sources.push(
+            ModuleSource {
+                name: m.name,
+                label: m.name,
+                file: m.ast,
+                imports: m.imports,
+                text: Some(m.text),
+                package: m.package,
+                importable: m.importable,
+            },
+        )
+    }
+    if items.is_some() {
+        match mir_of(sources, shared, items, before) {
+            Some(d) => return d
+            None => ()
+        }
+    }
+    mir_of(sources, shared, None, before).unwrap()
+}
+
+// `dump_mir`'s part from the resolver on, as `hir_of`'s: with std's
+// tables `items`, the program resolved with std's definitions after its
+// own, its bodies alone checked and std's checked functions spliced in
+// (`shared_module`); without, resolved and checked in full. An error
+// before MIR is `checked=false`. `None` when the shared path cannot check
+// the program, because it implements anything on a type it does not own,
+// which the full path then checks (ADR 0056 §4).
+fn mir_of(
+    sources: Vec<ModuleSource>,
+    shared: SharedStd,
+    items: Option<SharedItems>,
+    before: Bool,
+) -> Option<Dumped> {
+    let std_set = shared.std_set
+    let resolved = match items {
+        Some(_) => resolve_program_shared_for_check(sources, shared)
+        None => resolve_program_for(CompileTargetNative, sources, std_set)
+    }
+    for d in resolved.diagnostics.iter() {
+        if d.is_error() { return Some(DumpedText(dump_mir_program(ReachedNotChecked))) }
+    }
+    let (labels, texts) = labels_and_texts(sources, std_set)
+    let mut tables = match items {
+        Some(s) => check_items_shared(resolved.items, resolved.definitions, labels, texts, s)
+        None => check_items(resolved.items, resolved.definitions, labels, texts)
+    }
+    if items.is_some() && tables.implements_on_a_type_it_does_not_own() { return None }
+    tables.check_bodies(resolved.newline_splits)
+    for d in tables.diagnostics.iter() {
+        if d.is_error() { return Some(DumpedText(dump_mir_program(ReachedNotChecked))) }
+    }
+    let program = match items {
+        Some(s) => shared_module(tables, s)
+        None => full_module(tables)
+    }
+    keep_the_entry_main(program, resolved.definitions)
+    let result = lower_module_with(program, before)
+    Some(DumpedText(dump_mir_program(ReachedLowered(result, !before))))
 }
 
 // What `dump_resolution` gives for one root: its part; the error that

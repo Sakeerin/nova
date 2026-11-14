@@ -1,0 +1,524 @@
+// HIR to MIR for one function, already monomorphized: a port of
+// crates/nova-mir/src/lower.rs, function by function and with the same
+// names (spec docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md
+// §6.1, ADR 0057). This file holds the lowerer's state, `lower_function`,
+// the helpers and `lower_expr`; lower_call.nova calls, trait calls,
+// operators, `if` and array repeat; lower_match.nova `match`.
+//
+// - `request`, S0's callback that queues a callee's instance, is the
+//   worklist itself, which the lowerer pushes onto as monomorphization's
+//   closure does.
+// - A span carries no file in N, so the lowerer keeps the file of the
+//   function it lowers, for the place of its one diagnostic.
+
+import diagnostic
+import hir
+import lower_call
+import lower_match
+import mir
+import token
+
+/// What lowering one function leaves while it runs (`Lowerer`).
+pub record Lowerer {
+    pub program: HirModule,
+    // The program entry point's id, named `main` rather than mangled.
+    pub entry: Int,
+    // The worklist, which each callee's instance joins (`request`).
+    pub worklist: Vec<(Int, Vec<Ty>)>,
+    pub temps: Vec<Int>,
+    pub blocks: Vec<BlockState>,
+    pub current: Int,
+    // Each local's temp, by the local's index.
+    pub local_map: Vec<Int>,
+    // `(continue_target, break_target)` of each enclosing loop.
+    pub loop_targets: Vec<(Int, Int)>,
+    pub diagnostics: Vec<Diagnostic>,
+    // The file of the function being lowered.
+    pub file: String,
+    // Each builtin's lowering, by its index (`builtin_lowerings`).
+    pub builtins: Vec<Lowering>,
+}
+
+/// A block being built (`BlockState`): its statements, and its terminator
+/// once it has one.
+pub record BlockState { pub stmts: Vec<MirStmt>, pub term: Option<MirTerm> }
+
+fn new_block_state() -> BlockState { BlockState { stmts: Vec::new(), term: None } }
+
+/// Lower a specialized (generic-free) function to MIR (`lower_function`):
+/// each direct call or function reference pushes its callee's instance
+/// onto `worklist`, as monomorphization asks; `builtins` is each builtin's
+/// lowering.
+pub fn lower_function(
+    func: HirFunction,
+    mangled: String,
+    program: HirModule,
+    entry: Int,
+    worklist: Vec<(Int, Vec<Ty>)>,
+    builtins: Vec<Lowering>,
+) -> Result<MirFunction, Vec<Diagnostic>> {
+    let mut blocks: Vec<BlockState> = Vec::new()
+    blocks.push(new_block_state())
+    let mut local_map: Vec<Int> = Vec::new()
+    for _ in 0..func.locals.len() { local_map.push(0) }
+    let mut lo = Lowerer {
+        program: program,
+        entry: entry,
+        worklist: worklist,
+        temps: Vec::new(),
+        blocks: blocks,
+        current: 0,
+        local_map: local_map,
+        loop_targets: Vec::new(),
+        diagnostics: Vec::new(),
+        file: func.span.file,
+        builtins: builtins,
+    }
+    let capture_count = func.capture_count
+    if func.takes_env {
+        // ABI: (env_ptr, real_params...). Temp 0 is the env pointer, then
+        // one temp per real parameter; captured locals and body locals get
+        // temps afterwards. Captured locals are loaded from the env at
+        // entry.
+        let env = lo.new_temp(MIR_PTR)
+        for i in 0..func.params {
+            let local = func.locals.at(capture_count + i)
+            lo.local_map.set(capture_count + i, lo.new_temp(mir_ty(local.ty)))
+        }
+        let mut i = 0
+        while i < capture_count && i < func.locals.len() {
+            lo.local_map.set(i, lo.new_temp(mir_ty(func.locals.at(i).ty)))
+            i += 1
+        }
+        let mut k = capture_count + func.params
+        while k < func.locals.len() {
+            lo.local_map.set(k, lo.new_temp(mir_ty(func.locals.at(k).ty)))
+            k += 1
+        }
+        for c in 0..capture_count {
+            let ty = mir_ty(func.locals.at(c).ty)
+            if ty != MIR_UNIT {
+                let dst = lo.local_map.at(c)
+                lo.push(SRecordField(dst, env, c, ty))
+            }
+        }
+    } else {
+        // Normal ABI: parameters occupy the first temps in local order.
+        for i in 0..func.locals.len() {
+            let t = lo.new_temp(mir_ty(func.locals.at(i).ty))
+            if t != i { panic("params must map to leading temps") }
+            lo.local_map.set(i, t)
+        }
+    }
+    let body_ret = body_return_ty(func)
+    let result = lo.lower_expr(func.body)
+    if !diverges(func.body) {
+        if mir_ty(body_ret) == MIR_UNIT {
+            lo.terminate(TermReturn(-1))
+        } else {
+            lo.terminate(TermReturn(result))
+        }
+    }
+    if !lo.diagnostics.is_empty() { return Err(lo.diagnostics) }
+    let mut out: Vec<MirBlock> = Vec::new()
+    for b in lo.blocks.iter() {
+        // Dead blocks (opened after divergence, never jumped to) may lack
+        // a terminator; they are unreachable, so trap.
+        let term = match b.term {
+            Some(t) => t
+            None => TermTrap
+        }
+        out.push(MirBlock { stmts: b.stmts, term: term })
+    }
+    Ok(
+        MirFunction {
+            name: mangled,
+            params: func.params,
+            takes_env: func.takes_env,
+            capture_count: func.capture_count,
+            temps: lo.temps,
+            ret: mir_ty(body_ret),
+            is_async: func.is_async,
+            blocks: out,
+        },
+    )
+}
+
+/// The type the function's body produces (`body_return_ty`): an `async
+/// fn`'s output, not the `Future` its signature returns.
+pub fn body_return_ty(func: HirFunction) -> Ty {
+    match func.ret_ty {
+        TyFuture(out) => if func.is_async { out } else { func.ret_ty }
+        other => other
+    }
+}
+
+/// Whether `e` never yields a value (`diverges`).
+pub fn diverges(e: HirExpr) -> Bool {
+    match e.ty {
+        TyNever => true
+        _ => false
+    }
+}
+
+impl Lowerer {
+    pub fn new_temp(mut self, ty: Int) -> Int {
+        let t = self.temps.len()
+        self.temps.push(ty)
+        t
+    }
+
+    pub fn new_block(mut self) -> Int {
+        let id = self.blocks.len()
+        self.blocks.push(new_block_state())
+        id
+    }
+
+    pub fn switch_to(mut self, id: Int) { self.current = id }
+
+    /// Add `stmt` to the current block, unless it is terminated already:
+    /// statements after a terminator are unreachable, and dropped.
+    pub fn push(mut self, stmt: MirStmt) {
+        let b = self.blocks.at(self.current)
+        if b.term.is_none() {
+            let mut stmts = b.stmts
+            stmts.push(stmt)
+        }
+    }
+
+    /// Set the current block's terminator (first one wins).
+    pub fn terminate(mut self, term: MirTerm) {
+        let mut b = self.blocks.at(self.current)
+        if b.term.is_none() { b.term = Some(term) }
+    }
+
+    pub fn unit_temp(mut self) -> Int {
+        let t = self.new_temp(MIR_UNIT)
+        self.push(SConstUnit(t))
+        t
+    }
+
+    /// A runtime bounds check `check_bounds(index, len(arr))` that aborts
+    /// if `index` is out of range, before an array access.
+    pub fn bounds_check(mut self, arr: Int, index: Int) {
+        let len = self.new_temp(MIR_I64)
+        self.push(SArrayLen(len, arr))
+        self.push(SCallRuntime(-1, RT_CHECK_BOUNDS, Vec::from_array([index, len])))
+    }
+
+    /// Copy `src` into `dst` unless the value class is `Unit` (no data).
+    pub fn copy(mut self, dst: Int, src: Int) {
+        if self.temps.at(dst) != MIR_UNIT { self.push(SCopy(dst, src)) }
+    }
+
+    /// The symbol of a call to `def` at `type_args`, its instance queued
+    /// (`callee_name`): `main` for the entry point, an extern's raw
+    /// symbol, or the mangled name.
+    pub fn callee_name(mut self, def: Int, type_args: Vec<Ty>) -> String {
+        self.worklist.push((def, type_args))
+        if def == self.entry { return "main" }
+        match self.program.extern_fn(def) {
+            Some(ext) => return ext.symbol
+            None => ()
+        }
+        let name = match self.program.function(def) {
+            Some(f) => f.name
+            None => "__unknown_${def}"
+        }
+        mangle(def, name, type_args)
+    }
+
+    /// Lower `e`, returning the temp that holds its value (`lower_expr`).
+    pub fn lower_expr(mut self, e: HirExpr) -> Int {
+        match e.kind {
+            EkIntLit(v) => {
+                let t = self.new_temp(MIR_I64)
+                self.push(SConstInt(t, v))
+                t
+            }
+            EkFloatLit(v) => {
+                let t = self.new_temp(MIR_F64)
+                self.push(SConstFloat(t, v))
+                t
+            }
+            EkBoolLit(v) => {
+                let t = self.new_temp(MIR_I8)
+                self.push(SConstBool(t, v))
+                t
+            }
+            EkStrLit(s) => {
+                let t = self.new_temp(MIR_PTR)
+                self.push(SConstStr(t, s))
+                t
+            }
+            EkCharLit(c) => {
+                let t = self.new_temp(MIR_I64)
+                self.push(SConstInt(t, c.to_int()))
+                t
+            }
+            EkUnit => self.unit_temp()
+            EkLocal(l) => self.local_map.at(l)
+            EkMakeClosure(func, type_args, captures) => {
+                let code = self.callee_name(func, type_args)
+                let cap_temps = self.typed_exprs(captures)
+                let t = self.new_temp(MIR_PTR)
+                self.push(SMakeClosure(t, code, cap_temps))
+                t
+            }
+            EkCall(func, type_args, args) => self.lower_call(e, func, type_args, args)
+            EkMakeVariant(_, variant, args) => {
+                let fields = self.typed_exprs(args)
+                let t = self.new_temp(MIR_PTR)
+                self.push(SMakeSum(t, variant, fields))
+                t
+            }
+            // A tuple is an anonymous record: the same `MakeRecord`, so no
+            // backend sees a tuple.
+            EkMakeRecord(_, fields) => self.make_record(fields)
+            EkMakeTuple(elems) => self.make_record(elems)
+            EkFieldGet(target, index) => {
+                let rec = self.lower_expr(target)
+                let ty = mir_ty(e.ty)
+                if ty == MIR_UNIT { return self.unit_temp() }
+                let t = self.new_temp(ty)
+                self.push(SRecordField(t, rec, index, ty))
+                t
+            }
+            EkFieldSet(target, index, value) => {
+                // Left-to-right, as `IndexSet` does: the record expression
+                // is evaluated before the value expression.
+                let rec = self.lower_expr(target)
+                let v = self.lower_expr(value)
+                let ty = mir_ty(value.ty)
+                // A unit-typed field has no runtime representation, so
+                // there is nothing to store.
+                if ty != MIR_UNIT { self.push(SSetField(rec, index, v, ty)) }
+                self.unit_temp()
+            }
+            EkMakeArray(elems) => {
+                let lowered = self.typed_exprs(elems)
+                let t = self.new_temp(MIR_PTR)
+                self.push(SMakeArray(t, lowered))
+                t
+            }
+            EkArrayRepeat(init, len) => self.lower_array_repeat(init, len)
+            EkArrayLen(target) => {
+                let arr = self.lower_expr(target)
+                let t = self.new_temp(MIR_I64)
+                self.push(SArrayLen(t, arr))
+                t
+            }
+            EkIndex(target, index) => {
+                let arr = self.lower_expr(target)
+                let idx = self.lower_expr(index)
+                self.bounds_check(arr, idx)
+                let ty = mir_ty(e.ty)
+                if ty == MIR_UNIT { return self.unit_temp() }
+                let t = self.new_temp(ty)
+                self.push(SArrayGet(t, arr, idx, ty))
+                t
+            }
+            EkIndexSet(target, index, value) => {
+                let arr = self.lower_expr(target)
+                let idx = self.lower_expr(index)
+                let v = self.lower_expr(value)
+                self.bounds_check(arr, idx)
+                let ty = mir_ty(value.ty)
+                if ty != MIR_UNIT { self.push(SArraySet(arr, idx, v, ty)) }
+                self.unit_temp()
+            }
+            EkTraitCall(
+                trait_id,
+                method,
+                self_ty,
+                type_args,
+                receiver,
+                args,
+            ) => self.lower_trait_call(e, trait_id, method, self_ty, type_args, receiver, args)
+            EkBinary(op, lhs, rhs) => self.lower_binary(op, lhs, rhs)
+            EkLogicalAnd(lhs, rhs) => self.lower_logical(lhs, rhs, true)
+            EkLogicalOr(lhs, rhs) => self.lower_logical(lhs, rhs, false)
+            EkUnary(op, inner) => {
+                let src = self.lower_expr(inner)
+                match op {
+                    OpNeg => {
+                        let class = operand_class(inner.ty)
+                        let t = self.new_temp(self.temps.at(src))
+                        self.push(SNeg(t, class, src))
+                        t
+                    }
+                    OpNot => {
+                        let t = self.new_temp(MIR_I8)
+                        self.push(SNot(t, src))
+                        t
+                    }
+                    OpBitNot => {
+                        let t = self.new_temp(MIR_I64)
+                        self.push(SBitNot(t, src))
+                        t
+                    }
+                }
+            }
+            EkLet(local, init) => {
+                let v = self.lower_expr(init)
+                if !diverges(init) { self.copy(self.local_map.at(local), v) }
+                self.unit_temp()
+            }
+            EkAssign(local, value) => {
+                let v = self.lower_expr(value)
+                if !diverges(value) { self.copy(self.local_map.at(local), v) }
+                self.unit_temp()
+            }
+            EkBlock(stmts, trailing) => {
+                for s in stmts.iter() { let _ = self.lower_expr(s) }
+                match trailing {
+                    Some(t) => self.lower_expr(t)
+                    None => self.unit_temp()
+                }
+            }
+            EkIf(cond, then, else_) => self.lower_if(e, cond, then, else_)
+            EkWhile(cond, body) => {
+                let header = self.new_block()
+                let body_b = self.new_block()
+                let exit = self.new_block()
+                self.terminate(TermGoto(header))
+                self.switch_to(header)
+                // `continue` to the header (re-test), `break` to the exit;
+                // pushed before the condition is lowered, so a break or
+                // continue in the condition targets this loop.
+                self.loop_targets.push((header, exit))
+                let c = self.lower_expr(cond)
+                if diverges(cond) {
+                    // The condition never yields a bool; control has left
+                    // the header already. Resume at the exit.
+                    let _ = self.loop_targets.pop()
+                    self.switch_to(exit)
+                    return self.unit_temp()
+                }
+                self.terminate(TermBranch(c, body_b, exit))
+                self.switch_to(body_b)
+                let _ = self.lower_expr(body)
+                let _ = self.loop_targets.pop()
+                self.terminate(TermGoto(header))
+                self.switch_to(exit)
+                self.unit_temp()
+            }
+            EkBreak => self.lower_jump(true)
+            EkContinue => self.lower_jump(false)
+            EkMatch(scrutinee, arms) => self.lower_match(e, scrutinee, arms)
+            EkReturn(value) => {
+                match value {
+                    Some(v) => {
+                        let t = self.lower_expr(v)
+                        if !diverges(v) {
+                            if self.temps.at(t) == MIR_UNIT {
+                                self.terminate(TermReturn(-1))
+                            } else {
+                                self.terminate(TermReturn(t))
+                            }
+                        }
+                    }
+                    None => self.terminate(TermReturn(-1))
+                }
+                // Continue lowering into a fresh (unreachable) block.
+                let dead = self.new_block()
+                self.switch_to(dead)
+                self.unit_temp()
+            }
+            EkToStr(inner) => {
+                let v = self.lower_expr(inner)
+                let func = match inner.ty {
+                    TyInt => RT_INT_TO_STR
+                    TyFloat => RT_FLOAT_TO_STR
+                    TyBool => RT_BOOL_TO_STR
+                    TyChar => RT_CHAR_TO_STR
+                    // String / error recovery: pass through.
+                    _ => return v
+                }
+                let t = self.new_temp(MIR_PTR)
+                self.push(SCallRuntime(t, func, Vec::from_array([v])))
+                t
+            }
+            EkStrConcat(parts) => self.lower_str_concat(parts)
+            EkAwait(inner) => {
+                // A marker statement, not control flow: performing the
+                // await is `async_lower`'s block split.
+                let future = self.lower_expr(inner)
+                let ty = mir_ty(e.ty)
+                let dst = if ty == MIR_UNIT { -1 } else { self.new_temp(ty) }
+                self.push(SAwait(dst, future))
+                // A unit-output await produces no value, as a
+                // unit-returning call: the result is a fresh unit.
+                if dst >= 0 { dst } else { self.unit_temp() }
+            }
+        }
+    }
+
+    // Each of `exprs` lowered, in order, beside its class.
+    fn typed_exprs(mut self, exprs: Vec<HirExpr>) -> Vec<(Int, Int)> {
+        let mut out: Vec<(Int, Int)> = Vec::new()
+        for x in exprs.iter() {
+            let t = self.lower_expr(x)
+            out.push((t, mir_ty(x.ty)))
+        }
+        out
+    }
+
+    // A record's or a tuple's `MakeRecord`.
+    fn make_record(mut self, fields: Vec<HirExpr>) -> Int {
+        let lowered = self.typed_exprs(fields)
+        let t = self.new_temp(MIR_PTR)
+        self.push(SMakeRecord(t, lowered))
+        t
+    }
+
+    // `break` (`is_break`) or `continue`: a jump to the enclosing loop's
+    // target, then lowering goes on in a fresh dead block.
+    fn lower_jump(mut self, is_break: Bool) -> Int {
+        if !self.loop_targets.is_empty() {
+            let (cont, brk) = self.loop_targets.last()
+            self.terminate(TermGoto(if is_break { brk } else { cont }))
+        }
+        let dead = self.new_block()
+        self.switch_to(dead)
+        self.unit_temp()
+    }
+
+    // An interpolation's parts concatenated: none, an empty string; three
+    // or more, one array and one n-ary concatenation; otherwise pairwise.
+    fn lower_str_concat(mut self, parts: Vec<HirExpr>) -> Int {
+        if parts.is_empty() {
+            let t = self.new_temp(MIR_PTR)
+            self.push(SConstStr(t, ""))
+            return t
+        }
+        if parts.len() >= 3 {
+            let mut elems: Vec<(Int, Int)> = Vec::new()
+            for part in parts.iter() { elems.push((self.lower_expr(part), MIR_PTR)) }
+            let arr = self.new_temp(MIR_PTR)
+            self.push(SMakeArray(arr, elems))
+            let t = self.new_temp(MIR_PTR)
+            self.push(SCallRuntime(t, RT_STR_CONCAT_N, Vec::from_array([arr])))
+            return t
+        }
+        let mut acc = self.lower_expr(parts.at(0))
+        let mut i = 1
+        while i < parts.len() {
+            let rhs = self.lower_expr(parts.at(i))
+            let t = self.new_temp(MIR_PTR)
+            self.push(SCallRuntime(t, RT_STR_CONCAT, Vec::from_array([acc, rhs])))
+            acc = t
+            i += 1
+        }
+        acc
+    }
+}
+
+/// A binary or unary operation's operand class (`operand_class`).
+pub fn operand_class(ty: Ty) -> Int {
+    match ty {
+        TyFloat => OC_FLOAT
+        TyBool => OC_BOOL
+        _ => OC_INT
+    }
+}

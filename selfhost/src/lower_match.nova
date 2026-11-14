@@ -1,0 +1,382 @@
+// `match`: lower.rs's `lower_match`, `lower_switch_arms`,
+// `lower_string_match`, `lower_arm_body`, `lower_chain_arms`,
+// `lower_pattern_test`, `branch_or_fail`, `test_int_eq`, `test_int_cmp`
+// and `concrete`, function by function (spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.1, ADR
+// 0057): a flat match on a sum, an `Int`, a `Char` or a `Bool` is one
+// `Switch`, on a `String` a chain of equality tests; a match with a guard
+// or a nested pattern lowers wholly by test chains.
+//
+// S0's `lower_switch_arms` takes the function that reads a pattern's
+// switch value; N passes which one, `KEY_VARIANT`, `KEY_INT` or
+// `KEY_BOOL` (`switch_key`).
+
+import hir
+import lower
+import lower_call
+import mir
+import token
+
+/// A variant pattern's switch value: its variant's index.
+pub const KEY_VARIANT: Int = 0
+
+/// An `Int` or `Char` literal pattern's switch value: its value.
+pub const KEY_INT: Int = 1
+
+/// A `Bool` literal pattern's switch value: 1 or 0.
+pub const KEY_BOOL: Int = 2
+
+/// The switch value of `pat` read as `kind` says, `None` for a catch-all
+/// (the closure S0 passes `lower_switch_arms`).
+pub fn switch_key(kind: Int, pat: HirPattern) -> Option<Int> {
+    if kind == KEY_VARIANT {
+        match pat {
+            PatVariant(_, variant, _) => Some(variant)
+            _ => None
+        }
+    } else if kind == KEY_INT {
+        match pat {
+            PatInt(v) => Some(v)
+            PatChar(c) => Some(c.to_int())
+            _ => None
+        }
+    } else {
+        match pat {
+            PatBool(v) => Some(if v { 1 } else { 0 })
+            _ => None
+        }
+    }
+}
+
+impl Lowerer {
+    /// A `match` (`lower_match`).
+    pub fn lower_match(mut self, e: HirExpr, scrutinee: HirExpr, arms: Vec<HirArm>) -> Int {
+        let result = self.new_temp(mir_ty(e.ty))
+        let s = self.lower_expr(scrutinee)
+        if diverges(scrutinee) { return result }
+        let join = self.new_block()
+        // A match with a guard or a pattern the flat lowering does not take
+        // lowers wholly by test chains.
+        let mut flat = true
+        for a in arms.iter() {
+            if a.guard.is_some() || !is_flat(a.pattern) {
+                flat = false
+                break
+            }
+        }
+        if !flat {
+            self.lower_chain_arms(s, scrutinee.ty, arms, result, join)
+            self.switch_to(join)
+            return result
+        }
+        match scrutinee.ty {
+            TySum(_, _) => {
+                let disc = self.new_temp(MIR_I64)
+                self.push(SSumTag(disc, s))
+                self.lower_switch_arms(s, disc, arms, result, join, KEY_VARIANT)
+            }
+            TyInt => self.lower_switch_arms(s, s, arms, result, join, KEY_INT)
+            TyChar => self.lower_switch_arms(s, s, arms, result, join, KEY_INT)
+            TyBool => self.lower_switch_arms(s, s, arms, result, join, KEY_BOOL)
+            TyString => self.lower_string_match(s, arms, result, join)
+            _ => {
+                // Only catch-all arms are possible for other types.
+                if arms.is_empty() {
+                    self.terminate(TermTrap)
+                } else {
+                    self.lower_arm_body(s, arms.at(0), result)
+                    self.terminate(TermGoto(join))
+                }
+            }
+        }
+        self.switch_to(join)
+        result
+    }
+
+    /// Arms dispatched by an integer discriminant, a sum's tag or an
+    /// `Int`, `Char` or `Bool` value (`lower_switch_arms`): `key` reads a
+    /// pattern's switch value ([`switch_key`]).
+    pub fn lower_switch_arms(
+        mut self,
+        scrut: Int,
+        disc: Int,
+        arms: Vec<HirArm>,
+        result: Int,
+        join: Int,
+        key: Int,
+    ) {
+        let mut switch_arms: Vec<(Int, Int)> = Vec::new()
+        let mut default = -1
+        let mut pending: Vec<(Int, HirArm)> = Vec::new()
+        for arm in arms.iter() {
+            match switch_key(key, arm.pattern) {
+                Some(value) => {
+                    let mut seen = false
+                    for (v, _) in switch_arms.iter() { if v == value { seen = true } }
+                    // A duplicate arm is unreachable.
+                    if seen { continue }
+                    let b = self.new_block()
+                    switch_arms.push((value, b))
+                    pending.push((b, arm))
+                }
+                None => {
+                    // A catch-all, a binding or a wildcard, is the default;
+                    // later arms are unreachable.
+                    if default < 0 {
+                        let b = self.new_block()
+                        default = b
+                        pending.push((b, arm))
+                    }
+                    break
+                }
+            }
+        }
+        if default < 0 {
+            // Exhaustiveness was checked: this is unreachable.
+            let b = self.new_block()
+            let saved = self.current
+            self.switch_to(b)
+            self.terminate(TermTrap)
+            self.switch_to(saved)
+            default = b
+        }
+        self.terminate(TermSwitch(disc, switch_arms, default))
+        for (block, arm) in pending.iter() {
+            self.switch_to(block)
+            self.lower_arm_body(scrut, arm, result)
+            self.terminate(TermGoto(join))
+        }
+    }
+
+    /// A `String` match, a chain of equality tests
+    /// (`lower_string_match`).
+    pub fn lower_string_match(mut self, scrut: Int, arms: Vec<HirArm>, result: Int, join: Int) {
+        for arm in arms.iter() {
+            match arm.pattern {
+                PatStr(lit) => {
+                    let lit_t = self.new_temp(MIR_PTR)
+                    self.push(SConstStr(lit_t, lit))
+                    let eq = self.new_temp(MIR_I8)
+                    self.push(SCallRuntime(eq, RT_STR_EQ, Vec::from_array([scrut, lit_t])))
+                    let body_b = self.new_block()
+                    let next = self.new_block()
+                    self.terminate(TermBranch(eq, body_b, next))
+                    self.switch_to(body_b)
+                    self.lower_arm_body(scrut, arm, result)
+                    self.terminate(TermGoto(join))
+                    self.switch_to(next)
+                }
+                _ => {
+                    // A catch-all ends the chain.
+                    self.lower_arm_body(scrut, arm, result)
+                    self.terminate(TermGoto(join))
+                    return
+                }
+            }
+        }
+        // No catch-all: unreachable, exhaustiveness was checked.
+        self.terminate(TermTrap)
+    }
+
+    /// The arm's bindings, then its body, into the current block
+    /// (`lower_arm_body`).
+    pub fn lower_arm_body(mut self, scrut: Int, arm: HirArm, result: Int) {
+        match arm.pattern {
+            PatBind(local) => self.copy(self.local_map.at(local), scrut)
+            PatVariant(_, _, fields) => {
+                for i in 0..fields.len() {
+                    match fields.at(i) {
+                        PatBind(local) => {
+                            let dst = self.local_map.at(local)
+                            let ty = self.temps.at(dst)
+                            if ty != MIR_UNIT {
+                                let v = self.new_temp(ty)
+                                self.push(SSumField(v, scrut, i, ty))
+                                self.push(SCopy(dst, v))
+                            }
+                        }
+                        _ => ()
+                    }
+                }
+            }
+            _ => ()
+        }
+        let v = self.lower_expr(arm.body)
+        if !diverges(arm.body) { self.copy(result, v) }
+    }
+
+    /// A `match` by test chains (`lower_chain_arms`): each arm in order
+    /// tests its pattern and then its guard, a failure jumping to the next
+    /// arm's chain; a trap after the last.
+    pub fn lower_chain_arms(
+        mut self,
+        scrut: Int,
+        ty: Ty,
+        arms: Vec<HirArm>,
+        result: Int,
+        join: Int,
+    ) {
+        for arm in arms.iter() {
+            let next = self.new_block()
+            self.lower_pattern_test(arm.pattern, scrut, ty, next)
+            match arm.guard {
+                Some(guard) => {
+                    let g = self.lower_expr(guard)
+                    if !diverges(guard) {
+                        let body = self.new_block()
+                        self.terminate(TermBranch(g, body, next))
+                        self.switch_to(body)
+                    }
+                }
+                None => ()
+            }
+            let v = self.lower_expr(arm.body)
+            if !diverges(arm.body) { self.copy(result, v) }
+            self.terminate(TermGoto(join))
+            self.switch_to(next)
+        }
+        // Exhaustiveness was checked: no value gets here.
+        self.terminate(TermTrap)
+    }
+
+    /// Test `value`, of type `ty`, against `pat` in the current block,
+    /// jumping to `fail` when it does not match (`lower_pattern_test`).
+    pub fn lower_pattern_test(mut self, pat: HirPattern, value: Int, ty: Ty, fail: Int) {
+        match pat {
+            PatWildcard => ()
+            PatBind(local) => self.copy(self.local_map.at(local), value)
+            PatInt(n) => self.test_int_eq(value, n, fail)
+            PatChar(c) => self.test_int_eq(value, c.to_int(), fail)
+            PatBool(b) => {
+                let ok = self.new_block()
+                if b {
+                    self.terminate(TermBranch(value, ok, fail))
+                } else {
+                    self.terminate(TermBranch(value, fail, ok))
+                }
+                self.switch_to(ok)
+            }
+            PatStr(lit) => {
+                let lit_t = self.new_temp(MIR_PTR)
+                self.push(SConstStr(lit_t, lit))
+                let eq = self.new_temp(MIR_I8)
+                self.push(SCallRuntime(eq, RT_STR_EQ, Vec::from_array([value, lit_t])))
+                self.branch_or_fail(eq, fail)
+            }
+            PatRange(lo, hi) => {
+                self.test_int_cmp(value, OpGe, lo, fail)
+                self.test_int_cmp(value, OpLe, hi, fail)
+            }
+            PatVariant(sum, variant, fields) => {
+                // A sum of one variant needs no tag test.
+                let def = self.program.sum(sum)
+                let tested = match def {
+                    Some(d) => d.variants.len() > 1
+                    None => true
+                }
+                if tested {
+                    let tag = self.new_temp(MIR_I64)
+                    self.push(SSumTag(tag, value))
+                    self.test_int_eq(tag, variant, fail)
+                }
+                let args = match ty {
+                    TySum(_, a) => a
+                    _ => Vec::new()
+                }
+                let mut field_tys: Vec<Ty> = Vec::new()
+                match def {
+                    Some(d) => {
+                        if variant >= 0 && variant < d.variants.len() {
+                            for f in d.variants.at(variant).fields.iter() {
+                                field_tys.push(self.concrete(f, args))
+                            }
+                        }
+                    }
+                    None => ()
+                }
+                for i in 0..fields.len() {
+                    let field = fields.at(i)
+                    match field {
+                        PatWildcard => continue
+                        _ => ()
+                    }
+                    let fty = if i < field_tys.len() { field_tys.at(i) } else { TyError }
+                    let mty = mir_ty(fty)
+                    let t = if mty == MIR_UNIT {
+                        self.unit_temp()
+                    } else {
+                        let t = self.new_temp(mty)
+                        self.push(SSumField(t, value, i, mty))
+                        t
+                    }
+                    self.lower_pattern_test(field, t, fty, fail)
+                }
+            }
+            PatTuple(elems) => {
+                let tys = match ty {
+                    TyTuple(ts) => ts
+                    _ => Vec::new()
+                }
+                for i in 0..elems.len() {
+                    let elem = elems.at(i)
+                    match elem {
+                        PatWildcard => continue
+                        _ => ()
+                    }
+                    let ety = if i < tys.len() { tys.at(i) } else { TyError }
+                    let mty = mir_ty(ety)
+                    let t = if mty == MIR_UNIT {
+                        self.unit_temp()
+                    } else {
+                        let t = self.new_temp(mty)
+                        self.push(SRecordField(t, value, i, mty))
+                        t
+                    }
+                    self.lower_pattern_test(elem, t, ety, fail)
+                }
+            }
+            PatOr(alts) => {
+                let ok = self.new_block()
+                for k in 0..alts.len() {
+                    let last = k + 1 == alts.len()
+                    let alt_fail = if last { fail } else { self.new_block() }
+                    self.lower_pattern_test(alts.at(k), value, ty, alt_fail)
+                    self.terminate(TermGoto(ok))
+                    if !last { self.switch_to(alt_fail) }
+                }
+                self.switch_to(ok)
+            }
+        }
+    }
+
+    /// Go on in a fresh block when `cond` holds; jump to `fail` when not
+    /// (`branch_or_fail`).
+    pub fn branch_or_fail(mut self, cond: Int, fail: Int) {
+        let ok = self.new_block()
+        self.terminate(TermBranch(cond, ok, fail))
+        self.switch_to(ok)
+    }
+
+    /// `value == n`, an `Int`, `Char` or tag test (`test_int_eq`).
+    pub fn test_int_eq(mut self, value: Int, n: Int, fail: Int) {
+        self.test_int_cmp(value, OpEq, n, fail)
+    }
+
+    /// `value op n` on integers, failing to `fail` (`test_int_cmp`).
+    pub fn test_int_cmp(mut self, value: Int, op: HirBinOp, n: Int, fail: Int) {
+        let c = self.new_temp(MIR_I64)
+        self.push(SConstInt(c, n))
+        let cond = self.bin_i64(op, value, c, MIR_I8)
+        self.branch_or_fail(cond, fail)
+    }
+
+    /// A field's declared type at the scrutinee's type arguments, any
+    /// projection normalized (`concrete`).
+    pub fn concrete(self, field: Ty, args: Vec<Ty>) -> Ty {
+        let ty = subst(field, args)
+        match normalize_ty(ty, self.program.impls) {
+            Ok(t) => t
+            Err(_) => ty
+        }
+    }
+}
