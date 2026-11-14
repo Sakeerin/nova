@@ -2,10 +2,11 @@
 
 ## Status
 
-Draft (2026-11-14). Written as 5.4's prototype is built, on the local
-branch `proto/5-4`
-(`docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md`). Part 1
-(S0's side) wrote §1 to §9:
+Proposed (2026-11-14): complete as 5.4's prototype left it, on the
+local branch `proto/5-4`
+(`docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md`). CI's
+figures, and the user's answer on them (spec §8), come before the plan.
+Part 1 (S0's side) wrote §1 to §9:
 - §1, the hidden flag and its before form;
 - §2, the dump's grammar, with one example of every form, and the
   decisions it took;
@@ -29,9 +30,14 @@ Part 3 (N's `async_lower`) wrote §13 to §15:
   the before form narrowed to the roots the transform changes;
 - §15, part 3's figures.
 
-Later parts write the MIR fuzzer, the depth cases and N's stack, CI's
-figures, the rule that a change to MIR changes both compilers, and the
-Consequences.
+Part 4 (the fuzzer, the depth cases, the measurements and the records)
+wrote §16 to §21 and the Consequences:
+- §16, the MIR fuzzer;
+- §17, the depth cases, and N's stack;
+- §18, part 4's figures: agreement on every set, the time, N's memory;
+- §19, the time from the base to part 4, and CI's projection;
+- §20, departures from the spec, and decisions it does not settle;
+- §21, the rule.
 
 ## Decision
 
@@ -1047,3 +1053,377 @@ more than the default stack.
   difference: `nova check` 1,943, `parse` 3,674 runs, packages 22,
   `--help` 22, usage 474 and 10 in a terminal, the hidden forms' refusals
   114 and 330.
+
+### 16. The MIR fuzzer (part 4)
+
+`fuzz::mir_mutate` (spec §7.4, the user's decision 6) gives a program
+that lowers clean one to three closed additions aimed at MIR.
+
+- **Bases:** the loose corpus programs that import no module, parse and
+  lower clean, `lowered=true` with no diagnostic. They are read from the
+  loose corpus's MIR dump, as the type fuzzer reads its bases from the
+  HIR dump: `loose_mir` is the corpus test's run of the loose programs,
+  made once a run and shared. Each is read with `\r\n` as `\n`, so a
+  seed gives the same inputs on every system. 183 of the 251 qualify
+  today, 53 of them with an async `main`.
+- **Additions:** each of a kind the seed picks, under the prefix
+  `__m<n>_<k>` and the kind's letter (`n` the input's index, `k` the
+  addition's place). The prefix begins every name the addition declares,
+  its methods', fields' and variants' too, so MIR names every function
+  made of them by it, but closures and wrappers. `main`'s body gains a
+  first statement per addition, `<prefix>go()`, of type `()`. An
+  addition names only its own items, std's and its locals, so it
+  type-checks whatever the base declares (§20).
+  - **g, generic instances:** a generic function always, and as the seed
+    picks a generic record with a method, a generic sum with a method (a
+    `match` inside), a function of two type parameters that returns a
+    tuple, and a function bounded by a trait of the addition's own, which
+    a generic record of its own and a record of its own implement. Each
+    is called at two types the seed draws: `Int`, `Float`, `Bool`,
+    `Char`, `String`, the addition's own record or sum, and two levels of
+    tuples, arrays, `Option`, `Result` and `Vec` of them, each value
+    bound first under its annotation (`None`, `Err`, `[]` and
+    `Vec::new()` among them).
+  - **a, awaits:** an `async fn` that awaits another one to three times,
+    the awaited one generic as the seed picks (its poll function then an
+    instance's), with values of each class and of two drawn types live
+    across each await. std's `block_on` drives it from the addition's
+    plain `go`, through a third `async fn` as the seed picks.
+  - **p, match shapes,** over a sum of its own (`A(Int, String)`,
+    `B((Int, Char))`, `C(Option<S>)`, `D`): a `match` lowered by chains,
+    its arms drawn from eight (nested variant and tuple patterns, a
+    guard, or-patterns, `Int` and `Char` ranges, string and char
+    literals) in an order in which none is unreachable, then a wildcard;
+    a flat `match`, a `Switch` on the tag; and as the seed picks a
+    tuple's, an `Int`'s, a `Char`'s and a `String`'s.
+  - **c, closures:** one capturing a value of each class (`Int`,
+    `Float`, `Bool`, `String`, `()`), passed to a generic function that
+    calls it through its function-typed parameter, and a bare function
+    passed as a value; as the seed picks, a closure capturing an `Int`,
+    one taking a value of a drawn type (another instance of the generic
+    function), a closure called directly, and one that makes and calls a
+    closure of its own.
+- **The test,** `the_mir_fuzzers_inputs_agree_and_hold_each_kind`:
+  seeds 601, 602 and 603, 40 inputs each, written to `mir-fuzz/<seed>/`
+  and dumped in one process a side through `agree_on_mir_forms` (§14).
+  The after form is compared on every input, the before form on those
+  whose after form holds a poll function. The test fails on any input
+  that is not `lowered=true` with no diagnostic, and skips none.
+- **The floors:** each kind's mark in at least 10 of the 120 inputs,
+  read from S0's after form in a function whose name carries that kind's
+  prefix (`mir_marks`): for g an instance's symbol, `$` and its type
+  arguments; for a a `$poll`; for p a `Switch`; for c a `MakeClosure`
+  and a `CallIndirect`. Reading each mark in its kind's own functions is
+  stricter than reading it anywhere: a poll function's dispatch is a
+  `Switch` and an async wrapper holds a `MakeClosure`, and neither counts
+  for p or c.
+
+The fixed seeds' inputs (2026-11-14) hold 237 additions (63 g, 56 a, 55
+p, 63 c): 40 inputs have one, 43 two and 37 three, on 75 of the 183
+bases. 36 inputs have an async `main`, and 4 take the full check (an
+impl on a primitive, §5). Inputs that hold each mark:
+
+| Seed | g | a | p | c |
+|---|---:|---:|---:|---:|
+| 601 | 13 | 19 | 12 | 23 |
+| 602 | 22 | 17 | 20 | 16 |
+| 603 | 19 | 14 | 17 | 17 |
+| all | 54 | 50 | 49 | 56 |
+
+82 of the 120 are compared in the before form too. Every input lowers
+clean, and `nova check` gives none of them a warning. N agreed with S0
+on every input in both forms on the first run.
+
+### 17. The depth cases, and N's stack (part 4)
+
+`n_lowers_the_depth_cases_on_a_1_mb_main_thread` (spec §7.5) runs N's
+`selfhost mir` under `ulimit -s 1024` on Linux and macOS, and on Windows
+on the main thread as it is, 1 MB. Its output must be S0's after form,
+which S0 makes on its 64 MB thread, on 25 programs:
+- **5.3b's 19 deep bodies, made to lower** (`fuzz::mir_deep`): each kind
+  of `fuzz::BODY_DEEP_KINDS` at the deepest level the parser takes (ADR
+  0056 §12: closures 64; tuple and variant patterns in a `match` arm and
+  the three `for` loops 127; the rest 128). The nesting is in a function
+  `f` that `main` calls, and again in `g<T>(u: T, …)`, which `main`
+  instantiates at `Int`, so lowering walks it in `f` and the specializer
+  in `g`'s instance. The 64 closures are lifted twice, the second time
+  each an instance (`closure$N.N$i`). `fuzz::body_deep`'s statements of
+  `main` move into `f` and `g` as they are; its function `f` beside an
+  empty `main` is copied to `g`, and both are called with arguments of
+  their parameters' types. The 128-level tuple goes into a `let` first,
+  whose initializer is a level fewer than a call's argument.
+- **Six types 128 levels deep in an instance's type argument**
+  (`fuzz::mir_deep_type`): arrays, a generic record's arguments, tuples,
+  and `fn` types' parameters and returns, which are 5.3b's nestings of a
+  type that lower (parentheses vanish when parsed; optionals, references
+  and pointers are E0900); and std's `Option`, a sum. `let v: T =
+  make()` and `id(v)`, with `make<T>() -> T` a `panic`, instantiate
+  `make` and `id` at the type. `mangle_ty` walks its 128 levels (symbols
+  of 262 to 520 characters), and the specializer substitutes it into
+  `id`'s local.
+
+Each program lowers clean and makes no poll function, so the after form
+is the only one compared. S0's part shows the walk: `f` and `g`'s
+instance at `Int`, or a line for `id`'s instance past 256 characters. **N lowers
+every one on 1 MB on both runtimes**, its output S0's. Nothing overflows,
+so 5.3b's answer 2 (record the depth N survives as (differs)) is not
+needed. The test also runs `bodies-for-ranges-127.nova` on 96 KB, where
+N fails, so the stack is the one set.
+
+Least stack (Linux, `ulimit -s`, 4 KB bisection, each run's output
+compared with S0's part, 2026-11-14; a script, not committed), beside
+N's `selfhost hir` on the same programs:
+
+| Input | Levels | `mir`, debug runtime | `mir`, release runtime | `hir`, release runtime |
+|---|---:|---:|---:|---:|
+| body `annotations` | 128 | 60 KB | 56 KB | 64 KB |
+| body `arrays` | 128 | 196 KB | 196 KB | 200 KB |
+| body `closure-captures` | 64 | 196 KB | 196 KB | 200 KB |
+| body `closure-params` | 64 | 204 KB | 200 KB | 200 KB |
+| body `closures` | 64 | 200 KB | 200 KB | 196 KB |
+| body `for-arrays` | 127 | 212 KB | 212 KB | 212 KB |
+| body `for-patterns` | 127 | 216 KB | 204 KB | 208 KB |
+| body `for-ranges` | 127 | 212 KB | 212 KB | 212 KB |
+| body `indexes` | 128 | 200 KB | 200 KB | 200 KB |
+| body `interpolations` | 128 | 196 KB | 200 KB | 192 KB |
+| body `let-patterns` | 128 | 200 KB | 196 KB | 196 KB |
+| body `match-arms` | 128 | 208 KB | 204 KB | 208 KB |
+| body `match-scrutinees` | 128 | 204 KB | 200 KB | 196 KB |
+| body `method-chains` | 128 | 56 KB | 48 KB | 44 KB |
+| body `or-patterns` | 128 | 56 KB | 56 KB | 48 KB |
+| body `questions` | 128 | 200 KB | 200 KB | 200 KB |
+| body `tuple-patterns` | 127 | 200 KB | 196 KB | 200 KB |
+| body `tuples` | 128 | 196 KB | 200 KB | 200 KB |
+| body `variant-patterns` | 127 | 196 KB | 196 KB | 200 KB |
+| type argument, `arrays` | 128 | 52 KB | 48 KB | 52 KB |
+| type argument, `fn-parameters` | 128 | 52 KB | 52 KB | 48 KB |
+| type argument, `fn-returns` | 128 | 56 KB | 48 KB | 52 KB |
+| type argument, `generics` | 128 | 60 KB | 64 KB | 56 KB |
+| type argument, `options` | 128 | 64 KB | 60 KB | 56 KB |
+| type argument, `tuples` | 128 | 48 KB | 52 KB | 52 KB |
+
+MIR adds nothing measurable to N's stack: on every program `mir` needs
+what `hir` needs, within two bisection steps (8 KB). The most is the
+parser's, 196 to 216 KB for nested expressions, as in ADR 0056 §12, and
+the release runtime is within 12 KB of the debug one. N has about five
+times the room it needs.
+
+### 18. Part 4's figures
+
+Measured locally on 4 cores, 2026-11-14, at `b7d5c69b`.
+
+**Agreement,** byte for byte with exit codes, on every set the gate
+names (spec §10). Each test passed in every run below; the per-root
+counts come from a script that dumps each set through both sides, not
+committed:
+
+| Set | Roots | After form, agree / differ | Before form, agree / differ |
+|---|---:|---:|---:|
+| native corpus's roots that run (N's own included) | 261 | 261 / 0 | 76 / 0 |
+| HIR cases that reach MIR | 342 | 342 / 0 | 2 / 0 |
+| `cases/mir/` | 83 | 83 / 0 | 17 / 0 |
+| the cases again with `\r\n` | 425 | 425 / 0 | 19 / 0 |
+| the MIR fuzzer's inputs | 120 | 120 / 0 | 82 / 0 |
+| the depth cases | 25 | 25 / 0 | none holds a poll function |
+
+The codes, each at its site among the cases: E0601 13 (10 corpus roots,
+1 HIR case, 2 MIR cases), E0013 at `mono.rs:276` in 12 cases (32
+diagnostics), E0075 1, E0078 2, E0079 1. Every form of `KINDS` but
+`NOT_NATIVE`'s occurs. The guard (§5) passes in both orders: 677 roots
+lower, and the 85 roots that take the full check natively are 5.3b's 78
+and `cases/mir/`'s 7, as it lists them.
+
+**`selfhost.rs`** (63 tests):
+- plain: 197.31, 189.07 and 191.09 s (part 3: 190.05, 189.38 and 209.89
+  s, 61 tests);
+- as CI's Selfhost job runs it (`NOVA_EMBED_RUNTIME=1
+  CARGO_PROFILE_DEV_OPT_LEVEL=1`): 52.78, 52.65, 53.65, 56.04 and 54.70
+  s, user 190 and 186 s for the last two. Part 3's head, `9801b3f7`, in
+  the same session: 52.82, 52.45, 52.70 and 53.69 s, user 180 s. Part
+  3's own session gave 61.10, 57.49 and 53.18 s.
+
+Each group of tests alone, N's build in each:
+
+| Tests | Plain | As CI runs them |
+|---|---:|---:|
+| the six MIR tests of parts 1 to 3 | 60.40 s | 18.38 s |
+| the MIR fuzzer | 47.40 s | 11.70 s |
+| the depth test | 16.47 s | 3.89 s |
+| all eight | 72.86 s | 21.48 s |
+
+The fuzzer alone makes the loose corpus's MIR dump (`loose_mir`), which
+it shares with the corpus test in a full run. A full plain run was timed
+with a scratch timer on every process: the longest is still one of the
+HIR dump's package parts, 95.55 s against the 120 s `CHILD_LIMIT`, so
+no batch is dealt into more parts. The MIR fuzzer's N process takes
+24.7 s in the after form and 9.5 s in the before form, the depth test's
+7.9 s; the longest MIR process, N's after form on the 251 loose
+programs, 60.5 s.
+
+**The driver's unit tests** (`nova-driver`'s 42, unchanged in part 4):
+98.80 and 94.75 s, the guard alone 79.13 s. Part 1's session gave 85.4
+s; this one runs 10 to 15% slower.
+
+**The full suite** (`cargo test --workspace`, Node required): 2,835
+passed, 1 failed (the IPv6 test, as on the base), 10 ignored, in 347.7
+s.
+
+**The fuzzer's and the depth cases' time,** one process a side as the
+harness runs them, best of three:
+
+| Set | Roots | S0 opt 0 | N debug runtime | S0 opt 1 | N release runtime |
+|---|---:|---:|---:|---:|---:|
+| the fuzzer, after form | 120 | 1.96 s | 9.65 s | 0.87 s | 2.25 s |
+| the fuzzer, before form | 82 | 1.33 s | 5.97 s | 0.59 s | 1.41 s |
+| the depth cases | 25 | 2.37 s | 5.94 s | 0.95 s | 1.38 s |
+| N's root, after form | 1 | 1.16 s | 7.52 s | 0.53 s | 2.04 s |
+
+The fuzzer's inputs are 16,113 lines of source, 509 KB; their after form
+is 235,665 lines and 5,861,071 bytes, and the before form of the 82
+compared 130,998 lines and 3,174,622 bytes. The depth cases' dump is
+82,424 lines and 1,885,809 bytes.
+
+**N's memory:** peak RSS from `/proc/PID/status`'s `VmHWM`, polled;
+collections and the largest live heap from `NOVA_GC_DEBUG`, on the debug
+runtime:
+
+| Input | N debug runtime | N release runtime | S0 opt 0 | S0 opt 1 | N's collections, largest live heap |
+|---|---:|---:|---:|---:|---:|
+| N's root, after form | 207 MB | 205 MB | 117 MB | 112 MB | 23, 105 MB |
+| N's root, before form | 177 MB | 176 MB | 117 MB | 112 MB | 23, 120 MB |
+| the loose corpus | 41 MB | 40 MB | 44 MB | 39 MB | 103, 11 MB (§15) |
+| the fuzzer, after form | 41 MB | 40 MB | 43 MB | 38 MB | 62, 12 MB |
+| the depth cases | 40 MB | 39 MB | 46 MB | 38 MB | 42, 12 MB |
+
+`wait4`'s `ru_maxrss`, which §12 and §15 read, also counts the pages a
+child holds from its parent before `exec`. From a Python parent of 35 to
+75 MB it reads the parent's size for a small process (57 or 76 MB here,
+for a 40 MB N), so this table reads `VmHWM`. N's root's figures agree
+with §15's. The largest live heap is the last collection's, whose moment
+differs between the two forms.
+
+**Verification:** N's `nova test` 101 passed (part 4 adds no N code);
+`cargo fmt --all -- --check`, both clippy commands as CI runs them,
+`nova fmt --check std examples selfhost` and Rust 1.78's `cargo check
+--locked --workspace` with `-D warnings` are clean; `Cargo.lock` is
+unchanged. Part 1's byte-identity scripts against the base's `nova` show
+no difference: `nova check` 1,943, `parse` 3,674 runs over 1,837 files,
+packages 22, `--help` 22 of 22 with no hidden flag shown, usage 474 and
+10 in a terminal, and the hidden forms' refusals 114 and 330.
+
+### 19. The time, from the base to part 4, and CI's projection
+
+`selfhost.rs` locally, 4 cores, each part in its own session (sessions
+differ by up to 15%):
+
+| Head | Tests | As CI runs it | Plain |
+|---|---:|---|---|
+| the base, `e73353cf` | 55 | 37.62, 37.53, 38.03 s | 125.87, 135.20 s |
+| part 1, `599ac774` | 60 | 44.27, 43.75, 42.66 s | 147.10, 149.09 s |
+| part 2 | 62 | 55.84, 54.84, 55.32 s | 186.49, 201.56, 183.34 s |
+| part 3, `9801b3f7` | 61 | 61.10, 57.49, 53.18 s (52.45 to 53.69 s in part 4's session) | 190.05, 189.38, 209.89 s |
+| part 4, `b7d5c69b` | 63 | 52.65 to 56.04 s | 197.31, 189.07, 191.09 s |
+
+The MIR dump made `selfhost.rs` 38 to 49% longer as CI runs it (38 s to
+53 to 56 s), most of it in parts 2 and 3, N's side on every input in both
+forms. Part 4 adds about 1 s of wall and 6 to 10 s of CPU (3 to 5%), its
+two tests running beside longer ones.
+
+**CI, projected (not measured).** 5.3b's runs at its head and its merge
+(spec §8: run 43559046222, two attempts, and run 43570327222), with S0
+at `opt-level = 1` and N on the release runtime, took 39.22 to 42.28 s
+on Linux, 21.98 to 49.25 s on macOS and 41.62 to 90.74 s on Windows, on
+a tree that takes 37.5 to 38.0 s here. Scaled by the local growth since
+(×1.38 to 1.49), `selfhost.rs` would take about 54 to 63 s on Linux, 30
+to 73 s on macOS and 57 to 135 s on Windows, against lines of 60, 60 and
+70 s (ADR 0055 §15, ADR 0056 §14): Linux about at its line, Windows
+likely past it, and macOS's own spread too wide to call. The scaling
+assumes CI's runners grow as this machine does on the same tests, which
+nothing here tests: the added work is mostly N's processes running
+beside the HIR dump's, and how they share a runner's cores is CI's to
+show. Past projections missed both ways (5.2b's undershot by about
+half; 5.3b's macOS was projected at 60 s and took 86.45 s in its first
+run; 5.3a's overshot), and one commit's own spread on Windows (41.62 to
+90.74 s) is wider than this whole increment. CI's figures on all three
+systems decide (spec §8). The Test job's slowest binary, `nova-driver`'s unit
+tests, took 93.88 s on Linux in 5.3b's first CI run; here it took 77.7 s
+at the base and 85.4 s after part 1 (94.75 to 98.80 s in part 4's slower
+session), so the guard's MIR forms add about a tenth to it.
+
+### 20. Departures from the spec, and decisions it does not settle
+
+**Departures,** each recorded where it falls:
+- **(differs) Native only** (§6): WASM's and test mode's MIR stay S0's.
+- **E0013 at `lower.rs:974` is unreachable** (§7), as E0011 in
+  monomorphization is: ported as written, no case. The spec's statement
+  that both E0013 sites were reproduced was wrong (the research's two
+  probes reach `mono.rs:276`). The gate reads "E0013 at `mono.rs:276`"
+  (the main session's ruling, 2026-11-14), which the spec takes as a
+  dated amendment with the plan.
+- **The research's counts:** 4 WASM sources among the extracted, not 7
+  (§7); 19 cases hold a poll function, not 2, which counted the HIR cases
+  alone (§14); 85 roots take the full check natively, not 78 (§5); `Stmt`
+  has 27 variants, not 26 (spec §2 item 3), 26 of them native, `Await` in
+  the before form alone.
+- **The projections:** spec §8's +1 to 4 s of local wall for one form
+  measured +11.6 s at part 2, and both forms +15 to 18 s as CI runs it
+  at part 4 (§19); the research's N at 1.5 to 1.9 times S0 measured 1.5
+  to 4.1 times on the release runtime against S0 at `opt-level = 1`, and
+  2.5 to 6.7 times on the debug runtime against `opt-level = 0` (§12,
+  §15, §18).
+- **No (differs) for the stack:** N lowers all 25 depth cases on 1 MB
+  (§17).
+
+**Decisions the spec does not settle,** each with its cost if wrong:
+- The fuzzer's awaits are driven by `block_on` in the addition's plain
+  `go`, which `main`'s statement calls; `main` itself is async in 36 of
+  the 120 inputs, where spec §7.4 says "from a plain `main`". Bases with
+  a plain `main` alone would drop 53 of the 183. Cheap to change.
+- One to three additions an input, each kind as likely. Every name an
+  addition declares carries its prefix, so no base's name can collide; a
+  base that shadowed a std name an addition uses (none does today) would
+  fail the test, not be skipped. Cheap.
+- Each kind's mark is read in its own functions (§16), stricter than
+  anywhere in the program. Cheap.
+- The depth cases take 5.3b's 19 body kinds, as the spec says, not
+  5.1's 16 `DEEP_KINDS`, which the parser's and the type checker's depth
+  tests cover; `g` is instantiated at `Int` with a parameter its body
+  does not use; the deep types' values come from `make<T>() -> T`, a
+  `panic`. Adding 5.1's kinds would cost a few seconds, not measured.
+  Cheap.
+- The MIR fuzzer joins no `NOVA_SELFHOST_FUZZ` longer search, as the
+  type and body fuzzers did not. Cheap.
+- N's peak RSS is read from `VmHWM` (§18). None.
+- **The lazy splice** (§12): copying only the std functions a program
+  reaches would remove most of the splice's cost, with identical output,
+  but changes the whole-module rule (§5). The user's decision, with CI's
+  figures.
+
+### 21. The rule
+
+From 5.4 MIR exists twice, in `nova-mir` and in `selfhost/`. A change to
+either changes both in one pull request: lowering, a builtin's lowering,
+`match`'s chains, monomorphization and its names, `mangle` and
+`mangle_ty`, the specializer, the async transform, the shim, a MIR
+diagnostic's words or order, a runtime function's name or place in
+`RtFunc::ALL`, std's splice or its fallback. The MIR dump's differential
+(§14, §16, §17) holds them equal (phase plan decision 6; ADR 0055 §14
+and ADR 0056 §16 extended). The dump's grammar (§2) changes with them on
+both sides, and `KINDS` lists any new statement or terminator. WASM's and
+test mode's MIR stay S0's alone (§6) until a later phase ports them.
+
+## Consequences
+
+- 5.5's emitter starts from the native MIR the dump shows, the same on
+  both sides for every input the differential holds; `RtFunc::symbol` and
+  `signature` come with it (the user's decision 7).
+- `selfhost.rs` grew 38 to 49% locally as CI runs it (§19). CI is
+  measured before the plan, and past the lines the user is asked again
+  (spec §8).
+- std is spliced into each program whole: about 2 ms a program on S0 at
+  `opt-level = 1`, 5.9 ms on N's release runtime. Making it lazy is the
+  user's decision (§20).
+- N lowers the depth cases on 1 MB with about five times the room it
+  needs (§17). ADR 0055 §12's normalized type is still the one input
+  recorded as (differs) for N's stack.
+- N's root peaks at about 207 MB of RSS, both modules alive (§18).

@@ -543,6 +543,34 @@ and 62.28 s on CI).
   compilers check.
 
 ### 5.4 — MIR
+
+**Amended 2026-11-14 (5.4; spec
+`docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §1, ADR
+0057; its prototype on the local branch `proto/5-4`):** 5.4 is **native
+only**. WASM's MIR (its std, `route_runtime`, its roots and exports,
+`Mem` statements, `Js` externs and E0091) and test mode's (a synthesized
+`main` under `nova test`) stay S0's, recorded as (differs) in ADR 0057
+§6, and the 35 WASM programs are not compared. The dump is the hidden
+`nova check --dump-mir [--before-async] FILE…`, after the async
+transform and, with `--before-async`, before it; N's side is `selfhost
+mir`, std's checked bodies spliced into each program on both sides.
+- **The gate, amended:** native MIR dumps identical to S0's, after the
+  async transform on every input and before it where the transform makes
+  a poll function, on the corpus roots that run, the HIR cases that
+  reach MIR, the MIR cases with both line endings, the MIR fuzzer's
+  programs, which all lower clean with each kind's floor held, and the
+  depth cases, which N lowers on a 1 MB stack; MIR's diagnostics
+  included: E0601 at both sites, E0013 at `mono.rs:276`, E0075, E0078
+  and E0079 at theirs. E0011 in monomorphization and E0013 in lowering
+  (`lower.rs:974`) are unreachable from source, ported as written with no
+  case; E0091 is WASM's.
+- **The size, corrected:** `nova-mir` is about 3,400 code lines with 38
+  inline and 84 integration tests, not §2 item 1's 2,835, which counts
+  `lower.rs`, `mono.rs` and `async_lower.rs` alone; natively about 2,970
+  of them are ported. N's MIR is 4,076 lines (3,233 of code, its
+  `@test`s included), with 173 lines of HIR helpers and the command's
+  217.
+
 - **Lowering, monomorphization and `async_lower`,** with a canonical MIR
   dump.
 - **Needs first:** 5.3.
