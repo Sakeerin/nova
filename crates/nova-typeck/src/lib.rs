@@ -20,7 +20,7 @@ mod usefulness;
 
 pub use check::{
     check, check_items, check_items_shared, check_program, check_program_shared, check_with,
-    implements_on_a_type_it_does_not_own, Checked, ItemTables, SharedItems,
+    implements_on_a_type_it_does_not_own, shared_module, Checked, ItemTables, SharedItems,
 };
 
 use nova_hir::Ty;

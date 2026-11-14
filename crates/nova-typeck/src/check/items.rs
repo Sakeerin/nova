@@ -55,11 +55,16 @@ pub fn check_items(file: &ast::File, defs: &Definitions, options: &CheckOptions)
 /// std's item tables, built once from the check of a program of no module
 /// of its own, which each program's [`check_items_shared`] reads with std's
 /// ids rebased past its own (spec 5.3 §3.4): std's items are not collected
-/// again. For the hidden HIR dump alone.
+/// again. For the hidden HIR dump alone, and the MIR dump, which splices
+/// std's checked functions into each program ([`shared_module`], 5.4).
 pub struct SharedItems {
     tables: ItemTables,
     /// std's definitions and items, numbered from 0.
     defs: u32,
+    /// std's checked functions, in `hir::Module`'s order: its functions,
+    /// methods and constants by `DefId`, then its closures and wrappers,
+    /// from `defs` on, as they were lifted (5.4).
+    functions: Vec<hir::Function>,
     /// Whether std's items gave no diagnostic: one would come between a
     /// program's, which the shared path drops, so a program is then
     /// checked in full.
@@ -70,13 +75,15 @@ impl SharedItems {
     /// std's item tables, from `file` and `defs`, the resolution of a
     /// program of no module of its own. std's bodies are checked once
     /// too (5.3b, spec 5.3 §4.5): should they give a diagnostic, as its
-    /// items, nothing is shared.
+    /// items, nothing is shared. Their functions are kept, for the MIR
+    /// dump (5.4).
     pub fn new(file: &ast::File, defs: &Definitions, options: &CheckOptions) -> SharedItems {
         let tables = check_items(file, defs, options);
         let bodies = check_program(file, defs, options);
         SharedItems {
             shareable: tables.diagnostics.is_empty() && bodies.diagnostics.is_empty(),
             defs: defs.defs().len() as u32,
+            functions: bodies.functions,
             tables,
         }
     }
@@ -210,6 +217,311 @@ pub fn check_program_shared(
         return None;
     }
     Some(shared_checker(file, defs, options, shared).checked(tables))
+}
+
+/// The module the full check builds ([`Checked::into_module`]), from a
+/// program's shared check `checked` ([`check_program_shared`]) and std's
+/// checked functions, which [`SharedItems::new`] kept, copied in with their
+/// ids moved to where the full check numbers them (5.4, spec
+/// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §5, ADR
+/// 0057). With `S` std's definitions, `D` the program's and `P` its
+/// closures and wrappers ([`Shift`]): every id below `S` moves up by `D`,
+/// every closure's or wrapper's, `S` and up, by `D + P`, past the
+/// program's, and a lifted function's name `closure$N` or `fnval$N` takes
+/// its new id; nothing else changes. std's functions go after the
+/// program's functions, methods and constants, std's closures after the
+/// program's, as the full check orders them (`Checker::check_bodies`). The
+/// tables are the shared check's, std's parts rebased already.
+pub fn shared_module(checked: Checked, shared: &SharedItems) -> hir::Module {
+    let own_defs = checked.closures - shared.defs;
+    let shift = Shift {
+        std_defs: shared.defs,
+        defs: own_defs,
+        closures: own_defs + (checked.std_closures - checked.closures),
+    };
+    let Checked {
+        tables,
+        functions: own,
+        closures,
+        ..
+    } = checked;
+    let lifted = |fs: &[hir::Function], from: u32| {
+        fs.iter()
+            .position(|f| f.def_id.0 >= from)
+            .unwrap_or(fs.len())
+    };
+    let std = &shared.functions;
+    let std_lifted = lifted(std, shared.defs);
+    let own_lifted = lifted(&own, closures);
+    let mut own = own.into_iter();
+    let mut functions: Vec<hir::Function> = own.by_ref().take(own_lifted).collect();
+    functions.extend(std[..std_lifted].iter().map(|f| shift.function(f)));
+    functions.extend(own);
+    functions.extend(std[std_lifted..].iter().map(|f| shift.function(f)));
+    hir::Module {
+        sums: tables.sums,
+        records: tables.records,
+        traits: tables.traits,
+        impls: tables.impls,
+        functions,
+        externs: tables.externs,
+    }
+}
+
+/// How std's checked functions' ids move in a program ([`shared_module`]):
+/// a definition's, below `std_defs`, up by the program's `defs`; a closure's
+/// or wrapper's, from `std_defs` on, up by `closures`, the program's
+/// definitions and its own closures and wrappers.
+struct Shift {
+    std_defs: u32,
+    defs: u32,
+    closures: u32,
+}
+
+impl Shift {
+    fn id(&self, id: DefId) -> DefId {
+        if id.0 < self.std_defs {
+            DefId(id.0 + self.defs)
+        } else {
+            DefId(id.0 + self.closures)
+        }
+    }
+
+    /// A copy of std's function `f`, its ids moved: its own and its
+    /// bounds', every type's on its locals, its return and its body, and
+    /// every id its body names. A closure's or wrapper's name holds its id
+    /// (`Checker::lift_closure`, `Checker::make_fn_wrapper`), so it is
+    /// written again; any other name is kept.
+    fn function(&self, f: &hir::Function) -> hir::Function {
+        let def_id = self.id(f.def_id);
+        let mut name = f.name.clone();
+        if f.def_id.0 >= self.std_defs {
+            for prefix in ["closure$", "fnval$"] {
+                if f.name == format!("{prefix}{}", f.def_id.0) {
+                    name = format!("{prefix}{}", def_id.0);
+                }
+            }
+        }
+        let mut locals = f.locals.clone();
+        for local in &mut locals {
+            self.ty(&mut local.ty);
+        }
+        let mut ret_ty = f.ret_ty.clone();
+        self.ty(&mut ret_ty);
+        let mut body = f.body.clone();
+        self.expr(&mut body);
+        hir::Function {
+            def_id,
+            name,
+            generics: f.generics,
+            bounds: f
+                .bounds
+                .iter()
+                .map(|b| b.iter().map(|&t| self.id(t)).collect())
+                .collect(),
+            takes_env: f.takes_env,
+            capture_count: f.capture_count,
+            params: f.params,
+            locals,
+            ret_ty,
+            is_async: f.is_async,
+            body,
+            span: f.span,
+        }
+    }
+
+    fn ty(&self, ty: &mut Ty) {
+        match ty {
+            Ty::Fn { params, ret } => {
+                self.tys(params);
+                self.ty(ret);
+            }
+            Ty::Future(inner) | Ty::Array(inner) => self.ty(inner),
+            Ty::Sum { def_id, args } | Ty::Record { def_id, args } => {
+                *def_id = self.id(*def_id);
+                self.tys(args);
+            }
+            Ty::Tuple(elems) => self.tys(elems),
+            Ty::Assoc { on, assoc } => {
+                self.ty(on);
+                *assoc = self.id(*assoc);
+            }
+            Ty::Int
+            | Ty::Float
+            | Ty::Bool
+            | Ty::Char
+            | Ty::String
+            | Ty::Bytes
+            | Ty::Unit
+            | Ty::Param(_)
+            | Ty::Var(_)
+            | Ty::Never
+            | Ty::Error => {}
+        }
+    }
+
+    fn tys(&self, tys: &mut [Ty]) {
+        for ty in tys {
+            self.ty(ty);
+        }
+    }
+
+    fn exprs(&self, exprs: &mut [hir::Expr]) {
+        for e in exprs {
+            self.expr(e);
+        }
+    }
+
+    /// `e`, its type and every node below it, each id moved.
+    fn expr(&self, e: &mut hir::Expr) {
+        use hir::ExprKind as K;
+        self.ty(&mut e.ty);
+        match &mut e.kind {
+            K::IntLit(_)
+            | K::FloatLit(_)
+            | K::BoolLit(_)
+            | K::StrLit(_)
+            | K::CharLit(_)
+            | K::Unit
+            | K::Local(_)
+            | K::Break
+            | K::Continue => {}
+            K::MakeClosure {
+                func,
+                type_args,
+                captures,
+            } => {
+                *func = self.id(*func);
+                self.tys(type_args);
+                self.exprs(captures);
+            }
+            K::Call {
+                func,
+                type_args,
+                args,
+            } => {
+                if let hir::Callee::Def(id) = func {
+                    *id = self.id(*id);
+                }
+                self.tys(type_args);
+                self.exprs(args);
+            }
+            K::MakeVariant { sum, args, .. } => {
+                *sum = self.id(*sum);
+                self.exprs(args);
+            }
+            K::MakeRecord { record, fields } => {
+                *record = self.id(*record);
+                self.exprs(fields);
+            }
+            K::MakeTuple { elems } | K::MakeArray { elems } | K::StrConcat(elems) => {
+                self.exprs(elems)
+            }
+            K::FieldGet { target, .. }
+            | K::ArrayLen { target }
+            | K::Unary { expr: target, .. }
+            | K::Let { init: target, .. }
+            | K::Assign { value: target, .. }
+            | K::ToStr(target)
+            | K::Await(target) => self.expr(target),
+            K::FieldSet { target, value, .. } => {
+                self.expr(target);
+                self.expr(value);
+            }
+            K::ArrayRepeat { init, len } => {
+                self.expr(init);
+                self.expr(len);
+            }
+            K::Index { target, index } => {
+                self.expr(target);
+                self.expr(index);
+            }
+            K::IndexSet {
+                target,
+                index,
+                value,
+            } => {
+                self.expr(target);
+                self.expr(index);
+                self.expr(value);
+            }
+            K::TraitCall {
+                trait_id,
+                self_ty,
+                type_args,
+                receiver,
+                args,
+                ..
+            } => {
+                *trait_id = self.id(*trait_id);
+                self.ty(self_ty);
+                self.tys(type_args);
+                if let Some(r) = receiver {
+                    self.expr(r);
+                }
+                self.exprs(args);
+            }
+            K::Binary { lhs, rhs, .. } | K::LogicalAnd { lhs, rhs } | K::LogicalOr { lhs, rhs } => {
+                self.expr(lhs);
+                self.expr(rhs);
+            }
+            K::Block { stmts, trailing } => {
+                self.exprs(stmts);
+                if let Some(t) = trailing {
+                    self.expr(t);
+                }
+            }
+            K::If { cond, then, else_ } => {
+                self.expr(cond);
+                self.expr(then);
+                if let Some(e) = else_ {
+                    self.expr(e);
+                }
+            }
+            K::While { cond, body } => {
+                self.expr(cond);
+                self.expr(body);
+            }
+            K::Match { scrutinee, arms } => {
+                self.expr(scrutinee);
+                for arm in arms {
+                    self.pattern(&mut arm.pattern);
+                    if let Some(g) = &mut arm.guard {
+                        self.expr(g);
+                    }
+                    self.expr(&mut arm.body);
+                }
+            }
+            K::Return(value) => {
+                if let Some(v) = value {
+                    self.expr(v);
+                }
+            }
+        }
+    }
+
+    fn pattern(&self, p: &mut hir::Pattern) {
+        match p {
+            hir::Pattern::Variant { sum, fields, .. } => {
+                *sum = self.id(*sum);
+                for f in fields {
+                    self.pattern(f);
+                }
+            }
+            hir::Pattern::Tuple(ps) | hir::Pattern::Or(ps) => {
+                for q in ps {
+                    self.pattern(q);
+                }
+            }
+            hir::Pattern::Wildcard
+            | hir::Pattern::Bind(_)
+            | hir::Pattern::LitInt(_)
+            | hir::Pattern::LitBool(_)
+            | hir::Pattern::LitStr(_)
+            | hir::Pattern::LitChar(_)
+            | hir::Pattern::Range { .. } => {}
+        }
+    }
 }
 
 /// Whether the program implements anything on a type it does not own
@@ -995,5 +1307,79 @@ pub fn zz(x: Int) -> Int {
             .is_empty());
         let items = SharedItems::new(&alone.file, &alone.definitions, &options);
         assert!(!items.shareable());
+    }
+
+    /// std's checked functions, kept once and spliced into a program's
+    /// shared check, give the module the full check gives, by its `Debug`
+    /// text (5.4, spec 5.4 §5): over programs with no closure, one and
+    /// several with a wrapper, a method and a constant, against a std of
+    /// one more module holding a closure, a wrapper, a record, a sum, a
+    /// trait, an impl, a generic function and a constant, so that the
+    /// program's definitions and closures, `D` and `P`, both vary.
+    #[test]
+    fn shared_module_is_the_full_checks_module() {
+        let extra = (
+            "$std.zz",
+            "pub record Zr { n: Int }\npub type Zs = | Za(Int) | Zb\n\
+             pub trait Zt {\n    fn zt(self) -> Int\n}\n\
+             impl Zt for Zr {\n    fn zt(self) -> Int { self.n }\n}\n\
+             pub fn zz(x: Int) -> Int {\n    Some(x).map(|y| y + 1).unwrap_or(0)\n}\n\
+             pub fn zw(s: Zs) -> Int {\n    let h = zz\n    match s {\n        \
+             Za(n) => h(n)\n        Zb => Zr { n: 2 }.zt()\n    }\n}\n\
+             pub fn zg<T: Zt>(x: T) -> Int { x.zt() }\npub const ZC: Int = 3\n",
+        );
+        let std = std_with(Some(extra));
+        let shared_std = SharedStd::new(CompileTarget::Native, std_with(Some(extra)));
+        let alone = shared_std.alone();
+        let options = CheckOptions::default();
+        let items = SharedItems::new(&alone.file, &alone.definitions, &options);
+        assert!(items.shareable());
+        let std_lifted = items
+            .functions
+            .iter()
+            .filter(|f| f.def_id.0 >= items.defs)
+            .count();
+        assert!(std_lifted >= 2, "{std_lifted} of std's functions lifted");
+        let mut own_lifted = Vec::new();
+        for program in [
+            "fn main() {\n    println(\"${zz(1)} ${ZC}\")\n}\n",
+            "fn main() {\n    let f = |x: Int| x * 2\n    println(\"${f(zw(Zb))}\")\n}\n",
+            "record Mine { x: Int }\nimpl Mine {\n    \
+             fn m(self) -> Int {\n        let g = |y: Int| y + self.x\n        g(1)\n    }\n}\n\
+             impl Zt for Mine {\n    fn zt(self) -> Int { self.x }\n}\nconst K: Int = 4\n\
+             fn twice(f: fn(Int) -> Int, x: Int) -> Int { f(f(x)) }\n\
+             fn main() {\n    let a = |x: Int| x + K\n    let b = |x: Int| x * 2\n    \
+             let c = zz\n    let s = Za(1)\n    \
+             println(\"${twice(a, 1)} ${twice(b, 2)} ${c(3)} ${zg(Mine { x: 1 })} \
+             ${Mine { x: 2 }.m()} ${zw(s)}\")\n}\n",
+        ] {
+            let ast = parse(program);
+            let sources = [ModuleSource::new("main", &ast)];
+            let full =
+                nova_resolver::resolve_program_with_std(CompileTarget::Native, &sources, &std);
+            let all = check_with(&full.file, &full.definitions, &options);
+            assert!(
+                all.diagnostics.is_empty(),
+                "{program}: {:?}",
+                all.diagnostics
+            );
+            let shared =
+                nova_resolver::resolve_program_with_shared_std_for_check(&sources, &shared_std);
+            let checked = check_program_shared(&shared.file, &shared.definitions, &options, &items)
+                .expect("the shared path checks it");
+            own_lifted.push(checked.std_closures - checked.closures);
+            let spliced = shared_module(checked, &items);
+            assert_eq!(
+                format!("{spliced:?}"),
+                format!("{:?}", all.module),
+                "{program}"
+            );
+            // Each of std's lifted functions is named for its new id.
+            let defs = full.definitions.defs().len() as u32;
+            for f in spliced.functions.iter().filter(|f| f.def_id.0 >= defs) {
+                assert!(f.name.ends_with(&format!("${}", f.def_id.0)), "{}", f.name);
+            }
+        }
+        assert_eq!(own_lifted, [0, 1, 4]);
     }
 }

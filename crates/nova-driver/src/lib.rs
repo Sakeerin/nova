@@ -492,7 +492,12 @@ impl HirDumps {
                 });
                 return Some(dumps);
             }
-            let mut module = checked.into_module();
+            // The full check's module: std's checked functions spliced into
+            // the shared check's, their ids moved (5.4, spec §5).
+            let mut module = match resolve {
+                Resolve::SharedForCheck => nova_typeck::shared_module(checked, &self.items),
+                _ => checked.into_module(),
+            };
             keep_the_entry_main(&mut module, defs);
             let lowered = |stop_before_async: bool| {
                 nova_mir::lower_module_with(
@@ -532,6 +537,14 @@ impl Wanted {
         mir: false,
         before: false,
     };
+
+    /// Every dump: the driver's guard's, natively.
+    #[cfg(test)]
+    const ALL: Wanted = Wanted {
+        hir: true,
+        mir: true,
+        before: true,
+    };
 }
 
 /// One root's dumps, as [`Wanted`] asked for them.
@@ -564,11 +577,15 @@ impl RootDumps {
 /// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3.3, ADR
 /// 0057): for each root, a program that does not run, as `check` decides
 /// it, is `runs=false`, before the front end; otherwise [`HirDumps`]'s
-/// pipeline and check, std's shared, and, when neither gave an error, the
-/// entry `main` kept and the module lowered natively, after the async
-/// transform or, with `before_async`, before it. A user sees nothing of
-/// it: `check`, `build`, `run`, `test` and the language server keep their
-/// own paths.
+/// pipeline and check, and, when neither gave an error, the full check's
+/// module, the entry `main` kept and the module lowered natively, after
+/// the async transform or, with `before_async`, before it. std's checked
+/// functions are kept once and spliced into each program's shared check
+/// with their ids moved ([`nova_typeck::shared_module`], spec §5); a
+/// program the shared path cannot check, and every program when std alone
+/// gives a diagnostic or holds a test, is checked in full. A user sees
+/// nothing of it: `check`, `build`, `run`, `test` and the language server
+/// keep their own paths.
 pub struct MirDumps {
     hir: HirDumps,
     before_async: bool,
@@ -580,7 +597,7 @@ impl MirDumps {
     /// transform or, with `before_async`, before it.
     pub fn new(before_async: bool) -> MirDumps {
         MirDumps {
-            hir: HirDumps::unshared(Target::Native, false),
+            hir: HirDumps::new(Target::Native, false),
             before_async,
         }
     }
@@ -1993,7 +2010,11 @@ mod resolution_dumps {
     /// program that implements
     /// something on a type it does not own is checked in full, which the
     /// cases `std_bodies_*` (the research's probes) must take; the roots
-    /// that take it are listed.
+    /// that take it are listed. Natively, the MIR dumps too, after the
+    /// async transform and before it (5.4, spec 5.4 §5): std's checked
+    /// functions spliced into each program's shared check lower as the
+    /// full check's module does, from the same check as each root's HIR
+    /// dump, so no root is checked twice.
     #[test]
     fn std_checked_once_dumps_what_std_checked_for_each_program_dumps() {
         let sets = hir_sets();
@@ -2002,10 +2023,15 @@ mod resolution_dumps {
                 .iter()
                 .map(|(target, test, roots)| {
                     scope.spawn(move || {
+                        let wanted = if *target == Target::Native && !*test {
+                            Wanted::ALL
+                        } else {
+                            Wanted::HIR
+                        };
                         let dump_all = |dumps: &HirDumps, roots: &[std::path::PathBuf]| {
                             roots
                                 .iter()
-                                .map(|r| dumps.dump(r).map_err(|e| e.kind()))
+                                .map(|r| dumps.dumps(r, wanted).map_err(|e| e.kind()))
                                 .collect::<Vec<_>>()
                         };
                         // The full check of each root, which keeps nothing from
@@ -2049,10 +2075,28 @@ mod resolution_dumps {
                                 r.display()
                             );
                         }
+                        let holds = |d: &Option<String>, text: &str| {
+                            d.as_ref().is_some_and(|d| d.contains(text))
+                        };
                         let checked = unshared
                             .iter()
-                            .filter(|d| d.as_ref().is_ok_and(|d| d.contains(" checked=true")))
+                            .filter(|d| d.as_ref().is_ok_and(|d| holds(&d.hir, " checked=true")))
                             .count();
+                        // Natively, the programs that lower, in both forms.
+                        let lowered = unshared
+                            .iter()
+                            .filter(|d| {
+                                d.as_ref().is_ok_and(|d| {
+                                    holds(&d.mir, " async_lowered=true ")
+                                        && holds(&d.before, " async_lowered=false ")
+                                })
+                            })
+                            .count();
+                        if wanted.mir {
+                            assert!(lowered >= 500, "{target:?}: {lowered} lower");
+                        } else {
+                            assert_eq!(lowered, 0);
+                        }
                         let probes: Vec<&std::path::PathBuf> = roots
                             .iter()
                             .filter(|r| {
@@ -2069,7 +2113,8 @@ mod resolution_dumps {
                             .map(|f| f.strip_prefix(&root).unwrap_or(f).display().to_string())
                             .collect();
                         eprintln!(
-                            "{target:?} {test}: {} roots take the full check: {shown:?}",
+                            "{target:?} {test}: {} roots take the full check: {shown:?}; \
+                             {lowered} lower",
                             shown.len()
                         );
                         (roots.len(), checked)
