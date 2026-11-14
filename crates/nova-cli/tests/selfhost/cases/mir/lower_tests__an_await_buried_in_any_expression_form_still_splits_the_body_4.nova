@@ -1,0 +1,3 @@
+async fn g() -> Int { 1 }
+async fn f() -> Int { match g().await { _ => 0 } }
+fn main() { let x = f() }

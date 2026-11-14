@@ -1,0 +1,7 @@
+extern "C" {
+    fn sqrt(x: Float) -> Float
+}
+
+pub fn ca() -> Float {
+    sqrt(16.0)
+}

@@ -1,0 +1,12 @@
+record P { v: Int }
+impl P { fn scaled(self, k: Int) -> Int { self.v * k } }
+fn first<T>(xs: [T], fallback: T) -> T {
+if xs.len() == 0 { fallback } else { xs[0] }
+}
+fn main() {
+let n = 3
+let a = [7; n]
+let p = P { v: first(a, 0) + a.len() }
+let o: Option<Int> = Some(p.scaled(2))
+match o { Some(x) => println("${x}"), None => println("none"), }
+}

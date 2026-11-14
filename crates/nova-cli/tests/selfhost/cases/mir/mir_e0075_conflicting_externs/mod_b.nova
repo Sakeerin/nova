@@ -1,0 +1,7 @@
+extern "C" {
+    fn sqrt(x: Int) -> Int
+}
+
+pub fn cb() -> Int {
+    sqrt(16)
+}

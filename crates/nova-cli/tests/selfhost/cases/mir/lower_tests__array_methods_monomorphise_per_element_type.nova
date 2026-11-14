@@ -1,0 +1,5 @@
+fn main() {
+let a = [1, 2, 3].slice(0, 2)
+let b = ["x", "y"].slice(1, 2)
+println("${a.len()} ${b[0]}")
+}

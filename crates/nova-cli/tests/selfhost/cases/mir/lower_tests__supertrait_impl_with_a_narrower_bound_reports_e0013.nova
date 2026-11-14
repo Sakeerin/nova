@@ -1,0 +1,12 @@
+trait Show { fn show(self) -> String }
+trait A { fn a(self) -> Int }
+trait B: A { fn b(self) -> Int }
+record W<T> { inner: T }
+impl Show for Int { fn show(self) -> String { "i" } }
+impl<T: Show> A for W<T> { fn a(self) -> Int { 1 } }
+impl<T> B for W<T> { fn b(self) -> Int { 2 } }
+fn sum<U: B>(x: U) -> Int { x.b() }
+fn main() {
+let w = W { inner: true }
+println("${sum(w)}")
+}

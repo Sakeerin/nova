@@ -1,0 +1,7 @@
+fn f() -> Int {
+    let mut t = (1, "s")
+    t.0 = 5
+    t.1 = "x"
+    t.0
+}
+fn main() { println("${f()}") }

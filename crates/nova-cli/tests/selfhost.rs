@@ -73,6 +73,16 @@
 //! given a std whose items or bodies give a diagnostic checks std for each
 //! program.
 //!
+//! 5.4 (spec
+//! `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3, §7; ADR
+//! 0057): S0's hidden `nova check --dump-mir FILE…`, absent from `--help`,
+//! prints each root's MIR natively, after the async transform or, with
+//! `--before-async`, before it. Until N prints MIR (`N_MIR`), the native
+//! corpus's roots that run, the HIR cases that reach MIR and MIR's cases
+//! (`cases/mir/`), with both line endings, go through S0 alone, whose dumps
+//! must be well formed and hold every native form and every code MIR gives
+//! from source.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -5095,4 +5105,261 @@ fn every_run_of_a_mir_dump_settles_e0004s_paths_on_windows() {
             settled
         );
     }
+}
+
+/// The codes MIR gives natively from source (5.4, spec §7.3), each with
+/// its site's words, which the cases print: E0601 with no `main` and with
+/// one that is generic or takes parameters (`mono.rs`'s two), E0013 at the
+/// bound check of monomorphization, E0075, E0078 at both of its limits and
+/// E0079. E0013's other site, an unresolvable trait call in lowering
+/// (`lower.rs`), is unreachable from source, as monomorphization's E0011
+/// is, and E0091 is the WASM target's (ADR 0057).
+const MIR_CODES: [(&str, &str); 7] = [
+    ("E0601", "no `main` function found"),
+    ("E0601", "`main` cannot be generic or take parameters"),
+    ("E0013", "is not satisfied when instantiating"),
+    ("E0075", "is declared with conflicting signatures"),
+    ("E0078", "the chain of bindings is more than"),
+    ("E0078", "it resolves to more than"),
+    ("E0079", "is still an unresolved associated type"),
+];
+
+/// MIR's cases (5.4, spec §7.1): `cases/mir/`, the sources the native tests
+/// of `nova-mir` lower, extracted, and by hand a case for each of MIR's
+/// codes reachable from source, one holding every statement a native build
+/// prints, and a package whose module that does not run is `runs=false`;
+/// laid out as the resolver's ([`case_roots`]).
+fn mir_cases_dir() -> PathBuf {
+    cases_dir().join("mir")
+}
+
+/// The native corpus's roots that run (spec 5.4 §7.1): every loose program
+/// and each package's `src/main.nova`, as `check` lowers them.
+fn mir_corpus() -> (Vec<String>, Vec<String>) {
+    let packages = package_corpus()
+        .into_iter()
+        .filter(|f| f.ends_with("/src/main.nova"))
+        .collect();
+    (loose_corpus(), packages)
+}
+
+/// The HIR cases that reach MIR (spec 5.4 §7.1): the roots of
+/// `cases/check/` whose part in the HIR test's run ([`hir_cases`]) holds no
+/// error, the loose programs' and the packages' names, and the directories
+/// of those run apart; each part is read in the order the run dumped them.
+fn mir_hir_cases() -> &'static (Vec<String>, Vec<PathBuf>) {
+    static CASES: OnceLock<(Vec<String>, Vec<PathBuf>)> = OnceLock::new();
+    CASES.get_or_init(|| {
+        let roots = case_roots(&hir_cases_dir(Mode::Check));
+        let from_cases: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
+        let (dump, _) = hir_cases(Mode::Check);
+        let parts = parts_by_root(dump);
+        assert_eq!(parts.len(), from_cases.len() + roots.apart.len());
+        let clean: Vec<bool> = parts
+            .iter()
+            .map(|(_, part)| !part.contains("\n  (Error \""))
+            .collect();
+        let loose = from_cases
+            .iter()
+            .zip(&clean)
+            .filter(|(_, c)| **c)
+            .map(|(r, _)| r.clone())
+            .collect();
+        let apart = roots
+            .apart
+            .iter()
+            .zip(&clean[from_cases.len()..])
+            .filter(|(_, c)| **c)
+            .map(|(d, _)| d.clone())
+            .collect();
+        (loose, apart)
+    })
+}
+
+/// [`agree_on_mir_in`] `form` on the cases of `check` (in `check`, or a
+/// copy of it) that reach MIR ([`mir_hir_cases`]) and on MIR's cases (in
+/// `mir`, or a copy): each program apart from its own directory after the
+/// rest. Returns S0's output and how many programs it holds.
+fn agree_on_mir_cases(form: MirForm, check: &Path, mir: &Path) -> (String, usize) {
+    let (loose, apart) = mir_hir_cases();
+    let roots = case_roots(mir);
+    assert!(roots.apart.is_empty());
+    let mut all = agree_on_mir_in(form, check, loose, 0);
+    for dir in apart {
+        let name = dir.file_name().expect("a case's directory");
+        let copy = check.join(name);
+        all.push_str(&agree_on_mir_in(form, &copy, &["main.nova".to_string()], 0));
+    }
+    let own: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
+    all.push_str(&agree_on_mir_in(form, mir, &own, 0));
+    (all, loose.len() + apart.len() + own.len())
+}
+
+/// [`agree_on_mir_cases`] in `form` on the cases as they are, once a run.
+fn mir_cases(form: MirForm) -> &'static (String, usize) {
+    static CASES: [OnceLock<(String, usize)>; 2] = [OnceLock::new(), OnceLock::new()];
+    CASES[form as usize]
+        .get_or_init(|| agree_on_mir_cases(form, &hir_cases_dir(Mode::Check), &mir_cases_dir()))
+}
+
+/// The MIR dump, in both forms, of the native corpus's roots that run,
+/// the HIR cases that reach MIR and MIR's cases (5.4, spec §7.1 to §7.3):
+/// compared with N's once N prints MIR ([`N_MIR`]), S0's alone before;
+/// each root's part is there, well formed; every form of `KINDS` occurs
+/// but those a native build never prints, and nothing unlisted; `Await` and
+/// `async=true` in the before form alone, which equals the after form on
+/// every root that holds no poll function; and each of MIR's codes from
+/// source at its site occurs among the cases ([`MIR_CODES`]).
+#[test]
+fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
+    let root = root();
+    let (loose, packages) = mir_corpus();
+    assert!(loose.len() >= 240, "only {} loose programs", loose.len());
+    assert!(
+        packages.len() >= 8,
+        "only {} packages' src/main.nova",
+        packages.len()
+    );
+    let runs: Vec<(MirForm, String, String, usize)> = std::thread::scope(|scope| {
+        let runs: Vec<_> = [MirForm::After, MirForm::Before]
+            .into_iter()
+            .map(|form| {
+                let (root, loose, packages) = (&root, &loose, &packages);
+                scope.spawn(move || {
+                    let mut corpus = agree_on_mir_in(form, root, loose, 0);
+                    corpus.push_str(&agree_on_mir_in(form, root, packages, 0));
+                    let (cases, count) = mir_cases(form).clone();
+                    (form, corpus, cases, count)
+                })
+            })
+            .collect();
+        joined(runs)
+    });
+    let mut forms: [std::collections::HashSet<String>; 2] = Default::default();
+    for (form, corpus, cases, count) in &runs {
+        // Most corpus roots lower; the HIR cases that reach MIR, most of
+        // them clean, and MIR's cases.
+        assert!(*count >= 400, "{form:?}: only {count} cases");
+        let first = |dump: &str, head: &str| {
+            parts_by_root(dump)
+                .iter()
+                .filter(|(_, p)| p.starts_with(head))
+                .count()
+        };
+        let lowered = first(corpus, "(Mir runs=true checked=true lowered=true ");
+        assert!(lowered >= 200, "{form:?}: {lowered} corpus roots lower");
+        assert!(
+            first(cases, "(Mir runs=true checked=true lowered=true ") >= 380,
+            "{form:?}: too few cases lower"
+        );
+        let flag = format!(" async_lowered={} ", *form == MirForm::After);
+        for dump in [corpus, cases] {
+            for (r, part) in parts_by_root(dump) {
+                let line = part.lines().next().unwrap_or("");
+                if line.contains(" lowered=true ") {
+                    assert!(line.contains(&flag), "{form:?} {r}: {line}");
+                }
+            }
+            forms[*form as usize].extend(hir_forms(dump));
+        }
+        eprintln!(
+            "the MIR dump {form:?}: {} loose programs and {} packages' mains, {} lines, {} \
+             bytes; {count} cases, {} lines, {} bytes",
+            loose.len(),
+            packages.len(),
+            corpus.lines().count(),
+            corpus.len(),
+            cases.lines().count(),
+            cases.len()
+        );
+    }
+    let kinds = nova_driver::mir_dump::KINDS;
+    let not_native = nova_driver::mir_dump::NOT_NATIVE;
+    let all: std::collections::HashSet<&String> = forms[0].iter().chain(&forms[1]).collect();
+    let unlisted: Vec<&&String> = all
+        .iter()
+        .filter(|f| !f.ends_with("=<n>") && !kinds.contains(&f.as_str()))
+        .collect();
+    assert!(unlisted.is_empty(), "{unlisted:?} are in no list");
+    let missing: Vec<&str> = kinds
+        .iter()
+        .copied()
+        .filter(|k| !not_native.contains(k) && !all.iter().any(|f| f == k))
+        .collect();
+    assert!(missing.is_empty(), "no native MIR dump holds {missing:?}");
+    let native: Vec<&str> = not_native
+        .iter()
+        .copied()
+        .filter(|k| all.iter().any(|f| f == k))
+        .collect();
+    assert!(native.is_empty(), "{native:?} in a native dump");
+    for before_only in ["(Await", "(Function async=true"] {
+        assert!(!forms[0].contains(before_only), "{before_only} after");
+        assert!(forms[1].contains(before_only), "no {before_only} before");
+    }
+    // Where the after form holds no poll function the transform changed
+    // nothing (spec §7.2).
+    let (after, before) = (&runs[0], &runs[1]);
+    for (a, b) in [(&after.1, &before.1), (&after.2, &before.2)] {
+        let (a, b) = (parts_by_root(a), parts_by_root(b));
+        assert_eq!(a.len(), b.len());
+        let mut changed = 0;
+        for ((ra, pa), (rb, pb)) in a.iter().zip(&b) {
+            assert_eq!(ra, rb);
+            if pa.contains("$poll\" ") {
+                changed += 1;
+                continue;
+            }
+            let same = pa.replacen(" async_lowered=true ", " async_lowered=false ", 1);
+            assert_eq!(&same, pb, "{ra}: the forms differ with no poll function");
+        }
+        eprintln!("{changed} roots hold a poll function after the transform");
+    }
+    let codes = codes_in(&after.2);
+    assert_eq!(codes, codes_in(&before.2));
+    let absent: Vec<&(&str, &str)> = MIR_CODES
+        .iter()
+        .filter(|(code, words)| {
+            !after
+                .2
+                .lines()
+                .any(|l| l.starts_with(&format!("  (Error \"{code}\" \"")) && l.contains(words))
+        })
+        .collect();
+    assert!(absent.is_empty(), "{absent:?} occur in no case; {codes:?}");
+    eprintln!("the MIR cases' codes: {codes:?}");
+}
+
+/// MIR's cases and the HIR cases that reach MIR as a Windows checkout has
+/// them ([`crlf`]), in both forms (spec 5.4 §7.2): each part is there and
+/// the codes are those of the cases as they are, though E0601's and
+/// E0013's places are byte offsets.
+#[test]
+fn the_mir_dumps_agree_on_the_cases_with_windows_line_endings() {
+    let dir = fresh_dir("crlf-mir");
+    let (check, mir) = (dir.join("check"), dir.join("mir"));
+    let (held, _) = copy_crlf(&hir_cases_dir(Mode::Check), &check);
+    let (held_mir, changed) = copy_crlf(&mir_cases_dir(), &mir);
+    assert!(
+        held > 700 && held_mir > 70 && changed > 70,
+        "{held} {held_mir}"
+    );
+    std::thread::scope(|scope| {
+        let forms: Vec<_> = [MirForm::After, MirForm::Before]
+            .into_iter()
+            .map(|form| {
+                let (check, mir) = (&check, &mir);
+                scope.spawn(move || {
+                    let crlf = agree_on_mir_cases(form, check, mir);
+                    (form, crlf, mir_cases(form))
+                })
+            })
+            .collect();
+        for (form, (dumps, count), (lf, lf_count)) in joined(forms) {
+            assert_eq!(count, *lf_count, "{form:?}");
+            assert_eq!(parts_by_root(&dumps).len(), count, "{form:?}");
+            assert_eq!(codes_in(&dumps), codes_in(lf), "{form:?}");
+            assert_ne!(&dumps, lf, "{form:?}: no place moved");
+        }
+    });
 }

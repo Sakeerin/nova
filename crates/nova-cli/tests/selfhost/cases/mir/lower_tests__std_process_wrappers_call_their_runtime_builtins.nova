@@ -1,0 +1,7 @@
+fn main() {
+let o = run("p", ["a"])
+let s = status("p", [])
+let e = env("HOME")
+let x = current_exe()
+println("${o.is_ok()} ${s.is_ok()} ${e.is_some()} ${x.is_ok()}")
+}

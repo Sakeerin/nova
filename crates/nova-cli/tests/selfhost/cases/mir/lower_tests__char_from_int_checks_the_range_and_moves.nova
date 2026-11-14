@@ -1,0 +1,4 @@
+fn main() {
+    let c = char_from_int(65)
+    println("${c.is_some()}")
+}

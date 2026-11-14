@@ -1,0 +1,7 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Wrap =
+  | Wrap(Int, String)
+fn f(o: Opt<Int>) -> Int { match o { Yes(x) => x, No => 0 } }
+fn main() { println("${f(No)}") }

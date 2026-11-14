@@ -1,0 +1,4 @@
+fn main() {
+    let f = "2.5".parse_float()
+    println("${f.is_some()}")
+}
