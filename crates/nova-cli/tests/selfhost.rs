@@ -4099,7 +4099,11 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
             })
         });
         let wasm_dumps = scope.spawn(|| formed(agree_on_hir_in(Mode::Wasm, &root, &wasm, 0)));
-        let test_dumps = scope.spawn(|| formed(agree_on_hir_in(Mode::Test, &root, &tests, 0)));
+        let test_dumps = scope.spawn(|| {
+            agree_in_parts(&tests, HIR_TEST_PARTS, |part| {
+                formed(agree_on_hir_in(Mode::Test, &root, part, 0))
+            })
+        });
         let mut check = formed(loose_hir().clone());
         check.push_str(&package_dumps.join().expect("the packages' thread"));
         let mut wasm_dumps = wasm_dumps.join().expect("the WASM programs' thread");
@@ -4204,8 +4208,16 @@ fn loose_hir() -> &'static String {
 
 /// How many parts the package corpus is dealt into, each a process a side
 /// on a thread of its own ([`agree_in_parts`]): N's own 44 package roots,
-/// each a dump of all of N, are most of the corpus's dump.
-const HIR_PACKAGE_PARTS: usize = 3;
+/// each a dump of all of N, are most of the corpus's dump. Six since 5.4,
+/// where three gave a process about 40 s alone on N's debug runtime and
+/// 103 to 111 s in a full local run, near [`CHILD_LIMIT`], before the MIR
+/// dump's N side ran beside it.
+const HIR_PACKAGE_PARTS: usize = 6;
+
+/// How many parts the files with tests are dealt into under test mode, as
+/// [`HIR_PACKAGE_PARTS`] (5.4): in one process they took 88 to 96 s in a
+/// full local run.
+const HIR_TEST_PARTS: usize = 2;
 
 /// The type checker's cases of every mode as a Windows checkout has them
 /// ([`crlf`]), as the resolver's are compared
