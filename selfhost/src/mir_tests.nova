@@ -17,6 +17,7 @@ import mir
 import mono
 import parser
 import resolver
+import splice
 import typeck
 import typeck_body
 import typeck_body_tests

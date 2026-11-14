@@ -132,8 +132,8 @@ pub fn lower_module_with(
         if done.contains_key(name) { continue }
         let _ = done.insert(name, true)
         let mut concrete = true
-        for t in type_args.iter() { if has_params(t) { concrete = false } }
-        for t in type_args.iter() { if has_vars(t) { concrete = false } }
+        for i in 0..type_args.len() { if has_params(type_args.at(i)) { concrete = false } }
+        for i in 0..type_args.len() { if has_vars(type_args.at(i)) { concrete = false } }
         if !concrete {
             diagnostics.push(
                 error_at(
@@ -398,7 +398,8 @@ impl Specializer {
     /// return type, then body (`Specializer::function`).
     pub fn function(mut self, func: HirFunction) -> HirFunction {
         let mut locals: Vec<Local> = Vec::new()
-        for l in func.locals.iter() {
+        for i in 0..func.locals.len() {
+            let l = func.locals.at(i)
             locals.push(Local { name: l.name, ty: self.ty(l.ty), is_mut: l.is_mut, span: l.span })
         }
         let ret_ty = self.ty(func.ret_ty)
@@ -421,13 +422,13 @@ impl Specializer {
 
     fn tys(mut self, tys: Vec<Ty>) -> Vec<Ty> {
         let mut out: Vec<Ty> = Vec::new()
-        for t in tys.iter() { out.push(self.ty(t)) }
+        for i in 0..tys.len() { out.push(self.ty(tys.at(i))) }
         out
     }
 
     fn exprs(mut self, exprs: Vec<HirExpr>) -> Vec<HirExpr> {
         let mut out: Vec<HirExpr> = Vec::new()
-        for e in exprs.iter() { out.push(self.expr(e)) }
+        for i in 0..exprs.len() { out.push(self.expr(exprs.at(i))) }
         out
     }
 
@@ -522,7 +523,8 @@ impl Specializer {
             EkMatch(scrutinee, arms) => {
                 let s = self.expr(scrutinee)
                 let mut out: Vec<HirArm> = Vec::new()
-                for a in arms.iter() {
+                for i in 0..arms.len() {
+                    let a = arms.at(i)
                     let guard = self.opt(a.guard)
                     let body = self.expr(a.body)
                     out.push(HirArm { pattern: a.pattern, guard: guard, body: body, span: a.span })

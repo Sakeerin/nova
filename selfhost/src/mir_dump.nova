@@ -140,7 +140,8 @@ impl MirDump {
     fn typed(mut self, fields: Vec<(Int, Int)>) {
         self.out.push(" (")
         let mut first = true
-        for (t, c) in fields.iter() {
+        for i in 0..fields.len() {
+            let (t, c) = fields.at(i)
             if !first { self.out.push(" ") }
             first = false
             self.out.push("t${t}:")
@@ -166,7 +167,7 @@ impl MirDump {
             self.field("ret", MIR_TY_NAMES[e.ret])
             self.close()
         }
-        for f in program.functions.iter() { self.function(f) }
+        for i in 0..program.functions.len() { self.function(program.functions.at(i)) }
     }
 
     // A function: its line, its temps, one a line, and its blocks
@@ -189,7 +190,7 @@ impl MirDump {
             let b = f.blocks.at(i)
             self.open(2, "Block")
             self.block(i)
-            for s in b.stmts.iter() { self.stmt(s) }
+            for k in 0..b.stmts.len() { self.stmt(b.stmts.at(k)) }
             self.terminator(b.term)
             self.close()
         }
@@ -372,7 +373,8 @@ impl MirDump {
                 self.temp(disc)
                 self.out.push(" (")
                 let mut first = true
-                for (v, b) in arms.iter() {
+                for i in 0..arms.len() {
+                    let (v, b) = arms.at(i)
                     if !first { self.out.push(" ") }
                     first = false
                     self.out.push("${v}:bb${b}")

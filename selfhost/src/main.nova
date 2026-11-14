@@ -75,6 +75,7 @@ import parser_tests
 import resolution_dump
 import resolver
 import resolver_tests
+import splice
 import token
 import typeck
 import typeck_body

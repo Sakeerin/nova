@@ -121,7 +121,8 @@ pub fn lower_function(
     }
     if !lo.diagnostics.is_empty() { return Err(lo.diagnostics) }
     let mut out: Vec<MirBlock> = Vec::new()
-    for b in lo.blocks.iter() {
+    for i in 0..lo.blocks.len() {
+        let b = lo.blocks.at(i)
         // Dead blocks (opened after divergence, never jumped to) may lack
         // a terminator; they are unreachable, so trap.
         let term = match b.term {
@@ -370,7 +371,7 @@ impl Lowerer {
                 self.unit_temp()
             }
             EkBlock(stmts, trailing) => {
-                for s in stmts.iter() { let _ = self.lower_expr(s) }
+                for i in 0..stmts.len() { let _ = self.lower_expr(stmts.at(i)) }
                 match trailing {
                     Some(t) => self.lower_expr(t)
                     None => self.unit_temp()
@@ -457,7 +458,8 @@ impl Lowerer {
     // Each of `exprs` lowered, in order, beside its class.
     fn typed_exprs(mut self, exprs: Vec<HirExpr>) -> Vec<(Int, Int)> {
         let mut out: Vec<(Int, Int)> = Vec::new()
-        for x in exprs.iter() {
+        for i in 0..exprs.len() {
+            let x = exprs.at(i)
             let t = self.lower_expr(x)
             out.push((t, mir_ty(x.ty)))
         }
@@ -494,7 +496,7 @@ impl Lowerer {
         }
         if parts.len() >= 3 {
             let mut elems: Vec<(Int, Int)> = Vec::new()
-            for part in parts.iter() { elems.push((self.lower_expr(part), MIR_PTR)) }
+            for i in 0..parts.len() { elems.push((self.lower_expr(parts.at(i)), MIR_PTR)) }
             let arr = self.new_temp(MIR_PTR)
             self.push(SMakeArray(arr, elems))
             let t = self.new_temp(MIR_PTR)

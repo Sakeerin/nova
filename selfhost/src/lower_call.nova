@@ -185,7 +185,7 @@ impl Lowerer {
         args: Vec<HirExpr>,
     ) -> Int {
         let mut arg_temps: Vec<Int> = Vec::new()
-        for a in args.iter() { arg_temps.push(self.lower_expr(a)) }
+        for i in 0..args.len() { arg_temps.push(self.lower_expr(args.at(i))) }
         let ret_class = mir_ty(e.ty)
         let dst = if ret_class == MIR_UNIT { -1 } else { self.new_temp(ret_class) }
         match func {
@@ -230,7 +230,7 @@ impl Lowerer {
             CalleeLocal(l) => {
                 let callee = self.local_map.at(l)
                 let mut params: Vec<Int> = Vec::new()
-                for a in args.iter() { params.push(mir_ty(a.ty)) }
+                for i in 0..args.len() { params.push(mir_ty(args.at(i).ty)) }
                 self.push(SCallIndirect(dst, callee, params, ret_class, arg_temps))
             }
         }
@@ -256,7 +256,7 @@ impl Lowerer {
             Some(r) => arg_temps.push(self.lower_expr(r))
             None => ()
         }
-        for a in args.iter() { arg_temps.push(self.lower_expr(a)) }
+        for i in 0..args.len() { arg_temps.push(self.lower_expr(args.at(i))) }
         let ret_class = mir_ty(e.ty)
         let dst = if ret_class == MIR_UNIT { -1 } else { self.new_temp(ret_class) }
         let (target, type_args) = match self.program.resolve_method_full(
