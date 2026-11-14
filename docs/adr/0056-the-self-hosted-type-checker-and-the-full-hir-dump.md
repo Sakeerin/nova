@@ -12,7 +12,10 @@ the body cases, the harness's switch, and part 1's figures. Parts 2 to
 bodies) wrote §8. Part 5 (views, the harness in its final form, the body
 fuzzer, the depth cases and the figures) wrote §9 to §16 and finished §4,
 §6 and §8. CI's figures (§14) come from the measurement run, draft
-pull request Sakeerin/nova#139, closed unmerged.
+pull request Sakeerin/nova#139, closed unmerged. 5.3b's review
+(2026-11-14) amended §1, §2, §4, §5, §8, §10 and §12 to §15: N's witnesses
+on Rust's whole escape table, one more order a user can see, and the
+checks and figures that came with them.
 
 ## Decision
 
@@ -37,6 +40,17 @@ at 5.3b's last commit; part 1's 11, §7, counted three of N's files
 checked alone, which print alike as 5.3b's later parts leave them). A
 test pins it (`bodies_are_checked_the_programs_first_each_in_def_id_order`).
 
+**One more order a user can see** (found by 5.3b's review, 2026-11-14):
+when a program makes std's bodies give diagnostics, which only §4's bug
+lets it do, the program's methods' and constants' diagnostics now come
+before every one of std's bodies', where they came after those of std's
+functions: the base checked every function, std's included, then every
+method, then every constant. An inherent `impl<T> Option<T> { fn
+unwrap_or(self) -> Int { 0 } }` beside `const C: Int = "s"` printed C's
+E0010 after std's twelve E0016s, and prints it before them now. No
+base-tracked file is such a program (`checkcmp.sh`'s 8 are std's own
+files); the CHANGELOG's Changed says it.
+
 **Why the program's first** (spec §4.1): std's closures then follow all
 of the program's, so skipping std's bodies (§4) changes no id a program
 prints.
@@ -46,10 +60,11 @@ prints.
 `nova check --dump-hir` prints 5.3a's part (ADR 0055 §2) and then every
 function, after the externs and before the diagnostics; the diagnostics
 are then every diagnostic the type checker gave, the bodies' too. std's
-part (`--std`) adds ` functions=<n>` to its first line. The hidden
-`nova check --dump-hir-items`, by the same parser and refusals, prints
-5.3a's part alone, which the differential compares until N checks bodies
-(§6).
+part (`--std`) adds ` functions=<n>` to its first line. While 5.3b was
+built (its plan's Tasks 2 to 5), a hidden `nova check --dump-hir-items`,
+by the same parser and refusals, printed 5.3a's part alone, which the
+differential compared until N checked bodies (§6); Task 6 removed it, and
+`nova check` refuses it now as it refuses any unknown argument (§8, §10).
 
 **Order:** a part's own functions in `hir::Module`'s order (§1):
 functions, methods and constants by `DefId`, then the closures and
@@ -345,6 +360,9 @@ programs 78,316 lines (3.30 MB), 44 package files 93,189 (4.00 MB), N's
 mode, 440,672 (20.1 MB). Part 1, on `e5c555d0` (2026-11-12), measured
 the same figures but N's, which had no bodies then: its 30 package roots
 690,269 lines (31.7 MB), and the 10 files with tests 164,793 (7.48 MB).
+After the review's fix (2026-11-14), which grows N by Rust's escape table
+(§8), N's 44 package roots give 1,891,297 lines (86.8 MB) and the 13
+files with tests 442,189 (20.2 MB); the rest is as above.
 
 ### 3. Closure ids
 
@@ -408,8 +426,10 @@ an impl, inherent or a trait's, whose self type is not one of its own
 records or sums: a primitive, an array, or one of std's types.
 
 **5.3b's own condition**, not the user's: the full check is taken too
-when the item passes collected fewer of the program's impls than it
-wrote. An impl whose self type they refuse, a tuple, a function type or
+when the number of the program's impls the item passes collected is not
+the number it wrote (`collected != written`), which can only be fewer,
+since each impl they collect is one it wrote. An impl whose self type
+they refuse, a tuple, a function type or
 a projection (E0010, E0900), is not collected, so no self type is left
 to test, and none of those is a type the program owns; the count is how
 the trigger sees such an impl. The full check is what the dump must
@@ -479,7 +499,13 @@ inherent `unwrap_or` on `Option`, std's first definition, that takes no
 argument where std's takes one, and `std_bodies_string_inherent`, an
 inherent `len` on `String` that takes one where std's takes none; each
 gives E0016 at std's calls (12 and 24), which only the full check
-prints: `cases/check/` holds 824 programs, 831 cases in all. Every
+prints. One more came of 5.3b's review (2026-11-14),
+`witnesses_escape_what_rust_escapes`: E0022's witnesses of strings and
+characters that hold what Rust's `{:?}` escapes (Thai's marks, a
+no-break space, U+3000, a Devanagari, an Arabic and a Hebrew mark, the
+unassigned U+0378) and E0101's message quoting two such characters, each
+of them escaped alike by Rust 1.78, 1.97 and 1.100 (§8): `cases/check/`
+holds 825 programs, 832 cases in all. Every
 one of the 38 codes occurs among them (the sixteen body codes that had
 no case before, E0011 … E0103, all through the extracted sources), and
 every note, secondary label and fix form occurs in the cases, the corpus
@@ -645,13 +671,64 @@ parts' idioms:
   slice, since a `Vec` is shared when passed.
 - A witness's `String` and `Char` print as Rust's `{:?}` does
   (`debug_str`, `debug_char`): `\0`, `\t`, `\r`, `\n`, `\\` and the
-  quote escaped, a control character, a format character, a separator, a
-  private use and the commonest grapheme extenders (combining marks,
-  variation selectors, the zero-width non-joiner) as the code point's
-  escape. Rust's full `is_printable` and `Grapheme_Extend` tables are
-  not ported (a departure; no input holds another such character).
+  quote escaped, printable ASCII as it is, and every other character Rust
+  escapes as the code point's escape: ASCII's other controls, and from
+  U+0080 up each code point Rust's table holds (below). Part 4 had a few
+  of its ranges (the commonest marks, the format characters, the
+  separators and private uses).
 - A `for` loop's hidden locals are made where S0 makes them, a range's
   `__run` after its body, since their ids reach the dump.
+
+**Rust's escape table** (5.3b's review, 2026-11-14). The review found
+S0 escaping, in witnesses, Thai's marks, other scripts' marks, the space
+separators (U+00A0, U+1680, U+2000 to U+200A, U+202F, U+205F, U+3000) and
+unassigned code points where part 4's N printed them as they are: 1,660
+witnesses of a sweep of U+0080 to U+30FF. N now holds the table whole:
+`ESCAPE_RANGES` in `typeck_pattern.nova`, every code point from U+0080 up
+that `char::escape_debug_ext` escapes, those `is_grapheme_extended` holds
+or `is_printable` does not, in a string and as a `char` alike, as 914
+ranges, generated by this program built by Rust 1.100.0 (CI's stable,
+which builds S0 in the Selfhost job) and packed several ranges to a
+line:
+
+```rust
+fn main() {
+    // Ranges of code points that `{:?}` on a str prints as a code-point escape.
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    for v in 0x80u32..=0x10FFFF {
+        let Some(c) = char::from_u32(v) else { continue };
+        let s = format!("{:?}", c.to_string());
+        if s.contains("\\u{") {
+            match ranges.last_mut() {
+                Some(r) if r.1 + 1 == v => r.1 = v,
+                _ => ranges.push((v, v)),
+            }
+        }
+    }
+    for (a, b) in &ranges { println!("{a:x} {b:x}"); }
+}
+```
+
+The checker reads the table once, the first time a witness or a range
+pattern's message needs it (`escape_table`, the field `escapes`: a
+constant array is built again each time it is read), and `debug_escape`
+looks a character up by bisection after the special cases and ASCII. On
+a new toolchain the program's output replaces the table. **What
+stands:** S0 prints as the Rust that builds it, so an S0 built by a
+toolchain on another Unicode version differs from N's table on the code
+points that version changed: Rust 1.97.0, this machine's stable, on
+12,976 (it escapes 12,972 that 1.100.0 prints, and prints U+115F,
+U+1160, U+3164 and U+FFA0, which 1.100.0 escapes), Rust 1.78.0 on
+23,536. No case or corpus file holds one: every non-ASCII code point of
+the `.nova` files the repository tracks (1,837 with the new case) is
+escaped alike, or printed alike, by all three. The fix was checked
+against S0 built by Rust 1.97.0 on the review's sweep (12,416 code
+points, as characters) and on every boundary of the 1.97.0 and 1.100.0
+tables (3,274 code points, each range's first and last and those either
+side, as characters and in strings): every witness S0 printed follows
+1.97.0's table and every one N printed 1.100.0's, and the two differ on
+16 and 85 code points, those where the tables differ, and on nothing
+else.
 
 **Part 4's figures** (2026-11-12): std's full part is S0's, byte for
 byte, in the three modes, at the first run. Of 1,216 roots and std's
@@ -723,7 +800,12 @@ functions. N's files: `infer.nova` 152 lines, `typeck_body.nova` 1,065,
 `typeck_member_tests.nova` 195, `typeck_pattern_tests.nova` 394;
 `fixes.nova` 758, `hir.nova` 765, `hir_dump.nova` 797, `typeck.nova`
 1,134, `typeck_ty.nova` 486; N is 25,531 lines. N's `nova test`: 93
-tests, all passing on both runtimes.
+tests, all passing on both runtimes. After the review's fix (2026-11-14):
+`typeck_pattern.nova` 1,418 lines, the table's 113 among them,
+`typeck_pattern_tests.nova` 430, `typeck.nova` 1,142 and
+`typeck_tests.nova` 412; N is 25,771 lines, and `nova test` runs 96
+tests, two of the escapes and one of the fallback's trigger (§10) added,
+all passing on both runtimes.
 
 ### 9. Inference variables in S0's order
 
@@ -810,6 +892,21 @@ N must then check for each program (a temporary directory of its own,
 `body-error-std`). Two cases (§5) reach the trigger's sums and
 primitives: an impl on `Option`, std's first definition, and one on
 `String`, each of which changes std's bodies' diagnostics.
+
+**Checks 5.3b's review added** (2026-11-14): the depth test asserts each
+body kind's level exactly (64, 127 or 128, §12), where it took any level
+from 127 up, and on Unix runs `bodies-ifs-128.nova` on a 96 KB stack,
+which must fail (its least stack is about 224 KB), so a stack left unset
+shows (the plan's mutant 231); N's `@test`
+`only_an_impl_on_a_type_the_program_does_not_own_takes_the_full_check`
+checks N's trigger on the shared path, against a std of one module with
+an impl on its own record: the program's impl on its own record keeps the
+shared path and one on `Int` takes the full check, so N counting std's
+impls as the program's shows (mutant 213; S0's twin, mutant 93, was
+caught by `shared_bodies_check_what_the_full_check_does`); and §8's
+escapes, through the case `witnesses_escape_what_rust_escapes` and N's
+`@test`s of `debug_str` and `debug_char` on the same characters and of the
+table's order.
 
 ### 11. The body fuzzer
 
@@ -919,13 +1016,16 @@ compared with S0's, 2026-11-12):
 
 The least stacks are the parser's: up to 224 KB for nested expressions
 and blocks (200 to 216 KB in part 4), 40 to 68 KB for patterns, chains,
-types and items; the release runtime within 8 KB of the debug one.
+types and items; the release runtime within 8 KB of the debug one on
+every input but item type `arrays` (60 and 48 KB; 56 and 52 KB measured
+again).
 
-**Measured again** (2026-11-13, for this branch's plan; N, its build and
-the 45 programs as at `5a9bd2d3`, a split of this branch for its plan whose
-code is this branch's, byte for byte), the same way: all 45 pass on 1 MB
-on both runtimes, the least stacks 36 to 224 KB, each within two
-bisection steps (8 KB) of the table's.
+**Measured again** (2026-11-14, by this branch's plan's Task 8, at the
+branch's head before the review's fixes; the plan's replay, 2026-11-13,
+had 36 to 224 KB), the same way: all 45 pass on 1 MB on both runtimes,
+the least stacks 40 to 224 KB, each within two bisection steps (8 KB) of
+the table's, the release runtime within 8 KB of the debug one on every
+input.
 
 ### 13. N's memory and GC pauses
 
@@ -956,14 +1056,24 @@ and 0.13 s on std's parts; the release runtime's longest is 0.10 s. The
 debug runtime spends 39% of the loose corpus's run (3.6 of 9.5 s) in 60
 collections. Recorded, no threshold (spec §4.6).
 
-**Measured again** (2026-11-13, for this branch's plan; N, its build and
-the inputs as at `5a9bd2d3`, a split of this branch for its plan whose code
-is this branch's, byte for byte), the same way: the same collections and
-largest live heaps; peak RSS within 0.3 MB of the table's; walls 9 to
-21% shorter; the longest pause 4 to 25% shorter (352 ms on the debug
-runtime, 95 ms on the release one); the median pause shorter but for
-two, longer: std's part on the debug runtime (12.1 against 9.4 ms) and
-N's root on the release runtime (8.5 against 7.0 ms).
+**Measured again** (2026-11-14, after 5.3b's review's fix, which grows N
+by Rust's escape table, §8), the same way: the same collections (14, 15,
+14, 21 and 60 on each runtime) and largest live heaps, but N's root's,
+46.9 MB where it was 46.7 (N's own source is larger); peak RSS within
+0.6 MB of the table's (on the debug runtime 33.6, 35.6, 33.6, 152.5 and
+44.0 MB); walls from 9% shorter to 21% longer (the debug runtime's all
+shorter, 4.80 s on N's root and 8.59 s on the loose corpus, the release
+runtime's all longer, 1.23 and 2.37 s); the longest pauses from 13%
+shorter to 22% longer (401.0 ms on N's root on the debug runtime, 120.1
+ms on the release one). Walls and pauses vary from run to run by about
+15% either way, here up to 22%: this branch's plan's replay
+(2026-11-13, at `5a9bd2d3`) measured walls 9 to 21% shorter than the
+table's and longest pauses 4 to 25% shorter, its Task 8 (2026-11-14,
+before the fix) walls from 8% shorter to 8% longer and longest pauses
+from 16% shorter to 15% longer. The loose corpus's collections vary by
+one, 60 or 61 under `NOVA_GC_DEBUG`, since N's runtime draws its hash
+seeds per process and its allocation varies a little; the largest live
+heaps do not move.
 
 ### 14. The time, and CI's projection
 
@@ -1042,7 +1152,9 @@ seconds:
 - **(b)'s cost:** the job's build on a cold cache took 2 min 28 s, 3 min
   7 s and 4 min 25 s (against 34 s, 22 s and 2 min 3 s cached at
   `opt-level = 0`); the step that runs N's own tests on the debug runtime
-  runs it built at `opt-level = 1` too, debug assertions kept.
+  runs it built at `opt-level = 1` too, debug assertions kept: 1.38, 1.19
+  and 2.27 s in run 43356754975 (6.17, 6.92 and 8.95 s at `opt-level = 0`
+  in run 43355785537).
 - **The Test job** (run 43352978357): `nova-driver`'s unit tests 93.88 s
   on Linux and 68.93 s on macOS, the equivalence test (§4) most of it.
 - **The user's answer** (answer 6): (b), S0 built at `opt-level = 1` in
@@ -1050,6 +1162,11 @@ seconds:
   runner broke CI on `main` too (a clippy lint, Playwright, Windows'
   `synchronization.lib`, cargo's test layout); those were fixed first, in
   Sakeerin/nova#140 (answer 7).
+- **`main`'s fix, Sakeerin/nova#140** (run 43360551910, head `e94fa40c`;
+  this branch starts from `main` after it, `f1f17328`): all 19 jobs green; the Test job's
+  main step summed 2,832 passed on Linux and macOS and 2,809 on Windows
+  (10, 9 and 9 ignored), the IPv6 test passing on each; `selfhost.rs`
+  52, 50 and 46 tests.
 
 ### 15. Departures from the spec, and decisions it does not settle
 
@@ -1063,8 +1180,12 @@ seconds:
 - **(differs) The 38-code assertion** holds on the cases and the corpus
   alone, not on the differential's inputs with the fuzzers' (§10):
   stronger.
-- **(differs) Witnesses' strings and characters** approximate Rust's
-  `{:?}` (§8, part 4).
+- **(differs) Witnesses' strings and characters** print as Rust
+  1.100.0's `{:?}`, whose escape table N holds (§8, from 5.3b's review;
+  part 4 approximated it). S0 prints as the Rust that builds it, so an S0
+  built by a toolchain on another Unicode version differs on the code
+  points that version changed (1.97.0 on 12,976, 1.78.0 on 23,536); no
+  case or corpus file holds one.
 - **(differs) 5.3a's item-only dump** (`check --dump-hir-items`) existed
   only while 5.3b was built and is gone; the full dump holds the item
   part, and the driver's equivalence test compares the full dumps alone

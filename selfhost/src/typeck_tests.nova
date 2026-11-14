@@ -357,3 +357,56 @@ fn an_impls_type_is_shown_with_its_own_parameter_names() {
     assert_eq(display_ty(ty, c.defs), "W<[T0], T1, ?3>")
     assert_eq(display_ty(TyTuple(tys([TyInt])), c.defs), "(Int,)")
 }
+
+// The program `source`, the module `main`, checked on the shared path
+// (5.3b, ADR 0056 §4) against a std of one module, `$std.zz`, which holds a
+// record and an impl on it: std shared as `share_items` shares it, the
+// program resolved with std's definitions after its own and its items
+// checked against std's tables, std's impl among them.
+fn check_shared(source: String) -> Checker {
+    let zz = std_module(
+        "$std.zz",
+        std_label("$std.zz"),
+        "pub record Zr { n: Int }\nimpl Zr {\n    pub fn get(self) -> Int { self.n }\n}\n",
+    )
+    let std_set = StdSet {
+        modules: Vec::from_array([zz]),
+        natives: Vec::new(),
+        builtins: builtin_table(),
+    }
+    let shared = share_std(CompileTargetNative, std_set)
+    if !shared.shareable { panic("std does not resolve alone") }
+    let mut std_texts: Vec<Option<String>> = Vec::new()
+    std_texts.push(None)
+    let alone = shared.alone
+    let items = share_items(alone.items, alone.definitions, Vec::from_array([zz.label]), std_texts)
+    if !items.shareable { panic("std's items or bodies give a diagnostic") }
+    let (tokens, _) = lex(source)
+    let (file, errors) = parse(tokens)
+    if !errors.is_empty() { panic("a test source does not parse") }
+    let mut m = module_source("main", "main", file)
+    m.text = Some(source)
+    let r = resolve_program_shared_for_check(Vec::from_array([m]), shared)
+    if !r.diagnostics.is_empty() {
+        panic("a test source does not resolve: ${r.diagnostics.at(0).message}")
+    }
+    let mut texts: Vec<Option<String>> = Vec::new()
+    texts.push(Some(source))
+    texts.push(None)
+    check_items_shared(r.items, r.definitions, Vec::from_array(["main", zz.label]), texts, items)
+}
+
+// The shared path's trigger counts the program's impls alone: an impl on
+// its own record keeps the shared path, though std's tables hold an impl
+// on a record of std's; one on a primitive takes the full check (S0's
+// `shared_bodies_check_what_the_full_check_does`).
+@test
+fn only_an_impl_on_a_type_the_program_does_not_own_takes_the_full_check() {
+    let own = check_shared(
+        "record Mine { x: Int }\nimpl Mine {\n    fn m(self) -> Int { 1 }\n}\nfn main() {}\n",
+    )
+    assert(own.impls.len() == 2, "${own.impls.len()} impls: the program's and std's")
+    assert(!own.implements_on_a_type_it_does_not_own(), "an impl on its own record")
+    let int = check_shared("impl Int {\n    fn m(self) -> Int { 1 }\n}\nfn main() {}\n")
+    assert(int.implements_on_a_type_it_does_not_own(), "an impl on a primitive")
+}

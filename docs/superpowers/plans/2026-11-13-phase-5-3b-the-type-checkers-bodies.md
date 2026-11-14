@@ -23,8 +23,9 @@ body types and the dump's function forms), and `selfhost hir` prints the
 same full dump. The differential (`crates/nova-cli/tests/selfhost.rs`)
 compares the two on std's three full parts, every corpus root in three
 modes (339 programs natively: 251 loose and 88 package files; 39 for
-WASM; 13 files with tests), the type checker's 831 cases (824 under
-`check`, 2 for WASM, 5 under test mode; both line endings), the type
+WASM; 13 files with tests), the type checker's 832 cases (825 under
+`check`, the review's one among them, 2 for WASM, 5 under test mode;
+both line endings), the type
 fuzzer's and a new body fuzzer's inputs and 45 programs nested 128 levels
 deep, or as deep as the parser takes them (64 levels of closures, 127 of
 patterns in a `match` arm and of `for` loops; decision 19), which N
@@ -32,7 +33,10 @@ checks on a 1 MB main thread; each of the type checker's 38 codes
 occurs. The Selfhost job builds S0 at `opt-level = 1` (the user's
 answer 6). `nova check` changes for users only in the order of
 diagnostics inside methods (8 of std's files reorder; nothing else
-anywhere differs). ADR 0056 records the order, the dump, the sharing and
+anywhere differs) and, when a program makes std's bodies give
+diagnostics (ADR 0056 §4's bug), in its methods' and constants' now
+coming before std's (the review's finding, Task 8, Step 10; ADR 0056
+§1). ADR 0056 records the order, the dump, the sharing and
 its fallback, N's code, the figures and CI's.
 
 **Architecture:**
@@ -561,8 +565,11 @@ check in the task that owns the code:
    (Tasks 2 and 6) (mutants 89 to 98, 205 to 214). The bug it works
    around stays in S0 (ADR 0056 §4).
 4. **S0's order of bodies reaches users** (`check_bodies`): diagnostics
-   inside methods in declaration order, closures and wrappers renumbered;
-   nothing else → `bodies_are_checked_the_programs_first_each_in_def_id_order`
+   inside methods in declaration order, closures and wrappers renumbered,
+   and, for a program that makes std's bodies give diagnostics (ADR 0056
+   §4's bug), its methods' and constants' diagnostics before std's
+   bodies', where they came after std's functions' (the review's finding,
+   ADR 0056 §1); nothing else → `bodies_are_checked_the_programs_first_each_in_def_id_order`
    (Task 1) (mutants 1 to 8), `checkcmp.sh`'s 8 std files, each the same
    diagnostics reordered (`reorder.py`), `pkgcmp.sh`, the golden suite
    (Task 8, Steps 3 and 4).
@@ -624,7 +631,9 @@ The user's, from the spec's header (2026-11-06):
    fallback (`std_bodies_*`: the research's twelve probes and step 0's
    two), a hand case for a fix of every kind of name, and step 0's three
    others (decision 21): 824 under `check`, 2 for WASM, 5 under test
-   mode. 49 tests stay Rust-only (`infer`, `usefulness`, the builtin
+   mode; the review's fix (Task 8, Step 10) adds
+   `witnesses_escape_what_rust_escapes`, 825 under `check`. 49 tests stay
+   Rust-only (`infer`, `usefulness`, the builtin
    tables, the probe; ADR 0056 §5).
 7. **A new type-level fuzzer, its body mutations here** (the user's
    decision 7): `fuzz::body_mutate` and `BODY_ITEMS` (a literal's type, an
@@ -674,8 +683,9 @@ is this plan's own:
     own records or sums: a std record or sum, a primitive, an array; the
     bug is ADR 0056 §4's.
     **This plan's own condition, not the user's:** a program also takes
-    the full check when the item passes collected fewer of its impls
-    than it wrote. The input that reaches it is an impl whose self type
+    the full check when the number of its impls the item passes
+    collected is not the number it wrote (`collected != written`), which
+    can only be fewer. The input that reaches it is an impl whose self type
     the item passes refuse, a tuple, a function type or a projection
     (E0010, E0900), which no pass collects, so no self type is left to
     test; none of those is a type the program owns, so falling back
@@ -808,8 +818,14 @@ How this plan is cut and checked:
       parser's count (ADR 0056 §12);
     - **(differs)** the 38-code assertion holds on the cases and the
       corpus alone, not on the fuzzers' inputs too: stronger;
-    - **(differs)** witnesses' strings and characters approximate Rust's
-      `{:?}` in N (no full printable tables), equal on every input;
+    - **(differs)** witnesses' strings and characters print as Rust
+      1.100.0's `{:?}` in N, its escape table ported whole (the review's
+      fix, Task 8, Step 10; before it N approximated the table, and the
+      review found 1,660 witnesses of U+0080 to U+30FF printed otherwise);
+      S0 prints as the Rust that builds it, so an S0 built by a toolchain
+      on another Unicode version differs on the code points that version
+      changed (Rust 1.97.0 on 12,976, 1.78.0 on 23,536); no case or corpus
+      file holds one (ADR 0056 §8);
     - **(differs)** the transitional `--dump-hir-items` existed only
       while 5.3b was built (decision 17); the driver's equivalence test
       compares the full dumps alone, the unshared check of each root on
@@ -32618,10 +32634,12 @@ EOF
       differential complete; `opt-level = 1` in the Selfhost job; ADR 0056
       and the notes;
     - what a user sees change: diagnostics inside methods in declaration
-      order (8 of std's files reorder, nothing else), closures' and
-      wrappers' numbers in symbols; every other `.nova` file the base
-      tracks parses and checks as before, every package tests and builds
-      as before, every `--help` is unchanged;
+      order (8 of std's files reorder, nothing else), and, for a program
+      that makes std's bodies give diagnostics (ADR 0056 §4's bug), its
+      methods' and constants' before std's (the review's finding);
+      closures' and wrappers' numbers in symbols; every other `.nova`
+      file the base tracks parses and checks as before, every package
+      tests and builds as before, every `--help` is unchanged;
     - the departures, marked **(differs)** here;
     - the figures: the Test job's suite `2833 1 10` and `selfhost.rs`'s 55
       apart, the golden suite's `147 passed, 9 excluded`, `selfhost.rs`'s

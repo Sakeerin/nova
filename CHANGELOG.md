@@ -273,7 +273,7 @@ full HIR dump (§4; ADR 0056).
   components, and all 38 of the type checker's codes word for word with
   their notes, labels and fixes. `selfhost hir` prints the full dump, as
   `nova check --dump-hir` does; the differential compares them on std's
-  three parts, every corpus root in three modes, the type checker's 831
+  three parts, every corpus root in three modes, the type checker's 832
   cases with both line endings, a type-level and a body-level fuzzer's
   programs, and programs nested 128 levels deep in every way that
   type-checks, or as deep as the parser takes it (64 levels of closures,
@@ -290,6 +290,11 @@ full HIR dump (§4; ADR 0056).
   came in an order of their own before. Closures and functions used as
   values are numbered in the same order, the program's before std's, and
   their numbers show only in the names of the symbols they compile to.
+  One more order moves with it: when a program makes std's own code
+  report errors, which a known bug lets an impl on a std type do (ADR
+  0056 §4), the errors in the program's methods and constants now come
+  before every error in std's code, where they came after those in std's
+  functions.
 - **Deeply nested source is now P0002, not a crash.** Past 128 levels of
   nesting, "this is nested too deeply (more than 128 levels)" at the token
   where the limit was crossed; the parser stops there, so it is the

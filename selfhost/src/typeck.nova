@@ -113,6 +113,10 @@ pub record Checker {
     pub bodies: Bool,
     // The pattern being checked (`pats`, typeck_pattern.nova).
     pub pats: PatState,
+    // Rust's escape table for a witness's strings and characters, empty
+    // until a witness or a range pattern's message needs it
+    // (`escape_table`, typeck_pattern.nova).
+    pub escapes: Vec<Int>,
 }
 
 /// std's item tables, built once from the check of a program of no module
@@ -251,6 +255,7 @@ fn new_checker(
         std_closures: n,
         bodies: false,
         pats: new_pat_state(),
+        escapes: Vec::new(),
     }
 }
 
@@ -281,8 +286,11 @@ impl Checker {
 
     /// Whether the program implements anything on a type it does not own
     /// (`implements_on_a_type_it_does_not_own`, 5.3b, ADR 0056 §4): an
-    /// impl whose self type is not one of its own records or sums, or an
-    /// impl of its items the passes did not collect; `items` holds the
+    /// impl whose self type is not one of its own records or sums (the
+    /// user's ruling: "a std type or a primitive"); or, by 5.3b's own
+    /// condition, not the ruling, when the passes collected another number
+    /// of its impls than it wrote, which can only be fewer (an impl whose
+    /// self type they refuse is not collected). `items` holds the
     /// program's items alone, on the shared path.
     pub fn implements_on_a_type_it_does_not_own(self) -> Bool {
         let mut written = 0

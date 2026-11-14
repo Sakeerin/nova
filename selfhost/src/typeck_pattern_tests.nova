@@ -352,12 +352,48 @@ fn a_string_column_needs_a_catch_all() {
 
 @test
 fn a_witness_prints_strings_and_chars_as_rust_does() {
-    assert(debug_str("a\"b\\\n") == "\"a\\\"b\\\\\\n\"", debug_str("a\"b\\\n"))
-    assert(debug_char('\'') == "'\\''", debug_char('\''))
-    assert(debug_char('"') == "'\"'", debug_char('"'))
+    let t = escape_ranges()
+    assert(debug_str("a\"b\\\n", t) == "\"a\\\"b\\\\\\n\"", debug_str("a\"b\\\n", t))
+    assert(debug_char('\'', t) == "'\\''", debug_char('\'', t))
+    assert(debug_char('"', t) == "'\"'", debug_char('"', t))
     let del = string_from_chars([char_from_int(127).unwrap()])
     let want = "\"" + "\\" + "u{7f}é\""
-    assert(debug_str("${del}é") == want, debug_str("${del}é"))
+    assert(debug_str("${del}é", t) == want, debug_str("${del}é", t))
+}
+
+// Rust's table, as `escape_ranges` reads it: 914 ranges in order, none
+// touching the next, from U+0080 to U+10FFFF.
+@test
+fn the_escape_table_is_rusts_ranges_in_order() {
+    let t = escape_ranges()
+    assert(t.len() == 1828, "${t.len()} numbers")
+    assert(t.at(0) == 0x80 && t.at(1) == 0xa0, "the first range")
+    assert(t.at(1826) == 0x3fc40 && t.at(1827) == 0x10ffff, "the last range")
+    for k in 0..914 {
+        assert(t.at(2 * k) <= t.at(2 * k + 1), "range ${k}")
+        if k > 0 { assert(t.at(2 * k - 1) + 1 < t.at(2 * k), "range ${k} after ${k - 1}") }
+    }
+}
+
+// The characters of the case `witnesses_escape_what_rust_escapes`, which
+// Rust 1.78, 1.97 and 1.100 escape alike: Thai's marks, a no-break space,
+// U+3000, Devanagari's, Arabic's and Hebrew's marks, and the unassigned
+// U+0378, each escaped between letters printed as they are.
+@test
+fn a_witness_escapes_the_marks_spaces_and_unassigned_points_rust_escapes() {
+    let t = escape_ranges()
+    let u = "\\" + "u"
+    let thai = debug_str("สวัสดีที่นี่", t)
+    assert(thai == "\"สว${u}{e31}สด${u}{e35}ท${u}{e35}${u}{e48}น${u}{e35}${u}{e48}\"", thai)
+    let spaces = debug_str("10 km　!", t)
+    assert(spaces == "\"10${u}{a0}km${u}{3000}!\"", spaces)
+    let marks = debug_str("नमस्ते هٰذا שָׁלוֹם", t)
+    let want = "\"नमस${u}{94d}त${u}{947} ه${u}{670}ذا ש${u}{5b8}${u}{5c1}לו${u}{5b9}ם\""
+    assert(marks == want, marks)
+    assert(debug_char('͸', t) == "'${u}{378}'", debug_char('͸', t))
+    assert(debug_char('ͷ', t) == "'ͷ'", debug_char('ͷ', t))
+    assert(debug_char('　', t) == "'${u}{3000}'", debug_char('　', t))
+    assert(debug_char(' ', t) == "'${u}{a0}'", debug_char(' ', t))
 }
 
 // --- `for` ---

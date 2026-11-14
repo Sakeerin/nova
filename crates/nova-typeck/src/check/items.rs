@@ -199,15 +199,18 @@ pub fn check_program_shared(
 }
 
 /// Whether the program implements anything on a type it does not own
-/// (5.3b, spec 5.3 §4.5; the user's ruling of 2026-11-12): an impl, a
-/// trait's or an inherent one, whose self type is a primitive, an array
-/// or one of std's records or sums, rather than one of the program's own,
-/// those below `own_defs`. std's bodies look methods up in every impl,
-/// with no filter by the traits in scope, so such an impl can give std's
-/// bodies a diagnostic or bind one of their calls to the program's
-/// method. To err on the safe side, an impl of the program's that the item
-/// passes did not collect counts too: `file` holds the program's items
-/// alone.
+/// (5.3b, spec 5.3 §4.5): an impl, a trait's or an inherent one, whose
+/// self type is a primitive, an array or one of std's records or sums,
+/// rather than one of the program's own, those below `own_defs` (the
+/// user's ruling of 2026-11-12: "a std type or a primitive"). std's bodies
+/// look methods up in every impl, with no filter by the traits in scope,
+/// so such an impl can give std's bodies a diagnostic or bind one of their
+/// calls to the program's method. To err on the safe side, and by 5.3b's
+/// own condition, not the ruling (ADR 0056 §4): when the item passes
+/// collected another number of the program's impls than it wrote, which
+/// can only be fewer, since each impl they collect is one it wrote and
+/// one whose self type they refuse is not collected. `file` holds the
+/// program's items alone.
 pub fn implements_on_a_type_it_does_not_own(
     file: &ast::File,
     tables: &ItemTables,

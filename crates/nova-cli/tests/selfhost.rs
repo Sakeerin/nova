@@ -53,6 +53,26 @@
 //! refuses stops it, with a message, and no input of the differential has
 //! one.
 //!
+//! 5.3a (spec
+//! `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
+//! §3; ADR 0055): S0's hidden `nova check --dump-hir FILE…` and `--std`,
+//! absent from `--help`, print each root's resolution, the type checker's
+//! item tables and the diagnostics so far, and N's `selfhost hir --std DIR
+//! FILE…` and `--std-part` must print the same dump byte for byte, with
+//! the same exit codes: std's three parts, the corpus in each mode, the
+//! type checker's cases of each mode (`cases/check/`, `cases/check-wasm/`,
+//! `cases/check-test/`) and the type fuzzer's item mutations, among which
+//! every item code occurs.
+//!
+//! 5.3b (spec §4; ADR 0056): the dump goes on to every function the type
+//! checker built, its locals and its typed body, and N checks every body
+//! as S0 does: the same full dump on every input set above, the cases with
+//! both line endings too, the body fuzzer's inputs, and 45 programs nested
+//! 128 levels deep, or as deep as the parser takes them, which N checks on
+//! a 1 MB main thread; each of the type checker's 38 codes occurs, and N
+//! given a std whose items or bodies give a diagnostic checks std for each
+//! program.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -64,7 +84,8 @@
 //! The target says `test = false`: `cargo test --workspace` skips this
 //! file and `cargo test --workspace --test selfhost` runs it. CI runs it in
 //! a job of its own on each system, N linked against a release runtime,
-//! and N's own tests once more on the debug runtime (ADR 0055 §15).
+//! and N's own tests once more on the debug runtime (ADR 0055 §15), S0
+//! built at `opt-level = 1` (ADR 0056 §14).
 
 #[path = "selfhost/compare.rs"]
 mod compare;
@@ -3654,7 +3675,7 @@ fn agree_on_hir_dump(dump: &Dump, dir: &Path, files: &[String], code: i32) -> St
 
 /// The most bytes of root names one HIR dump's command line carries.
 /// Windows caps a command line at 32,767 characters (`CreateProcessW`,
-/// os error 206 past it), and `check`'s 824 cases' names come to about
+/// os error 206 past it), and `check`'s 825 cases' names come to about
 /// 51,000; this leaves room for the program's path and the flags.
 const HIR_ARGS_LIMIT: usize = 16_000;
 
@@ -4070,8 +4091,9 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
         }
         (check, wasm_dumps, test_dumps, counts)
     });
-    // 5.3b's cases: 5.3a's 164, 646 of the body-level tests' sources and
-    // 18 by hand under `check`; 2 for the WASM target; 5 under test mode.
+    // 5.3b's cases: 5.3a's 164, 642 of the body-level tests' sources and
+    // 19 by hand under `check`; 2 for the WASM target; 5 under test mode,
+    // 4 of them the body-level tests'.
     assert!(counts[0] >= 800, "only {} type-checker cases", counts[0]);
     assert!(counts[1] >= 2, "only {} WASM cases", counts[1]);
     assert!(counts[2] >= 5, "only {} test-mode cases", counts[2]);
@@ -4156,7 +4178,7 @@ fn loose_hir() -> &'static String {
 }
 
 /// How many parts the package corpus is dealt into, each a process a side
-/// on a thread of its own ([`agree_in_parts`]): N's own 30 package roots,
+/// on a thread of its own ([`agree_in_parts`]): N's own 44 package roots,
 /// each a dump of all of N, are most of the corpus's dump.
 const HIR_PACKAGE_PARTS: usize = 3;
 
@@ -4420,14 +4442,19 @@ fn n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread() {
         .expect("write a deep input");
         files.push(file);
     }
-    // Spec 5.3 §4.6's 128 levels, but where the parser stops sooner:
-    // closures at 64, patterns in an arm and `for` loops at 127 (ADR 0056
-    // §12).
+    // Spec 5.3 §4.6's 128 levels, but where the parser stops sooner (ADR
+    // 0056 §12): the closures at 64, a closure called at once being two of
+    // the parser's levels; tuple and variant patterns in a `match` arm and
+    // the `for` loops at 127, the arm and the innermost statement each a
+    // level of their own; every other kind at 128.
     for (kind, depth) in fuzz::BODY_DEEP_KINDS {
-        assert!(
-            depth >= 127 || (kind.starts_with("closure") && depth == 64),
-            "{kind} at {depth} levels"
-        );
+        let level = match kind {
+            "closures" | "closure-captures" | "closure-params" => 64,
+            "tuple-patterns" | "variant-patterns" | "for-ranges" | "for-arrays"
+            | "for-patterns" => 127,
+            _ => 128,
+        };
+        assert_eq!(depth, level, "{kind}'s level");
     }
     let mut rng = SplitMix64::new(DEEP_SEEDS[0]);
     let bodies = fuzz::DEEP_KINDS
@@ -4475,6 +4502,14 @@ fn n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread() {
             "{}",
             report(&m, hir_in(Mode::Check), &dir, &nova(), selfhost())
         );
+    }
+    // The stack is the one set: `bodies-ifs-128.nova`, whose least stack is
+    // about 224 KB (ADR 0056 §12), fails on 96 KB.
+    if cfg!(unix) {
+        let mut args = HIR_N.to_vec();
+        args.extend(["--std", std_dir.as_str(), "bodies-ifs-128.nova"]);
+        let (code, _) = n_args_on_stack(&dir, Some(96), &args);
+        assert_ne!(code, Some(0), "N's `selfhost hir` passed on a 96 KB stack");
     }
 }
 

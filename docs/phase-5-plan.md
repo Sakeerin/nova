@@ -519,7 +519,7 @@ every body as S0 does (`infer.nova`, `typeck_body.nova`,
 `usefulness.nova`, `typeck_for.nova`, `typeck_view.nova`, the rest of
 `fixes.nova`), and `selfhost hir` gives `nova check --dump-hir`'s full
 dump, every function's locals and typed body, byte for byte on std's
-three full parts, every corpus root in the three modes, the 831 cases of
+three full parts, every corpus root in the three modes, the 832 cases of
 the three modes with both line endings, the type fuzzer's and the body
 fuzzer's 120 inputs each and programs nested 128 levels deep in 45 ways,
 or as deep as the parser takes them (64 levels of closures, 127 of
