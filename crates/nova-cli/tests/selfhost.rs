@@ -5487,16 +5487,21 @@ fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
 /// them ([`crlf`]), in both forms as [`agree_on_mir_forms`] compares them
 /// (spec 5.4 §7.2): each part is there and the codes are those of the
 /// cases as they are, though E0601's and E0013's places are byte offsets.
+/// A copy that changes no file, as on a Windows checkout, which already
+/// has each `\r\n`, is not compared again:
+/// `the_mir_dumps_agree_on_the_corpus_and_the_cases` has compared those
+/// bytes, as the resolution and HIR dumps' tests do (ADR 0054 §9).
 #[test]
 fn the_mir_dumps_agree_on_the_cases_with_windows_line_endings() {
     let dir = fresh_dir("crlf-mir");
     let (check, mir) = (dir.join("check"), dir.join("mir"));
-    let (held, _) = copy_crlf(&hir_cases_dir(Mode::Check), &check);
+    let (held, changed_check) = copy_crlf(&hir_cases_dir(Mode::Check), &check);
     let (held_mir, changed) = copy_crlf(&mir_cases_dir(), &mir);
-    assert!(
-        held > 700 && held_mir > 70 && changed > 70,
-        "{held} {held_mir}"
-    );
+    assert!(held > 700 && held_mir > 70, "{held} {held_mir}");
+    if changed_check + changed == 0 {
+        return;
+    }
+    assert!(changed > 70, "{changed}");
     let (crlf, lf) = std::thread::scope(|scope| {
         let lf = scope.spawn(mir_cases);
         (agree_on_mir_cases(&check, &mir), joined(vec![lf]).remove(0))
