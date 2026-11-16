@@ -3,9 +3,10 @@
 // docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.1, ADR
 // 0057): `lower_module_with` from `main` (E0601), the worklist, externs
 // (E0075), names, E0011, bounds (E0013), `Specializer` (E0078, E0079),
-// the async `main`'s shim, `impl_satisfies` and `type_name`; and the
-// driver's `keep_the_entry_main` (crates/nova-driver/src/lib.rs). The
-// WASM build's roots and routing (`RuntimeImpls`, `route_runtime`,
+// the async `main`'s shim, the async transform's place and the checks on
+// its output, `impl_satisfies` and `type_name`; and the driver's
+// `keep_the_entry_main` (crates/nova-driver/src/lib.rs). The WASM build's
+// roots and routing (`RuntimeImpls`, `route_runtime`,
 // `unavailable_on_wasm`, E0091) are S0's alone (decision 4).
 //
 // - The worklist is a `Vec` used as a stack; `done` a `Map<String, Bool>`
@@ -15,6 +16,7 @@
 //   instance reads (spec §6.2).
 // - `Options` is its native field alone, `stop_before_async`.
 
+import async_lower
 import builtins
 import diagnostic
 import hir
@@ -27,7 +29,8 @@ import token
 /// Lower a typed module to monomorphized MIR natively
 /// (`lower_module_with`): instances are found from `main` outward. With
 /// `stop_before_async`, the module as lowering left it, the async `main`'s
-/// shim pushed, before the async transform.
+/// shim pushed, before the async transform; otherwise after it
+/// (async_lower.nova).
 pub fn lower_module_with(
     program: HirModule,
     stop_before_async: Bool,
@@ -237,11 +240,30 @@ pub fn lower_module_with(
         None => ()
     }
     let mir = MirModule { functions: functions, externs: externs }
-    // The hidden MIR dump's before form.
+    // The hidden MIR dump's before form: nothing natively follows the
+    // transform, and the checks below are on its output.
     if stop_before_async { return Ok(mir) }
-    panic(
-        "the async transform is not ported to N yet (5.4's next part): only the before form is lowered",
-    )
+    // Run on the finished module rather than per function inside the
+    // loop: it needs no generics resolved.
+    let lowered = transform(mir)
+    for f in lowered.functions.iter() {
+        if f.is_async {
+            panic(
+                "the async transform must leave no function flagged: one that reaches codegen still flagged is emitted under its own symbol with its BODY's return class instead of a future's pointer (see `Function::is_async`)",
+            )
+        }
+        for b in f.blocks.iter() {
+            for s in b.stmts.iter() {
+                match s {
+                    SAwait(_, _) => panic(
+                        "the async transform must consume every await marker: no codegen backend can emit one, and a function that is not `is_async` cannot have had its awaits split (see `Stmt::Await`)",
+                    )
+                    _ => ()
+                }
+            }
+        }
+    }
+    Ok(lowered)
 }
 
 // The first extern of `externs` whose symbol is `symbol`.

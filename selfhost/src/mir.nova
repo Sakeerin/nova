@@ -208,6 +208,10 @@ pub const RT_CHAR_TO_STR: Int = 13
 /// `RtFunc::StrEq`.
 pub const RT_STR_EQ: Int = 14
 
+/// `RtFunc::Alloc`, which the async transform's wrappers call for their
+/// state objects.
+pub const RT_ALLOC: Int = 25
+
 /// `RtFunc::CheckBounds`.
 pub const RT_CHECK_BOUNDS: Int = 26
 
