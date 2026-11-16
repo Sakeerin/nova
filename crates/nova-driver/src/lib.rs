@@ -2095,8 +2095,24 @@ mod resolution_dumps {
                                 })
                             })
                             .count();
-                        if wanted.mir {
-                            assert!(lowered >= 500, "{target:?}: {lowered} lower");
+                        // Natively the MIR dumps are compared too, whatever
+                        // `wanted` says: most programs lower, each package
+                        // module that does not run says so, and MIR's cases
+                        // are among the roots, some taking the full check.
+                        let not_run = unshared
+                            .iter()
+                            .filter(|d| d.as_ref().is_ok_and(|d| holds(&d.mir, "(Mir runs=false)")))
+                            .count();
+                        let mir_fallbacks = fallbacks
+                            .iter()
+                            .filter(|f| f.components().any(|c| c.as_os_str() == "mir"))
+                            .count();
+                        if *target == Target::Native && !*test {
+                            assert!(
+                                lowered >= 500 && not_run >= 100 && mir_fallbacks >= 8,
+                                "{target:?}: {lowered} lower, {not_run} do not run, \
+                                 {mir_fallbacks} of MIR's cases take the full check"
+                            );
                         } else {
                             assert_eq!(lowered, 0);
                         }
@@ -2117,7 +2133,7 @@ mod resolution_dumps {
                             .collect();
                         eprintln!(
                             "{target:?} {test}: {} roots take the full check: {shown:?}; \
-                             {lowered} lower",
+                             {lowered} lower, {not_run} do not run",
                             shown.len()
                         );
                         (roots.len(), checked)
