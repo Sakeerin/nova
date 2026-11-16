@@ -209,7 +209,10 @@ Monomorphized: each unique instantiation gets its own compiled function.
 named `name.<DefId>$<args>`, each type argument mangled by `mangle_ty`
 (`i`, `f`, `b`, `c`, `s`, `y`, `u` and `n` for the primitives, `F…R…E` a
 function type, `S<id>L…E` and `R<id>L…E` a sum's and a record's
-arguments, `A…E` an array, `T…E` a tuple, `U…E` a future), as
+arguments, `A…E` an array, `T…E` a tuple, `U…E` a future; a sum or a
+record with no type arguments is `S<id>` or `R<id>` alone, an instance's
+type arguments are joined by `_`, and `X` stands for a parameter, an
+inference variable, an error type or an associated type), as
 `Vec_T.push.147$i`; the `_nova_vec_push_Int` form above was never built.
 The self-hosted compiler monomorphizes and mangles the same way, byte
 for byte on every input the MIR dump's differential holds, types nested

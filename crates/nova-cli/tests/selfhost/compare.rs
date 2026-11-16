@@ -184,8 +184,13 @@ impl MirWalk {
     ///   index in the block from 0, as `Block::stmts` counts, the
     ///   terminator after the last statement.
     ///
-    /// `None` for a part that is not a MIR root's.
+    /// `None` for a part that is not a MIR root's, and at a header: the next
+    /// root's `== FILE` line, where one side printed a line more than the
+    /// other, is in no root's part.
     fn place(&self, dump_line: usize, line: &[u8]) -> Option<String> {
+        if line.starts_with(b"== ") {
+            return None;
+        }
         if dump_line == 1 {
             return line
                 .starts_with(b"(Mir ")
