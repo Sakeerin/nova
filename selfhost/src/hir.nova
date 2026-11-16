@@ -763,3 +763,176 @@ pub type HirPattern =
     | PatVariant(Int, Int, Vec<HirPattern>)
     | PatTuple(Vec<HirPattern>)
     | PatOr(Vec<HirPattern>)
+
+// ---------------------------------------------------------------------------
+// The module MIR reads (5.4)
+// ---------------------------------------------------------------------------
+
+/// Whether `ty` holds a generic parameter anywhere (`Ty::has_params`).
+pub fn has_params(ty: Ty) -> Bool {
+    match ty {
+        TyParam(_) => true
+        TyFn(params, ret) => {
+            for p in params.iter() { if has_params(p) { return true } }
+            has_params(ret)
+        }
+        TySum(_, args) => any_params(args)
+        TyRecord(_, args) => any_params(args)
+        TyArray(e) => has_params(e)
+        TyTuple(es) => any_params(es)
+        TyFuture(o) => has_params(o)
+        TyAssoc(on, _) => has_params(on)
+        _ => false
+    }
+}
+
+fn any_params(tys: Vec<Ty>) -> Bool {
+    for t in tys.iter() { if has_params(t) { return true } }
+    false
+}
+
+/// Whether a pattern is one the flat `match` lowering takes
+/// (`Pattern::is_flat`): a `_`, a binding, a literal, or a variant whose
+/// fields are each `_` or a binding.
+pub fn is_flat(pat: HirPattern) -> Bool {
+    match pat {
+        PatWildcard => true
+        PatBind(_) => true
+        PatInt(_) => true
+        PatBool(_) => true
+        PatStr(_) => true
+        PatChar(_) => true
+        PatVariant(_, _, fields) => {
+            for f in fields.iter() {
+                match f {
+                    PatWildcard => ()
+                    PatBind(_) => ()
+                    _ => return false
+                }
+            }
+            true
+        }
+        PatRange(_, _) => false
+        PatTuple(_) => false
+        PatOr(_) => false
+    }
+}
+
+/// A fully checked module: the type layouts and the typed functions
+/// (`Module`), as MIR reads it. `fn_index` is each function's position in
+/// `functions` by its id, which `function` reads where S0 scans: the same
+/// answer, a function's id being unique among them (spec 5.4 §6.2).
+pub record HirModule {
+    pub sums: Vec<SumType>,
+    pub records: Vec<RecordType>,
+    pub traits: Vec<TraitDef>,
+    pub impls: Vec<ImplInfo>,
+    pub functions: Vec<HirFunction>,
+    pub externs: Vec<ExternFn>,
+    pub fn_index: Map<Int, Int>,
+}
+
+/// The module of these tables and functions, its index built.
+pub fn hir_module(
+    sums: Vec<SumType>,
+    records: Vec<RecordType>,
+    traits: Vec<TraitDef>,
+    impls: Vec<ImplInfo>,
+    functions: Vec<HirFunction>,
+    externs: Vec<ExternFn>,
+) -> HirModule {
+    let mut index: Map<Int, Int> = Map::new()
+    for i in 0..functions.len() {
+        let id = functions.at(i).def_id
+        // The first, as S0's scan finds it.
+        if !index.contains_key(id) { let _ = index.insert(id, i) }
+    }
+    HirModule {
+        sums: sums,
+        records: records,
+        traits: traits,
+        impls: impls,
+        functions: functions,
+        externs: externs,
+        fn_index: index,
+    }
+}
+
+impl HirModule {
+    /// The extern function declared under `def_id` (`Module::extern_fn`).
+    pub fn extern_fn(self, def_id: Int) -> Option<ExternFn> {
+        for e in self.externs.iter() { if e.def_id == def_id { return Some(e) } }
+        None
+    }
+
+    /// The sum type declared under `def_id` (`Module::sum`).
+    pub fn sum(self, def_id: Int) -> Option<SumType> {
+        for s in self.sums.iter() { if s.def_id == def_id { return Some(s) } }
+        None
+    }
+
+    /// The record type declared under `def_id` (`Module::record`, whose
+    /// name is a keyword in Nova).
+    pub fn record_type(self, def_id: Int) -> Option<RecordType> {
+        for r in self.records.iter() { if r.def_id == def_id { return Some(r) } }
+        None
+    }
+
+    /// The trait declared under `def_id` (`Module::trait_def`).
+    pub fn trait_def(self, def_id: Int) -> Option<TraitDef> {
+        for t in self.traits.iter() { if t.def_id == def_id { return Some(t) } }
+        None
+    }
+
+    /// The function declared under `def_id` (`Module::function`).
+    pub fn function(self, def_id: Int) -> Option<HirFunction> {
+        match self.fn_index.get(def_id) {
+            Some(i) => Some(self.functions.at(i))
+            None => None
+        }
+    }
+
+    /// Trait method `method` of `trait_id` for the concrete `self_ty`
+    /// resolved to the function it dispatches to, with the type arguments
+    /// that function is instantiated with (`Module::resolve_method_full`):
+    /// the fitting impl's method at the impl's own arguments, or the
+    /// trait's default body at `[self_ty]`; `None` when no impl fits.
+    pub fn resolve_method_full(
+        self,
+        trait_id: Int,
+        method: Int,
+        self_ty: Ty,
+    ) -> Option<(Int, Vec<Ty>)> {
+        let tr = match self.trait_def(trait_id) {
+            Some(t) => t
+            None => return None
+        }
+        if method < 0 || method >= tr.methods.len() { return None }
+        let method_name = tr.methods.at(method).name
+        let h = match head(self_ty) {
+            Some(h) => h
+            None => return None
+        }
+        let mut found: Option<(ImplInfo, Vec<Ty>)> = None
+        for i in self.impls.iter() {
+            if i.trait_id != trait_id || !head_eq(i.self_head, h) { continue }
+            match match_args(i, self_ty) {
+                Some(args) => {
+                    found = Some((i, args))
+                    break
+                }
+                None => ()
+            }
+        }
+        let (imp, impl_args) = match found {
+            Some(f) => f
+            None => return None
+        }
+        for (n, def) in imp.methods.iter() { if n == method_name { return Some((def, impl_args)) } }
+        let def = tr.methods.at(method).default_def
+        if def < 0 { return None }
+        let mut args: Vec<Ty> = Vec::new()
+        args.push(self_ty)
+        Some((def, args))
+    }
+}

@@ -1,0 +1,476 @@
+// Calls, trait calls, operators, `if` and array repeat: lower.rs's
+// `lower_call` with its builtin table, `lower_trait_call`,
+// `lower_binary`, `lower_logical`, `lower_if`, `lower_array_repeat`,
+// `panic_if` and `bin_i64`, function by function (spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.1, ADR
+// 0057).
+//
+// - S0's exhaustive `match b` over the builtins is `BUILTIN_LOWERING`, one
+//   entry per builtin in `BUILTIN_VARIANTS`' order: the runtime function a
+//   builtin calls, or `=Reinterpret`, `=FutureOutput` or `=Mem` and its
+//   memory operation. Monomorphization reads it once into a list of
+//   `Lowering`s (`builtin_lowerings`), which every function's lowering
+//   shares.
+// - The `Mem` builtins are the WASM target's alone (`mem_load8` in a
+//   native program is E0001, before MIR): N meets none, and panics if it
+//   does.
+
+import builtins
+import diagnostic
+import hir
+import lower
+import mir
+import token
+
+/// How one builtin reaches its implementation (`Lowering`).
+pub type Lowering =
+    // one `CallRuntime` to this runtime function
+    | LoweringRuntime(Int)
+    // the result is the argument, in another type of the same class
+    | LoweringReinterpret
+    // two typed field loads reaching a finished future's output slot
+    | LoweringFutureOutput
+    // a WASM memory access in line, by its operation's name
+    | LoweringMem(String)
+
+/// Each builtin's lowering, `BUILTIN_VARIANTS`' order: the arms of
+/// `lower_call`'s `match b`.
+pub const BUILTIN_LOWERING: [String] = [
+    "Println",
+    "Print",
+    "EPrint",
+    "EPrintln",
+    "Panic",
+    "StrCmp",
+    "StrHash",
+    "=Reinterpret",
+    "StrLenChars",
+    "StrChars",
+    "StrFromChars",
+    "StrJoin",
+    "StrIndexOf",
+    "JsonQuote",
+    "StrToUpper",
+    "StrToLower",
+    "FloatFixed",
+    "StrToFloat",
+    "StrIsFloat",
+    "FloatToBits",
+    "=Reinterpret",
+    "=Reinterpret",
+    "TestSelector",
+    "TaskSpawn",
+    "TaskIsDone",
+    "TaskRelease",
+    "TaskBlockOn",
+    "=FutureOutput",
+    "TaskYieldFuture",
+    "TaskSleepFutureNanos",
+    "TaskJoinFuture",
+    "TaskTimeoutFuture",
+    "FsReadToString",
+    "FsWriteString",
+    "FsTakeString",
+    "FsLastErrorMessage",
+    "FsTempDir",
+    "FsExists",
+    "FsCreateDir",
+    "FsCreateDirAll",
+    "FsRemoveFile",
+    "FsRemoveDirAll",
+    "FsRename",
+    "FsReadDir",
+    "FsTakeStringArray",
+    "FsKind",
+    "FsRead",
+    "FsTakeBytes",
+    "FsWrite",
+    "FileOpen",
+    "FileClose",
+    "FileRead",
+    "FileWrite",
+    "FileFlush",
+    "IoStdinRead",
+    "IoStdoutWrite",
+    "IoStderrWrite",
+    "IoStdoutFlush",
+    "IoStderrFlush",
+    "NetConnect",
+    "NetClose",
+    "NetRead",
+    "NetWrite",
+    "NetReadTimeout",
+    "NetListen",
+    "NetLocalPort",
+    "NetAccept",
+    "BytesLen",
+    "BytesFromString",
+    "BytesIsUtf8",
+    "BytesToStringUnchecked",
+    "BytesAt",
+    "BytesSlice",
+    "BytesConcat",
+    "BytesToInts",
+    "BytesFromInts",
+    "BytesEq",
+    "IntHashSeed",
+    "HttpParseRequest",
+    "CryptoHash",
+    "CryptoRandomBytes",
+    "CryptoRandomInt",
+    "CryptoPbkdf2Sha256",
+    "CryptoPbkdf2Sha256Verify",
+    "TimeNowNanos",
+    "TimeNowEpochNanos",
+    "LogConfigLevel",
+    "LogConfigToStderr",
+    "LogSetConfig",
+    "ShutdownRequested",
+    "ProcessArgCount",
+    "ProcessArg",
+    "ProcessExit",
+    "ProcessRun",
+    "ProcessTakeStatus",
+    "ProcessTakeStdout",
+    "ProcessTakeStderr",
+    "ProcessEnv",
+    "ProcessCurrentExe",
+    "UiStatePresent",
+    "UiStateLoad",
+    "UiStateStore",
+    "RouterStatePresent",
+    "RouterStateLoad",
+    "RouterStateStore",
+    "=Mem Load8",
+    "=Mem Store8",
+    "=Mem Load64",
+    "=Mem Store64",
+    "=Mem Copy",
+    "=Mem Fill",
+    "=Mem Pages",
+    "=Mem Grow",
+    "=Mem HeapBase",
+    "=Mem Poll",
+    "=Mem Abort",
+    "=Mem ClosureWord",
+    "=Mem ClosureCall",
+]
+
+/// `BUILTIN_LOWERING` read into `Lowering`s, by the builtin's index.
+pub fn builtin_lowerings() -> Vec<Lowering> {
+    let mut out: Vec<Lowering> = Vec::new()
+    for entry in BUILTIN_LOWERING.iter() {
+        let how = if entry == "=Reinterpret" {
+            LoweringReinterpret
+        } else if entry == "=FutureOutput" {
+            LoweringFutureOutput
+        } else if entry.starts_with("=Mem ") {
+            LoweringMem(entry.byte_slice(5, entry.byte_len()))
+        } else {
+            LoweringRuntime(rt_func(entry))
+        }
+        out.push(how)
+    }
+    out
+}
+
+impl Lowerer {
+    /// A call: its arguments, then the call to a function, a builtin or a
+    /// function value (`lower_call`).
+    pub fn lower_call(
+        mut self,
+        e: HirExpr,
+        func: Callee,
+        type_args: Vec<Ty>,
+        args: Vec<HirExpr>,
+    ) -> Int {
+        let mut arg_temps: Vec<Int> = Vec::new()
+        for i in 0..args.len() { arg_temps.push(self.lower_expr(args.at(i))) }
+        let ret_class = mir_ty(e.ty)
+        let dst = if ret_class == MIR_UNIT { -1 } else { self.new_temp(ret_class) }
+        match func {
+            CalleeDef(def) => {
+                let callee = self.callee_name(def, type_args)
+                self.push(SCall(dst, callee, arg_temps))
+            }
+            CalleeBuiltin(b) => {
+                match self.builtins.at(b) {
+                    LoweringRuntime(f) => self.push(SCallRuntime(dst, f, arg_temps))
+                    LoweringReinterpret => {
+                        // A representation-level no-op, a register move: the
+                        // `Copy` is not optional, or every later reader of the
+                        // result reads an unassigned temp.
+                        if dst < 0 || arg_temps.len() != 1 {
+                            panic(
+                                "`${BUILTIN_NAMES[b]}` must lower with a dst and exactly one argument (got dst=${dest_debug(dst)}, ${arg_temps.len()} args), or its result temp is left unassigned",
+                            )
+                        }
+                        self.push(SCopy(dst, arg_temps.at(0)))
+                    }
+                    LoweringFutureOutput => {
+                        // `task_output(fut)`: the future's state object, then
+                        // that object's output slot, loaded in the output's
+                        // own class; nothing for a unit output.
+                        if arg_temps.len() != 1 {
+                            panic("`${BUILTIN_NAMES[b]}` takes exactly one future")
+                        }
+                        if dst >= 0 {
+                            let state = self.new_temp(MIR_PTR)
+                            self.push(
+                                SRecordField(state, arg_temps.at(0), FUTURE_SLOT_STATE, MIR_PTR),
+                            )
+                            self.push(SRecordField(dst, state, STATE_SLOT_OUTPUT, ret_class))
+                        }
+                    }
+                    LoweringMem(op) => panic(
+                        "`${BUILTIN_NAMES[b]}` lowers to the WASM memory access `${op}`, which N's native MIR does not have",
+                    )
+                }
+            }
+            CalleeLocal(l) => {
+                let callee = self.local_map.at(l)
+                let mut params: Vec<Int> = Vec::new()
+                for i in 0..args.len() { params.push(mir_ty(args.at(i).ty)) }
+                self.push(SCallIndirect(dst, callee, params, ret_class, arg_temps))
+            }
+        }
+        if dst >= 0 { dst } else { self.unit_temp() }
+    }
+
+    /// A trait method call, statically dispatched: `self_ty` is concrete
+    /// here, so the call goes to the impl's method or the trait's default
+    /// body (`lower_trait_call`). A trait associated function has no
+    /// receiver.
+    pub fn lower_trait_call(
+        mut self,
+        e: HirExpr,
+        trait_id: Int,
+        method: Int,
+        self_ty: Ty,
+        method_type_args: Vec<Ty>,
+        receiver: Option<HirExpr>,
+        args: Vec<HirExpr>,
+    ) -> Int {
+        let mut arg_temps: Vec<Int> = Vec::new()
+        match receiver {
+            Some(r) => arg_temps.push(self.lower_expr(r))
+            None => ()
+        }
+        for i in 0..args.len() { arg_temps.push(self.lower_expr(args.at(i))) }
+        let ret_class = mir_ty(e.ty)
+        let dst = if ret_class == MIR_UNIT { -1 } else { self.new_temp(ret_class) }
+        let (target, type_args) = match self.program.resolve_method_full(
+            trait_id,
+            method,
+            self_ty,
+        ) {
+            Some(r) => r
+            None => {
+                let trait_name = match self.program.trait_def(trait_id) {
+                    Some(t) => t.name
+                    None => "trait#${trait_id}"
+                }
+                self.diagnostics.push(
+                    error_at(
+                        "E0013",
+                        "no implementation of trait `${trait_name}` for the receiver type",
+                        self.file,
+                        e.span,
+                        "no matching trait impl",
+                    ),
+                )
+                return if dst >= 0 { dst } else { self.unit_temp() }
+            }
+        }
+        // The trait method's own generic arguments after the impl's or
+        // `Self`'s.
+        let mut all = type_args
+        for t in method_type_args.iter() { all.push(t) }
+        let callee = self.callee_name(target, all)
+        self.push(SCall(dst, callee, arg_temps))
+        if dst >= 0 { dst } else { self.unit_temp() }
+    }
+
+    /// A binary operation (`lower_binary`): string equality and `+` are
+    /// runtime calls, a unit comparison a constant, every other one `Bin`.
+    pub fn lower_binary(mut self, op: HirBinOp, lhs: HirExpr, rhs: HirExpr) -> Int {
+        let l = self.lower_expr(lhs)
+        let r = self.lower_expr(rhs)
+        let is_string = match lhs.ty {
+            TyString => true
+            _ => false
+        }
+        let (is_eq, is_ne, is_add) = match op {
+            OpEq => (true, false, false)
+            OpNe => (false, true, false)
+            OpAdd => (false, false, true)
+            _ => (false, false, false)
+        }
+        if is_string && (is_eq || is_ne) {
+            let eq = self.new_temp(MIR_I8)
+            self.push(SCallRuntime(eq, RT_STR_EQ, Vec::from_array([l, r])))
+            if is_eq { return eq }
+            let ne = self.new_temp(MIR_I8)
+            self.push(SNot(ne, eq))
+            return ne
+        }
+        // `String + String` is one call of the runtime's concatenation.
+        if is_string && is_add {
+            let t = self.new_temp(MIR_PTR)
+            self.push(SCallRuntime(t, RT_STR_CONCAT, Vec::from_array([l, r])))
+            return t
+        }
+        // Unit comparison is a constant.
+        match lhs.ty {
+            TyUnit => {
+                let t = self.new_temp(MIR_I8)
+                self.push(SConstBool(t, is_eq))
+                return t
+            }
+            _ => ()
+        }
+        let class = operand_class(lhs.ty)
+        let result = if is_comparison(op) {
+            MIR_I8
+        } else if class == OC_FLOAT {
+            MIR_F64
+        } else {
+            MIR_I64
+        }
+        let t = self.new_temp(result)
+        self.push(SBin(t, op, class, l, r))
+        t
+    }
+
+    /// `&&` (`is_and`) or `||`, as control flow (`lower_logical`).
+    pub fn lower_logical(mut self, lhs: HirExpr, rhs: HirExpr, is_and: Bool) -> Int {
+        let result = self.new_temp(MIR_I8)
+        let l = self.lower_expr(lhs)
+        if diverges(lhs) { return result }
+        let rhs_block = self.new_block()
+        let short_block = self.new_block()
+        let join = self.new_block()
+        if is_and {
+            self.terminate(TermBranch(l, rhs_block, short_block))
+        } else {
+            self.terminate(TermBranch(l, short_block, rhs_block))
+        }
+        self.switch_to(rhs_block)
+        let r = self.lower_expr(rhs)
+        if !diverges(rhs) { self.copy(result, r) }
+        self.terminate(TermGoto(join))
+        self.switch_to(short_block)
+        self.push(SConstBool(result, !is_and))
+        self.terminate(TermGoto(join))
+        self.switch_to(join)
+        result
+    }
+
+    /// `if`, with or without an `else` (`lower_if`).
+    pub fn lower_if(
+        mut self,
+        e: HirExpr,
+        cond: HirExpr,
+        then: HirExpr,
+        else_: Option<HirExpr>,
+    ) -> Int {
+        let result = self.new_temp(mir_ty(e.ty))
+        let c = self.lower_expr(cond)
+        if diverges(cond) { return result }
+        let then_b = self.new_block()
+        let join = self.new_block()
+        let else_b = if else_.is_some() { self.new_block() } else { join }
+        self.terminate(TermBranch(c, then_b, else_b))
+        self.switch_to(then_b)
+        let tv = self.lower_expr(then)
+        if !diverges(then) { self.copy(result, tv) }
+        self.terminate(TermGoto(join))
+        match else_ {
+            Some(else_expr) => {
+                self.switch_to(else_b)
+                let ev = self.lower_expr(else_expr)
+                if !diverges(else_expr) { self.copy(result, ev) }
+                self.terminate(TermGoto(join))
+            }
+            None => ()
+        }
+        self.switch_to(join)
+        result
+    }
+
+    /// `[init; n]`: allocate `n` slots behind two length guards, then fill
+    /// every one with `init`, lowered once (`lower_array_repeat`).
+    pub fn lower_array_repeat(mut self, init: HirExpr, len: HirExpr) -> Int {
+        let init_t = self.lower_expr(init)
+        let len_t = self.lower_expr(len)
+        let elem_ty = mir_ty(init.ty)
+        let arr = self.new_temp(MIR_PTR)
+        let zero = self.new_temp(MIR_I64)
+        self.push(SConstInt(zero, 0))
+        let negative = self.bin_i64(OpLt, len_t, zero, MIR_I8)
+        self.panic_if(negative, "array length must not be negative")
+        let max = self.new_temp(MIR_I64)
+        self.push(SConstInt(max, MAX_ARRAY_LEN))
+        let too_long = self.bin_i64(OpGt, len_t, max, MIR_I8)
+        self.panic_if(too_long, "array length is too large")
+        self.push(SArrayAlloc(arr, len_t))
+        // A unit element has no runtime representation: nothing to store.
+        if elem_ty == MIR_UNIT { return arr }
+        let i = self.new_temp(MIR_I64)
+        self.push(SConstInt(i, 0))
+        let header = self.new_block()
+        let body_b = self.new_block()
+        let exit = self.new_block()
+        self.terminate(TermGoto(header))
+        self.switch_to(header)
+        let more = self.bin_i64(OpLt, i, len_t, MIR_I8)
+        self.terminate(TermBranch(more, body_b, exit))
+        self.switch_to(body_b)
+        self.push(SArraySet(arr, i, init_t, elem_ty))
+        let one = self.new_temp(MIR_I64)
+        self.push(SConstInt(one, 1))
+        let next = self.bin_i64(OpAdd, i, one, MIR_I64)
+        self.push(SCopy(i, next))
+        self.terminate(TermGoto(header))
+        self.switch_to(exit)
+        arr
+    }
+
+    /// `if bad { panic(msg) }`, continuing in a fresh block (`panic_if`).
+    pub fn panic_if(mut self, bad: Int, msg: String) {
+        let panic_b = self.new_block()
+        let ok_b = self.new_block()
+        self.terminate(TermBranch(bad, panic_b, ok_b))
+        self.switch_to(panic_b)
+        let m = self.new_temp(MIR_PTR)
+        self.push(SConstStr(m, msg))
+        self.push(SCallRuntime(-1, RT_PANIC, Vec::from_array([m])))
+        // The runtime's panic aborts, so control never returns here.
+        self.terminate(TermTrap)
+        self.switch_to(ok_b)
+    }
+
+    /// An `Int`-class binary operation on two temps, into a fresh temp of
+    /// class `result` (`bin_i64`).
+    pub fn bin_i64(mut self, op: HirBinOp, lhs: Int, rhs: Int, result: Int) -> Int {
+        let dst = self.new_temp(result)
+        self.push(SBin(dst, op, OC_INT, lhs, rhs))
+        dst
+    }
+}
+
+/// Whether `op` compares, giving a `Bool`.
+pub fn is_comparison(op: HirBinOp) -> Bool {
+    match op {
+        OpEq => true
+        OpNe => true
+        OpLt => true
+        OpLe => true
+        OpGt => true
+        OpGe => true
+        _ => false
+    }
+}
+
+// An optional temp as Rust's `Debug` prints one, for a panic's message.
+fn dest_debug(t: Int) -> String { if t < 0 { "None" } else { "Some(Temp(${t}))" } }

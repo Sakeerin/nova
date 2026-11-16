@@ -1,0 +1,415 @@
+// The MIR dump: what monomorphization and lowering built natively for one
+// program, as text, one entry per line, exactly as S0's `nova check
+// --dump-mir` prints it: a port of crates/nova-mir/src/dump.rs, function
+// by function (spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §4). ADR 0057
+// writes the grammar out, with an example of every form.
+//
+// - The first line says how far the root got: `(Mir runs=false)`,
+//   `checked=false`, `lowered=false` with MIR's diagnostics, or
+//   `lowered=true`, `async_lowered=` whether the transform ran, the
+//   counts, the externs and every function.
+// - Order is MIR's own, nothing sorted.
+// - A statement is one line: its variant's name, then every field in
+//   declaration order: `_` for an absent destination, `t<n>`, `bb<n>`,
+//   integers in decimal, a float as the 16 hex digits of its bits, strings
+//   and symbols quoted, operators, classes and runtime functions by name,
+//   lists in parentheses (`t3:Ptr`, `0:bb2`).
+// - One printer for both forms: the before form is the module before the
+//   async transform.
+
+import diagnostic
+import dump
+import hir
+import mir
+import resolution_dump
+
+/// How far a root got, which its part's first line says (`Reached`).
+pub type Reached =
+    // A package module that `check` does not lower.
+    | ReachedNotRun
+    // An error before MIR, which the HIR dump prints.
+    | ReachedNotChecked
+    // MIR's result, after the async transform when the flag says so.
+    | ReachedLowered(Result<MirModule, Vec<Diagnostic>>, Bool)
+
+/// A program's part (`dump_program`): its first line and, once lowered,
+/// the module; then `(Diagnostics)`, MIR's alone.
+pub fn dump_mir_program(reached: Reached) -> String {
+    let mut d = MirDump { out: StringBuilder::new(), fresh: true }
+    d.open(0, "Mir")
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    match reached {
+        ReachedNotRun => d.bool_field("runs", false)
+        ReachedNotChecked => {
+            d.bool_field("runs", true)
+            d.bool_field("checked", false)
+        }
+        ReachedLowered(result, async_lowered) => {
+            d.bool_field("runs", true)
+            d.bool_field("checked", true)
+            match result {
+                Ok(program) => {
+                    d.bool_field("lowered", true)
+                    d.bool_field("async_lowered", async_lowered)
+                    d.module_text(program)
+                }
+                Err(errors) => {
+                    d.bool_field("lowered", false)
+                    diagnostics = errors
+                }
+            }
+        }
+    }
+    d.close()
+    d.out.push("\n")
+    d.out.push(diagnostics_text(diagnostics))
+    d.out.to_string()
+}
+
+// The text being written, and whether it is empty or ends a line
+// (`Dump`).
+record MirDump { out: StringBuilder, fresh: Bool }
+
+impl MirDump {
+    // A line, up to its kind (`open`).
+    fn open(mut self, depth: Int, kind: String) {
+        if !self.fresh { self.out.push("\n") }
+        self.fresh = false
+        for _ in 0..depth { self.out.push("  ") }
+        self.out.push("(")
+        self.out.push(kind)
+    }
+
+    fn close(mut self) { self.out.push(")") }
+
+    // ` key=value`.
+    fn field(mut self, key: String, value: String) { self.out.push(" ${key}=${value}") }
+
+    fn bool_field(mut self, key: String, value: Bool) { self.out.push(" ${key}=${value}") }
+
+    // ` ` and a value as it is.
+    fn value(mut self, text: String) {
+        self.out.push(" ")
+        self.out.push(text)
+    }
+
+    // ` ` and `text` quoted.
+    fn string(mut self, text: String) {
+        self.out.push(" \"")
+        push_escaped(self.out, text, true)
+        self.out.push("\"")
+    }
+
+    // ` t<n>`.
+    fn temp(mut self, t: Int) { self.out.push(" t${t}") }
+
+    // ` bb<n>`.
+    fn block(mut self, b: Int) { self.out.push(" bb${b}") }
+
+    // ` ` and an optional temp, the temp or `_`.
+    fn dest(mut self, t: Int) { if t < 0 { self.out.push(" _") } else { self.out.push(" t${t}") } }
+
+    // ` ` and a class by its variant's name.
+    fn class(mut self, c: Int) {
+        self.out.push(" ")
+        self.out.push(MIR_TY_NAMES[c])
+    }
+
+    // ` (t0 t1)`: temps, a list.
+    fn temps(mut self, ts: Vec<Int>) {
+        self.out.push(" (")
+        for i in 0..ts.len() {
+            if i > 0 { self.out.push(" ") }
+            self.out.push("t${ts.at(i)}")
+        }
+        self.out.push(")")
+    }
+
+    // ` (I64 F64)`: classes, a list.
+    fn classes(mut self, cs: Vec<Int>) {
+        self.out.push(" (")
+        for i in 0..cs.len() {
+            if i > 0 { self.out.push(" ") }
+            self.out.push(MIR_TY_NAMES[cs.at(i)])
+        }
+        self.out.push(")")
+    }
+
+    // ` (t0:I64 t3:Ptr)`: temps with their classes, a list.
+    fn typed(mut self, fields: Vec<(Int, Int)>) {
+        self.out.push(" (")
+        let mut first = true
+        for i in 0..fields.len() {
+            let (t, c) = fields.at(i)
+            if !first { self.out.push(" ") }
+            first = false
+            self.out.push("t${t}:")
+            self.out.push(MIR_TY_NAMES[c])
+        }
+        self.out.push(")")
+    }
+
+    // The counts, the externs and every function, after the first line's
+    // fields (`module`).
+    fn module_text(mut self, program: MirModule) {
+        self.field("functions", "${program.functions.len()}")
+        self.field("externs", "${program.externs.len()}")
+        for e in program.externs.iter() {
+            self.open(1, "Extern")
+            self.string(e.symbol)
+            let abi = match e.abi {
+                ExternAbiC => "C"
+                ExternAbiJs => "Js"
+            }
+            self.field("abi", abi)
+            self.classes(e.params)
+            self.field("ret", MIR_TY_NAMES[e.ret])
+            self.close()
+        }
+        for i in 0..program.functions.len() { self.function(program.functions.at(i)) }
+    }
+
+    // A function: its line, its temps, one a line, and its blocks
+    // (`function`).
+    fn function(mut self, f: MirFunction) {
+        self.open(1, "Function")
+        self.string(f.name)
+        self.field("params", "${f.params}")
+        self.bool_field("takes_env", f.takes_env)
+        self.field("captures", "${f.capture_count}")
+        self.field("ret", MIR_TY_NAMES[f.ret])
+        self.bool_field("async", f.is_async)
+        for i in 0..f.temps.len() {
+            self.open(2, "Temp")
+            self.temp(i)
+            self.class(f.temps.at(i))
+            self.close()
+        }
+        for i in 0..f.blocks.len() {
+            let b = f.blocks.at(i)
+            self.open(2, "Block")
+            self.block(i)
+            for k in 0..b.stmts.len() { self.stmt(b.stmts.at(k)) }
+            self.terminator(b.term)
+            self.close()
+        }
+        self.close()
+    }
+
+    // A statement, one line (`stmt`).
+    fn stmt(mut self, stmt: MirStmt) {
+        match stmt {
+            SConstInt(dst, v) => {
+                self.open(3, "ConstInt")
+                self.temp(dst)
+                self.value("${v}")
+            }
+            SConstFloat(dst, v) => {
+                self.open(3, "ConstFloat")
+                self.temp(dst)
+                self.value(hex16(v.to_bits()))
+            }
+            SConstBool(dst, v) => {
+                self.open(3, "ConstBool")
+                self.temp(dst)
+                self.value("${v}")
+            }
+            SConstStr(dst, s) => {
+                self.open(3, "ConstStr")
+                self.temp(dst)
+                self.string(s)
+            }
+            SConstUnit(dst) => {
+                self.open(3, "ConstUnit")
+                self.temp(dst)
+            }
+            SCopy(dst, src) => {
+                self.open(3, "Copy")
+                self.temp(dst)
+                self.temp(src)
+            }
+            SBin(dst, op, c, lhs, rhs) => {
+                self.open(3, "Bin")
+                self.temp(dst)
+                self.value(bin_op_name(op))
+                self.value(OPERAND_CLASS_NAMES[c])
+                self.temp(lhs)
+                self.temp(rhs)
+            }
+            SNeg(dst, c, src) => {
+                self.open(3, "Neg")
+                self.temp(dst)
+                self.value(OPERAND_CLASS_NAMES[c])
+                self.temp(src)
+            }
+            SNot(dst, src) => {
+                self.open(3, "Not")
+                self.temp(dst)
+                self.temp(src)
+            }
+            SBitNot(dst, src) => {
+                self.open(3, "BitNot")
+                self.temp(dst)
+                self.temp(src)
+            }
+            SCall(dst, callee, args) => {
+                self.open(3, "Call")
+                self.dest(dst)
+                self.string(callee)
+                self.temps(args)
+            }
+            SCallIndirect(dst, callee, params, ret, args) => {
+                self.open(3, "CallIndirect")
+                self.dest(dst)
+                self.temp(callee)
+                self.classes(params)
+                self.class(ret)
+                self.temps(args)
+            }
+            SAwait(dst, future) => {
+                self.open(3, "Await")
+                self.dest(dst)
+                self.temp(future)
+            }
+            SCallRuntime(dst, func, args) => {
+                self.open(3, "CallRuntime")
+                self.dest(dst)
+                self.value(RT_FUNC_VARIANTS[func])
+                self.temps(args)
+            }
+            SMakeClosure(dst, code, captures) => {
+                self.open(3, "MakeClosure")
+                self.temp(dst)
+                self.string(code)
+                self.typed(captures)
+            }
+            SMakeSum(dst, tag, fields) => {
+                self.open(3, "MakeSum")
+                self.temp(dst)
+                self.value("${tag}")
+                self.typed(fields)
+            }
+            SSumTag(dst, sum) => {
+                self.open(3, "SumTag")
+                self.temp(dst)
+                self.temp(sum)
+            }
+            SSumField(dst, sum, index, ty) => {
+                self.open(3, "SumField")
+                self.temp(dst)
+                self.temp(sum)
+                self.value("${index}")
+                self.class(ty)
+            }
+            SMakeRecord(dst, fields) => {
+                self.open(3, "MakeRecord")
+                self.temp(dst)
+                self.typed(fields)
+            }
+            SRecordField(dst, rec, index, ty) => {
+                self.open(3, "RecordField")
+                self.temp(dst)
+                self.temp(rec)
+                self.value("${index}")
+                self.class(ty)
+            }
+            SSetField(rec, index, value, ty) => {
+                self.open(3, "SetField")
+                self.temp(rec)
+                self.value("${index}")
+                self.temp(value)
+                self.class(ty)
+            }
+            SMakeArray(dst, elems) => {
+                self.open(3, "MakeArray")
+                self.temp(dst)
+                self.typed(elems)
+            }
+            SArrayAlloc(dst, len) => {
+                self.open(3, "ArrayAlloc")
+                self.temp(dst)
+                self.temp(len)
+            }
+            SArrayLen(dst, arr) => {
+                self.open(3, "ArrayLen")
+                self.temp(dst)
+                self.temp(arr)
+            }
+            SArrayGet(dst, arr, index, ty) => {
+                self.open(3, "ArrayGet")
+                self.temp(dst)
+                self.temp(arr)
+                self.temp(index)
+                self.class(ty)
+            }
+            SArraySet(arr, index, value, ty) => {
+                self.open(3, "ArraySet")
+                self.temp(arr)
+                self.temp(index)
+                self.temp(value)
+                self.class(ty)
+            }
+        }
+        self.close()
+    }
+
+    // A block's terminator, one line at its statements' depth
+    // (`terminator`).
+    fn terminator(mut self, term: MirTerm) {
+        match term {
+            TermGoto(to) => {
+                self.open(3, "Goto")
+                self.block(to)
+            }
+            TermBranch(cond, then_, else_) => {
+                self.open(3, "Branch")
+                self.temp(cond)
+                self.block(then_)
+                self.block(else_)
+            }
+            TermSwitch(disc, arms, default) => {
+                self.open(3, "Switch")
+                self.temp(disc)
+                self.out.push(" (")
+                let mut first = true
+                for i in 0..arms.len() {
+                    let (v, b) = arms.at(i)
+                    if !first { self.out.push(" ") }
+                    first = false
+                    self.out.push("${v}:bb${b}")
+                }
+                self.out.push(")")
+                self.block(default)
+            }
+            TermReturn(value) => {
+                self.open(3, "Return")
+                self.dest(value)
+            }
+            TermTrap => self.open(3, "Trap")
+        }
+        self.close()
+    }
+}
+
+/// A binary operator by its variant's name, as Rust's `Debug` prints it.
+pub fn bin_op_name(op: HirBinOp) -> String {
+    match op {
+        OpAdd => "Add"
+        OpSub => "Sub"
+        OpMul => "Mul"
+        OpDiv => "Div"
+        OpRem => "Rem"
+        OpEq => "Eq"
+        OpNe => "Ne"
+        OpLt => "Lt"
+        OpLe => "Le"
+        OpGt => "Gt"
+        OpGe => "Ge"
+        OpBitAnd => "BitAnd"
+        OpBitOr => "BitOr"
+        OpBitXor => "BitXor"
+        OpShl => "Shl"
+        OpShr => "Shr"
+    }
+}
