@@ -551,16 +551,21 @@ fn run(program: &Path, args: &[&str], dir: &Path, files: &[String]) -> Result<Ru
 }
 
 /// `stdout` of a run with `args` as S0's and N's are compared: a
-/// resolution dump's, S0's `check --dump-resolution` or N's `resolve`, or
-/// a HIR dump's, S0's `check --dump-hir` or N's `hir` (5.3a),
+/// resolution dump's, S0's `check --dump-resolution` or N's `resolve`, a
+/// HIR dump's, S0's `check --dump-hir` or N's `hir` (5.3a), or a MIR
+/// dump's, S0's `check --dump-mir` or N's `mir` (5.4),
 /// with `\` read as `/` in the paths of E0004's and E0093's messages on
 /// `windows` ([`settle_paths`], ADR 0054 §7); any other as it is.
 fn settled_stdout(args: &[&str], stdout: Vec<u8>, windows: bool) -> Vec<u8> {
     // The HIR dump prints the loader's diagnostics too (5.3a, spec 5.3
-    // §3.6): S0's `check --dump-hir` and N's `hir` are settled alike.
+    // §3.6): S0's `check --dump-hir` and N's `hir` are settled alike. The
+    // MIR dump runs the loader too (5.4, spec §7.2), and no message of
+    // MIR's names a path, so nothing changes in it today; one rule covers
+    // every dump that runs the loader.
     if args.starts_with(RESOLUTION_S0)
         || args.starts_with(HIR_S0)
-        || matches!(args.first(), Some(&"resolve" | &"hir"))
+        || args.starts_with(MIR_S0)
+        || matches!(args.first(), Some(&"resolve" | &"hir" | &"mir"))
     {
         settle_paths(&stdout, windows)
     } else {
@@ -4724,4 +4729,370 @@ fn the_body_fuzzers_inputs_agree_and_hold_each_aimed_code() {
         "aimed codes under two: {short:?}; all: {codes:?}"
     );
     eprintln!("the body fuzzer's codes over seeds {BODY_SEEDS:?}: {codes:?}");
+}
+
+// 5.4 (spec
+// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3, §7; ADR
+// 0057): S0's hidden `nova check --dump-mir FILE…`, natively, and its
+// before form, `--dump-mir --before-async`. Until N prints MIR
+// ([`N_MIR`]), the MIR dump's inputs run through S0 alone.
+
+/// S0's MIR dump (5.4, ADR 0057): the hidden `check --dump-mir`, before
+/// the roots; after the async transform.
+const MIR_S0: &[&str] = &["check", "--dump-mir"];
+
+/// S0's MIR dump before the async transform: `check --dump-mir
+/// --before-async`.
+const MIR_BEFORE_S0: &[&str] = &["check", "--dump-mir", "--before-async"];
+
+/// Whether N prints MIR, `selfhost mir --std DIR [--before-async]` (spec
+/// 5.4 §6.3). Until it does, the MIR dump's inputs (the native corpus's
+/// roots that run, the HIR cases that reach MIR and `cases/mir/`, with
+/// both line endings) run through S0 alone, whose dumps must be well
+/// formed, hold a header per root, every form of `KINDS` but those a
+/// native build never prints, `Await` and `async=true` in the before form
+/// alone, and every code MIR gives natively from source. Later parts of
+/// 5.4 port N's MIR and set it, and every set is then compared byte for
+/// byte.
+const N_MIR: bool = false;
+
+/// The MIR dump's two forms (spec 5.4 §3.1, §7.2): after the async
+/// transform, what the emitter reads, and before it, as lowering left it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MirForm {
+    After,
+    Before,
+}
+
+impl MirForm {
+    /// S0's arguments for the form.
+    fn s0(self) -> &'static [&'static str] {
+        match self {
+            MirForm::After => MIR_S0,
+            MirForm::Before => MIR_BEFORE_S0,
+        }
+    }
+}
+
+/// The MIR dump through both sides in `form`: S0's `check --dump-mir`,
+/// and N's `mir --std DIR`, each with `--before-async` for the before form,
+/// followed by the roots.
+fn mir_in(form: MirForm) -> &'static Dump {
+    static DUMPS: [OnceLock<Dump>; 2] = [OnceLock::new(), OnceLock::new()];
+    DUMPS[form as usize].get_or_init(|| {
+        let std_dir = std_dir();
+        let mut n = vec!["mir", "--std", std_dir.as_str()];
+        if form == MirForm::Before {
+            n.push("--before-async");
+        }
+        Dump {
+            s0: form.s0(),
+            n: leak_args(&n),
+        }
+    })
+}
+
+/// `form` on `files`, relative to `dir`, each a program's root, in one
+/// process a side, each side exiting with `code`: compared through
+/// [`compare_batch`] once N prints MIR ([`N_MIR`]), and S0's alone, through
+/// [`run`], before; the roots' names under [`HIR_ARGS_LIMIT`], and the dump
+/// well formed ([`assert_well_formed`]) with a header and a `(Mir` line per
+/// root. Returns S0's output.
+fn agree_on_mir_dump(form: MirForm, dir: &Path, files: &[String], code: i32) -> String {
+    let bytes: usize = files.iter().map(|f| f.len() + 1).sum();
+    assert!(
+        bytes <= HIR_ARGS_LIMIT,
+        "{bytes} bytes of root names on one command line, past HIR_ARGS_LIMIT"
+    );
+    let text = if N_MIR {
+        compare_batch(mir_in(form), dir, files, code, &nova(), selfhost())
+            .unwrap_or_else(|report| panic!("{report}"))
+    } else {
+        let s0 = run(&nova(), form.s0(), dir, files).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            s0.code,
+            Some(code),
+            "{}: {}",
+            batch_name(&nova(), form.s0(), files),
+            s0.stderr
+        );
+        String::from_utf8(s0.stdout).expect("the MIR dump is UTF-8")
+    };
+    assert_well_formed(&text);
+    let parts = parts_by_root(&text);
+    assert_eq!(
+        parts.iter().map(|(r, _)| r.as_str()).collect::<Vec<_>>(),
+        files.iter().map(String::as_str).collect::<Vec<_>>(),
+        "{form:?}: a header per root"
+    );
+    for (root, part) in &parts {
+        assert!(
+            part.starts_with("(Mir ") || part.starts_with("IOERR "),
+            "{form:?} {root}: {part}"
+        );
+    }
+    text
+}
+
+/// [`agree_on_mir_dump`] on `files`: in one process a side, or, when their
+/// names would pass [`HIR_ARGS_LIMIT`], in [`agree_in_parts`] side by side,
+/// each part under it.
+fn agree_on_mir_in(form: MirForm, dir: &Path, files: &[String], code: i32) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let bytes: usize = files.iter().map(|f| f.len() + 1).sum();
+    let parts = bytes.div_ceil(HIR_ARGS_LIMIT);
+    if parts <= 1 {
+        return agree_on_mir_dump(form, dir, files, code);
+    }
+    agree_in_parts(files, parts, |part| {
+        agree_on_mir_dump(form, dir, part, code)
+    })
+}
+
+/// `nova check`'s help names no `--dump-mir`, every `nova check` command
+/// line whose first argument after `check` is not the hidden flag is parsed
+/// as the base parses it, `--dump-mir=…` included, and the MIR dump's own
+/// parser takes `--before-async` and files and refuses everything else
+/// with one error under its own usage line, `--std`, `--target`, `--test`,
+/// `--help`, `-h` and the flag again among them; with no file, one line on
+/// stderr; each exiting 2 with nothing on stdout (5.4, spec §3.1).
+#[test]
+fn the_mir_dump_flag_is_hidden_and_refused_as_the_spec_says() {
+    let help = Command::new(nova())
+        .args(["check", "--help"])
+        .output()
+        .expect("run nova check --help");
+    let help = String::from_utf8_lossy(&help.stdout).into_owned();
+    assert!(help.contains("--target"), "{help}");
+    assert!(!help.contains("dump-mir"), "{help}");
+    assert!(!help.contains("before-async"), "{help}");
+    let out = Command::new(nova())
+        .args(["check", "--help", "--dump-mir"])
+        .output()
+        .expect("run nova check --help --dump-mir");
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), help);
+    let (opts, file, target) = ("[OPTIONS] [FILE]", "<FILE>", "--target <TARGET> [FILE]");
+    for (args, named, usage) in [
+        (&["check", "--dump-mi", "a.nova"][..], "--dump-mi", opts),
+        (&["check", "--dump-mirr", "a.nova"], "--dump-mirr", opts),
+        (&["check", "--dump-mir=1", "a.nova"], "--dump-mir", opts),
+        (
+            &["check", "--dump-mir=before-async", "a.nova"],
+            "--dump-mir",
+            opts,
+        ),
+        (&["check", "--dump-mir=", "a.nova"], "--dump-mir", opts),
+        (
+            &["check", "--before-async", "a.nova"],
+            "--before-async",
+            opts,
+        ),
+        (&["check", "a.nova", "--dump-mir"], "--dump-mir", file),
+        (
+            &["check", "--target", "native", "--dump-mir", "a.nova"],
+            "--dump-mir",
+            target,
+        ),
+        (&["check", "--test", "--dump-mir", "a.nova"], "--test", opts),
+    ] {
+        let out = Command::new(nova())
+            .args(args)
+            .output()
+            .expect("run nova check");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let tip = format!("  tip: to pass '{named}' as a value, use '-- {named}'\n\n");
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "error: unexpected argument '{named}' found\n\n{tip}\
+                 Usage: nova{EXE_SUFFIX} check {usage}\n\n\
+                 For more information, try '--help'.\n"
+            ),
+            "{args:?}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    for args in [
+        &["--std"][..],
+        &["--std", "a.nova"],
+        &["--target", "native", "a.nova"],
+        &["--target=wasm", "a.nova"],
+        &["--test", "a.nova"],
+        &["--help"],
+        &["-h"],
+        &["--dump-mir", "a.nova"],
+        &["--dump-hir", "a.nova"],
+        &["--before-async", "--before-async", "a.nova"],
+        &["--before-async=1", "a.nova"],
+        &["--before-asyn", "a.nova"],
+        &["--before-async"],
+        &[],
+    ] {
+        let out = Command::new(nova())
+            .args(MIR_S0)
+            .args(args)
+            .output()
+            .expect("run nova check --dump-mir");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with("error: "), "{args:?}: {stderr}");
+        assert_eq!(stderr.matches("error:").count(), 1, "{args:?}: {stderr}");
+        assert_eq!(
+            stderr.matches("Usage: ").count(),
+            stderr.matches("Usage: nova check --dump-mir ").count(),
+            "{args:?}: {stderr}"
+        );
+        // The form's own refusal, which is not clap's, names its flag.
+        if !stderr.contains("Usage: ") {
+            assert_eq!(stderr, "error: --dump-mir needs a FILE\n", "{args:?}");
+        }
+        assert!(out.stdout.is_empty(), "{args:?}");
+    }
+    // `--` before a root that starts with `-`.
+    let dir = fresh_dir("mir-flag");
+    std::fs::write(dir.join("-a.nova"), "fn main() {}\n").expect("write -a.nova");
+    let out = Command::new(nova())
+        .current_dir(&dir)
+        .args(MIR_BEFORE_S0)
+        .args(["--", "-a.nova"])
+        .output()
+        .expect("run nova check --dump-mir --before-async -- -a.nova");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with(
+        "== -a.nova\n(Mir runs=true checked=true lowered=true async_lowered=false functions=1 "
+    ));
+}
+
+/// Each root's part follows a header with its path as given, in both
+/// forms: a root that cannot be read is `IOERR` and its kind, the rest are
+/// dumped, and the exit code is 2; a package's module that does not run is
+/// `runs=false`, before the loader, whether it can be read or not; a
+/// program that stops before MIR, in the parser, the resolver or the type
+/// checker, `checked=false` with no diagnostic; E0601 `lowered=false` with
+/// MIR's diagnostics, the first with no place; a clean program its
+/// functions, whose async ones the before form shows with their awaits
+/// (5.4, spec §4.1).
+#[test]
+fn the_mir_dump_has_a_header_per_root_and_says_how_far_each_got() {
+    let dir = fresh_dir("mir-headers");
+    let write = |name: &str, text: &[u8]| {
+        std::fs::write(dir.join(name), text).unwrap_or_else(|e| panic!("write {name}: {e}"))
+    };
+    write("a.nova", b"fn main() {}\n");
+    write("b.nova", b"fn g( {");
+    write("c.nova", b"fn f(x: Nope) {}\nfn f() {}\n");
+    write("d.nova", b"fn main() { let x: Int = \"s\" }\n");
+    write("e.nova", b"fn helper() {}\n");
+    write("f.nova", b"fn main(x: Int) {}\n");
+    write(
+        "g.nova",
+        b"async fn h() -> Int { 1 }\nasync fn k() -> Int { h().await + 1 }\n\
+          fn main() { println(\"${block_on(k())}\") }\n",
+    );
+    write("latin1.nova", b"fn \xe9() {}\n");
+    std::fs::create_dir_all(dir.join("pkg").join("src")).expect("create pkg/src");
+    write("pkg/nova.toml", MANIFEST.as_bytes());
+    write("pkg/src/main.nova", b"import shapes\nfn main() {}\n");
+    write("pkg/src/shapes.nova", b"pub type Shape =\n  | Dot\n");
+    let files: Vec<String> = [
+        "a.nova",
+        "missing.nova",
+        "b.nova",
+        "c.nova",
+        "d.nova",
+        "e.nova",
+        "f.nova",
+        "g.nova",
+        "latin1.nova",
+        "pkg/src/main.nova",
+        "pkg/src/shapes.nova",
+        "pkg/src/missing.nova",
+    ]
+    .iter()
+    .map(|f| f.to_string())
+    .collect();
+    let after = agree_on_mir_in(MirForm::After, &dir, &files, 2);
+    let before = agree_on_mir_in(MirForm::Before, &dir, &files, 2);
+    for (form, out) in [(MirForm::After, &after), (MirForm::Before, &before)] {
+        let parts: std::collections::BTreeMap<String, String> =
+            parts_by_root(out).into_iter().collect();
+        let first = |root: &str| parts[root].lines().next().unwrap_or("").to_string();
+        assert_eq!(parts["missing.nova"], "IOERR NotFound\n", "{form:?}");
+        assert_eq!(parts["latin1.nova"], "IOERR InvalidData\n", "{form:?}");
+        for root in ["pkg/src/shapes.nova", "pkg/src/missing.nova"] {
+            assert_eq!(parts[root], "(Mir runs=false)\n(Diagnostics)\n", "{form:?}");
+        }
+        for root in ["b.nova", "c.nova", "d.nova"] {
+            assert_eq!(
+                parts[root], "(Mir runs=true checked=false)\n(Diagnostics)\n",
+                "{form:?} {root}"
+            );
+        }
+        assert_eq!(
+            parts["e.nova"],
+            "(Mir runs=true checked=true lowered=false)\n(Diagnostics\n  \
+             (Error \"E0601\" \"no `main` function found; `nova run` needs a `fn main()` \
+             entry point\"))\n",
+            "{form:?}"
+        );
+        assert_eq!(
+            parts["f.nova"],
+            "(Mir runs=true checked=true lowered=false)\n(Diagnostics\n  \
+             (Error \"E0601\" \"`main` cannot be generic or take parameters\"\n    \
+             (Primary \"f\":3..7 \"invalid `main` signature\")))\n",
+            "{form:?}"
+        );
+        let lowered = |n: usize| {
+            let flag = form == MirForm::After;
+            format!(
+                "(Mir runs=true checked=true lowered=true async_lowered={flag} functions={n} \
+                 externs=0"
+            )
+        };
+        assert_eq!(first("a.nova"), lowered(1), "{form:?}");
+        assert_eq!(first("pkg/src/main.nova"), lowered(1), "{form:?}");
+        assert!(
+            parts["a.nova"].ends_with(
+                "\n  (Function \"main\" params=0 takes_env=false captures=0 \
+                 ret=Unit async=false\n    (Temp t0 Unit)\n    (Block bb0\n      \
+                 (ConstUnit t0)\n      (Return _))))\n(Diagnostics)\n"
+            ),
+            "{form:?}: {}",
+            parts["a.nova"]
+        );
+        // `main`, `block_on`'s instance, `k` and `h`; after the transform
+        // each async function's poll function and wrapper.
+        let g = &parts["g.nova"];
+        let n = if form == MirForm::After { 6 } else { 4 };
+        assert_eq!(first("g.nova"), lowered(n), "{form:?}");
+        let awaits = g.matches("\n      (Await ").count();
+        let flagged = g.matches(" async=true\n").count();
+        match form {
+            MirForm::After => assert_eq!((awaits, flagged), (0, 0), "{g}"),
+            MirForm::Before => assert_eq!((awaits, flagged), (1, 2), "{g}"),
+        }
+    }
+}
+
+/// The MIR dump's runs are settled as the HIR dump's, in both forms, on
+/// both sides (5.4, spec §7.2): no MIR message names a path, but the dump
+/// runs the loader, whose E0004 does.
+#[test]
+fn every_run_of_a_mir_dump_settles_e0004s_paths_on_windows() {
+    let windows = b"(Diagnostics\n  (Error \"E0004\" \"`a` is both: app\\x5csrc\\x5ca.nova, and the entry at app\\x5cnova.toml:6\"\n".to_vec();
+    let settled = settled_stdout(RESOLUTION_S0, windows.clone(), true);
+    assert_ne!(settled, windows);
+    for form in [MirForm::After, MirForm::Before] {
+        let args: Vec<&str> = form.s0().iter().chain(["a.nova"].iter()).copied().collect();
+        assert_eq!(settled_stdout(&args, windows.clone(), true), settled);
+        assert_eq!(settled_stdout(&args, windows.clone(), false), windows);
+        assert_eq!(
+            settled_stdout(mir_in(form).n, windows.clone(), true),
+            settled
+        );
+    }
 }
