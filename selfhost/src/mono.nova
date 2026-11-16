@@ -1,0 +1,586 @@
+// Monomorphization: a port of crates/nova-mir/src/mono.rs's native path,
+// function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.1, ADR
+// 0057): `lower_module_with` from `main` (E0601), the worklist, externs
+// (E0075), names, E0011, bounds (E0013), `Specializer` (E0078, E0079),
+// the async `main`'s shim, `impl_satisfies` and `type_name`; and the
+// driver's `keep_the_entry_main` (crates/nova-driver/src/lib.rs). The
+// WASM build's roots and routing (`RuntimeImpls`, `route_runtime`,
+// `unavailable_on_wasm`, E0091) are S0's alone (decision 4).
+//
+// - The worklist is a `Vec` used as a stack; `done` a `Map<String, Bool>`
+//   read by lookup only, so no map's order reaches the output.
+// - Records alias in N, so `Specializer` builds every node of an instance
+//   afresh, and never writes into the generic function, which every
+//   instance reads (spec §6.2).
+// - `Options` is its native field alone, `stop_before_async`.
+
+import builtins
+import diagnostic
+import hir
+import lower
+import lower_call
+import mir
+import resolver
+import token
+
+/// Lower a typed module to monomorphized MIR natively
+/// (`lower_module_with`): instances are found from `main` outward. With
+/// `stop_before_async`, the module as lowering left it, the async `main`'s
+/// shim pushed, before the async transform.
+pub fn lower_module_with(
+    program: HirModule,
+    stop_before_async: Bool,
+) -> Result<MirModule, Vec<Diagnostic>> {
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    let mut found: Option<HirFunction> = None
+    for f in program.functions.iter() {
+        if f.name == "main" {
+            found = Some(f)
+            break
+        }
+    }
+    let main = match found {
+        Some(f) => f
+        None => {
+            diagnostics.push(
+                Diagnostic::error(
+                    "E0601",
+                    "no `main` function found; `nova run` needs a `fn main()` entry point",
+                ),
+            )
+            return Err(diagnostics)
+        }
+    }
+    if main.generics != 0 || main.params != 0 {
+        diagnostics.push(
+            error_at(
+                "E0601",
+                "`main` cannot be generic or take parameters",
+                main.span.file,
+                main.span.span,
+                "invalid `main` signature",
+            ),
+        )
+        return Err(diagnostics)
+    }
+    let entry = main.def_id
+    let mut functions: Vec<MirFunction> = Vec::new()
+    let mut externs: Vec<ExternDecl> = Vec::new()
+    let mut done: Map<String, Bool> = Map::new()
+    let mut worklist: Vec<(Int, Vec<Ty>)> = Vec::new()
+    worklist.push((entry, Vec::new()))
+    // The symbol an `async fn main` was lowered under, once it has been:
+    // the future-building wrapper the shim calls.
+    let mut async_entry: Option<String> = None
+    let builtins = builtin_lowerings()
+    while !worklist.is_empty() {
+        let (def_id, type_args) = worklist.pop().unwrap()
+        let func = match program.function(def_id) {
+            Some(f) => f
+            None => {
+                // Not a Nova function: an `extern` declaration is recorded,
+                // deduplicated by symbol through `done`; two that share a
+                // symbol but disagree on the signature are E0075.
+                match program.extern_fn(def_id) {
+                    Some(ext) => {
+                        let mut params: Vec<Int> = Vec::new()
+                        for p in ext.params.iter() { params.push(mir_ty(p)) }
+                        let ret = mir_ty(ext.ret)
+                        if !done.contains_key(ext.symbol) {
+                            let _ = done.insert(ext.symbol, true)
+                            externs.push(
+                                ExternDecl {
+                                    symbol: ext.symbol,
+                                    abi: ext.abi,
+                                    params: params,
+                                    ret: ret,
+                                },
+                            )
+                        } else {
+                            match first_extern(externs, ext.symbol) {
+                                Some(prev) => {
+                                    if !ints_eq(prev.params, params) || prev.ret != ret {
+                                        diagnostics.push(
+                                            error_at(
+                                                "E0075",
+                                                "extern symbol `${ext.symbol}` is declared with conflicting signatures",
+                                                ext.span.file,
+                                                ext.span.span,
+                                                "conflicting declaration",
+                                            ),
+                                        )
+                                    }
+                                }
+                                None => ()
+                            }
+                        }
+                    }
+                    None => ()
+                }
+                continue
+            }
+        }
+        // The entry point keeps the bare symbol `main`; every other
+        // function, an `async fn main` too, is mangled with its id.
+        let name = if def_id == entry && !func.is_async {
+            "main"
+        } else {
+            mangle(def_id, func.name, type_args)
+        }
+        if def_id == entry && func.is_async { async_entry = Some(name) }
+        if done.contains_key(name) { continue }
+        let _ = done.insert(name, true)
+        let mut concrete = true
+        for i in 0..type_args.len() { if has_params(type_args.at(i)) { concrete = false } }
+        for i in 0..type_args.len() { if has_vars(type_args.at(i)) { concrete = false } }
+        if !concrete {
+            diagnostics.push(
+                error_at(
+                    "E0011",
+                    "cannot monomorphize `${func.name}` with non-concrete type arguments",
+                    func.span.file,
+                    func.span.span,
+                    "instantiated here",
+                ),
+            )
+            continue
+        }
+        // Each concrete type argument must satisfy its generic parameter's
+        // trait bounds.
+        let mut bounds_ok = true
+        for i in 0..func.bounds.len() {
+            if i >= type_args.len() { continue }
+            let arg = type_args.at(i)
+            for trait_id in func.bounds.at(i).iter() {
+                if !impl_satisfies(program, arg, trait_id) {
+                    bounds_ok = false
+                    let trait_name = match program.trait_def(trait_id) {
+                        Some(t) => t.name
+                        None => "trait#${trait_id}"
+                    }
+                    let mut d = error_at(
+                        "E0013",
+                        "trait bound `${type_name(arg, program)}: ${trait_name}` is not satisfied when instantiating `${func.name}`",
+                        func.span.file,
+                        func.span.span,
+                        "required by this generic parameter",
+                    )
+                    match arg {
+                        TyTuple(_) => d.add_note(TUPLE_HAS_NO_IMPLS)
+                        _ => ()
+                    }
+                    diagnostics.push(d)
+                }
+            }
+        }
+        // An instance with unsatisfied bounds is not lowered: its body
+        // would fail to resolve the very trait methods the bound
+        // guarantees.
+        if !bounds_ok { continue }
+        // The body specialized for these type arguments, every projection
+        // they make resolvable resolved.
+        let mut spec = Specializer {
+            args: type_args,
+            impls: program.impls,
+            unresolved: None,
+            overflow: None,
+        }
+        let specialized = spec.function(func)
+        let mut resolved_ok = true
+        match spec.overflow {
+            Some((at, limit)) => {
+                resolved_ok = false
+                let detail = match limit {
+                    NormalizeLimitDepth => "the chain of bindings is more than ${NORMALIZE_DEPTH_LIMIT} deep, or does not terminate"
+                    NormalizeLimitSteps => "it resolves to more than ${NORMALIZE_STEP_LIMIT} type nodes"
+                }
+                diagnostics.push(
+                    error_at(
+                        "E0078",
+                        "could not resolve the associated types in `${type_name(at, program)}` when instantiating `${func.name}`: ${detail}",
+                        func.span.file,
+                        func.span.span,
+                        "instantiated here",
+                    ),
+                )
+            }
+            None => ()
+        }
+        match spec.unresolved {
+            Some(at) => {
+                resolved_ok = false
+                diagnostics.push(
+                    error_at(
+                        "E0079",
+                        "`${type_name(at, program)}` is still an unresolved associated type after instantiating `${func.name}`; no impl in scope binds it for this Self type",
+                        func.span.file,
+                        func.span.span,
+                        "instantiated here",
+                    ),
+                )
+            }
+            None => ()
+        }
+        // An instance whose types are not what they claim is not lowered.
+        if !resolved_ok { continue }
+        match lower_function(specialized, name, program, entry, worklist, builtins) {
+            Ok(f) => functions.push(f)
+            Err(ds) => for d in ds.iter() { diagnostics.push(d) }
+        }
+    }
+    if !diagnostics.is_empty() { return Err(diagnostics) }
+    // Before the transform, so the shim is in place whichever order the
+    // two are read in: it is not async, so the transform walks past it.
+    match async_entry {
+        Some(wrapper) => functions.push(async_main_shim(wrapper))
+        None => ()
+    }
+    let mir = MirModule { functions: functions, externs: externs }
+    // The hidden MIR dump's before form.
+    if stop_before_async { return Ok(mir) }
+    panic(
+        "the async transform is not ported to N yet (5.4's next part): only the before form is lowered",
+    )
+}
+
+// The first extern of `externs` whose symbol is `symbol`.
+fn first_extern(externs: Vec<ExternDecl>, symbol: String) -> Option<ExternDecl> {
+    for e in externs.iter() { if e.symbol == symbol { return Some(e) } }
+    None
+}
+
+/// Element-wise `==` of two lists of codes (`Vec<MirTy>`'s `==`).
+pub fn ints_eq(a: Vec<Int>, b: Vec<Int>) -> Bool {
+    if a.len() != b.len() { return false }
+    for i in 0..a.len() { if a.at(i) != b.at(i) { return false } }
+    true
+}
+
+/// The `main` an `async fn main` gets (`async_main_shim`): call the
+/// future-building wrapper `wrapper`, then hand the future to the
+/// executor, discarding its output.
+pub fn async_main_shim(wrapper: String) -> MirFunction {
+    let future = 0
+    let mut stmts: Vec<MirStmt> = Vec::new()
+    stmts.push(SCall(future, wrapper, Vec::new()))
+    stmts.push(SCallRuntime(-1, RT_TASK_BLOCK_ON, Vec::from_array([future])))
+    let mut blocks: Vec<MirBlock> = Vec::new()
+    blocks.push(MirBlock { stmts: stmts, term: TermReturn(-1) })
+    MirFunction {
+        name: "main",
+        params: 0,
+        takes_env: false,
+        capture_count: 0,
+        temps: Vec::from_array([MIR_PTR]),
+        ret: MIR_UNIT,
+        is_async: false,
+        blocks: blocks,
+    }
+}
+
+/// Whether the concrete type `arg` implements `trait_id`
+/// (`impl_satisfies`): an impl of the trait whose self type fits `arg`,
+/// and whose own generic bounds hold for the arguments recovered from it.
+pub fn impl_satisfies(program: HirModule, arg: Ty, trait_id: Int) -> Bool {
+    let h = match head(arg) {
+        Some(h) => h
+        None => return false
+    }
+    for imp in program.impls.iter() {
+        if imp.trait_id != trait_id || !head_eq(imp.self_head, h) { continue }
+        match match_args(imp, arg) {
+            Some(impl_args) => {
+                let mut all = true
+                for i in 0..imp.bounds.len() {
+                    for bound in imp.bounds.at(i).iter() {
+                        let holds = if i < impl_args.len() {
+                            impl_satisfies(program, impl_args.at(i), bound)
+                        } else {
+                            false
+                        }
+                        if !holds {
+                            all = false
+                            break
+                        }
+                    }
+                    if !all { break }
+                }
+                if all { return true }
+            }
+            None => ()
+        }
+    }
+    false
+}
+
+/// A short display name for a type in monomorphization's diagnostics
+/// (`type_name`), its names read from the module; a projection is
+/// `<on>::Name`.
+pub fn type_name(ty: Ty, program: HirModule) -> String {
+    match ty {
+        TyInt => "Int"
+        TyFloat => "Float"
+        TyBool => "Bool"
+        TyChar => "Char"
+        TyString => "String"
+        TyBytes => "Bytes"
+        TyUnit => "()"
+        TySum(d, _) => {
+            match program.sum(d) {
+                Some(s) => s.name
+                None => "?"
+            }
+        }
+        TyRecord(d, _) => {
+            match program.record_type(d) {
+                Some(r) => r.name
+                None => "?"
+            }
+        }
+        TyArray(e) => "[${type_name(e, program)}]"
+        TyTuple(es) => {
+            let mut names: Vec<String> = Vec::new()
+            for e in es.iter() { names.push(type_name(e, program)) }
+            if names.len() == 1 { "(${names.at(0)},)" } else { "(${", ".join(names.to_array())})" }
+        }
+        TyFuture(o) => "Future<${type_name(o, program)}>"
+        TyAssoc(on, assoc) => {
+            let mut name = "?"
+            for t in program.traits.iter() {
+                let mut hit = false
+                for (n, d) in t.assoc_types.iter() {
+                    if d == assoc {
+                        name = n
+                        hit = true
+                        break
+                    }
+                }
+                if hit { break }
+            }
+            "${type_name(on, program)}::${name}"
+        }
+        _ => "?"
+    }
+}
+
+/// `subst` then normalization, over every type of an instance
+/// (`Specializer`): the first projection left unresolved and the first
+/// normalization out of budget, with the type it was asked about, are
+/// kept for one diagnostic each.
+pub record Specializer {
+    pub args: Vec<Ty>,
+    pub impls: Vec<ImplInfo>,
+    pub unresolved: Option<Ty>,
+    pub overflow: Option<(Ty, NormalizeLimit)>,
+}
+
+impl Specializer {
+    /// `ty` substituted and normalized (`Specializer::ty`).
+    pub fn ty(mut self, ty: Ty) -> Ty {
+        let substituted = subst(ty, self.args)
+        if !has_assoc(substituted) { return substituted }
+        match normalize_ty(substituted, self.impls) {
+            Ok(resolved) => {
+                if has_assoc(resolved) && self.unresolved.is_none() {
+                    self.unresolved = Some(resolved)
+                }
+                resolved
+            }
+            Err(limit) => {
+                if self.overflow.is_none() { self.overflow = Some((substituted, limit)) }
+                substituted
+            }
+        }
+    }
+
+    /// A new function, every type substituted and normalized: locals,
+    /// return type, then body (`Specializer::function`).
+    pub fn function(mut self, func: HirFunction) -> HirFunction {
+        let mut locals: Vec<Local> = Vec::new()
+        for i in 0..func.locals.len() {
+            let l = func.locals.at(i)
+            locals.push(Local { name: l.name, ty: self.ty(l.ty), is_mut: l.is_mut, span: l.span })
+        }
+        let ret_ty = self.ty(func.ret_ty)
+        let body = self.expr(func.body)
+        HirFunction {
+            def_id: func.def_id,
+            name: func.name,
+            generics: 0,
+            bounds: Vec::new(),
+            takes_env: func.takes_env,
+            capture_count: func.capture_count,
+            params: func.params,
+            locals: locals,
+            ret_ty: ret_ty,
+            is_async: func.is_async,
+            body: body,
+            span: func.span,
+        }
+    }
+
+    fn tys(mut self, tys: Vec<Ty>) -> Vec<Ty> {
+        let mut out: Vec<Ty> = Vec::new()
+        for i in 0..tys.len() { out.push(self.ty(tys.at(i))) }
+        out
+    }
+
+    fn exprs(mut self, exprs: Vec<HirExpr>) -> Vec<HirExpr> {
+        let mut out: Vec<HirExpr> = Vec::new()
+        for i in 0..exprs.len() { out.push(self.expr(exprs.at(i))) }
+        out
+    }
+
+    fn opt(mut self, e: Option<HirExpr>) -> Option<HirExpr> {
+        match e {
+            Some(x) => Some(self.expr(x))
+            None => None
+        }
+    }
+
+    /// A new node for `e` and every node below it, in the order S0's
+    /// struct literals evaluate them, then its type
+    /// (`Specializer::expr`).
+    pub fn expr(mut self, e: HirExpr) -> HirExpr {
+        let kind = match e.kind {
+            EkIntLit(v) => EkIntLit(v)
+            EkFloatLit(v) => EkFloatLit(v)
+            EkBoolLit(v) => EkBoolLit(v)
+            EkStrLit(v) => EkStrLit(v)
+            EkCharLit(v) => EkCharLit(v)
+            EkUnit => EkUnit
+            EkBreak => EkBreak
+            EkContinue => EkContinue
+            EkLocal(l) => EkLocal(l)
+            EkMakeClosure(func, type_args, captures) => {
+                let ta = self.tys(type_args)
+                EkMakeClosure(func, ta, self.exprs(captures))
+            }
+            EkCall(func, type_args, args) => {
+                let ta = self.tys(type_args)
+                EkCall(func, ta, self.exprs(args))
+            }
+            EkMakeVariant(sum, variant, args) => EkMakeVariant(sum, variant, self.exprs(args))
+            EkMakeRecord(rec, fields) => EkMakeRecord(rec, self.exprs(fields))
+            EkMakeTuple(elems) => EkMakeTuple(self.exprs(elems))
+            EkFieldGet(target, index) => EkFieldGet(self.expr(target), index)
+            EkFieldSet(target, index, value) => {
+                let t = self.expr(target)
+                EkFieldSet(t, index, self.expr(value))
+            }
+            EkMakeArray(elems) => EkMakeArray(self.exprs(elems))
+            EkArrayRepeat(init, len) => {
+                let i = self.expr(init)
+                EkArrayRepeat(i, self.expr(len))
+            }
+            EkIndex(target, index) => {
+                let t = self.expr(target)
+                EkIndex(t, self.expr(index))
+            }
+            EkIndexSet(target, index, value) => {
+                let t = self.expr(target)
+                let i = self.expr(index)
+                EkIndexSet(t, i, self.expr(value))
+            }
+            EkArrayLen(target) => EkArrayLen(self.expr(target))
+            EkTraitCall(trait_id, method, self_ty, type_args, receiver, args) => {
+                let st = self.ty(self_ty)
+                let ta = self.tys(type_args)
+                // `None` for a trait associated function: substitution must
+                // not invent a receiver for one.
+                let r = self.opt(receiver)
+                EkTraitCall(trait_id, method, st, ta, r, self.exprs(args))
+            }
+            EkBinary(op, lhs, rhs) => {
+                let l = self.expr(lhs)
+                EkBinary(op, l, self.expr(rhs))
+            }
+            EkLogicalAnd(lhs, rhs) => {
+                let l = self.expr(lhs)
+                EkLogicalAnd(l, self.expr(rhs))
+            }
+            EkLogicalOr(lhs, rhs) => {
+                let l = self.expr(lhs)
+                EkLogicalOr(l, self.expr(rhs))
+            }
+            EkUnary(op, inner) => EkUnary(op, self.expr(inner))
+            EkLet(local, init) => EkLet(local, self.expr(init))
+            EkAssign(local, value) => EkAssign(local, self.expr(value))
+            EkBlock(stmts, trailing) => {
+                let s = self.exprs(stmts)
+                EkBlock(s, self.opt(trailing))
+            }
+            EkIf(cond, then, else_) => {
+                let c = self.expr(cond)
+                let t = self.expr(then)
+                EkIf(c, t, self.opt(else_))
+            }
+            EkWhile(cond, body) => {
+                let c = self.expr(cond)
+                EkWhile(c, self.expr(body))
+            }
+            EkMatch(scrutinee, arms) => {
+                let s = self.expr(scrutinee)
+                let mut out: Vec<HirArm> = Vec::new()
+                for i in 0..arms.len() {
+                    let a = arms.at(i)
+                    let guard = self.opt(a.guard)
+                    let body = self.expr(a.body)
+                    out.push(HirArm { pattern: a.pattern, guard: guard, body: body, span: a.span })
+                }
+                EkMatch(s, out)
+            }
+            EkReturn(v) => EkReturn(self.opt(v))
+            EkToStr(inner) => EkToStr(self.expr(inner))
+            EkStrConcat(parts) => EkStrConcat(self.exprs(parts))
+            EkAwait(inner) => EkAwait(self.expr(inner))
+        }
+        HirExpr { kind: kind, ty: self.ty(e.ty), span: e.span }
+    }
+}
+
+/// The name a `main` declared outside the entry module takes
+/// (`NOT_THE_ENTRY_MAIN`).
+pub const NOT_THE_ENTRY_MAIN: String = "main.not_the_entry"
+
+/// Rename every `main` declared outside the entry module, module 0, so
+/// that `lower_module_with`'s search by name finds the entry's own `main`
+/// or reports E0601 (the driver's `keep_the_entry_main`). A call reaches
+/// its function by id, so the rename breaks no call. The renamed function
+/// is a new record, in the old one's place.
+pub fn keep_the_entry_main(mut program: HirModule, definitions: Definitions) {
+    for i in 0..program.functions.len() {
+        let f = program.functions.at(i)
+        if f.name != "main" { continue }
+        if f.def_id < 0 || f.def_id >= definitions.defs.len() { continue }
+        let item = match definitions.defs.at(f.def_id).kind {
+            DefKindFn(item) => item
+            _ => continue
+        }
+        let m = if item >= 0 && item < definitions.item_module.len() {
+            definitions.item_module.at(item)
+        } else {
+            0
+        }
+        if m != 0 {
+            program.functions.set(
+                i,
+                HirFunction {
+                    def_id: f.def_id,
+                    name: NOT_THE_ENTRY_MAIN,
+                    generics: f.generics,
+                    bounds: f.bounds,
+                    takes_env: f.takes_env,
+                    capture_count: f.capture_count,
+                    params: f.params,
+                    locals: f.locals,
+                    ret_ty: f.ret_ty,
+                    is_async: f.is_async,
+                    body: f.body,
+                    span: f.span,
+                },
+            )
+        }
+    }
+}

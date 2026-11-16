@@ -77,11 +77,14 @@
 //! `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3, §7; ADR
 //! 0057): S0's hidden `nova check --dump-mir FILE…`, absent from `--help`,
 //! prints each root's MIR natively, after the async transform or, with
-//! `--before-async`, before it. Until N prints MIR (`N_MIR`), the native
-//! corpus's roots that run, the HIR cases that reach MIR and MIR's cases
-//! (`cases/mir/`), with both line endings, go through S0 alone, whose dumps
-//! must be well formed and hold every native form and every code MIR gives
-//! from source.
+//! `--before-async`, before it. N's `selfhost mir --std DIR --before-async
+//! FILE…` must print the before form byte for byte, with the same exit
+//! codes, on the native corpus's roots that run, the HIR cases that reach
+//! MIR and MIR's cases (`cases/mir/`), with both line endings; until N
+//! ports the async transform (`N_MIR_AFTER`), the after form goes through
+//! S0 alone, and N refuses it with the exit code 3. The dumps must be well
+//! formed and hold every native form and every code MIR gives from
+//! source.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -1121,21 +1124,28 @@ fn a_manifest_n_cannot_read_stops_n_with_a_message() {
             name == "registry",
             "{name}: {stdout}"
         );
-        let n = Command::new(selfhost())
-            .current_dir(&dir)
-            .args(resolution().n)
-            .arg(&root)
-            .output()
-            .expect("run selfhost resolve");
-        let stderr = String::from_utf8_lossy(&n.stderr);
-        assert_eq!(n.status.code(), Some(1), "{name}: {stderr}");
-        assert!(n.stdout.is_empty(), "{name}");
-        assert!(
-            stderr.starts_with(&format!(
-                "error: selfhost resolve cannot dump {root}: {name}/nova.toml: "
-            )),
-            "{name}: {stderr}"
-        );
+        // The resolution dump's, and the MIR dump's, whose root runs
+        // (5.4, spec §6.3).
+        for (args, command) in [
+            (resolution().n, "resolve"),
+            (mir_in(MirForm::Before).n, "mir"),
+        ] {
+            let n = Command::new(selfhost())
+                .current_dir(&dir)
+                .args(args)
+                .arg(&root)
+                .output()
+                .expect("run selfhost");
+            let stderr = String::from_utf8_lossy(&n.stderr);
+            assert_eq!(n.status.code(), Some(1), "{name} {command}: {stderr}");
+            assert!(n.stdout.is_empty(), "{name} {command}");
+            assert!(
+                stderr.starts_with(&format!(
+                    "error: selfhost {command} cannot dump {root}: {name}/nova.toml: "
+                )),
+                "{name} {command}: {stderr}"
+            );
+        }
     }
 }
 
@@ -1703,6 +1713,127 @@ fn a_missing_final_line_break_is_marked() {
     // Lines that differ otherwise are shown as they are.
     let m = first_difference(b"== a.nova\n0 0 Eof\n", b"== a.nova\n0 1 Eof").expect("a difference");
     assert_eq!(m.n.as_deref(), Some("0 1 Eof"));
+}
+
+/// A MIR dump's line has no span, so for a MIR dump the report names the
+/// root, the function and the block above the first line that differs and
+/// the statement's index there (spec 5.4 §4.3), the nearest function's of
+/// two; a function's or a block's header names the one it heads, a temp
+/// its function, the root's first line the root alone, and a line outside
+/// any function, an extern or a diagnostic, says so.
+#[test]
+fn the_mir_mismatch_report_names_the_function_block_and_statement() {
+    const MIR: Dump = Dump {
+        s0: &["check", "--dump-mir"],
+        n: &["mir"],
+    };
+    let s0 = [
+        "== a.nova",
+        "(Mir runs=true checked=true lowered=true async_lowered=true functions=2 externs=1",
+        "  (Extern \"sqrt\" abi=C (F64) ret=F64)",
+        "  (Function \"main\" params=0 takes_env=false captures=0 ret=Unit async=false",
+        "    (Temp t0 Unit)",
+        "    (Block bb0",
+        "      (Call _ \"g.1\" ())",
+        "      (Goto bb1))",
+        "    (Block bb1",
+        "      (ConstUnit t0)",
+        "      (Return _)))",
+        "  (Function \"g.1\" params=0 takes_env=false captures=0 ret=I64 async=false",
+        "    (Temp t0 I64)",
+        "    (Temp t1 I64)",
+        "    (Block bb0",
+        "      (Goto bb1))",
+        "    (Block bb1",
+        "      (ConstInt t0 1)",
+        "      (ConstInt t1 2)",
+        "      (Return t1)))",
+        "(Diagnostics)",
+        "== b.nova",
+        "(Mir runs=true checked=true lowered=false)",
+        "(Diagnostics",
+        "  (Error \"E0601\" \"`main` function not found\"))",
+        "",
+    ]
+    .join("\n");
+    let reported = |from: &str, to: &str| {
+        let n = s0.replacen(from, to, 1);
+        assert_ne!(s0, n, "{from} is not in:\n{s0}");
+        let m = first_difference(s0.as_bytes(), n.as_bytes()).expect("a difference");
+        report(
+            &m,
+            &MIR,
+            Path::new("."),
+            Path::new("nova"),
+            Path::new("selfhost"),
+        )
+    };
+    assert_eq!(
+        reported("(ConstInt t1 2)", "(ConstInt t1 3)"),
+        "the dumps differ in a.nova, at line 18 of its dump, function \"g.1\", block bb1, \
+         statement 1\n\
+         \x20 S0 (nova check --dump-mir):       (ConstInt t1 2)\n\
+         \x20 N  (selfhost mir):                (ConstInt t1 3)\n\
+         reproduce, in .:\n\
+         \x20 nova check --dump-mir a.nova > s0.txt\n\
+         \x20 selfhost mir a.nova > n.txt\n\
+         \x20 diff s0.txt n.txt\n\
+         and add the file to crates/nova-cli/tests/selfhost/cases/ once it is fixed"
+    );
+    for (from, to, at) in [
+        (
+            "(Return t1)",
+            "(Return t0)",
+            "a.nova, at line 19 of its dump, function \"g.1\", block bb1, statement 2",
+        ),
+        (
+            "captures=0 ret=I64",
+            "captures=1 ret=I64",
+            "a.nova, at line 11 of its dump, function \"g.1\", at its header",
+        ),
+        (
+            "(Block bb1\n      (ConstInt",
+            "(Block bb2\n      (ConstInt",
+            "a.nova, at line 16 of its dump, function \"g.1\", block bb1, at its header",
+        ),
+        (
+            "(Temp t1 I64)",
+            "(Temp t1 F64)",
+            "a.nova, at line 13 of its dump, function \"g.1\", at its temps",
+        ),
+        (
+            "(Temp t0 Unit)",
+            "(Temp t0 I64)",
+            "a.nova, at line 4 of its dump, function \"main\", at its temps",
+        ),
+        (
+            "functions=2",
+            "functions=3",
+            "a.nova, at line 1 of its dump, the root's first line",
+        ),
+        (
+            "(F64) ret=F64",
+            "(I64) ret=F64",
+            "a.nova, at line 2 of its dump, outside any function",
+        ),
+        (
+            "(Diagnostics)",
+            "(Diagnostics",
+            "a.nova, at line 20 of its dump, outside any function",
+        ),
+        (
+            "not found",
+            "missing",
+            "b.nova, at line 3 of its dump, outside any function",
+        ),
+    ] {
+        let text = reported(from, to);
+        assert_eq!(
+            text.lines().next(),
+            Some(format!("the dumps differ in {at}").as_str()),
+            "{text}"
+        );
+    }
 }
 
 // --- 5.1b: the AST dump, the depth limit and S0's thread (ADR 0052) ---
@@ -4089,7 +4220,11 @@ fn the_hir_dumps_agree_on_std_the_corpus_and_the_cases() {
             })
         });
         let wasm_dumps = scope.spawn(|| formed(agree_on_hir_in(Mode::Wasm, &root, &wasm, 0)));
-        let test_dumps = scope.spawn(|| formed(agree_on_hir_in(Mode::Test, &root, &tests, 0)));
+        let test_dumps = scope.spawn(|| {
+            agree_in_parts(&tests, HIR_TEST_PARTS, |part| {
+                formed(agree_on_hir_in(Mode::Test, &root, part, 0))
+            })
+        });
         let mut check = formed(loose_hir().clone());
         check.push_str(&package_dumps.join().expect("the packages' thread"));
         let mut wasm_dumps = wasm_dumps.join().expect("the WASM programs' thread");
@@ -4194,8 +4329,16 @@ fn loose_hir() -> &'static String {
 
 /// How many parts the package corpus is dealt into, each a process a side
 /// on a thread of its own ([`agree_in_parts`]): N's own 44 package roots,
-/// each a dump of all of N, are most of the corpus's dump.
-const HIR_PACKAGE_PARTS: usize = 3;
+/// each a dump of all of N, are most of the corpus's dump. Six since 5.4,
+/// where three gave a process about 40 s alone on N's debug runtime and
+/// 103 to 111 s in a full local run, near [`CHILD_LIMIT`], before the MIR
+/// dump's N side ran beside it.
+const HIR_PACKAGE_PARTS: usize = 6;
+
+/// How many parts the files with tests are dealt into under test mode, as
+/// [`HIR_PACKAGE_PARTS`] (5.4): in one process they took 88 to 96 s in a
+/// full local run.
+const HIR_TEST_PARTS: usize = 2;
 
 /// The type checker's cases of every mode as a Windows checkout has them
 /// ([`crlf`]), as the resolver's are compared
@@ -4744,8 +4887,9 @@ fn the_body_fuzzers_inputs_agree_and_hold_each_aimed_code() {
 // 5.4 (spec
 // `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3, §7; ADR
 // 0057): S0's hidden `nova check --dump-mir FILE…`, natively, and its
-// before form, `--dump-mir --before-async`. Until N prints MIR
-// ([`N_MIR`]), the MIR dump's inputs run through S0 alone.
+// before form, `--dump-mir --before-async`, which N's `selfhost mir
+// --before-async` prints too; the after form runs through S0 alone until N
+// ports the async transform ([`N_MIR_AFTER`]).
 
 /// S0's MIR dump (5.4, ADR 0057): the hidden `check --dump-mir`, before
 /// the roots; after the async transform.
@@ -4755,16 +4899,22 @@ const MIR_S0: &[&str] = &["check", "--dump-mir"];
 /// --before-async`.
 const MIR_BEFORE_S0: &[&str] = &["check", "--dump-mir", "--before-async"];
 
-/// Whether N prints MIR, `selfhost mir --std DIR [--before-async]` (spec
-/// 5.4 §6.3). Until it does, the MIR dump's inputs (the native corpus's
-/// roots that run, the HIR cases that reach MIR and `cases/mir/`, with
-/// both line endings) run through S0 alone, whose dumps must be well
-/// formed, hold a header per root, every form of `KINDS` but those a
-/// native build never prints, `Await` and `async=true` in the before form
-/// alone, and every code MIR gives natively from source. Later parts of
-/// 5.4 port N's MIR and set it, and every set is then compared byte for
-/// byte.
-const N_MIR: bool = false;
+/// N's MIR dump, `selfhost mir --std DIR [--before-async]` (spec 5.4
+/// §6.3).
+const MIR_N: &[&str] = &["mir"];
+
+/// Whether N prints the MIR dump after the async transform, `selfhost mir
+/// --std DIR` (spec 5.4 §6.3, §9). N prints the before form,
+/// `--before-async`, and every input (the native corpus's roots that run,
+/// the HIR cases that reach MIR and `cases/mir/`, with both line endings)
+/// is compared in it byte for byte; until N ports `async_lower`, the after
+/// form runs through S0 alone, whose dumps must be well formed, hold a
+/// header per root, every form of `KINDS` but those a native build never
+/// prints, `Await` and `async=true` in the before form alone, and every
+/// code MIR gives natively from source, and N refuses it with the exit
+/// code 3. Porting the transform sets it, and the after form is then
+/// compared on every input too.
+const N_MIR_AFTER: bool = false;
 
 /// The MIR dump's two forms (spec 5.4 §3.1, §7.2): after the async
 /// transform, what the emitter reads, and before it, as lowering left it.
@@ -4782,6 +4932,15 @@ impl MirForm {
             MirForm::Before => MIR_BEFORE_S0,
         }
     }
+
+    /// Whether N prints the form ([`N_MIR_AFTER`]), so that both sides
+    /// are compared in it.
+    fn n_prints(self) -> bool {
+        match self {
+            MirForm::After => N_MIR_AFTER,
+            MirForm::Before => true,
+        }
+    }
 }
 
 /// The MIR dump through both sides in `form`: S0's `check --dump-mir`,
@@ -4791,7 +4950,7 @@ fn mir_in(form: MirForm) -> &'static Dump {
     static DUMPS: [OnceLock<Dump>; 2] = [OnceLock::new(), OnceLock::new()];
     DUMPS[form as usize].get_or_init(|| {
         let std_dir = std_dir();
-        let mut n = vec!["mir", "--std", std_dir.as_str()];
+        let mut n = [MIR_N, &["--std", std_dir.as_str()][..]].concat();
         if form == MirForm::Before {
             n.push("--before-async");
         }
@@ -4804,17 +4963,17 @@ fn mir_in(form: MirForm) -> &'static Dump {
 
 /// `form` on `files`, relative to `dir`, each a program's root, in one
 /// process a side, each side exiting with `code`: compared through
-/// [`compare_batch`] once N prints MIR ([`N_MIR`]), and S0's alone, through
-/// [`run`], before; the roots' names under [`HIR_ARGS_LIMIT`], and the dump
-/// well formed ([`assert_well_formed`]) with a header and a `(Mir` line per
-/// root. Returns S0's output.
+/// [`compare_batch`] in a form N prints ([`MirForm::n_prints`]), and S0's
+/// alone, through [`run`], in the other; the roots' names under
+/// [`HIR_ARGS_LIMIT`], and the dump well formed ([`assert_well_formed`])
+/// with a header and a `(Mir` line per root. Returns S0's output.
 fn agree_on_mir_dump(form: MirForm, dir: &Path, files: &[String], code: i32) -> String {
     let bytes: usize = files.iter().map(|f| f.len() + 1).sum();
     assert!(
         bytes <= HIR_ARGS_LIMIT,
         "{bytes} bytes of root names on one command line, past HIR_ARGS_LIMIT"
     );
-    let text = if N_MIR {
+    let text = if form.n_prints() {
         compare_batch(mir_in(form), dir, files, code, &nova(), selfhost())
             .unwrap_or_else(|report| panic!("{report}"))
     } else {
@@ -5107,6 +5266,57 @@ fn every_run_of_a_mir_dump_settles_e0004s_paths_on_windows() {
     }
 }
 
+/// Both sides refuse the MIR dump's shapes alike, in the form N prints
+/// (5.4, spec §3.1, §6.3): no root, `--target` either way, `--test`, an
+/// option twice and std's part (S0's `--std`, N's `--std-part`) exit 2
+/// with nothing on stdout.
+#[test]
+fn both_sides_refuse_the_mir_dumps_shapes_alike() {
+    let file = "tests/runtime/array_helpers.nova";
+    assert!(root().join(file).is_file());
+    let n = mir_in(MirForm::Before).n;
+    for (s0_extra, n_extra) in [
+        (&[][..], &[][..]),
+        (&["--target", "native", file], &["--target", "native", file]),
+        (&["--target=native", file], &["--target=native", file]),
+        (&["--test", file], &["--test", file]),
+        (&["--before-async", file], &["--before-async", file]),
+        (&["--std"], &["--std-part"]),
+        (&["--std", file], &["--std", "std", file]),
+    ] {
+        let dump = Dump {
+            s0: leak_args(&[MIR_BEFORE_S0, s0_extra].concat()),
+            n: leak_args(&[n, n_extra].concat()),
+        };
+        let out = compare_batch(&dump, &root(), &[], 2, &nova(), selfhost());
+        assert_eq!(out, Ok(String::new()), "{n_extra:?}");
+    }
+}
+
+/// N prints the before form alone until it ports the async transform
+/// ([`N_MIR_AFTER`], spec 5.4 §9): `selfhost mir --std DIR FILE…` without
+/// `--before-async` exits 3, with one line on stderr and nothing on
+/// stdout, where S0 prints the after form.
+#[test]
+fn n_refuses_the_after_form_until_it_ports_the_async_transform() {
+    if N_MIR_AFTER {
+        return;
+    }
+    let files = ["tests/runtime/closures.nova".to_string()];
+    let n = run(selfhost(), mir_in(MirForm::After).n, &root(), &files)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(n.code, Some(3), "{}", n.stderr);
+    assert!(
+        n.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&n.stdout)
+    );
+    assert_eq!(n.stderr.lines().count(), 1, "{}", n.stderr);
+    assert!(n.stderr.starts_with("error: selfhost mir "), "{}", n.stderr);
+    let s0 = run(&nova(), MIR_S0, &root(), &files).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(s0.code, Some(0), "{}", s0.stderr);
+}
+
 /// The codes MIR gives natively from source (5.4, spec §7.3), each with
 /// its site's words, which the cases print: E0601 with no `main` and with
 /// one that is generic or takes parameters (`mono.rs`'s two), E0013 at the
@@ -5204,7 +5414,8 @@ fn mir_cases(form: MirForm) -> &'static (String, usize) {
 
 /// The MIR dump, in both forms, of the native corpus's roots that run,
 /// the HIR cases that reach MIR and MIR's cases (5.4, spec §7.1 to §7.3):
-/// compared with N's once N prints MIR ([`N_MIR`]), S0's alone before;
+/// compared with N's in each form N prints ([`MirForm::n_prints`]), the
+/// before form, S0's alone in the other;
 /// each root's part is there, well formed; every form of `KINDS` occurs
 /// but those a native build never prints, and nothing unlisted; `Await` and
 /// `async=true` in the before form alone, which equals the after form on

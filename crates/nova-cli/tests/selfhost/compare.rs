@@ -1,5 +1,6 @@
 //! The comparison of S0's and N's dumps, and the report of the first place
-//! they differ: the file, the line of its dump and of its source, both
+//! they differ: the file, the line of its dump and of its source (in a MIR
+//! dump, which has no spans, its function, block and statement), both
 //! sides' lines, and how to reproduce it.
 
 use std::path::Path;
@@ -38,6 +39,10 @@ pub struct Mismatch {
     pub s0: Option<String>,
     /// N's line there, or `None` past the end of its output, marked as S0's.
     pub n: Option<String>,
+    /// In a MIR root's part, where the line is ([`MirWalk::place`]), which
+    /// the report gives in place of a source line; `None` in any other
+    /// dump, before the first header, and at a header.
+    pub place: Option<String>,
 }
 
 /// The first line where `s0` and `n` differ, or `None` if they are equal.
@@ -51,6 +56,7 @@ pub fn first_difference(s0: &[u8], n: &[u8]) -> Option<Mismatch> {
     let mut right = n.split_inclusive(|&b| b == b'\n');
     let mut file = None;
     let mut dump_line = 0;
+    let mut walk = MirWalk::default();
     loop {
         let (a, b) = (left.next(), right.next());
         if a != b {
@@ -80,8 +86,13 @@ pub fn first_difference(s0: &[u8], n: &[u8]) -> Option<Mismatch> {
                     dump_line: 0,
                     s0: line(a, b),
                     n: line(b, a),
+                    place: None,
                 },
                 None => Mismatch {
+                    place: match a.or(b) {
+                        Some(differs) if file.is_some() => walk.place(dump_line + 1, differs),
+                        _ => None,
+                    },
                     file,
                     dump_line: dump_line + 1,
                     s0: line(a, b),
@@ -95,8 +106,106 @@ pub fn first_difference(s0: &[u8], n: &[u8]) -> Option<Mismatch> {
                 file = Some(text(path).trim_end_matches('\n').to_string());
                 dump_line = 0;
             }
-            None => dump_line += 1,
+            None => {
+                dump_line += 1;
+                walk.step(dump_line, a);
+            }
         }
+    }
+}
+
+/// Where a line of a MIR root's part is (spec 5.4 §4.3): MIR has no spans,
+/// so the report names the function and the block above the line, and the
+/// statement's index there, where other dumps give a source line. The part
+/// is walked line by line, as [`first_difference`] reads the lines both
+/// sides share, by the dump's indentation (ADR 0053 §1, ADR 0057 §2): at
+/// depth 0 the root's `(Mir` line and `(Diagnostics`; at depth 1 a
+/// `(Function` line, or an `(Extern` or a diagnostic's `(Error`; at depth 2
+/// a function's `(Temp` and `(Block` lines; at depth 3 a block's
+/// statements, then its terminator.
+#[derive(Clone, Default)]
+struct MirWalk {
+    /// Whether the part is a MIR root's: its first line starts `(Mir `.
+    mir: bool,
+    /// The function the last line walked is in, its name as the dump
+    /// quotes it; `None` outside any function.
+    function: Option<String>,
+    /// The block the last line walked is in, `bb<n>`; `None` outside any.
+    block: Option<String>,
+    /// The block's statement lines walked, its terminator counted as one.
+    statements: usize,
+}
+
+impl MirWalk {
+    /// Walk `line`, line `dump_line` of the root's part.
+    fn step(&mut self, dump_line: usize, line: &[u8]) {
+        if dump_line == 1 {
+            self.mir = line.starts_with(b"(Mir ");
+        }
+        if !self.mir {
+            return;
+        }
+        let line = text(line);
+        let line = line.trim_end_matches('\n');
+        let node = line.trim_start_matches(' ');
+        match (line.len() - node.len()) / 2 {
+            0 => {
+                self.function = None;
+                self.block = None;
+            }
+            1 => {
+                self.function = node
+                    .strip_prefix("(Function ")
+                    .and_then(|rest| rest.split(" params=").next())
+                    .map(str::to_string);
+                self.block = None;
+            }
+            2 => {
+                self.block = node
+                    .strip_prefix("(Block ")
+                    .map(|b| b.trim_end_matches(')').to_string());
+                self.statements = 0;
+            }
+            _ => self.statements += 1,
+        }
+    }
+
+    /// The place of `line`, the part's line `dump_line`, which differs,
+    /// after the lines walked, which both sides share, so either side's
+    /// text gives them. The line itself is S0's, or N's where S0's output
+    /// ended; its own kind decides what is named:
+    /// - the part's first line, the root's `(Mir` line: that alone;
+    /// - a line outside any function (an extern, MIR's diagnostics):
+    ///   "outside any function";
+    /// - a function's header: that function, by the differing line's name;
+    /// - a temp: the function, "at its temps";
+    /// - a block's header: the function and that block;
+    /// - a statement or a terminator: the function, the block, and its
+    ///   index in the block from 0, as `Block::stmts` counts, the
+    ///   terminator after the last statement.
+    ///
+    /// `None` for a part that is not a MIR root's.
+    fn place(&self, dump_line: usize, line: &[u8]) -> Option<String> {
+        if dump_line == 1 {
+            return line
+                .starts_with(b"(Mir ")
+                .then(|| "the root's first line".to_string());
+        }
+        if !self.mir {
+            return None;
+        }
+        let mut at = self.clone();
+        at.step(dump_line, line);
+        let depth = line.iter().take_while(|&&b| b == b' ').count() / 2;
+        Some(match (&at.function, &at.block, depth) {
+            (None, _, _) => "outside any function".to_string(),
+            (Some(f), None, 1) => format!("function {f}, at its header"),
+            (Some(f), None, _) => format!("function {f}, at its temps"),
+            (Some(f), Some(b), 2) => format!("function {f}, block {b}, at its header"),
+            (Some(f), Some(b), _) => {
+                format!("function {f}, block {b}, statement {}", self.statements)
+            }
+        })
     }
 }
 
@@ -132,12 +241,18 @@ pub fn report(m: &Mismatch, dump: &Dump, dir: &Path, nova: &Path, selfhost: &Pat
     let at = if m.dump_line == 0 {
         "at its header: one side's output ended before it".to_string()
     } else {
-        let at_source =
-            m.s0.as_deref()
-                .or(m.n.as_deref())
-                .and_then(|line| source_line(dir, file, line))
-                .map(|l| format!(", source line {l}"))
-                .unwrap_or_default();
+        // A MIR dump's line has no span: its place stands for the source
+        // line.
+        let at_source = match &m.place {
+            Some(place) => format!(", {place}"),
+            None => {
+                m.s0.as_deref()
+                    .or(m.n.as_deref())
+                    .and_then(|line| source_line(dir, file, line))
+                    .map(|l| format!(", source line {l}"))
+                    .unwrap_or_default()
+            }
+        };
         format!("at line {} of its dump{at_source}", m.dump_line)
     };
     let (s0_args, n_args) = (dump.s0.join(" "), dump.n.join(" "));

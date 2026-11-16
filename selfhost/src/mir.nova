@@ -1,0 +1,390 @@
+// MIR's types and names: a port of crates/nova-mir/src/lib.rs's native
+// part, function by function and with the same names (spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6, ADR 0057):
+// `MirTy`, `Temp`, `BlockId`, `Module`, `ExternDecl`, `Function`, `Block`,
+// `OperandClass`, `RtFunc`'s variant names in `RtFunc::ALL`'s order, `Stmt`
+// but its WASM-only `Mem`, `Terminator`, `mir_ty`, `mangle` and
+// `mangle_ty`. `RtFunc::symbol` and `signature` come with the emitter in
+// 5.5 (decision 7); the WASM code, `on_wasm` and `MemOp`, is S0's alone
+// (decision 4).
+//
+// The Rust's idioms, beyond hir.nova's (ADR 0057):
+//
+// - A class (`MirTy`), an operand class (`OperandClass`) and a runtime
+//   function (`RtFunc`) are `Int` codes, where S0 compares them with `==`:
+//   a `MirTy` one of `MIR_I64` to `MIR_UNIT`, an `OperandClass` one of
+//   `OC_INT` to `OC_BOOL`, an `RtFunc` its index in `RT_FUNC_VARIANTS`.
+// - A `Temp` and a `BlockId` are `Int`s, an `Option<Temp>` an `Int`, -1
+//   for none.
+// - The names ast.nova or hir.nova hold too carry `Mir` (`MirModule`,
+//   `MirFunction`, `MirBlock`, `MirStmt`, `MirTerm`); a statement's
+//   variant is `S` and its Rust name (`SCall`), a terminator's `Term` and
+//   its Rust name (`TermGoto`).
+// - `module` and `record` are keywords in Nova: S0's `module` is `program`
+//   wherever it names a `hir::Module` or MIR's, and `Module::record` is
+//   `record_type`.
+
+import hir
+
+/// `MirTy::I64`: 64-bit integer (Int, Char).
+pub const MIR_I64: Int = 0
+
+/// `MirTy::F64`: 64-bit float.
+pub const MIR_F64: Int = 1
+
+/// `MirTy::I8`: boolean (byte-sized).
+pub const MIR_I8: Int = 2
+
+/// `MirTy::Ptr`: opaque pointer (String, Bytes, sum values, function
+/// values).
+pub const MIR_PTR: Int = 3
+
+/// `MirTy::Unit`: no runtime value (unit / diverging results).
+pub const MIR_UNIT: Int = 4
+
+/// Each class's variant name, by its code.
+pub const MIR_TY_NAMES: [String] = ["I64", "F64", "I8", "Ptr", "Unit"]
+
+/// `OperandClass::Int`.
+pub const OC_INT: Int = 0
+
+/// `OperandClass::Float`.
+pub const OC_FLOAT: Int = 1
+
+/// `OperandClass::Bool`.
+pub const OC_BOOL: Int = 2
+
+/// Each operand class's variant name, by its code.
+pub const OPERAND_CLASS_NAMES: [String] = ["Int", "Float", "Bool"]
+
+/// The largest array length `ArrayAlloc` takes (`MAX_ARRAY_LEN`):
+/// `(i64::MAX - 8) / 8`.
+pub const MAX_ARRAY_LEN: Int = 1152921504606846974
+
+/// The future value's slot holding its state object
+/// (`async_lower::FUTURE_SLOT_STATE`).
+pub const FUTURE_SLOT_STATE: Int = 1
+
+/// The state object's slot holding the finished output
+/// (`async_lower::STATE_SLOT_OUTPUT`).
+pub const STATE_SLOT_OUTPUT: Int = 1
+
+/// `RtFunc`'s variants, in `RtFunc::ALL`'s order: a runtime function is
+/// its index here.
+pub const RT_FUNC_VARIANTS: [String] = [
+    "Println",
+    "Print",
+    "EPrint",
+    "EPrintln",
+    "StrConcat",
+    "StrConcatN",
+    "IntToStr",
+    "FloatToStr",
+    "FloatFixed",
+    "StrToFloat",
+    "StrIsFloat",
+    "FloatToBits",
+    "BoolToStr",
+    "CharToStr",
+    "StrEq",
+    "StrCmp",
+    "StrHash",
+    "StrLenChars",
+    "StrChars",
+    "StrFromChars",
+    "StrJoin",
+    "StrIndexOf",
+    "JsonQuote",
+    "StrToUpper",
+    "StrToLower",
+    "Alloc",
+    "CheckBounds",
+    "Panic",
+    "TestSelector",
+    "TaskSpawn",
+    "TaskBlockOn",
+    "TaskIsDone",
+    "TaskTakeOutput",
+    "TaskRelease",
+    "TaskYieldFuture",
+    "TaskSleepFutureNanos",
+    "TaskJoinFuture",
+    "TaskTimeoutFuture",
+    "FsReadToString",
+    "FsWriteString",
+    "FsTakeString",
+    "FsLastErrorMessage",
+    "FsTempDir",
+    "FsExists",
+    "FsCreateDir",
+    "FsCreateDirAll",
+    "FsRemoveFile",
+    "FsRemoveDirAll",
+    "FsRename",
+    "FsReadDir",
+    "FsTakeStringArray",
+    "FsKind",
+    "FsRead",
+    "FsTakeBytes",
+    "FsWrite",
+    "FileOpen",
+    "FileClose",
+    "FileRead",
+    "FileWrite",
+    "FileFlush",
+    "IoStdinRead",
+    "IoStdoutWrite",
+    "IoStderrWrite",
+    "IoStdoutFlush",
+    "IoStderrFlush",
+    "NetConnect",
+    "NetClose",
+    "NetRead",
+    "NetWrite",
+    "NetReadTimeout",
+    "NetListen",
+    "NetLocalPort",
+    "NetAccept",
+    "BytesLen",
+    "BytesFromString",
+    "BytesIsUtf8",
+    "BytesToStringUnchecked",
+    "BytesAt",
+    "BytesSlice",
+    "BytesConcat",
+    "BytesToInts",
+    "BytesFromInts",
+    "BytesEq",
+    "IntHashSeed",
+    "HttpParseRequest",
+    "CryptoHash",
+    "CryptoRandomBytes",
+    "CryptoRandomInt",
+    "CryptoPbkdf2Sha256",
+    "CryptoPbkdf2Sha256Verify",
+    "TimeNowNanos",
+    "TimeNowEpochNanos",
+    "LogConfigLevel",
+    "LogConfigToStderr",
+    "LogSetConfig",
+    "ShutdownRequested",
+    "ProcessArgCount",
+    "ProcessArg",
+    "ProcessExit",
+    "ProcessRun",
+    "ProcessTakeStatus",
+    "ProcessTakeStdout",
+    "ProcessTakeStderr",
+    "ProcessEnv",
+    "ProcessCurrentExe",
+    "UiStatePresent",
+    "UiStateLoad",
+    "UiStateStore",
+    "RouterStatePresent",
+    "RouterStateLoad",
+    "RouterStateStore",
+]
+
+/// `RtFunc::StrConcat`, by its index (the lowering's own runtime
+/// functions, beside the builtins' table; `mir_tests.nova` holds each to
+/// its name).
+pub const RT_STR_CONCAT: Int = 4
+
+/// `RtFunc::StrConcatN`.
+pub const RT_STR_CONCAT_N: Int = 5
+
+/// `RtFunc::IntToStr`.
+pub const RT_INT_TO_STR: Int = 6
+
+/// `RtFunc::FloatToStr`.
+pub const RT_FLOAT_TO_STR: Int = 7
+
+/// `RtFunc::BoolToStr`.
+pub const RT_BOOL_TO_STR: Int = 12
+
+/// `RtFunc::CharToStr`.
+pub const RT_CHAR_TO_STR: Int = 13
+
+/// `RtFunc::StrEq`.
+pub const RT_STR_EQ: Int = 14
+
+/// `RtFunc::CheckBounds`.
+pub const RT_CHECK_BOUNDS: Int = 26
+
+/// `RtFunc::Panic`.
+pub const RT_PANIC: Int = 27
+
+/// `RtFunc::TaskBlockOn`.
+pub const RT_TASK_BLOCK_ON: Int = 30
+
+/// The runtime function named `name`, its index in `RT_FUNC_VARIANTS`
+/// (`RtFunc::Name`); a name that is none of them is a bug in N.
+pub fn rt_func(name: String) -> Int {
+    let variants = RT_FUNC_VARIANTS
+    let mut i = 0
+    while i < variants.len() {
+        if variants[i] == name { return i }
+        i += 1
+    }
+    panic("no runtime function is named `${name}`")
+}
+
+/// A monomorphized module ready for codegen (`Module`): natively
+/// `runtime_alloc` is `None` and `runtime_exports` empty, so neither is
+/// held.
+pub record MirModule { pub functions: Vec<MirFunction>, pub externs: Vec<ExternDecl> }
+
+/// An imported external function (`ExternDecl`): its raw symbol, ABI and
+/// classes.
+pub record ExternDecl { pub symbol: String, pub abi: ExternAbi, pub params: Vec<Int>, pub ret: Int }
+
+/// A monomorphized function (`Function`).
+pub record MirFunction {
+    pub name: String,
+    pub params: Int,
+    pub takes_env: Bool,
+    pub capture_count: Int,
+    pub temps: Vec<Int>,
+    pub ret: Int,
+    pub is_async: Bool,
+    pub blocks: Vec<MirBlock>,
+}
+
+/// A basic block: straight-line statements plus one terminator (`Block`).
+pub record MirBlock { pub stmts: Vec<MirStmt>, pub term: MirTerm }
+
+/// A single 3-address statement (`Stmt`), but `Mem`, a WASM build's alone;
+/// the comment after a variant names its fields.
+pub type MirStmt =
+    // dst, value
+    | SConstInt(Int, Int)
+    | SConstFloat(Int, Float)
+    | SConstBool(Int, Bool)
+    | SConstStr(Int, String)
+    | SConstUnit(Int)
+    // dst, src
+    | SCopy(Int, Int)
+    // dst, op, class, lhs, rhs
+    | SBin(Int, HirBinOp, Int, Int, Int)
+    // dst, class, src
+    | SNeg(Int, Int, Int)
+    // dst, src
+    | SNot(Int, Int)
+    // dst, src
+    | SBitNot(Int, Int)
+    // dst, callee, args
+    | SCall(Int, String, Vec<Int>)
+    // dst, callee, params, ret, args
+    | SCallIndirect(Int, Int, Vec<Int>, Int, Vec<Int>)
+    // dst, future
+    | SAwait(Int, Int)
+    // dst, func, args
+    | SCallRuntime(Int, Int, Vec<Int>)
+    // dst, code, captures
+    | SMakeClosure(Int, String, Vec<(Int, Int)>)
+    // dst, tag, fields
+    | SMakeSum(Int, Int, Vec<(Int, Int)>)
+    // dst, sum
+    | SSumTag(Int, Int)
+    // dst, sum, index, ty
+    | SSumField(Int, Int, Int, Int)
+    // dst, fields
+    | SMakeRecord(Int, Vec<(Int, Int)>)
+    // dst, record, index, ty
+    | SRecordField(Int, Int, Int, Int)
+    // record, index, value, ty
+    | SSetField(Int, Int, Int, Int)
+    // dst, elems
+    | SMakeArray(Int, Vec<(Int, Int)>)
+    // dst, len
+    | SArrayAlloc(Int, Int)
+    // dst, arr
+    | SArrayLen(Int, Int)
+    // dst, arr, index, ty
+    | SArrayGet(Int, Int, Int, Int)
+    // arr, index, value, ty
+    | SArraySet(Int, Int, Int, Int)
+
+/// Block terminators (`Terminator`).
+pub type MirTerm =
+    | TermGoto(Int)
+    // cond, then_, else_
+    | TermBranch(Int, Int, Int)
+    // disc, arms, default
+    | TermSwitch(Int, Vec<(Int, Int)>, Int)
+    // the temp, -1 for none
+    | TermReturn(Int)
+    | TermTrap
+
+/// Map a concrete HIR type to its machine class (`mir_ty`). A type that
+/// should not occur after type checking maps to `MIR_UNIT`, as S0's
+/// defensive arm does.
+pub fn mir_ty(ty: Ty) -> Int {
+    match ty {
+        TyInt => MIR_I64
+        TyChar => MIR_I64
+        TyFloat => MIR_F64
+        TyBool => MIR_I8
+        TyString => MIR_PTR
+        TyBytes => MIR_PTR
+        TyFn(_, _) => MIR_PTR
+        TySum(_, _) => MIR_PTR
+        TyRecord(_, _) => MIR_PTR
+        TyArray(_) => MIR_PTR
+        TyTuple(_) => MIR_PTR
+        TyFuture(_) => MIR_PTR
+        TyUnit => MIR_UNIT
+        TyNever => MIR_UNIT
+        TyParam(_) => MIR_UNIT
+        TyVar(_) => MIR_UNIT
+        TyError => MIR_UNIT
+        TyAssoc(_, _) => MIR_UNIT
+    }
+}
+
+/// Mangle a function instance into a unique symbol name (`mangle`):
+/// `name.<def>`, or `name.<def>$<args>` for an instance of a generic
+/// function.
+pub fn mangle(def_id: Int, name: String, type_args: Vec<Ty>) -> String {
+    if type_args.is_empty() { return "${name}.${def_id}" }
+    let mut args: Vec<String> = Vec::new()
+    for t in type_args.iter() { args.push(mangle_ty(t)) }
+    let joined = "_".join(args.to_array())
+    "${name}.${def_id}" + "$" + joined
+}
+
+/// A type's part of a symbol (`mangle_ty`): each a prefix-free code, `X`
+/// for a type that should not occur after monomorphization.
+pub fn mangle_ty(ty: Ty) -> String {
+    match ty {
+        TyInt => "i"
+        TyFloat => "f"
+        TyBool => "b"
+        TyChar => "c"
+        TyString => "s"
+        TyBytes => "y"
+        TyUnit => "u"
+        TyNever => "n"
+        TyFn(params, ret) => "F${mangle_tys(params, "")}R${mangle_ty(ret)}E"
+        TySum(d, args) => if args.is_empty() { "S${d}" } else { "S${d}L${mangle_tys(args, "")}E" }
+        TyRecord(d, args) => if args.is_empty() {
+            "R${d}"
+        } else {
+            "R${d}L${mangle_tys(args, "")}E"
+        }
+        TyArray(e) => "A${mangle_ty(e)}E"
+        TyTuple(es) => "T${mangle_tys(es, "")}E"
+        TyFuture(o) => "U${mangle_ty(o)}E"
+        TyParam(_) => "X"
+        TyVar(_) => "X"
+        TyError => "X"
+        TyAssoc(_, _) => "X"
+    }
+}
+
+// Each of `tys` mangled, joined by `sep`.
+fn mangle_tys(tys: Vec<Ty>, sep: String) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for t in tys.iter() { parts.push(mangle_ty(t)) }
+    sep.join(parts.to_array())
+}

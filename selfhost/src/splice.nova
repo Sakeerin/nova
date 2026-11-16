@@ -1,0 +1,259 @@
+// std's checked functions spliced into a program: a port of
+// crates/nova-typeck/src/check/items.rs's `shared_module` and `Shift`
+// (5.4, spec docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md
+// §5, ADR 0057), beside `Checked::into_module` (`full_module`). N's
+// `SharedItems` keeps its whole checker, std's checked functions with it
+// (5.3b), so each program's MIR reads the module the full check builds:
+// the shared check's tables and functions, std's functions copied in with
+// their ids moved.
+//
+// - Records alias in N, so a copy is made of new functions, nodes, types
+//   and patterns, as S0's clone is, and never writes into std's shared
+//   functions, which every program reads (spec §6.2).
+
+import hir
+import typeck
+
+/// The module the full check builds (`Checked::into_module`, 5.4): its
+/// tables and its functions.
+pub fn full_module(tables: Checker) -> HirModule {
+    hir_module(
+        tables.sums,
+        tables.records,
+        tables.traits,
+        tables.impls,
+        tables.functions,
+        tables.externs,
+    )
+}
+
+/// The module the full check builds, from a program's shared check
+/// `checked` and std's checked functions, which `share_items` kept, copied
+/// in with their ids moved to where the full check numbers them
+/// (`shared_module`; spec
+/// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §5, ADR
+/// 0057). With `S` std's definitions, `D` the program's and `P` its
+/// closures and wrappers (`Shift`): every id below `S` moves up by `D`,
+/// every closure's or wrapper's, `S` and up, by `D + P`, past the
+/// program's, and a lifted function's name `closure$N` or `fnval$N` takes
+/// its new id; nothing else changes. std's functions go after the
+/// program's functions, methods and constants, std's closures after the
+/// program's, as the full check orders them (`check_bodies`). Each copy is
+/// made of new nodes: std's shared functions are never written. The
+/// tables are the shared check's, std's parts rebased already.
+pub fn shared_module(checked: Checker, shared: SharedItems) -> HirModule {
+    let own_defs = checked.closures - shared.defs
+    let shift = Shift {
+        std_defs: shared.defs,
+        defs: own_defs,
+        closures: own_defs + (checked.std_closures - checked.closures),
+    }
+    let std = shared.tables.functions
+    let own = checked.functions
+    let std_lifted = first_lifted(std, shared.defs)
+    let own_lifted = first_lifted(own, checked.closures)
+    let mut functions: Vec<HirFunction> = Vec::new()
+    for i in 0..own_lifted { functions.push(own.at(i)) }
+    for i in 0..std_lifted { functions.push(shift.function(std.at(i))) }
+    for i in own_lifted..own.len() { functions.push(own.at(i)) }
+    for i in std_lifted..std.len() { functions.push(shift.function(std.at(i))) }
+    hir_module(
+        checked.sums,
+        checked.records,
+        checked.traits,
+        checked.impls,
+        functions,
+        checked.externs,
+    )
+}
+
+// The position of the first of `fs` whose id is `from` or past it: the
+// first closure or wrapper.
+fn first_lifted(fs: Vec<HirFunction>, from: Int) -> Int {
+    for i in 0..fs.len() { if fs.at(i).def_id >= from { return i } }
+    fs.len()
+}
+
+/// How std's checked functions' ids move in a program (`Shift`): a
+/// definition's, below `std_defs`, up by the program's `defs`; a closure's
+/// or wrapper's, from `std_defs` on, up by `closures`, the program's
+/// definitions and its own closures and wrappers.
+pub record Shift { pub std_defs: Int, pub defs: Int, pub closures: Int }
+
+impl Shift {
+    pub fn id(self, id: Int) -> Int {
+        if id < self.std_defs { id + self.defs } else { id + self.closures }
+    }
+
+    /// A copy of std's function `f`, its ids moved: its own and its
+    /// bounds', every type's on its locals, its return and its body, and
+    /// every id its body names; a closure's or wrapper's name, which holds
+    /// its id, written again (`Shift::function`).
+    pub fn function(self, f: HirFunction) -> HirFunction {
+        let def_id = self.id(f.def_id)
+        let mut name = f.name
+        if f.def_id >= self.std_defs {
+            for prefix in ["closure$", "fnval$"].iter() {
+                if f.name == prefix + "${f.def_id}" { name = prefix + "${def_id}" }
+            }
+        }
+        let mut locals: Vec<Local> = Vec::new()
+        for i in 0..f.locals.len() {
+            let l = f.locals.at(i)
+            locals.push(Local { name: l.name, ty: self.ty(l.ty), is_mut: l.is_mut, span: l.span })
+        }
+        let mut bounds: Vec<Vec<Int>> = Vec::new()
+        for i in 0..f.bounds.len() {
+            let b = f.bounds.at(i)
+            let mut ids: Vec<Int> = Vec::new()
+            for k in 0..b.len() { ids.push(self.id(b.at(k))) }
+            bounds.push(ids)
+        }
+        HirFunction {
+            def_id: def_id,
+            name: name,
+            generics: f.generics,
+            bounds: bounds,
+            takes_env: f.takes_env,
+            capture_count: f.capture_count,
+            params: f.params,
+            locals: locals,
+            ret_ty: self.ty(f.ret_ty),
+            is_async: f.is_async,
+            body: self.expr(f.body),
+            span: f.span,
+        }
+    }
+
+    /// `ty`, every id in it moved (`Shift::ty`).
+    pub fn ty(self, ty: Ty) -> Ty {
+        match ty {
+            TyFn(params, ret) => TyFn(self.tys(params), self.ty(ret))
+            TyFuture(o) => TyFuture(self.ty(o))
+            TyArray(e) => TyArray(self.ty(e))
+            TySum(d, args) => TySum(self.id(d), self.tys(args))
+            TyRecord(d, args) => TyRecord(self.id(d), self.tys(args))
+            TyTuple(es) => TyTuple(self.tys(es))
+            TyAssoc(on, assoc) => TyAssoc(self.ty(on), self.id(assoc))
+            other => other
+        }
+    }
+
+    fn tys(self, tys: Vec<Ty>) -> Vec<Ty> {
+        let mut out: Vec<Ty> = Vec::new()
+        for i in 0..tys.len() { out.push(self.ty(tys.at(i))) }
+        out
+    }
+
+    fn exprs(self, exprs: Vec<HirExpr>) -> Vec<HirExpr> {
+        let mut out: Vec<HirExpr> = Vec::new()
+        for i in 0..exprs.len() { out.push(self.expr(exprs.at(i))) }
+        out
+    }
+
+    fn opt(self, e: Option<HirExpr>) -> Option<HirExpr> {
+        match e {
+            Some(x) => Some(self.expr(x))
+            None => None
+        }
+    }
+
+    /// A new node for `e`, its type and every node below it, each id moved
+    /// (`Shift::expr`).
+    pub fn expr(self, e: HirExpr) -> HirExpr {
+        let kind = match e.kind {
+            EkMakeClosure(func, type_args, captures) => EkMakeClosure(
+                self.id(func),
+                self.tys(type_args),
+                self.exprs(captures),
+            )
+            EkCall(func, type_args, args) => {
+                let callee = match func {
+                    CalleeDef(id) => CalleeDef(self.id(id))
+                    other => other
+                }
+                EkCall(callee, self.tys(type_args), self.exprs(args))
+            }
+            EkMakeVariant(sum, variant, args) => EkMakeVariant(
+                self.id(sum),
+                variant,
+                self.exprs(args),
+            )
+            EkMakeRecord(rec, fields) => EkMakeRecord(self.id(rec), self.exprs(fields))
+            EkMakeTuple(elems) => EkMakeTuple(self.exprs(elems))
+            EkMakeArray(elems) => EkMakeArray(self.exprs(elems))
+            EkStrConcat(parts) => EkStrConcat(self.exprs(parts))
+            EkFieldGet(target, index) => EkFieldGet(self.expr(target), index)
+            EkArrayLen(target) => EkArrayLen(self.expr(target))
+            EkUnary(op, inner) => EkUnary(op, self.expr(inner))
+            EkLet(local, init) => EkLet(local, self.expr(init))
+            EkAssign(local, value) => EkAssign(local, self.expr(value))
+            EkToStr(inner) => EkToStr(self.expr(inner))
+            EkAwait(inner) => EkAwait(self.expr(inner))
+            EkFieldSet(target, index, value) => EkFieldSet(
+                self.expr(target),
+                index,
+                self.expr(value),
+            )
+            EkArrayRepeat(init, len) => EkArrayRepeat(self.expr(init), self.expr(len))
+            EkIndex(target, index) => EkIndex(self.expr(target), self.expr(index))
+            EkIndexSet(target, index, value) => EkIndexSet(
+                self.expr(target),
+                self.expr(index),
+                self.expr(value),
+            )
+            EkTraitCall(trait_id, method, self_ty, type_args, receiver, args) => EkTraitCall(
+                self.id(trait_id),
+                method,
+                self.ty(self_ty),
+                self.tys(type_args),
+                self.opt(receiver),
+                self.exprs(args),
+            )
+            EkBinary(op, lhs, rhs) => EkBinary(op, self.expr(lhs), self.expr(rhs))
+            EkLogicalAnd(lhs, rhs) => EkLogicalAnd(self.expr(lhs), self.expr(rhs))
+            EkLogicalOr(lhs, rhs) => EkLogicalOr(self.expr(lhs), self.expr(rhs))
+            EkBlock(stmts, trailing) => EkBlock(self.exprs(stmts), self.opt(trailing))
+            EkIf(cond, then, else_) => EkIf(self.expr(cond), self.expr(then), self.opt(else_))
+            EkWhile(cond, body) => EkWhile(self.expr(cond), self.expr(body))
+            EkMatch(scrutinee, arms) => {
+                let mut out: Vec<HirArm> = Vec::new()
+                for i in 0..arms.len() {
+                    let a = arms.at(i)
+                    out.push(
+                        HirArm {
+                            pattern: self.pattern(a.pattern),
+                            guard: self.opt(a.guard),
+                            body: self.expr(a.body),
+                            span: a.span,
+                        },
+                    )
+                }
+                EkMatch(self.expr(scrutinee), out)
+            }
+            EkReturn(value) => EkReturn(self.opt(value))
+            other => other
+        }
+        HirExpr { kind: kind, ty: self.ty(e.ty), span: e.span }
+    }
+
+    /// `p`, a variant's sum moved, at any depth (`Shift::pattern`).
+    pub fn pattern(self, p: HirPattern) -> HirPattern {
+        match p {
+            PatVariant(sum, variant, fields) => PatVariant(
+                self.id(sum),
+                variant,
+                self.patterns(fields),
+            )
+            PatTuple(ps) => PatTuple(self.patterns(ps))
+            PatOr(ps) => PatOr(self.patterns(ps))
+            other => other
+        }
+    }
+
+    fn patterns(self, ps: Vec<HirPattern>) -> Vec<HirPattern> {
+        let mut out: Vec<HirPattern> = Vec::new()
+        for i in 0..ps.len() { out.push(self.pattern(ps.at(i))) }
+        out
+    }
+}

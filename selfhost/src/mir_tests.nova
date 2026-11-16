@@ -1,0 +1,235 @@
+// N's own tests of MIR (5.4, spec
+// docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md §6.3): each
+// type's code in a symbol (`mangle_ty`, mono.rs's tests' `mangle_ty`
+// cases), the lowering's runtime functions by name, a generic function
+// instantiated twice with its own nodes unchanged, and std's functions
+// spliced into a program twice with std's shared functions unchanged. The
+// differential compares everything else with S0.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import builtins
+import hir
+import lexer
+import lower_call
+import mir
+import mono
+import parser
+import resolver
+import splice
+import typeck
+import typeck_body
+import typeck_body_tests
+
+fn tys(list: [Ty]) -> Vec<Ty> { Vec::from_array(list) }
+
+@test
+fn mangle_ty_gives_each_type_its_code() {
+    let cases = [
+        (TyInt, "i"),
+        (TyFloat, "f"),
+        (TyBool, "b"),
+        (TyChar, "c"),
+        (TyString, "s"),
+        (TyBytes, "y"),
+        (TyUnit, "u"),
+        (TyNever, "n"),
+        (TyFn(tys([TyInt, TyString]), TyBool), "FisRbE"),
+        (TyFn(tys([]), TyUnit), "FRuE"),
+        (TySum(7, tys([])), "S7"),
+        (TySum(7, tys([TyInt, TyArray(TyChar)])), "S7LiAcEE"),
+        (TyRecord(12, tys([])), "R12"),
+        (TyRecord(12, tys([TyFuture(TyFloat)])), "R12LUfEE"),
+        (TyArray(TyArray(TyInt)), "AAiEE"),
+        (TyTuple(tys([TyInt, TyTuple(tys([TyInt, TyInt]))])), "TiTiiEE"),
+        (TyTuple(tys([TyTuple(tys([TyInt, TyInt])), TyInt])), "TTiiEiE"),
+        (TyFuture(TyUnit), "UuE"),
+        (TyParam(0), "X"),
+        (TyVar(3), "X"),
+        (TyError, "X"),
+        (TyAssoc(TyInt, 4), "X"),
+    ]
+    for (ty, code) in cases.iter() { assert_eq(mangle_ty(ty), code) }
+    assert_eq(mangle(9, "f", tys([])), "f.9")
+    assert_eq(mangle(9, "f", tys([TyInt, TyString])), "f.9" + "$" + "i_s")
+}
+
+@test
+fn the_lowerings_runtime_functions_are_named_as_s0_names_them() {
+    assert(RT_FUNC_VARIANTS.len() == 111, "${RT_FUNC_VARIANTS.len()} runtime functions")
+    let named = [
+        (RT_STR_CONCAT, "StrConcat"),
+        (RT_STR_CONCAT_N, "StrConcatN"),
+        (RT_INT_TO_STR, "IntToStr"),
+        (RT_FLOAT_TO_STR, "FloatToStr"),
+        (RT_BOOL_TO_STR, "BoolToStr"),
+        (RT_CHAR_TO_STR, "CharToStr"),
+        (RT_STR_EQ, "StrEq"),
+        (RT_CHECK_BOUNDS, "CheckBounds"),
+        (RT_PANIC, "Panic"),
+        (RT_TASK_BLOCK_ON, "TaskBlockOn"),
+    ]
+    for (index, name) in named.iter() { assert_eq(RT_FUNC_VARIANTS[index], name) }
+    assert(BUILTIN_LOWERING.len() == BUILTIN_VARIANTS.len(), "one lowering a builtin")
+    let lowerings = builtin_lowerings()
+    assert(lowerings.len() == BUILTIN_VARIANTS.len(), "one lowering a builtin")
+}
+
+// --- A generic function instantiated twice ---
+
+// `ty` as text, a parameter `P<i>`, so that a substitution written into
+// a type shows.
+fn ty_text(ty: Ty) -> String {
+    match ty {
+        TyParam(i) => "P${i}"
+        TyFn(params, ret) => "F(${tys_text(params)})${ty_text(ret)}"
+        TySum(d, args) => "S${d}(${tys_text(args)})"
+        TyRecord(d, args) => "R${d}(${tys_text(args)})"
+        TyArray(e) => "A(${ty_text(e)})"
+        TyTuple(es) => "T(${tys_text(es)})"
+        TyFuture(o) => "U(${ty_text(o)})"
+        TyAssoc(on, assoc) => "<${ty_text(on)}>::${assoc}"
+        other => mangle_ty(other)
+    }
+}
+
+fn tys_text(list: Vec<Ty>) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for t in list.iter() { parts.push(ty_text(t)) }
+    ",".join(parts.to_array())
+}
+
+// Every type of `f` (its locals, its return, its body's nodes, in order),
+// its id and name, as text.
+fn function_text(f: HirFunction) -> String {
+    let mut out = StringBuilder::new()
+    out.push("${f.def_id} ${f.name} generics=${f.generics}")
+    for l in f.locals.iter() { out.push(" ${ty_text(l.ty)}") }
+    out.push(" -> ${ty_text(f.ret_ty)}:")
+    push_expr_types(out, f.body)
+    out.to_string()
+}
+
+fn push_expr_types(mut out: StringBuilder, e: HirExpr) {
+    out.push(" ${ty_text(e.ty)}")
+    for child in child_exprs(e).iter() { push_expr_types(out, child) }
+    match e.kind {
+        EkCall(_, type_args, _) => out.push(" <${tys_text(type_args)}>")
+        _ => ()
+    }
+}
+
+@test
+fn a_generic_function_instantiated_twice_keeps_its_own_nodes() {
+    let c = check_bodies_of(
+        "fn pair<T>(x: T) -> (T, T) {\n    let y = x\n    (y, x)\n}\nfn main() {\n    let a = pair(1)\n    let b = pair(\"s\")\n    let c = pair(2)\n}\n",
+    )
+    assert(c.diagnostics.is_empty(), "the source checks")
+    let program = full_module(c)
+    let generic = program.function(0).unwrap()
+    let before = function_text(generic)
+    assert(before.contains("P0"), before)
+    let lowered = match lower_module_with(program, true) {
+        Ok(m) => m
+        Err(_) => panic("the source lowers")
+    }
+    // `main`, then `pair` at `Int`, then at `String`, as the worklist pops
+    // them, last pushed first; the first call at `Int` is the last's
+    // instance.
+    let mut names: Vec<String> = Vec::new()
+    for f in lowered.functions.iter() { names.push(f.name) }
+    let pair = "pair.0" + "$"
+    assert_eq(" ".join(names.to_array()), "main ${pair}i ${pair}s")
+    assert_eq(MIR_TY_NAMES[lowered.functions.at(1).temps.at(0)], "I64")
+    assert_eq(MIR_TY_NAMES[lowered.functions.at(2).temps.at(0)], "Ptr")
+    // The generic function, which both instances read, is as it was.
+    assert_eq(function_text(program.function(0).unwrap()), before)
+    assert(program.function(0).unwrap().generics == 1, "still generic")
+}
+
+// --- std's functions spliced in ---
+
+// A std of one module, `$std.zz`, holding a function with a closure and
+// a generic one, shared as `share_items` shares it, and the program
+// `source` checked on the shared path against it.
+fn shared_std_and_program(source: String) -> (SharedItems, Checker) {
+    let zz = std_module(
+        "$std.zz",
+        std_label("$std.zz"),
+        "pub record Zr { n: Int }\npub fn zz(x: Int) -> Int {\n    let r = Zr { n: x }\n    let f = |y: Int| y + r.n\n    f(1)\n}\npub fn zid<T>(t: T) -> T { t }\n",
+    )
+    let std_set = StdSet {
+        modules: Vec::from_array([zz]),
+        natives: Vec::new(),
+        builtins: builtin_table(),
+    }
+    let shared = share_std(CompileTargetNative, std_set)
+    if !shared.shareable { panic("std does not resolve alone") }
+    let mut std_texts: Vec<Option<String>> = Vec::new()
+    std_texts.push(None)
+    let alone = shared.alone
+    let items = share_items(alone.items, alone.definitions, Vec::from_array([zz.label]), std_texts)
+    if !items.shareable { panic("std's items or bodies give a diagnostic") }
+    let (tokens, _) = lex(source)
+    let (file, errors) = parse(tokens)
+    if !errors.is_empty() { panic("a test source does not parse") }
+    let mut m = module_source("main", "main", file)
+    m.text = Some(source)
+    let r = resolve_program_shared_for_check(Vec::from_array([m]), shared)
+    if !r.diagnostics.is_empty() {
+        panic("a test source does not resolve: ${r.diagnostics.at(0).message}")
+    }
+    let mut texts: Vec<Option<String>> = Vec::new()
+    texts.push(Some(source))
+    texts.push(None)
+    let mut c = check_items_shared(
+        r.items,
+        r.definitions,
+        Vec::from_array(["main", zz.label]),
+        texts,
+        items,
+    )
+    c.check_bodies(r.newline_splits)
+    (items, c)
+}
+
+fn module_text(program: HirModule) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for f in program.functions.iter() { parts.push(function_text(f)) }
+    "\n".join(parts.to_array())
+}
+
+@test
+fn a_splice_done_twice_leaves_stds_shared_functions_as_they_were() {
+    let (items, c) = shared_std_and_program(
+        "record Mine { k: Int }\nfn main() {\n    let g = |z: Int| z\n    let a = zz(g(1))\n    let b = zid(Mine { k: 1 })\n}\n",
+    )
+    assert(c.diagnostics.is_empty(), "the program checks")
+    let mut std_before: Vec<String> = Vec::new()
+    for f in items.tables.functions.iter() { std_before.push(function_text(f)) }
+    let first = shared_module(c, items)
+    let second = shared_module(c, items)
+    assert_eq(module_text(first), module_text(second))
+    let mut std_after: Vec<String> = Vec::new()
+    for f in items.tables.functions.iter() { std_after.push(function_text(f)) }
+    assert_eq("\n".join(std_after.to_array()), "\n".join(std_before.to_array()))
+    // std's definitions moved past the program's (`D` of them), std's
+    // closure past the program's own (`D + P`), and renamed.
+    let d = c.closures - items.defs
+    let p = c.std_closures - c.closures
+    let mut names: Vec<String> = Vec::new()
+    for f in first.functions.iter() { names.push("${f.def_id}:${f.name}") }
+    let std_closure = items.defs
+    let moved = std_closure + d + p
+    assert(
+        " ".join(names.to_array()).contains("${moved}:closure$" + "${moved}"),
+        " ".join(names.to_array()),
+    )
+    // Every copy is a new record: renaming one leaves std's as it was.
+    let mut copy = first.functions.at(first.functions.len() - 1)
+    copy.name = "renamed"
+    let mut std_last: Vec<String> = Vec::new()
+    for f in items.tables.functions.iter() { std_last.push(function_text(f)) }
+    assert_eq("\n".join(std_last.to_array()), "\n".join(std_before.to_array()))
+}
