@@ -46,6 +46,14 @@
 //!    binding (a `let mut` made `let`), a missing method, `break` outside a
 //!    loop, `.await` outside an `async fn`, an annotation removed, and
 //!    functions appended that give each aimed code.
+//! 7. [`mir_mutate`] (5.4, spec
+//!    `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §7.4,
+//!    ADR 0057): a loose corpus program that lowers clean, given closed
+//!    additions aimed at MIR, generic instances, awaits, match shapes and
+//!    closures, each reached from `main`'s first statements, so that every
+//!    input lowers clean and each kind's mark occurs among the fixed seeds'
+//!    inputs. Beside it, [`mir_deep`] and [`mir_deep_type`]: the type
+//!    checker's deep bodies, and types 128 levels deep, made to lower.
 //!
 //! Beside them, [`edges`]: fixed inputs that no file under `cases/` can
 //! hold as it is, such as a lone `\r` or a NUL.
@@ -1643,4 +1651,436 @@ pub fn body_deep(kind: &str, depth: usize) -> String {
         }
         other => panic!("no kind of nesting {other}"),
     }
+}
+
+// --- 5.4: the MIR fuzzer (spec
+// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §7.4; ADR
+// 0057) and the depth cases made to lower (§7.5) ---
+
+/// The MIR fuzzer's four kinds of addition (spec 5.4 §7.4), each by the
+/// letter that ends its prefix, `__m<n>_<k>` and the letter, which starts
+/// the name of every item it declares, and so of every function MIR makes
+/// of them but closures and wrappers: generic instances, awaits, match
+/// shapes and closures.
+pub const MIR_KINDS: [(char, &str); 4] = [
+    ('g', "generic instances"),
+    ('a', "awaits"),
+    ('p', "match shapes"),
+    ('c', "closures"),
+];
+
+/// The record and the sum of its own every addition that draws a type
+/// declares (`{p}` its prefix), which [`mir_type`] may draw.
+const MIR_OWN: &str = "record {p}Rec { {p}f: Int }\n\ntype {p}Sum = | {p}No | {p}Yes(Int)";
+
+/// A type the seed draws, and a value of it to bind under it: a primitive,
+/// the addition's own record or sum ([`MIR_OWN`]), or, while `depth` lasts,
+/// a tuple, an array, an `Option`, a `Result` or a `Vec` of drawn types.
+/// `{p}` stands for the addition's prefix.
+fn mir_type(rng: &mut SplitMix64, depth: usize) -> (String, String) {
+    let pair = |s: &str, v: &str| (s.to_string(), v.to_string());
+    match rng.below(if depth == 0 { 7 } else { 12 }) {
+        0 => ("Int".to_string(), rng.below(100).to_string()),
+        1 => pair("Float", "2.5"),
+        2 => pair("Bool", rng.pick(&["true", "false"])),
+        3 => pair("Char", "'q'"),
+        4 => pair("String", "\"m\""),
+        5 => pair("{p}Rec", "{p}Rec { {p}f: 1 }"),
+        6 => pair("{p}Sum", rng.pick(&["{p}No", "{p}Yes(2)"])),
+        7 => {
+            let (a, x) = mir_type(rng, depth - 1);
+            let (b, y) = mir_type(rng, depth - 1);
+            (format!("({a}, {b})"), format!("({x}, {y})"))
+        }
+        8 => {
+            let (a, x) = mir_type(rng, depth - 1);
+            let value = if rng.one_in(3) {
+                "[]".to_string()
+            } else {
+                format!("[{x}, {x}]")
+            };
+            (format!("[{a}]"), value)
+        }
+        9 => {
+            let (a, x) = mir_type(rng, depth - 1);
+            let value = if rng.one_in(3) {
+                "None".to_string()
+            } else {
+                format!("Some({x})")
+            };
+            (format!("Option<{a}>"), value)
+        }
+        10 => {
+            let (a, x) = mir_type(rng, depth - 1);
+            let (b, y) = mir_type(rng, depth - 1);
+            let value = if rng.one_in(2) {
+                format!("Ok({x})")
+            } else {
+                format!("Err({y})")
+            };
+            (format!("Result<{a}, {b}>"), value)
+        }
+        _ => {
+            let (a, _) = mir_type(rng, depth - 1);
+            (format!("Vec<{a}>"), "Vec::new()".to_string())
+        }
+    }
+}
+
+/// A function `{p}go` whose body is `lines`, each a statement.
+fn mir_go(lines: &[String]) -> String {
+    let mut text = String::from("fn {p}go() {\n");
+    for line in lines {
+        text.push_str("    ");
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push('}');
+    text
+}
+
+/// Generic instances: a generic function always, and as the seed picks a
+/// generic record with a method, a generic sum with a method, a function
+/// of two type parameters, and a function bounded by a trait of its own
+/// that a generic record and a record of its own implement; each at two
+/// types the seed draws.
+fn mir_generic(rng: &mut SplitMix64) -> String {
+    let (t1, v1) = mir_type(rng, 2);
+    let (t2, v2) = mir_type(rng, 2);
+    let mut items = vec![
+        MIR_OWN.to_string(),
+        "fn {p}id<T>(x: T) -> T {\n    let y: T = x\n    y\n}".to_string(),
+    ];
+    let mut lines = vec![
+        format!("let a: {t1} = {v1}"),
+        format!("let b: {t2} = {v2}"),
+        "let c = {p}id(a)".to_string(),
+    ];
+    if rng.one_in(2) {
+        items.push(
+            "record {p}Box<T> { {p}v: T }\n\nimpl<T> {p}Box<T> {\n    fn {p}get(self) -> T { self.{p}v }\n}"
+                .to_string(),
+        );
+        lines.push("let d = {p}Box { {p}v: b }.{p}get()".to_string());
+    }
+    if rng.one_in(2) {
+        items.push(
+            "type {p}Two<A, B> = | {p}L(A) | {p}R(B)\n\nimpl<A, B> {p}Two<A, B> {\n    fn {p}left(self) -> Bool {\n        match self {\n            {p}L(_) => true\n            {p}R(_) => false\n        }\n    }\n}"
+                .to_string(),
+        );
+        lines.push(format!("let e: {{p}}Two<{t1}, {t2}> = {{p}}R(b)"));
+        lines.push("let f = e.{p}left()".to_string());
+    }
+    if rng.one_in(2) {
+        items.push("fn {p}swap<A, B>(a: A, b: B) -> (B, A) { (b, a) }".to_string());
+        lines.push("let g = {p}swap(a, b)".to_string());
+    }
+    if rng.one_in(2) {
+        items.push(
+            "trait {p}Tr {\n    fn {p}m(self) -> Int\n}\n\nrecord {p}Own<T> { {p}k: Int, {p}t: T }\n\nimpl<T> {p}Tr for {p}Own<T> {\n    fn {p}m(self) -> Int { self.{p}k }\n}\n\nimpl {p}Tr for {p}Rec {\n    fn {p}m(self) -> Int { self.{p}f }\n}\n\nfn {p}bound<T: {p}Tr>(x: T) -> Int { x.{p}m() }"
+                .to_string(),
+        );
+        lines.push("let h = {p}bound({p}Own { {p}k: 1, {p}t: a })".to_string());
+        lines.push("let i = {p}bound({p}Rec { {p}f: 2 })".to_string());
+        lines.push("println(\"${h} ${i}\")".to_string());
+    }
+    items.push(mir_go(&lines));
+    items.join("\n\n")
+}
+
+/// Awaits: an `async fn` that awaits another one to three times, a generic
+/// one as the seed picks, with values of each class and of two drawn types
+/// live across each await, driven by std's `block_on` from a plain
+/// function that `main` calls, through a third as the seed picks.
+fn mir_await(rng: &mut SplitMix64) -> String {
+    let (t1, v1) = mir_type(rng, 1);
+    let (t2, v2) = mir_type(rng, 1);
+    let generic = rng.one_in(2);
+    let leaf = if generic {
+        "async fn {p}leaf<T>(x: T) -> T {\n    yield_now().await\n    x\n}"
+    } else {
+        "async fn {p}leaf(x: Int) -> Int {\n    yield_now().await\n    x + 1\n}"
+    };
+    let mut mid = format!(
+        "async fn {{p}}mid(x: {t1}, y: {t2}) -> Int {{\n    let k = x\n    let n = 3\n    let fl = 1.5\n    let on = n > 1\n"
+    );
+    for j in 0..1 + rng.below(3) {
+        let arg = if generic {
+            *rng.pick(&["y", "k", "n", "fl", "on"])
+        } else {
+            "n"
+        };
+        mid.push_str(&format!("    let r{j} = {{p}}leaf({arg}).await\n"));
+    }
+    mid.push_str("    let z = (k, y, n, fl, on)\n    z.2 + 1\n}");
+    let call = format!("{{p}}mid({v1}, {v2})");
+    let mut items = vec![MIR_OWN.to_string(), leaf.to_string(), mid];
+    let driven = if rng.one_in(2) {
+        items.push(format!(
+            "async fn {{p}}top() -> Int {{\n    let a = 7\n    let b = {call}.await\n    a + b\n}}"
+        ));
+        "{p}top()".to_string()
+    } else {
+        call
+    };
+    items.push(mir_go(&[
+        format!("let r = block_on({driven})"),
+        "println(\"${r}\")".to_string(),
+    ]));
+    items.join("\n\n")
+}
+
+/// The arms [`mir_match`] draws from for its chained `match` over its own
+/// sum, in an order in which none is unreachable, a wildcard after them.
+const MIR_ARMS: [&str; 8] = [
+    "{p}A(0, \"x\") => 1",
+    "{p}A(n, _) if n > 3 => n",
+    "{p}A(1..=9, s) => s.len()",
+    "{p}B((1..=5, 'a')) | {p}B((_, 'b')) => 2",
+    "{p}B((n, 'c'..='f')) => n",
+    "{p}C(Some({p}A(k, \"y\") | {p}B((k, _)))) => k",
+    "{p}C(Some({p}C(None))) => 4",
+    "{p}C(None) => 3",
+];
+
+/// Match shapes over a sum of its own: a `match` lowered by chains, its
+/// arms drawn from [`MIR_ARMS`] (nested variant and tuple patterns, a
+/// guard, or-patterns, ranges, string and char literals), then a
+/// wildcard; a flat one, a `Switch` on the tag; and as the seed picks a
+/// tuple's, an `Int`'s, a `Char`'s and a `String`'s.
+fn mir_match(rng: &mut SplitMix64) -> String {
+    let mut arms: Vec<&str> = MIR_ARMS.iter().copied().filter(|_| rng.one_in(2)).collect();
+    if arms.is_empty() {
+        arms.push(rng.pick(&MIR_ARMS));
+    }
+    let mut chain = String::from("fn {p}chain(v: {p}S) -> Int {\n    match v {\n");
+    for arm in arms {
+        chain.push_str(&format!("        {arm}\n"));
+    }
+    chain.push_str("        _ => 0\n    }\n}");
+    let mut items = vec![
+        "type {p}S = | {p}A(Int, String) | {p}B((Int, Char)) | {p}C(Option<{p}S>) | {p}D".to_string(),
+        chain,
+        "fn {p}flat(v: {p}S) -> Int {\n    match v {\n        {p}A(a, _) => a\n        {p}B(_) => 1\n        {p}C(_) => 2\n        {p}D => 3\n    }\n}"
+            .to_string(),
+    ];
+    let mut lines = vec![
+        "let a = {p}chain({p}A(0, \"x\")) + {p}chain({p}C(Some({p}B((2, 'b')))))".to_string(),
+        "let b = {p}chain({p}D) + {p}flat({p}B((1, 'z')))".to_string(),
+        "println(\"${a} ${b}\")".to_string(),
+    ];
+    if rng.one_in(2) {
+        items.push(
+            "fn {p}tuple(t: (Int, String)) -> Int {\n    match t {\n        (0, \"a\") | (1, \"b\") => 1\n        (n, s) if n == s.len() => 2\n        (5..=7, _) => 3\n        _ => 0\n    }\n}"
+                .to_string(),
+        );
+        lines.push("println(\"${{p}tuple((6, \"c\"))}\")".to_string());
+    }
+    if rng.one_in(2) {
+        items.push(
+            "fn {p}int(n: Int) -> Int {\n    match n {\n        0 => 1\n        1 => 2\n        _ => 3\n    }\n}"
+                .to_string(),
+        );
+        lines.push("println(\"${{p}int(1)}\")".to_string());
+    }
+    if rng.one_in(2) {
+        items.push(
+            "fn {p}char(c: Char) -> Int {\n    match c {\n        'a' => 1\n        'b' => 2\n        _ => 0\n    }\n}"
+                .to_string(),
+        );
+        lines.push("println(\"${{p}char('b')}\")".to_string());
+    }
+    if rng.one_in(2) {
+        items.push(
+            "fn {p}text(s: String) -> Int {\n    match s {\n        \"a\" => 1\n        \"b\" => 2\n        _ => 0\n    }\n}"
+                .to_string(),
+        );
+        lines.push("println(\"${{p}text(\"a\")}\")".to_string());
+    }
+    items.push(mir_go(&lines));
+    items.join("\n\n")
+}
+
+/// Closures: one capturing a value of each class (`Int`, `Float`, `Bool`,
+/// `String` and `()`) passed to a generic function that calls it through
+/// its function-typed parameter, and a bare function passed as a value;
+/// and as the seed picks a closure capturing an `Int`, one taking a value
+/// of a type the seed draws, a closure called directly, and a closure
+/// that makes and calls one of its own.
+fn mir_closure(rng: &mut SplitMix64) -> String {
+    let items = vec![
+        MIR_OWN.to_string(),
+        "fn {p}apply<T>(f: fn(T) -> T, x: T) -> T { f(x) }".to_string(),
+        "fn {p}twice(x: Int) -> Int { x * 2 }".to_string(),
+    ];
+    let mut lines: Vec<String> = [
+        "let k = 5",
+        "let s = \"cap\"",
+        "let fl = 1.5",
+        "let bo = true",
+        "let u = ()",
+        "let all = |y: String| {\n        let w = u\n        \"${y}${s}${fl}${bo}${k}\"\n    }",
+        "let r1 = {p}apply(all, \"a\")",
+        "let r2 = {p}apply({p}twice, 4)",
+        "println(\"${r1} ${r2}\")",
+    ]
+    .iter()
+    .map(|l| l.to_string())
+    .collect();
+    if rng.one_in(2) {
+        lines.push("let add = |x: Int| x + k".to_string());
+        lines.push("println(\"${{p}apply(add, 3)}\")".to_string());
+    }
+    if rng.one_in(2) {
+        let (t, v) = mir_type(rng, 2);
+        lines.push(format!("let a: {t} = {v}"));
+        lines.push(format!(
+            "let keep = |z: {t}| {{\n        let q = (k, s)\n        z\n    }}"
+        ));
+        lines.push("let r3 = {p}apply(keep, a)".to_string());
+    }
+    if rng.one_in(2) {
+        lines.push("println(all(\"b\"))".to_string());
+    }
+    if rng.one_in(2) {
+        lines.push(
+            "let outer = |x: Int| {\n        let inner = |y: Int| y + x + k\n        inner(x)\n    }"
+                .to_string(),
+        );
+        lines.push("println(\"${{p}apply(outer, 1)}\")".to_string());
+    }
+    let mut items = items;
+    items.push(mir_go(&lines));
+    items.join("\n\n")
+}
+
+/// The byte just inside `main`'s body, after its `{`, if `source` parses
+/// and declares a `main`.
+fn main_body(source: &str) -> Option<usize> {
+    use nova_ast::Item;
+    let (tokens, lex_errors) = nova_lexer::lex(source, FileId::DUMMY);
+    if !lex_errors.is_empty() {
+        return None;
+    }
+    let parsed = nova_parser::parse_recovering(&tokens, FileId::DUMMY);
+    if !parsed.errors.is_empty() {
+        return None;
+    }
+    parsed.file.items.iter().find_map(|item| match &item.value {
+        Item::Function(f) if f.name.value == "main" => Some(f.body.span.start as usize + 1),
+        _ => None,
+    })
+}
+
+/// `source`, a program that lowers clean, given one to three closed
+/// additions (module docs, 7.), each of a kind of [`MIR_KINDS`] the seed
+/// picks: items appended under the prefix `__m<n>_<k>` and the kind's
+/// letter, `<k>` the addition's place, and a statement at the start of
+/// `main`'s body, `<prefix>go()`, of type `()`, that reaches them. An
+/// addition names only its own items, std's and its locals, so every input
+/// type-checks and lowers clean, which the harness checks.
+pub fn mir_mutate(rng: &mut SplitMix64, source: &str, n: usize) -> String {
+    let at = main_body(source).expect("a base declares `main` and parses");
+    let mut calls = String::new();
+    let mut items = String::new();
+    for step in 0..1 + rng.below(3) {
+        let (kind, _) = *rng.pick(&MIR_KINDS);
+        let text = match kind {
+            'g' => mir_generic(rng),
+            'a' => mir_await(rng),
+            'p' => mir_match(rng),
+            _ => mir_closure(rng),
+        };
+        let prefix = format!("__m{n}_{step}{kind}");
+        items.push_str(&format!("\n{}\n", text.replace("{p}", &prefix)));
+        calls.push_str(&format!("\n    {prefix}go()"));
+    }
+    format!(
+        "{}{calls}\n{}\n{items}",
+        &source[..at],
+        source[at..].trim_end_matches('\n')
+    )
+}
+
+/// The kind of [`MIR_KINDS`] whose addition declared the function `name`
+/// of a MIR dump: the letter after `__m<n>_<k>`.
+pub fn mir_kind_of(name: &str) -> Option<char> {
+    let rest = name.strip_prefix("__m")?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.strip_prefix('_')?;
+    let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.chars()
+        .next()
+        .filter(|c| MIR_KINDS.iter().any(|(k, _)| k == c))
+}
+
+/// [`BODY_DEEP_KINDS`]' programs made to lower (spec 5.4 §7.5): each nested
+/// body in a function `f` that `main` calls and again in a generic `g`
+/// that `main` instantiates at `Int`, so that lowering and the specializer
+/// both walk it. `main`'s statements go into `f` and `g` as they are, and
+/// a function `f` beside an empty `main` is copied to `g` with a type
+/// parameter first, each called with arguments of its parameters' types.
+pub fn mir_deep(kind: &str, depth: usize) -> String {
+    let text = body_deep(kind, depth);
+    if let Some(f) = text.strip_suffix("\n\nfn main() {}\n") {
+        let rest = f.strip_prefix("fn f(").expect("a function `f` first");
+        let generic = if rest.starts_with(')') {
+            format!("fn g<T>(u: T{rest}")
+        } else {
+            format!("fn g<T>(u: T, {rest}")
+        };
+        // Bound first where they nest, a `let`'s initializer being a level
+        // fewer than a call's argument.
+        let (bind, args) = match kind {
+            "questions" => ("", "Some(1)".to_string()),
+            "or-patterns" | "match-arms" | "match-scrutinees" => ("", "1".to_string()),
+            "let-patterns" => {
+                let deep = format!("{}1{}", "(".repeat(depth), ", 2)".repeat(depth));
+                return format!(
+                    "{f}\n\n{generic}\n\nfn main() {{\n    let a = {deep}\n    let p = f(a)\n    let q = g(1, a)\n    println(\"${{p}} ${{q}}\")\n}}\n"
+                );
+            }
+            "for-ranges" => ("", String::new()),
+            "for-arrays" => ("    let a = [1, 2]\n", "a".to_string()),
+            "for-patterns" => ("    let a = [(1, 2)]\n", "a".to_string()),
+            other => panic!("no function `f` for {other}"),
+        };
+        let comma = if args.is_empty() { "" } else { ", " };
+        return format!(
+            "{f}\n\n{generic}\n\nfn main() {{\n{bind}    let p = f({args})\n    let q = g(1{comma}{args})\n}}\n"
+        );
+    }
+    let body = text
+        .strip_prefix("fn main() {\n")
+        .and_then(|t| t.strip_suffix("\n}\n"))
+        .expect("`main`'s statements");
+    format!("fn f() {{\n{body}\n}}\n\nfn g<T>(u: T) {{\n{body}\n}}\n\nfn main() {{\n    f()\n    g(1)\n}}\n")
+}
+
+/// The written nestings of a type [`mir_deep_type`] puts in an instance's
+/// type argument, each level around `Int` (5.3b's that lower: arrays, a
+/// generic record's arguments, tuples, `fn` types' parameters and
+/// returns), and std's `Option`, a sum.
+pub const MIR_DEEP_TYPES: [(&str, &str, &str); 6] = [
+    ("arrays", "[", "]"),
+    ("generics", "W<", ">"),
+    ("tuples", "(", ", Int)"),
+    ("fn-parameters", "fn(", ") -> Int"),
+    ("fn-returns", "fn() -> ", ""),
+    ("options", "Option<", ">"),
+];
+
+/// A program whose generic functions `make` and `id` are instantiated at a
+/// type nested `depth` levels as `kind` names ([`MIR_DEEP_TYPES`]), so that
+/// `mangle_ty` and the specializer's substitution walk it all (spec 5.4
+/// §7.5).
+pub fn mir_deep_type(kind: &str, depth: usize) -> String {
+    let (_, open, close) = MIR_DEEP_TYPES
+        .iter()
+        .find(|(k, _, _)| *k == kind)
+        .unwrap_or_else(|| panic!("no nesting of a type {kind}"));
+    let ty = format!("{}Int{}", open.repeat(depth), close.repeat(depth));
+    format!(
+        "record W<T> {{ x: T }}\n\nfn make<T>() -> T {{ panic(\"never\") }}\n\nfn id<T>(x: T) -> T {{\n    let y: T = x\n    y\n}}\n\nfn main() {{\n    let v: {ty} = make()\n    let w = id(v)\n}}\n"
+    )
 }

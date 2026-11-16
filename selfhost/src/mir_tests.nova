@@ -3,8 +3,9 @@
 // type's code in a symbol (`mangle_ty`, mono.rs's tests' `mangle_ty`
 // cases), the lowering's runtime functions by name, a generic function
 // instantiated twice with its own nodes unchanged, std's functions
-// spliced into a program twice with std's shared functions unchanged, and
-// the async transform's state slots for values live across two awaits.
+// spliced into a program twice with std's shared functions unchanged, a
+// spliced module the full check's, and the async transform's state slots
+// for values live across two awaits.
 // The differential compares everything else with S0.
 //
 // They live in `src/`, imported by `main.nova`, for the reason
@@ -97,6 +98,22 @@ fn ty_text(ty: Ty) -> String {
     }
 }
 
+// A pattern as text, each variant's sum and index.
+fn pattern_text(p: HirPattern) -> String {
+    match p {
+        PatVariant(sum, variant, fields) => "V${sum}.${variant}(${patterns_text(fields)})"
+        PatTuple(ps) => "T(${patterns_text(ps)})"
+        PatOr(ps) => "O(${patterns_text(ps)})"
+        _ => "_"
+    }
+}
+
+fn patterns_text(ps: Vec<HirPattern>) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for q in ps.iter() { parts.push(pattern_text(q)) }
+    ",".join(parts.to_array())
+}
+
 fn tys_text(list: Vec<Ty>) -> String {
     let mut parts: Vec<String> = Vec::new()
     for t in list.iter() { parts.push(ty_text(t)) }
@@ -116,6 +133,19 @@ fn function_text(f: HirFunction) -> String {
 
 fn push_expr_types(mut out: StringBuilder, e: HirExpr) {
     out.push(" ${ty_text(e.ty)}")
+    // The ids a node names beyond its type, which the splice moves.
+    match e.kind {
+        EkCall(func, _, _) => match func {
+            CalleeDef(id) => out.push(" call${id}")
+            _ => ()
+        }
+        EkMakeClosure(func, _, _) => out.push(" closure${func}")
+        EkMakeVariant(sum, variant, _) => out.push(" variant${sum}.${variant}")
+        EkMakeRecord(rec, _) => out.push(" record${rec}")
+        EkTraitCall(trait_id, method, _, _, _, _) => out.push(" trait${trait_id}.${method}")
+        EkMatch(_, arms) => { for a in arms.iter() { out.push(" ${pattern_text(a.pattern)}") } }
+        _ => ()
+    }
     for child in child_exprs(e).iter() { push_expr_types(out, child) }
     match e.kind {
         EkCall(_, type_args, _) => out.push(" <${tys_text(type_args)}>")
@@ -157,11 +187,17 @@ fn a_generic_function_instantiated_twice_keeps_its_own_nodes() {
 // a generic one, shared as `share_items` shares it, and the program
 // `source` checked on the shared path against it.
 fn shared_std_and_program(source: String) -> (SharedItems, Checker) {
-    let zz = std_module(
-        "$std.zz",
-        std_label("$std.zz"),
+    shared_std_and_program_with(
         "pub record Zr { n: Int }\npub fn zz(x: Int) -> Int {\n    let r = Zr { n: x }\n    let f = |y: Int| y + r.n\n    f(1)\n}\npub fn zid<T>(t: T) -> T { t }\n",
+        source,
     )
+}
+
+// A std of one module, `$std.zz`, whose text is `std_text`, shared as
+// `share_items` shares it, and the program `source` checked on the shared
+// path against it.
+fn shared_std_and_program_with(std_text: String, source: String) -> (SharedItems, Checker) {
+    let zz = std_module("$std.zz", std_label("$std.zz"), std_text)
     let std_set = StdSet {
         modules: Vec::from_array([zz]),
         natives: Vec::new(),
@@ -235,6 +271,61 @@ fn a_splice_done_twice_leaves_stds_shared_functions_as_they_were() {
     let mut std_last: Vec<String> = Vec::new()
     for f in items.tables.functions.iter() { std_last.push(function_text(f)) }
     assert_eq("\n".join(std_last.to_array()), "\n".join(std_before.to_array()))
+}
+
+// The program `source` checked in full, its bodies too, against a std of
+// one module, `$std.zz`, whose text is `std_text`, as the full check
+// resolves std again for each program.
+fn full_check_with(std_text: String, source: String) -> Checker {
+    let zz = std_module("$std.zz", std_label("$std.zz"), std_text)
+    let std_set = StdSet {
+        modules: Vec::from_array([zz]),
+        natives: Vec::new(),
+        builtins: builtin_table(),
+    }
+    let (tokens, _) = lex(source)
+    let (file, errors) = parse(tokens)
+    if !errors.is_empty() { panic("a test source does not parse") }
+    let mut m = module_source("main", "main", file)
+    m.text = Some(source)
+    let r = resolve_program_for(CompileTargetNative, Vec::from_array([m]), std_set)
+    if !r.diagnostics.is_empty() {
+        panic("a test source does not resolve: ${r.diagnostics.at(0).message}")
+    }
+    let mut texts: Vec<Option<String>> = Vec::new()
+    texts.push(Some(source))
+    texts.push(None)
+    let mut c = check_items(r.items, r.definitions, Vec::from_array(["main", zz.label]), texts)
+    c.check_bodies(r.newline_splits)
+    c
+}
+
+// A std holding every id the splice moves: a record and its literal, a
+// sum, its variants made and matched, a trait, its impl and a call of it,
+// a closure, a wrapper, a generic function bounded by the trait and a
+// constant.
+const SPLICE_STD: String = "pub record Zr { n: Int }\npub type Zs = | Za(Int) | Zb\npub trait Zt {\n    fn zt(self) -> Int\n}\nimpl Zt for Zr {\n    fn zt(self) -> Int { self.n }\n}\npub fn zz(x: Int) -> Int {\n    let f = |y: Int| y + 1\n    f(x)\n}\npub fn zw(s: Zs) -> Int {\n    let h = zz\n    match s {\n        Za(n) => h(n)\n        Zb => Zr { n: 2 }.zt()\n    }\n}\npub fn zg<T: Zt>(x: T) -> Int { x.zt() }\npub fn zmake(n: Int) -> Zs { if n > 0 { Za(n) } else { Zb } }\npub const ZC: Int = 3\n"
+
+@test
+fn a_spliced_module_is_the_full_checks_module() {
+    // Programs with no closure, one, and four with a wrapper, a method and
+    // a constant, so that the program's definitions and closures, `D` and
+    // `P`, both vary (S0's `shared_module_is_the_full_checks_module`).
+    let sources = [
+        "fn main() {\n    let a = zz(1) + ZC\n}\n",
+        "fn main() {\n    let f = |x: Int| x * 2\n    let a = f(zw(Zb))\n}\n",
+        "record Mine { x: Int }\nimpl Mine {\n    fn m(self) -> Int {\n        let g = |y: Int| y + self.x\n        g(1)\n    }\n}\nimpl Zt for Mine {\n    fn zt(self) -> Int { self.x }\n}\nconst K: Int = 4\nfn twice(f: fn(Int) -> Int, x: Int) -> Int { f(f(x)) }\nfn main() {\n    let a = |x: Int| x + K\n    let b = |x: Int| x * 2\n    let c = zz\n    let s = Za(1)\n    let r = twice(a, 1) + twice(b, 2) + c(3) + zg(Mine { x: 1 }) + Mine { x: 2 }.m() + zw(s) + zw(zmake(2))\n}\n",
+    ]
+    let mut lifted: Vec<String> = Vec::new()
+    for source in sources.iter() {
+        let (items, c) = shared_std_and_program_with(SPLICE_STD, source)
+        assert(c.diagnostics.is_empty(), "the program checks on the shared path")
+        lifted.push("${c.std_closures - c.closures}")
+        let full = full_check_with(SPLICE_STD, source)
+        assert(full.diagnostics.is_empty(), "the program checks in full")
+        assert_eq(module_text(shared_module(c, items)), module_text(full_module(full)))
+    }
+    assert_eq(" ".join(lifted.to_array()), "0 1 4")
 }
 
 // --- The async transform's state slots ---

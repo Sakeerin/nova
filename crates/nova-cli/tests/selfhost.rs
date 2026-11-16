@@ -84,7 +84,12 @@
 //! before form on those whose after form holds a poll function, the
 //! transform's work; elsewhere the two forms are equal, which S0's dumps
 //! show. The dumps must be well formed and hold every native form and
-//! every code MIR gives from source.
+//! every code MIR gives from source. So must the MIR fuzzer's inputs, loose
+//! corpus programs given generic instances, awaits, match shapes and
+//! closures, each of which lowers clean, each kind in at least ten; and 25
+//! programs nested 128 levels deep, or as deep as the parser takes them,
+//! in bodies that lowering and the specializer walk and in an instance's
+//! type argument, which N lowers on a 1 MB main thread.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -4453,6 +4458,10 @@ fn n_checks_std_for_each_program_when_std_gives_an_item_diagnostic() {
 /// bodies alike decide whether std is shared (5.3b, ADR 0056 §4). Each
 /// checked program's dump keeps std's E0010 and is otherwise S0's; std's
 /// part holds it once. S0's std is built in, so it cannot be given one.
+/// N's MIR dump (5.4, spec §6.3) splices std's functions only where std is
+/// shared, so with such a std every program's check holds the E0010 and
+/// none lowers: each of MIR's first eight cases, which S0 lowers on std as
+/// it is, is `checked=false`.
 #[test]
 fn n_checks_std_for_each_program_when_std_gives_a_body_diagnostic() {
     let std = std_copy("body-error-std");
@@ -4503,6 +4512,26 @@ fn n_checks_std_for_each_program_when_std_gives_a_body_diagnostic() {
         String::from_utf8_lossy(&part.stdout).matches(mark).count(),
         1
     );
+    let mir_cases = mir_cases_dir();
+    let mir_roots: Vec<String> = case_roots(&mir_cases).loose[..8].to_vec();
+    let s0 = run(&nova(), MIR_S0, &mir_cases, &mir_roots).expect("run S0's MIR dump");
+    let n_args = [MIR_N, &["--std", &std]].concat();
+    let n = run(selfhost(), &n_args, &mir_cases, &mir_roots).expect("run N's MIR dump");
+    assert_eq!((s0.code, n.code), (Some(0), Some(0)), "{}", n.stderr);
+    let lowered = parts_by_root(&String::from_utf8_lossy(&s0.stdout))
+        .iter()
+        .filter(|(_, part)| part.contains(" lowered=true "))
+        .count();
+    assert!(lowered >= 4, "{lowered} of S0's eight lower");
+    let n = String::from_utf8_lossy(&n.stdout).into_owned();
+    let n_parts = parts_by_root(&n);
+    assert_eq!(n_parts.len(), mir_roots.len(), "{n}");
+    for (root, part) in &n_parts {
+        assert_eq!(
+            part, "(Mir runs=true checked=false)\n(Diagnostics)\n",
+            "{root}"
+        );
+    }
 }
 
 /// N with `args` in `dir`, on a main thread of `stack` KB where `ulimit -s`
@@ -5470,16 +5499,14 @@ fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
         "only {} packages' src/main.nova",
         packages.len()
     );
-    // The loose programs, the packages' mains and the cases side by side.
+    // The loose programs, the packages' mains and the cases side by side;
+    // the loose programs' once a run, which the MIR fuzzer's bases read.
     let (sets, cases) = std::thread::scope(|scope| {
         let cases = scope.spawn(mir_cases);
-        let runs: Vec<_> = [&loose, &packages]
-            .into_iter()
-            .map(|files| {
-                let root = &root;
-                scope.spawn(move || agree_on_mir_forms(root, files, 0))
-            })
-            .collect();
+        let runs = vec![
+            scope.spawn(|| loose_mir().clone()),
+            scope.spawn(|| agree_on_mir_forms(&root, &packages, 0)),
+        ];
         (joined(runs), joined(vec![cases]).remove(0))
     });
     let corpus = [
@@ -5632,5 +5659,246 @@ fn the_mir_dumps_agree_on_the_cases_with_windows_line_endings() {
         assert_eq!(parts_by_root(dumps).len(), crlf.count, "{form:?}");
         assert_eq!(codes_in(dumps), codes_in(lf), "{form:?}");
         assert_ne!(dumps, lf, "{form:?}: no place moved");
+    }
+}
+
+/// The loose corpus's MIR dump in both forms ([`agree_on_mir_forms`]),
+/// compared, once a run: the corpus test's, and the MIR fuzzer's bases are
+/// read from it.
+fn loose_mir() -> &'static (String, String) {
+    static DUMP: OnceLock<(String, String)> = OnceLock::new();
+    DUMP.get_or_init(|| agree_on_mir_forms(&root(), &loose_corpus(), 0))
+}
+
+/// The MIR fuzzer's seeds (5.4, spec §7.4): its own, past the body
+/// fuzzer's.
+const MIR_SEEDS: [u64; 3] = [601, 602, 603];
+const MIR_COUNT: usize = 40;
+
+/// How many of the fixed seeds' inputs must hold each kind's mark (spec
+/// 5.4 §7.4).
+const MIR_FLOOR: usize = 10;
+
+/// The loose corpus programs the MIR fuzzer starts from (spec 5.4 §7.4):
+/// those that import no module and lower clean, `lowered=true` with no
+/// diagnostic. Read from the loose corpus's MIR dump ([`loose_mir`]), the
+/// same on every system, as the type fuzzer reads its bases from the HIR
+/// dump ([`type_bases`]).
+fn mir_bases() -> Vec<String> {
+    let root = root();
+    let candidates: Vec<String> = loose_corpus()
+        .into_iter()
+        .filter(|f| {
+            let text = std::fs::read_to_string(root.join(f)).expect("read a corpus file");
+            !text.lines().any(|l| l.starts_with("import "))
+                && fuzz::parses(&text.replace("\r\n", "\n"))
+        })
+        .collect();
+    parts_by_root(&loose_mir().0)
+        .into_iter()
+        .filter(|(root, part)| {
+            candidates.contains(root)
+                && part.starts_with("(Mir runs=true checked=true lowered=true ")
+                && part.ends_with("\n(Diagnostics)\n")
+        })
+        .map(|(root, _)| root)
+        .collect()
+}
+
+/// `count` programs from `seed` given MIR additions ([`fuzz::mir_mutate`]),
+/// each one of `bases` that the seed picks, read with each `\r\n` as `\n`,
+/// so a seed gives the same inputs on every system.
+fn mir_inputs(bases: &[String], seed: u64, count: usize) -> Vec<String> {
+    let root = root();
+    let mut bases = bases.to_vec();
+    bases.sort();
+    let mut rng = SplitMix64::new(seed);
+    (0..count)
+        .map(|i| {
+            let file = rng.pick(&bases);
+            let source = std::fs::read_to_string(root.join(file))
+                .expect("read a corpus file")
+                .replace("\r\n", "\n");
+            fuzz::mir_mutate(&mut rng, &source, i)
+        })
+        .collect()
+}
+
+/// Which of [`fuzz::MIR_KINDS`]' marks a root's part of the MIR dump holds
+/// in a function an addition of that kind declared ([`fuzz::mir_kind_of`]):
+/// an instance's symbol, with type arguments; a poll function; a `Switch`;
+/// a `MakeClosure` and a `CallIndirect` (spec 5.4 §7.4).
+fn mir_marks(part: &str) -> [bool; 4] {
+    let mut kind = None;
+    let (mut instance, mut poll, mut switch, mut make, mut call) =
+        (false, false, false, false, false);
+    for line in part.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("(Function \"") {
+            let name = rest.split('"').next().unwrap_or("");
+            kind = fuzz::mir_kind_of(name);
+            instance |= kind == Some('g') && name.contains('$');
+            poll |= kind == Some('a') && name.ends_with("$poll");
+            continue;
+        }
+        switch |= kind == Some('p') && line.starts_with("(Switch ");
+        make |= kind == Some('c') && line.starts_with("(MakeClosure ");
+        call |= kind == Some('c') && line.starts_with("(CallIndirect ");
+    }
+    [instance, poll, switch, make && call]
+}
+
+/// The MIR fuzzer (5.4, spec §7.4, ADR 0057): each seed's inputs, written
+/// to `mir-fuzz/<seed>/` and dumped in one process a side, compared in the
+/// after form and, where a poll function is made, in the before form
+/// ([`agree_on_mir_forms`]); every input lowers clean, none skipped; and
+/// each kind's mark ([`mir_marks`]) occurs in at least [`MIR_FLOOR`] of the
+/// inputs.
+#[test]
+fn the_mir_fuzzers_inputs_agree_and_hold_each_kind() {
+    let bases = mir_bases();
+    // 183 of the loose corpus at 5.4.
+    assert!(bases.len() >= 100, "only {} bases", bases.len());
+    let dir = fresh_dir("mir-fuzz");
+    let mut roots = Vec::new();
+    for seed in MIR_SEEDS {
+        let sub = dir.join(seed.to_string());
+        std::fs::create_dir_all(&sub).expect("create a seed's directory");
+        for (i, input) in mir_inputs(&bases, seed, MIR_COUNT).iter().enumerate() {
+            let file = format!("f{i:05}.nova");
+            std::fs::write(sub.join(&file), input).expect("write a MIR-fuzz input");
+            roots.push(format!("{seed}/{file}"));
+        }
+    }
+    let (after, _) = agree_on_mir_forms(&dir, &roots, 0);
+    let parts = parts_by_root(&after);
+    assert_eq!(parts.len(), roots.len());
+    let unclean: Vec<&str> = parts
+        .iter()
+        .filter(|(_, part)| {
+            !part.starts_with("(Mir runs=true checked=true lowered=true async_lowered=true ")
+                || !part.ends_with("\n(Diagnostics)\n")
+        })
+        .map(|(root, _)| root.as_str())
+        .collect();
+    assert!(
+        unclean.is_empty(),
+        "inputs that do not lower clean: {unclean:?}"
+    );
+    let mut counts = [[0usize; 4]; MIR_SEEDS.len()];
+    let mut polls = 0;
+    for (root, part) in &parts {
+        let seed = MIR_SEEDS
+            .iter()
+            .position(|s| root.starts_with(&format!("{s}/")))
+            .expect("a seed's input");
+        for (count, held) in counts[seed].iter_mut().zip(mir_marks(part)) {
+            *count += usize::from(held);
+        }
+        polls += usize::from(holds_a_poll_function(part));
+    }
+    let total: Vec<usize> = (0..4).map(|k| counts.iter().map(|c| c[k]).sum()).collect();
+    let short: Vec<(&str, usize)> = fuzz::MIR_KINDS
+        .iter()
+        .zip(&total)
+        .filter(|(_, n)| **n < MIR_FLOOR)
+        .map(|((_, kind), n)| (*kind, *n))
+        .collect();
+    assert!(
+        short.is_empty(),
+        "kinds under {MIR_FLOOR} inputs: {short:?}"
+    );
+    for (seed, count) in MIR_SEEDS.iter().zip(&counts) {
+        eprintln!(
+            "the MIR fuzzer's seed {seed}: inputs holding each kind {:?}",
+            fuzz::MIR_KINDS
+                .iter()
+                .zip(count)
+                .map(|((_, kind), n)| format!("{kind} {n}"))
+                .collect::<Vec<_>>()
+        );
+    }
+    eprintln!(
+        "the MIR fuzzer over seeds {MIR_SEEDS:?}: {} inputs from {} bases, each kind {total:?}; \
+         {polls} compared in the before form; the after dump {} lines, {} bytes",
+        roots.len(),
+        bases.len(),
+        after.lines().count(),
+        after.len()
+    );
+}
+
+/// N's MIR on its own stack (5.4, spec §7.5, ADR 0057): N's `selfhost mir`
+/// on a main thread of 1 MB, as
+/// [`n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread`] runs N's
+/// type checker, its dump S0's, which S0 makes on its 64 MB thread. The
+/// type checker's deep bodies, every kind of [`fuzz::BODY_DEEP_KINDS`] at
+/// the deepest level the parser takes, each in a function `main` calls and
+/// in a generic one `main` instantiates ([`fuzz::mir_deep`]), so that
+/// lowering and the specializer both walk it; and every kind of
+/// [`fuzz::MIR_DEEP_TYPES`], 128 levels deep, as an instance's type
+/// argument ([`fuzz::mir_deep_type`]), so that `mangle_ty` and the
+/// substitution walk it. Each lowers clean; none makes a poll function, so
+/// the after form is the only one to compare.
+#[test]
+fn n_lowers_the_depth_cases_on_a_1_mb_main_thread() {
+    let dir = fresh_dir("deep-n-mir");
+    let mut files = Vec::new();
+    for (kind, depth) in fuzz::BODY_DEEP_KINDS {
+        let file = format!("bodies-{kind}-{depth}.nova");
+        std::fs::write(dir.join(&file), fuzz::mir_deep(kind, depth)).expect("write a deep input");
+        files.push(file);
+    }
+    for (kind, _, _) in fuzz::MIR_DEEP_TYPES {
+        let file = format!("types-{kind}-128.nova");
+        std::fs::write(dir.join(&file), fuzz::mir_deep_type(kind, 128))
+            .expect("write a deep input");
+        files.push(file);
+    }
+    let s0 = run(&nova(), MIR_S0, &dir, &files).expect("run S0");
+    assert_eq!(s0.code, Some(0), "{}", s0.stderr);
+    let text = String::from_utf8_lossy(&s0.stdout);
+    let parts = parts_by_root(&text);
+    assert_eq!(parts.len(), files.len());
+    for (root, part) in &parts {
+        assert!(
+            part.starts_with("(Mir runs=true checked=true lowered=true ")
+                && part.ends_with("\n(Diagnostics)\n")
+                && !holds_a_poll_function(part),
+            "{root}: {part}"
+        );
+        // Walked twice, as `f` and as `g`'s instance at `Int`; or `id`'s
+        // instance at the deep type.
+        let walked = if root.starts_with("bodies-") {
+            part.contains("\n  (Function \"f.")
+                && part
+                    .lines()
+                    .any(|l| l.starts_with("  (Function \"g.") && l.contains("$i\" "))
+        } else {
+            part.lines()
+                .any(|l| l.starts_with("  (Function \"id.") && l.len() > 256)
+        };
+        assert!(walked, "{root}: {part}");
+    }
+    let std_dir = std_dir();
+    let mut args = MIR_N.to_vec();
+    args.extend(["--std", std_dir.as_str()]);
+    args.extend(files.iter().map(String::as_str));
+    let stack = if cfg!(unix) { Some(1024) } else { None };
+    let (code, n) = n_args_on_stack(&dir, stack, &args);
+    assert_eq!(code, Some(0), "N's `selfhost mir` on a {stack:?} KB stack");
+    if let Some(m) = first_difference(&s0.stdout, &n) {
+        panic!(
+            "{}",
+            report(&m, mir_in(MirForm::After), &dir, &nova(), selfhost())
+        );
+    }
+    // The stack is the one set: `bodies-for-ranges-127.nova`, whose least
+    // stack is about 212 KB (ADR 0057 §17), fails on 96 KB.
+    if cfg!(unix) {
+        let mut args = MIR_N.to_vec();
+        args.extend(["--std", std_dir.as_str(), "bodies-for-ranges-127.nova"]);
+        let (code, _) = n_args_on_stack(&dir, Some(96), &args);
+        assert_ne!(code, Some(0), "N's `selfhost mir` passed on a 96 KB stack");
     }
 }
