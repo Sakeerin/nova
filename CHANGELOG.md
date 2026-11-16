@@ -23,7 +23,9 @@ resolver for loose programs and the resolution dump (spec
 dump (spec
 `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
 §3; ADR 0055), and 5.3b, the self-hosted type checker's bodies and the
-full HIR dump (§4; ADR 0056).
+full HIR dump (§4; ADR 0056). Phase 5.4, the self-hosted MIR and the MIR
+dump, natively (spec
+`docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md`; ADR 0057).
 
 ### Added
 
@@ -280,6 +282,37 @@ full HIR dump (§4; ADR 0056).
   127 of patterns in a `match` arm and of `for` loops), which N checks
   on a 1 MB stack. A change to the type checker now changes both
   compilers in one pull request (ADR 0056).
+- **`nova check --dump-mir FILE…` and `--before-async`, hidden:** the
+  native MIR of each program whose root is FILE, after the async
+  transform, or before it with `--before-async`: the externs and every
+  function monomorphization reached, its temps with their classes, its
+  blocks, statements and terminators, then MIR's diagnostics. A root
+  that does not run (a package's module) prints `runs=false`, and one
+  that stops before MIR `checked=false`. std's checked bodies are kept
+  once for all the roots and spliced into each program with their ids
+  shifted, but for a program that implements anything on a type it does
+  not own, or for every program when std alone gives a diagnostic or
+  holds a test, which is checked in full. It takes no `--std`,
+  `--target` or `--test`, is absent from `--help`, carries no stability
+  promise and is taken only when `--dump-mir` comes first after `check`,
+  by a parser of its own (5.4, ADR 0057).
+- **The self-hosted MIR, in `selfhost/`:** N lowers a program natively
+  as `nova-mir` does, function for function: monomorphization from
+  `main` with S0's names and mangling, every reached function lowered to
+  temps and blocks, the builtins, `match` by switches and chains,
+  closures and functions as values, the async transform into poll
+  functions and wrappers with an async `main`'s shim, and MIR's
+  diagnostics in S0's order, word for word. `selfhost mir --std DIR
+  [--before-async] FILE…` prints the same dump as `nova check
+  --dump-mir`; the differential compares them on the corpus roots that
+  run, the HIR cases that reach MIR, MIR's cases with both line endings,
+  a MIR fuzzer's programs and programs nested 128 levels deep, which N
+  lowers on a 1 MB stack. WASM's and test mode's MIR stay S0's. A change
+  to MIR now changes both compilers in one pull request (ADR 0057).
+  Nothing a user sees changes with 5.4: `nova check` gives what it gave,
+  byte for byte, on every `.nova` file the repository tracks, and `nova
+  test` and `nova build` on its 11 packages outside `crates/`; the
+  packages under `crates/`, test fixtures, were not compared.
 
 ### Changed
 

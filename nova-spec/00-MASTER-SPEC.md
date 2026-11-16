@@ -838,6 +838,23 @@ loops). S0 now checks a program's methods in declaration order. From
 here a change to the type checker changes both compilers in one pull
 request.
 
+**Amended 2026-11-15 (branch `claude/loving-archimedes-frtf5q-54`, ADR
+0057):** step 3's MIR is ported for the native target alone
+(`docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md`). `selfhost/` lowers a program
+as `nova-mir` does natively: monomorphization from `main`, every reached
+function lowered to temps, blocks, statements and terminators, `match`
+compiled to switches and chains, the async transform into poll functions
+and wrappers, and MIR's diagnostics in S0's order. std's checked bodies
+are spliced into each program, their ids shifted, on both sides.
+`selfhost mir` prints the MIR dump S0's hidden `nova check --dump-mir`
+prints, after the async transform and, with `--before-async`, before it.
+The differential compares them on the corpus roots that run, the HIR
+cases that reach MIR, MIR's cases with both line endings, a MIR fuzzer's
+programs (generic instances, awaits, match shapes and closures added to
+corpus programs) and programs nested 128 levels deep, which N lowers on
+a 1 MB stack. WASM's and test mode's MIR stay S0's. From here a change
+to MIR changes both compilers in one pull request.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)
