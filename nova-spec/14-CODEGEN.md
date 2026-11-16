@@ -23,6 +23,19 @@ TypedAst → HIR → MIR → CodegenIR
 - Borrows and moves explicit
 - Drop points inserted
 
+**Amended 2026-11-15 (branch `claude/loving-archimedes-frtf5q-54`, ADR
+0057):** MIR exists twice, natively, in
+`nova-mir` and in the self-hosted compiler (`selfhost/`). Its statements
+are the 27 ADR 0057 §2 lists, 26 natively; no borrow, move or drop point
+is among them. The hidden `nova check --dump-mir [--before-async] FILE…` prints a
+program's native MIR, after the async transform or before it: every
+function with its temps and each temp's class (`I64`, `F64`, `I8`,
+`Ptr`, `Unit`), its blocks, statements and terminators, then MIR's
+diagnostics, in the grammar of ADR 0057 §2. The self-hosted compiler
+prints the same, byte for byte, on every input the differential holds.
+WASM's MIR, with its `Mem` statements and `Js` externs, stays the Rust
+compiler's alone.
+
 **CodegenIR**: backend-specific (LLVM IR, Cranelift IR, or WASM bytecode)
 
 ---
@@ -189,6 +202,19 @@ statement is new, so the backends emit compares and conditional branches.
 Monomorphized: each unique instantiation gets its own compiled function.
 - `vec.push::<Int>(1)` and `vec.push::<String>("hi")` → two distinct functions in object file
 - Mangled: `_nova_vec_push_Int`, `_nova_vec_push_String`
+
+**Amended 2026-11-15 (branch `claude/loving-archimedes-frtf5q-54`, ADR
+0057):** monomorphization runs from
+`main` over a worklist; each reached instance is a function of its own,
+named `name.<DefId>$<args>`, each type argument mangled by `mangle_ty`
+(`i`, `f`, `b`, `c`, `s`, `y`, `u` and `n` for the primitives, `F…R…E` a
+function type, `S<id>L…E` and `R<id>L…E` a sum's and a record's
+arguments, `A…E` an array, `T…E` a tuple, `U…E` a future), as
+`Vec_T.push.147$i`; the `_nova_vec_push_Int` form above was never built.
+The self-hosted compiler monomorphizes and mangles the same way, byte
+for byte on every input the MIR dump's differential holds, types nested
+128 levels deep in a type argument among them, and an unsatisfied bound
+found while instantiating is E0013 at the same place in both.
 
 ### 6.4 Async fn
 Lowers to state machine. `nova-async-lowering` pass converts:
