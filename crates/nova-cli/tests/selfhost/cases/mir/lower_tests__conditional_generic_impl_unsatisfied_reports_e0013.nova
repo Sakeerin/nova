@@ -1,0 +1,6 @@
+trait Show { fn show(self) -> String }
+record Wrap<T> { inner: T }
+impl Show for Int { fn show(self) -> String { "i" } }
+impl<T: Show> Show for Wrap<T> { fn show(self) -> String { self.inner.show() } }
+fn present<X: Show>(x: X) -> String { x.show() }
+fn main() { println(present(Wrap { inner: true })) }

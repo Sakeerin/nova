@@ -1,0 +1,8 @@
+trait Mapper { fn raw(self) -> Int
+ fn remap<U>(self, f: fn(Int) -> U) -> U { f(self.raw()) } }
+record C { n: Int }
+impl Mapper for C { fn raw(self) -> Int { self.n } }
+fn dbl(n: Int) -> Int { n * 2 }
+fn lbl(n: Int) -> String { "${n}" }
+fn main() { let c = C { n: 1 }
+ println("${c.remap(dbl)} ${c.remap(lbl)}") }

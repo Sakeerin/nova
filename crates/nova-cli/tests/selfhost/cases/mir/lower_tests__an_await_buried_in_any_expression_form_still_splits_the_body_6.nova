@@ -1,0 +1,4 @@
+async fn g() -> Int { 1 }
+async fn f() -> Int { let a = [g().await, 2]
+ a[0] }
+fn main() { let x = f() }

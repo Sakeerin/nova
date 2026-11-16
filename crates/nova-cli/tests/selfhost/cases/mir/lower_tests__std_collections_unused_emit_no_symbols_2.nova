@@ -1,0 +1,9 @@
+fn main() {
+let mut v = Vec::new()
+v.push(1)
+let mut m = Map::new()
+let _ = m.insert(1, 2)
+let mut s = Set::new()
+let _ = s.insert(3)
+println("${v.len()} ${m.len()} ${s.len()}")
+}

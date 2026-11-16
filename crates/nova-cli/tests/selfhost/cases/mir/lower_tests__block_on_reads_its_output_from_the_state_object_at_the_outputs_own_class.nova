@@ -1,0 +1,2 @@
+async fn half(x: Float) -> Float { x / 2.0 }
+fn main() { println("${block_on(half(7.0))}") }

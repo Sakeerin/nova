@@ -1,0 +1,7 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Wrap =
+  | Wrap(Int, String)
+fn f(c: Char) -> Int { match c { 'a' => 1, 'b' => 2, _ => 3 } }
+fn main() { println("${f('a')}") }

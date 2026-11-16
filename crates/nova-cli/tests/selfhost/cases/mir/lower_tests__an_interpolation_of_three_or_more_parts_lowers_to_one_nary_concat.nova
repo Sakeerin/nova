@@ -1,0 +1,2 @@
+fn s(a: Int, x: String, y: String) -> String { "a=${a} x=${x} y=${y}" }
+fn main() { println(s(1, "p", "q")) }

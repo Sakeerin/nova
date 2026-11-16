@@ -1,0 +1,7 @@
+record Unhashable { v: Int }
+fn main() {
+let mut m = OrderedMap::new()
+let k = Unhashable { v: 1 }
+let p = m.insert(k, 1)
+println("${m.len()}")
+}

@@ -1,0 +1,10 @@
+fn main() {
+let none_val: Option<Int> = None
+let some_val = Some(1)
+let ok_val: Result<Int, String> = Ok(2)
+let err_val: Result<Int, String> = Err("e")
+match some_val {
+Some(_) => println("some"),
+None => println("none"),
+}
+}

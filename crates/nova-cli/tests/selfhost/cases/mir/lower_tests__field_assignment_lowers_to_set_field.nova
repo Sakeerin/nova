@@ -1,0 +1,6 @@
+record Point { x: Int, y: Int }
+fn main() {
+let mut p = Point { x: 3, y: 4 }
+p.y = 5
+println("${p.y}")
+}

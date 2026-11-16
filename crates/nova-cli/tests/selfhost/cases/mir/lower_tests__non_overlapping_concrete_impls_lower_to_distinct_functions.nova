@@ -1,0 +1,10 @@
+record Pair<A, B> { first: A, second: B }
+trait Foo { fn foo(self) -> String }
+impl Foo for Pair<Int, Bool> { fn foo(self) -> String { "b" } }
+impl Foo for Pair<Int, Int> { fn foo(self) -> String { "i" } }
+fn main() {
+let pb = Pair { first: 1, second: true }
+let pii = Pair { first: 1, second: 2 }
+println(pb.foo())
+println(pii.foo())
+}

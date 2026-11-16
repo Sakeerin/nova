@@ -1,0 +1,4 @@
+record Q { v: Int }
+trait Show { fn name(self) -> String }
+fn label<T: Show>(x: T) -> String { "x" }
+fn main() { println(label(Q { v: 1 })) }

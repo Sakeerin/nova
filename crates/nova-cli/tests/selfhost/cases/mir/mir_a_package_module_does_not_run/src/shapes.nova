@@ -1,0 +1,8 @@
+pub type Shape =
+  | Dot
+
+pub fn name(s: Shape) -> String {
+    match s {
+        Dot => "dot"
+    }
+}

@@ -1,0 +1,4 @@
+record W { v: Int }
+impl W { async fn get(self) -> Int { self.v } }
+fn main() { let w = W { v: 1 }
+ let y = w.get() }

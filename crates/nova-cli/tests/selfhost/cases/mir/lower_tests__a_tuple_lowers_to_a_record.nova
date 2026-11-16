@@ -1,0 +1,5 @@
+fn f(a: Int, s: String) -> Bool {
+    let t = (a, s, true, 1.5)
+    t.2
+}
+fn main() { println("${f(1, "s")}") }

@@ -1,0 +1,5 @@
+fn main() {
+    let mut m: Map<(Int,), Int> = Map::new()
+    let p = m.insert((1,), 3)
+    println("${m.len()}")
+}
