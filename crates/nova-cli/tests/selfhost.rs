@@ -1725,7 +1725,8 @@ fn a_missing_final_line_break_is_marked() {
 /// the statement's index there (spec 5.4 §4.3), the nearest function's of
 /// two; a function's or a block's header names the one it heads, a temp
 /// its function, the root's first line the root alone, and a line outside
-/// any function, an extern or a diagnostic, says so.
+/// any function, an extern or a diagnostic, says so; the next root's header
+/// names nothing.
 #[test]
 fn the_mir_mismatch_report_names_the_function_block_and_statement() {
     const MIR: Dump = Dump {
@@ -1839,6 +1840,19 @@ fn the_mir_mismatch_report_names_the_function_block_and_statement() {
             "{text}"
         );
     }
+    // N prints a line more before the next root's header, which is S0's line
+    // there: it is in no function, and the report names none.
+    let text = reported(
+        "(Diagnostics)\n== b.nova",
+        "(Diagnostics)\n(Diagnostics)\n== b.nova",
+    );
+    assert_eq!(
+        text.lines().next(),
+        Some("the dumps differ in a.nova, at line 21 of its dump"),
+        "{text}"
+    );
+    assert!(!text.contains("outside any function"), "{text}");
+    assert!(!text.contains("function \""), "{text}");
 }
 
 // --- 5.1b: the AST dump, the depth limit and S0's thread (ADR 0052) ---
@@ -5633,11 +5647,41 @@ fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
 /// (spec 5.4 §7.2): each part is there and the codes are those of the
 /// cases as they are, though E0601's and E0013's places are byte offsets.
 /// A copy that changes no file, as on a Windows checkout, which already
-/// has each `\r\n`, is not compared again:
+/// has each `\r\n`, is not compared again, and only where the MIR cases as
+/// checked out already hold `\r\n`:
 /// `the_mir_dumps_agree_on_the_corpus_and_the_cases` has compared those
 /// bytes, as the resolution and HIR dumps' tests do (ADR 0054 §9).
 #[test]
 fn the_mir_dumps_agree_on_the_cases_with_windows_line_endings() {
+    let mut compared = false;
+    agree_on_mir_cases_with_crlf(&mut compared);
+    if !compared {
+        let mut cases: Vec<PathBuf> = std::fs::read_dir(mir_cases_dir())
+            .expect("read the MIR cases")
+            .map(|e| e.expect("a directory entry").path())
+            .filter(|p| p.is_file())
+            .collect();
+        cases.sort();
+        let (case, text) = cases
+            .into_iter()
+            .map(|p| {
+                let text = std::fs::read(&p).expect("read a case");
+                (p, text)
+            })
+            .find(|(_, text)| text.contains(&b'\n'))
+            .expect("a MIR case with a line break");
+        assert!(
+            text.windows(2).any(|w| w == b"\r\n"),
+            "no copy changed, yet {} as checked out has no CR LF",
+            case.display()
+        );
+    }
+}
+
+/// [`the_mir_dumps_agree_on_the_cases_with_windows_line_endings`]'s copies
+/// and their comparison, which sets `compared`; a copy that changes no file
+/// returns before it.
+fn agree_on_mir_cases_with_crlf(compared: &mut bool) {
     let dir = fresh_dir("crlf-mir");
     let (check, mir) = (dir.join("check"), dir.join("mir"));
     let (held, changed_check) = copy_crlf(&hir_cases_dir(Mode::Check), &check);
@@ -5660,6 +5704,7 @@ fn the_mir_dumps_agree_on_the_cases_with_windows_line_endings() {
         assert_eq!(codes_in(dumps), codes_in(lf), "{form:?}");
         assert_ne!(dumps, lf, "{form:?}: no place moved");
     }
+    *compared = true;
 }
 
 /// The loose corpus's MIR dump in both forms ([`agree_on_mir_forms`]),
