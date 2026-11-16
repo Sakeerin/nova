@@ -610,3 +610,89 @@ Ranked.
 - The bug by which std's bodies see a program's impls (ADR 0056 §4),
   worked around by the fallback, not fixed.
 - A runtime change for N's stack or speed, unless the user rules.
+
+## Amendment (2026-11-15)
+
+Dated, with the plan (`docs/superpowers/plans/2026-11-15-phase-5-4-mir.md`),
+after the prototype and its measurement on CI. Where this section and the
+text above differ, this section holds; ADR 0057 records each point.
+
+1. **E0013 in lowering is unreachable** (the main session's ruling,
+   2026-11-14, reported to the user). §2 item 8 says both E0013 sites were
+   reproduced from source, and §7.1 item 4, §7.3 and §10 ask for a case
+   at each. The research's two E0013 probes both reach
+   monomorphization's bound check in `lower_module_with` (`mono.rs:276`
+   at this spec's base, 283 once 5.4's hook is in); the prototype's 13
+   probes and an analysis found no input that reaches the lowering site,
+   `lower_trait_call` (`lower.rs:974`). `resolve_method_full` filters the
+   impls as
+   monomorphization's bound check does, by trait and head, then by
+   `match_args`, without the impls' bounds, and monomorphization checks
+   every bound of an instance first and does not lower one that fails;
+   the type checker resolves a trait call on a concrete receiver
+   structurally (E0014 otherwise), requires a supertrait's impl (E0072)
+   and refuses bounds on an associated type (E0900). The site is treated
+   as E0011 is: ported as written, with no case, recorded unreachable in
+   ADR 0057 §7. Where §7.1 item 4, §7.3 and §10 say "E0013 at both
+   sites", read "E0013 at `mono.rs:276`" (the base's line; 283 once 5.4's
+   hook is in). Cost if wrong: one site without a case; no output
+   changes.
+2. **The Selfhost job's lines, widened** (the user's answer, 2026-11-15).
+   §8's lines, 60 s on Linux and macOS and 70 s on Windows, are now 80 s
+   on Linux, 100 s on macOS and 110 s on Windows, with no input or
+   coverage cut and std's splice left whole (§5; not the lazy splice,
+   which would copy only the std functions a program reaches). CI's
+   figures, from draft pull request Sakeerin/nova#142, closed unmerged,
+   `selfhost.rs` in the Selfhost job (S0 at `opt-level = 1`, N on the
+   release runtime):
+
+   | System | run 43656932684 | run 43657541603 | old line | new line |
+   |---|---|---|---|---|
+   | Linux | 65.78 s | 68.21 s | 60 s | 80 s |
+   | macOS | 79.62 s | 54.63 s | 60 s | 100 s |
+   | Windows | 66.12 s | 87.77 s | 70 s | 110 s |
+
+   The first run's Windows leg failed at the start of the MIR cases'
+   `\r\n` test on a Windows checkout, which already has each `\r\n`; the
+   second ran after the test's fix. 5.3b's head and merge had taken
+   39.22 to 42.28 s on Linux, 21.98 to 49.25 s on macOS and 41.62 to
+   90.74 s on Windows (ADR 0057 §19).
+3. **Counts and a projection that proved wrong:**
+   - §7.1 item 3: 4 WASM sources among those `nova-mir`'s tests lower,
+     not 7, which counted call sites;
+   - §2 item 9 and §7.2: 19 cases hold a poll function, not 2, which
+     counted the HIR cases alone: 2 of the HIR cases that reach MIR and
+     17 of `cases/mir/`'s 83 (20, 18 of 86, with the plan's step 0);
+   - §5: 85 roots take the full check natively, not 78: 5.3b's 78 and 7
+     of the extracted sources, which implement a trait on a primitive,
+     six that give E0013 and one that lowers clean,
+     `lower_tests__deeply_nested_satisfiable_bound_is_accepted` (86 with
+     the plan's step 0, whose
+     `mir_std_bodies_see_an_inherent_flush_on_stdout` implements on a std
+     type);
+   - §2 item 3: `Stmt` has 27 variants, not 26: the 26 a native build
+     prints and `Mem`, WASM's alone; `Await` occurs in the before form
+     alone;
+   - §8: the projection, std spliced, of +1 to 4 s of local wall for one
+     form, over the base, measured about +17 to 18 s with N's before form
+     alone (the prototype's part 2: 54.84 to 55.84 s) and +15 to 18 s
+     with both forms (part 4: 52.65 to 56.04 s), each against the base's
+     37.53 to 38.03 s as the Selfhost job runs `selfhost.rs` (ADR 0057
+     §19).
+4. **A package module that does not run prints `runs=false`, even when
+   it cannot be read** (§3.1, §3.3, which give `IOERR` to every root that
+   cannot be read). A root that does not run is decided before it is
+   read, as `check` decides it, so a missing or unreadable package module
+   prints `(Mir runs=false)`, never `IOERR`: reading a module `check` does
+   not lower, only to report it, is work no comparison needs (ADR 0057
+   §2, §20). Cost if wrong: that read error goes unshown.
+5. **No GC pauses** (§8, which asks for N's peak RSS and GC pauses on its
+   root's MIR). The runtime reports neither pauses nor their length; N's
+   peak RSS, its collections and its largest live heap (`NOVA_GC_DEBUG`)
+   were measured instead (ADR 0057 §12, §18, §20). No runtime change.
+6. **The MIR fuzzer's async `main`** (§7.4, which has each addition's
+   await "driven from a plain `main` by std's `block_on`"). Each
+   addition's awaits are driven by `block_on` in its own plain `go`,
+   which `main`'s first statement calls; `main` itself is async in 36 of
+   the 120 inputs, since bases with a plain `main` alone would drop 53 of
+   the 183 (ADR 0057 §16, §20). Cost if wrong: cheap to change.
