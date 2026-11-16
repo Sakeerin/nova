@@ -1,0 +1,10 @@
+type Opt<T> =
+  | Yes(T)
+  | No
+type Wrap =
+  | Wrap(Int, String)
+fn f() -> Int {
+    let (Wrap(n, _), (m, k)) = (Wrap(1, "s"), (2, 3))
+    n + m + k
+}
+fn main() { println("${f()}") }

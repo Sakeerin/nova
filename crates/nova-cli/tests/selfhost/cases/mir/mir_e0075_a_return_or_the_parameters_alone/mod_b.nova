@@ -1,0 +1,7 @@
+extern "C" {
+    fn cbrt(x: Int) -> Int
+}
+
+pub fn cb() -> Int {
+    cbrt(27)
+}

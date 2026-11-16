@@ -1,0 +1,7 @@
+pub fn main() {
+    println("other")
+}
+
+pub fn greet() {
+    println("hi")
+}

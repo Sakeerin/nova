@@ -1,0 +1,7 @@
+fn first<T>(x: T) -> T { x }
+fn main() {
+    let a = first((1, (2, 3)))
+    let b = first(((1, 2), 3))
+    let c = first((true, 1))
+    println("${a.0} ${b.1} ${c.1}")
+}

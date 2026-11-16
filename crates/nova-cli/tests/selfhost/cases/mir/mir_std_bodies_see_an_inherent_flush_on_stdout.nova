@@ -1,0 +1,15 @@
+import ui::html::{text}
+import ui::ssr::{page, serve, Page, Site}
+
+async fn mine() -> Result<(), IoError> { Ok(()) }
+
+impl Stdout {
+    fn flush(self) -> Future<Result<(), IoError>> { mine() }
+}
+
+fn render(location: String) -> Page { page(location, || text("hi")) }
+
+fn main() {
+    let site = Site { address: "127.0.0.1:0", dist: "dist", routes: [], render: render }
+    let _ = block_on(serve(site))
+}

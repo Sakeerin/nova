@@ -1,0 +1,6 @@
+record Box<T> { value: T }
+trait Show { fn show(self) -> String }
+impl Show for Int { fn show(self) -> String { "i" } }
+impl<T> Box<T> { fn tag<U: Show>(self, x: U) -> String { x.show() } }
+fn main() { let a = Box { value: 1 }
+ println(a.tag(true)) }

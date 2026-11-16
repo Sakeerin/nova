@@ -1,0 +1,5 @@
+import shapes::{name, Dot}
+
+fn main() {
+    println(name(Dot))
+}

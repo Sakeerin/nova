@@ -13,6 +13,9 @@ mod runtime_cache;
 
 pub use analyze::{analyze, analyze_program, Analysis, DiskSources, Options, Probe, Sources};
 pub use nova_codegen_cranelift::CompiledProgram;
+/// The MIR dump's forms, for the self-hosted compiler's differential test
+/// (spec 5.4 §4).
+pub use nova_mir::dump as mir_dump;
 /// The resolution dump's forms, for the self-hosted resolver's differential
 /// test (spec 5.2 §3.4).
 pub use nova_resolver::dump as resolution_dump;
@@ -1950,7 +1953,7 @@ mod resolution_dumps {
 
     /// The HIR dump's roots of each mode (5.3a): the corpus's and the
     /// cases' of the resolution dump and of the type checker, as the
-    /// harness takes them.
+    /// harness takes them; natively, MIR's cases too (5.4).
     fn hir_sets() -> Vec<(Target, bool, Vec<std::path::PathBuf>)> {
         let root = repository();
         let cases = root.join("crates/nova-cli/tests/selfhost/cases");
@@ -1975,7 +1978,7 @@ mod resolution_dumps {
                 corpus
                     .iter()
                     .cloned()
-                    .chain(cases_of(&["resolve", "check"]))
+                    .chain(cases_of(&["resolve", "check", "mir"]))
                     .collect(),
             ),
             (

@@ -1,0 +1,3 @@
+async fn f() -> Float { 1.5 }
+async fn g() -> Float { f().await }
+fn main() { let x = g() }

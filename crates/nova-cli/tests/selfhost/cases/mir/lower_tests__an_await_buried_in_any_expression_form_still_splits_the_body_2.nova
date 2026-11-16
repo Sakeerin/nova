@@ -1,0 +1,5 @@
+async fn g() -> Int { 1 }
+async fn f() -> Int { let mut i = 0
+ while i < 1 { i = g().await }
+ i }
+fn main() { let x = f() }

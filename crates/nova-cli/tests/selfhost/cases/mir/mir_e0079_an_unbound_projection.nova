@@ -1,0 +1,4 @@
+fn main() {
+    let m = MapIter { it: 5, f: |x| x }
+    println("built")
+}

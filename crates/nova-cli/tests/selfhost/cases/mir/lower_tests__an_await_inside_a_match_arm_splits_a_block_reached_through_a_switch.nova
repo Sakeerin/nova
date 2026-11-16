@@ -1,0 +1,4 @@
+type Choice = | Left | Right
+async fn g() -> Int { 1 }
+async fn f(c: Choice) -> Int { match c { Left => g().await, Right => 0, } }
+fn main() { let x = f(Left) }

@@ -1,0 +1,7 @@
+extern "C" {
+    fn cbrt(x: Float) -> Float
+}
+
+pub fn ca() -> Float {
+    cbrt(27.0)
+}

@@ -1,0 +1,6 @@
+import mod_a::{ca}
+import mod_b::{cb}
+
+fn main() {
+    println("${ca()} ${cb()}")
+}

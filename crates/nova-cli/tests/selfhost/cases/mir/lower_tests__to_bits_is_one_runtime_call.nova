@@ -1,0 +1,4 @@
+fn main() {
+    let b = (1.5).to_bits()
+    println("${b}")
+}

@@ -1,0 +1,46 @@
+extern "C" {
+    fn labs(x: Int) -> Int
+}
+
+record P {
+    x: Int
+    y: Float
+}
+
+type S =
+  | A(Int)
+  | B
+
+fn pick(s: S) -> Int {
+    match s {
+        A(n) => n
+        B => 0
+    }
+}
+
+fn flip(b: Bool) -> Bool {
+    !b
+}
+
+fn half(f: Float) -> Float {
+    -f / 2.0
+}
+
+async fn one() -> Int {
+    1
+}
+
+async fn two() -> Int {
+    one().await + 1
+}
+
+fn main() {
+    let mut p = P { x: ~1, y: half(3.0) }
+    p.x = -p.x
+    let mut a = [0; 3]
+    a[1] = a.len() + [5, 6][1]
+    let k = 2
+    let f = |n: Int| n * k
+    let g = pick
+    println("${f(a[1])} ${g(A(4))} ${flip(true)} ${p.y} ${labs(-3)} ${block_on(two())}")
+}
