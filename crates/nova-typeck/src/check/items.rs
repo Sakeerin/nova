@@ -165,6 +165,20 @@ impl Checked {
     pub fn functions(&self) -> &[hir::Function] {
         &self.functions
     }
+
+    /// The module [`check_with`](super::check_with) builds, from the full
+    /// check's tables and functions, for the MIR dump (5.4, spec
+    /// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3.3).
+    pub fn into_module(self) -> hir::Module {
+        hir::Module {
+            sums: self.tables.sums,
+            records: self.tables.records,
+            traits: self.tables.traits,
+            impls: self.tables.impls,
+            functions: self.functions,
+            externs: self.tables.externs,
+        }
+    }
 }
 
 /// [`check_with`](super::check_with) over `file`, with the item tables kept

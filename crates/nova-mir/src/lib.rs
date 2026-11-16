@@ -15,6 +15,7 @@
 //! through the runtime. Strings and function values are opaque pointers.
 
 mod async_lower;
+pub mod dump;
 mod lower;
 mod mono;
 

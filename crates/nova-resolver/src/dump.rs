@@ -36,7 +36,9 @@
 
 use std::fmt::Write;
 
-use nova_ast::dump::quote;
+/// 5.1's quoting of a string, which every later dump takes: re-exported for
+/// the MIR dump's crate, which does not depend on `nova-ast` (5.4, ADR 0057).
+pub use nova_ast::dump::quote;
 use nova_diagnostics::{Diagnostic, FileId, Severity, Span};
 
 use crate::{

@@ -26,6 +26,13 @@ pub struct Options<'a> {
     /// a call to its `std/rt` function, which joins the module; each
     /// [`WasmRuntime::Unavailable`] one is E0091. `None` lowers natively.
     pub runtime: Option<&'a RuntimeImpls>,
+    /// Return the module as lowering left it, the async `main`'s shim
+    /// pushed, before the async transform: its `async fn`s still flagged,
+    /// with their `Stmt::Await` markers. Only the hidden MIR dump's
+    /// `--before-async` sets it (spec
+    /// `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md` §3.2, ADR
+    /// 0057), natively; no codegen backend can take such a module.
+    pub stop_before_async: bool,
 }
 
 /// The name of `std/rt`'s allocator, a root of every WASM build.
@@ -388,6 +395,11 @@ pub fn lower_module_with(
         if let Some(wrapper) = async_entry {
             mir.functions
                 .push(async_main_shim(&wrapper, main_entry.as_deref()));
+        }
+        // The hidden MIR dump's before form: nothing natively follows the
+        // transform, and the asserts below are on its output.
+        if options.stop_before_async {
+            return Ok(mir);
         }
         // Run on the finished module rather than per function inside the loop:
         // it needs no generics resolved and lands once for both codegen

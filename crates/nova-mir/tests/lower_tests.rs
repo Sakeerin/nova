@@ -1891,6 +1891,7 @@ fn wasm_mir_without(
         &checked.module,
         &nova_mir::Options {
             runtime: Some(&impls),
+            ..Default::default()
         },
     )
 }
@@ -2186,8 +2187,14 @@ fn state_builtins_lower(kind: &str, rts: [nova_mir::RtFunc; 3]) {
             }
         }
         let runtime = (target == CompileTarget::Wasm).then_some(&impls);
-        nova_mir::lower_module_with(&checked.module, &nova_mir::Options { runtime })
-            .expect("lowers")
+        nova_mir::lower_module_with(
+            &checked.module,
+            &nova_mir::Options {
+                runtime,
+                ..Default::default()
+            },
+        )
+        .expect("lowers")
     };
     let [present, load, store] = rts;
     let native = lower(CompileTarget::Native);
