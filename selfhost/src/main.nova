@@ -33,17 +33,20 @@
 //                             ADR 0055), then every function of the
 //                             program, its body checked, std's bodies
 //                             checked once (§4.3, §4.5, ADR 0056)
-//   selfhost mir --std DIR [--before-async] FILE...
+//   selfhost mir --std DIR [--before-async | --ll] FILE...
 //                             prints the MIR dump of each program whose
 //                             root is FILE, after the same header, as
-//                             `nova check --dump-mir [--before-async]`
-//                             does: natively, monomorphized from `main`,
-//                             lowered and through the async transform, or
-//                             before it with `--before-async`, std's
-//                             checked functions spliced into each program
-//                             (spec
+//                             `nova check --dump-mir [--before-async |
+//                             --ll]` does: natively, monomorphized from
+//                             `main`, lowered and through the async
+//                             transform, or before it with
+//                             `--before-async`, std's checked functions
+//                             spliced into each program (spec
 //                             docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md
-//                             §5, §6, ADR 0057)
+//                             §5, §6, ADR 0057); with `--ll`, each
+//                             lowered root's `.ll` after its part (spec
+//                             docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md
+//                             §4, §5)
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -55,6 +58,8 @@ import async_lower
 import builtins
 import diagnostic
 import dump
+import emit_ll
+import emit_ll_tests
 import fixes
 import hir
 import hir_dump
@@ -271,21 +276,24 @@ async fn dump_command(argv: Vec<String>, command: String) {
     if failed { exit(2) }
 }
 
-// `selfhost mir --std DIR [--before-async] FILE...`: std's modules are
-// read from DIR, parsed, resolved, their items collected and their bodies
-// checked once, then each program's MIR dump after its header, natively,
-// as S0's `check --dump-mir` prints it (spec 5.4 §6.3). Each option is
-// taken once, and `--` before a root that starts with `-`. With no `--std
-// DIR`, with a second `--std` or `--before-async`, `--std-part`,
-// `--target`, `--test` or another option, or with no file, nothing is
-// printed and the exit code is 2, as S0's form refuses its shapes. The
-// dump is after the async transform, or before it with `--before-async`.
+// `selfhost mir --std DIR [--before-async | --ll] FILE...`: std's modules
+// are read from DIR, parsed, resolved, their items collected and their
+// bodies checked once, then each program's MIR dump after its header,
+// natively, as S0's `check --dump-mir` prints it (spec 5.4 §6.3). Each
+// option is taken once, and `--` before a root that starts with `-`. With
+// no `--std DIR`, with a second `--std`, `--before-async` or `--ll`, with
+// both `--before-async` and `--ll`, `--ll=…`, `--std-part`, `--target`,
+// `--test` or another option, or with no file, nothing is printed and the
+// exit code is 2, as S0's form refuses its shapes. The dump is after the
+// async transform, or before it with `--before-async`; with `--ll`, each
+// root that lowered has its `.ll` after its part (spec 5.5a §4).
 // A root whose package's manifest N's reader refuses stops the run with
 // the exit code 1, as `selfhost hir`.
 async fn mir_command(argv: Vec<String>) {
-    let usage = "usage: selfhost mir --std DIR [--before-async] FILE..."
+    let usage = "usage: selfhost mir --std DIR [--before-async | --ll] FILE..."
     let mut std_dir = ""
     let mut before = false
+    let mut ll = false
     let mut bad = false
     let mut only_files = false
     let mut files: Vec<String> = Vec::new()
@@ -304,16 +312,19 @@ async fn mir_command(argv: Vec<String>) {
         } else if a == "--before-async" {
             if before { bad = true }
             before = true
+        } else if a == "--ll" {
+            if ll { bad = true }
+            ll = true
         } else if a.starts_with("-") {
             // `--std` with no value, `--std-part`, `--target`, `--test`,
-            // `--before-async=…` and every other option.
+            // `--before-async=…`, `--ll=…` and every other option.
             bad = true
         } else {
             files.push(a)
         }
         i += 1
     }
-    if bad || std_dir == "" || files.is_empty() {
+    if bad || std_dir == "" || files.is_empty() || (before && ll) {
         eprintln(usage)
         exit(2)
         return
@@ -337,7 +348,7 @@ async fn mir_command(argv: Vec<String>) {
     if shared.shareable && s.shareable { items = Some(s) }
     let mut failed = false
     for path in files.iter() {
-        match dump_mir(path, shared, items, before).await {
+        match dump_mir(path, shared, items, before, ll).await {
             DumpedText(out) => print("== ${path}\n${out}")
             DumpedIoError(e) => {
                 print("== ${path}\nIOERR ${io_kind_name(e.kind)}\n")
@@ -361,12 +372,13 @@ async fn mir_command(argv: Vec<String>) {
 // be and in full otherwise, and, when neither gave an error, the full
 // check's module, std's functions spliced in, its entry `main` kept and
 // the module lowered natively, through the async transform or, when
-// `before`, before it.
+// `before`, before it; when `ll`, the lowered module's `.ll` after it.
 async fn dump_mir(
     path: String,
     shared: SharedStd,
     items: Option<SharedItems>,
     before: Bool,
+    ll: Bool,
 ) -> Dumped {
     let mut graph: Option<Graph> = None
     let mut kind = RootLoose
@@ -409,12 +421,12 @@ async fn dump_mir(
         )
     }
     if items.is_some() {
-        match mir_of(sources, shared, items, before) {
+        match mir_of(sources, shared, items, before, ll) {
             Some(d) => return d
             None => ()
         }
     }
-    mir_of(sources, shared, None, before).unwrap()
+    mir_of(sources, shared, None, before, ll).unwrap()
 }
 
 // `dump_mir`'s part from the resolver on, as `hir_of`'s: with std's
@@ -423,12 +435,14 @@ async fn dump_mir(
 // (`shared_module`); without, resolved and checked in full. An error
 // before MIR is `checked=false`. `None` when the shared path cannot check
 // the program, because it implements anything on a type it does not own,
-// which the full path then checks (ADR 0056 §4).
+// which the full path then checks (ADR 0056 §4). When `ll`, a module that
+// lowered has its `.ll` part after its own (`ll_part`, spec 5.5a §4).
 fn mir_of(
     sources: Vec<ModuleSource>,
     shared: SharedStd,
     items: Option<SharedItems>,
     before: Bool,
+    ll: Bool,
 ) -> Option<Dumped> {
     let std_set = shared.std_set
     let resolved = match items {
@@ -454,7 +468,30 @@ fn mir_of(
     }
     keep_the_entry_main(program, resolved.definitions)
     let result = lower_module_with(program, before)
-    Some(DumpedText(dump_mir_program(ReachedLowered(result, !before))))
+    let text = dump_mir_program(ReachedLowered(result, !before))
+    if ll {
+        match result {
+            Ok(lowered) => return Some(DumpedText(text + ll_part(lowered)))
+            Err(_) => ()
+        }
+    }
+    Some(DumpedText(text))
+}
+
+// A lowered root's `.ll` part (nova-driver's `ll_part`, spec 5.5a §4):
+// `(Ll ok)` and the emitter's text, or one line `(Ll error "…")` with the
+// emitter's words, quoted as the dumps quote.
+fn ll_part(program: MirModule) -> String {
+    match compile_ir(program) {
+        Ok(ir) => "(Ll ok)\n" + ir
+        Err(e) => {
+            let mut part = StringBuilder::new()
+            part.push("(Ll error \"")
+            push_escaped(part, e, true)
+            part.push("\")\n")
+            part.to_string()
+        }
+    }
 }
 
 // What `dump_resolution` gives for one root: its part; the error that

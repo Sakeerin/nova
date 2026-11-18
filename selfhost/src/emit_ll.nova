@@ -1,0 +1,690 @@
+// The `.ll` emitter: a port of crates/nova-codegen-llvm/src/lib.rs, the
+// release backend's textual LLVM IR from a monomorphized native MIR
+// module, function by function and with the same names (5.5a, spec
+// docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md
+// §5): `compile_ir`, `rt_func_decl`, `llty`, `escape_bytes`, `float_hex`,
+// `FnEmit` and its helpers, `stmt`, `arg_list`, `emit_call`, `binop` and
+// `terminator`. S0's module comment gives the layout: 8-byte slots, the
+// heap layouts of sums, records, arrays and closures, the env-first
+// indirect call, every temp an entry-block `alloca`.
+//
+// The Rust's idioms, beyond mir.nova's (ADR 0057):
+//
+// - The text is a `StringBuilder`'s parts, joined once. S0 builds the
+//   functions' text first and the header after; the header reads nothing
+//   the functions make, so here it comes first, into the same builder.
+// - `\XX` escapes are written by bytes (`byte_at`), two uppercase hex
+//   digits and no `x`, for every byte outside 0x20 to 0x7E and for `"` and
+//   `\`; dump.nova's `push_escaped` is another rule. A float is `0x` and
+//   the 16 uppercase hex digits of its bits; a string's length is its
+//   byte length.
+// - `ret_of` is a `Map` read by lookup alone, the functions inserted
+//   before the externs, so an extern's class replaces a function's of the
+//   same symbol, as S0's `collect` keeps the last; a callee it lacks is
+//   `Unit`. `string_index` is a `Map` read by lookup alone, the strings
+//   in a `Vec` by first use. No map's order reaches the text.
+// - A class is its `MirTy` code and a runtime function its index
+//   (mir.nova): `llty` maps a code; each runtime function's declaration,
+//   symbol and return class are read once per module (`RtTable`), since
+//   reading a `const` builds it anew.
+// - `compile_ir` is `Result<String, String>`, each error in S0's words:
+//   no `main`, an `Await`, a float `%` and a float bitwise operator. S0's
+//   `Mem` arm has nothing to match: N's MIR has no `Mem` statement.
+
+import hir
+import mir
+
+/// The symbol the MIR `main` is emitted under (`NOVA_ENTRY_SYMBOL`),
+/// leaving `main` for the exported C entry wrapper.
+pub const NOVA_ENTRY_SYMBOL: String = "nova_main"
+
+// The LLVM trap intrinsic `TermTrap` calls (`TRAP_DECL`).
+const TRAP_DECL: String = "declare void @llvm.trap()"
+
+// The string constructor `ConstStr` calls by its raw symbol
+// (`STR_NEW_DECL`), which no runtime function names.
+const STR_NEW_DECL: String = "declare ptr @nova_rt_str_new(ptr, i64)"
+
+// The 16 hex digits, uppercase, by value.
+const HEX_UPPER: String = "0123456789ABCDEF"
+
+// Hex digit `d`, uppercase.
+fn hex_upper(d: Int) -> String { HEX_UPPER.byte_slice(d, d + 1) }
+
+/// Each runtime function's declaration, symbol and return class, by its
+/// index, read once from `RT_FUNC_SIGNATURES`.
+pub record RtTable { pub decls: Vec<String>, pub symbols: Vec<String>, pub rets: Vec<Int> }
+
+/// The table of every runtime function, in `RtFunc::ALL`'s order, read
+/// from `RT_FUNC_SIGNATURES` once.
+pub fn rt_table() -> RtTable {
+    let mut decls: Vec<String> = Vec::new()
+    let mut symbols: Vec<String> = Vec::new()
+    let mut rets: Vec<Int> = Vec::new()
+    let table = RT_FUNC_SIGNATURES
+    for f in 0..table.len() {
+        let (symbol, signature) = table[f]
+        let (params, ret) = read_signature(signature)
+        decls.push(decl_of(symbol, params, ret))
+        symbols.push(symbol)
+        rets.push(ret)
+    }
+    RtTable { decls: decls, symbols: symbols, rets: rets }
+}
+
+/// The LLVM declaration of runtime function `rt` (`rt_func_decl`), from
+/// its signature and symbol, as its calls spell them.
+pub fn rt_func_decl(rt: Int) -> String {
+    let (params, ret) = rt_func_signature(rt)
+    decl_of(rt_func_symbol(rt), params, ret)
+}
+
+// `declare <ret> @<symbol>(<params>)`.
+fn decl_of(symbol: String, params: Vec<Int>, ret: Int) -> String {
+    let mut names: Vec<String> = Vec::new()
+    for i in 0..params.len() { names.push(llty(params.at(i))) }
+    "declare ${llty(ret)} @${symbol}(${", ".join(names.to_array())})"
+}
+
+/// A monomorphized MIR module as a textual LLVM IR module (`compile_ir`).
+pub fn compile_ir(program: MirModule) -> Result<String, String> {
+    let functions = program.functions
+    let externs = program.externs
+    let mut has_main = false
+    for i in 0..functions.len() {
+        if functions.at(i).name == "main" {
+            has_main = true
+            break
+        }
+    }
+    if !has_main { return Err("no `main` function in MIR module") }
+    // Return class of every function, so a call site can spell the call's
+    // result type even when the result is discarded.
+    let mut ret_of: Map<String, Int> = Map::new()
+    for i in 0..functions.len() {
+        let f = functions.at(i)
+        let _ = ret_of.insert(f.name, f.ret)
+    }
+    for i in 0..externs.len() {
+        let e = externs.at(i)
+        let _ = ret_of.insert(e.symbol, e.ret)
+    }
+    let rt = rt_table()
+    let strings: Vec<String> = Vec::new()
+    let string_index: Map<String, Int> = Map::new()
+    let mut out = StringBuilder::new()
+    out.push("; LLVM IR emitted by the Nova compiler (release backend).\n")
+    out.push("; Requires LLVM >= 15 (opaque pointers).\n\n")
+    out.push(TRAP_DECL)
+    out.push("\n")
+    for f in 0..rt.decls.len() {
+        out.push(rt.decls.at(f))
+        out.push("\n")
+    }
+    out.push(STR_NEW_DECL)
+    out.push("\n")
+    // Each extern (FFI) symbol, which the call sites spell `@"symbol"`.
+    for i in 0..externs.len() {
+        let ext = externs.at(i)
+        let mut params: Vec<String> = Vec::new()
+        for k in 0..ext.params.len() { params.push(llty(ext.params.at(k))) }
+        out.push("declare ${llty(ext.ret)} @\"${ext.symbol}\"(${", ".join(params.to_array())})\n")
+    }
+    out.push("\n")
+    for i in 0..functions.len() {
+        let mut fe = FnEmit {
+            out: out,
+            f: functions.at(i),
+            ret_of: ret_of,
+            rt: rt,
+            strings: strings,
+            string_index: string_index,
+            ssa: 0,
+        }
+        fe.emit()?
+        out.push("\n")
+    }
+    // String literal globals.
+    for i in 0..strings.len() {
+        let s = strings.at(i)
+        let n = if s.byte_len() == 0 { 1 } else { s.byte_len() }
+        out.push("@str${i} = private unnamed_addr constant [${n} x i8] c\"")
+        if s.byte_len() == 0 { out.push("\\00") } else { escape_bytes(out, s) }
+        out.push("\", align 1\n")
+    }
+    out.push("\n")
+    // Exported C entry point: `int main(int, char**) { nova_main(); return 0; }`.
+    out.push("define i32 @main(i32 %argc, ptr %argv) {\nentry:\n")
+    out.push("  call void @nova_main()\n  ret i32 0\n}\n")
+    Ok(out.to_string())
+}
+
+/// The LLVM type spelling of a class (`llty`), `void` for unit.
+pub fn llty(ty: Int) -> String {
+    if ty == MIR_I64 {
+        "i64"
+    } else if ty == MIR_F64 {
+        "double"
+    } else if ty == MIR_I8 {
+        "i8"
+    } else if ty == MIR_PTR {
+        "ptr"
+    } else {
+        "void"
+    }
+}
+
+/// The bytes of `text` escaped for an LLVM `c"..."` constant, onto `out`
+/// (`escape_bytes`): printable ASCII but `"` and `\` as it is, every other
+/// byte `\XX`, two uppercase hex digits. The bytes kept are ASCII, so each
+/// run of them is whole characters.
+pub fn escape_bytes(mut out: StringBuilder, text: String) {
+    let n = text.byte_len()
+    let mut run = 0
+    let mut i = 0
+    while i < n {
+        let b = text.byte_at(i)
+        if b < 0x20 || b > 0x7E || b == 34 || b == 92 {
+            if i > run { out.push(text.byte_slice(run, i)) }
+            out.push("\\${hex_upper(b >> 4)}${hex_upper(b & 15)}")
+            run = i + 1
+        }
+        i += 1
+    }
+    if n > run { out.push(text.byte_slice(run, n)) }
+}
+
+/// A `double` constant as its exact IEEE-754 bits, LLVM's hex float form
+/// (`float_hex`): `0x` and 16 uppercase hex digits.
+pub fn float_hex(v: Float) -> String {
+    let bits = v.to_bits()
+    let mut out = StringBuilder::new()
+    out.push("0x")
+    let mut shift = 60
+    while shift >= 0 {
+        out.push(hex_upper((bits >> shift) & 15))
+        shift -= 4
+    }
+    out.to_string()
+}
+
+/// Per-function IR emission state (`FnEmit`): the text, shared by every
+/// function; the function; the module's return classes and runtime
+/// table; the string globals, shared; and the next `%rN`.
+pub record FnEmit {
+    out: StringBuilder,
+    f: MirFunction,
+    ret_of: Map<String, Int>,
+    rt: RtTable,
+    strings: Vec<String>,
+    string_index: Map<String, Int>,
+    ssa: Int,
+}
+
+impl FnEmit {
+    fn line(mut self, s: String) {
+        self.out.push(s)
+        self.out.push("\n")
+    }
+
+    // A fresh, named SSA temporary (`fresh`).
+    fn fresh(mut self) -> String {
+        let n = self.ssa
+        self.ssa += 1
+        "%r${n}"
+    }
+
+    fn temp_ty(self, t: Int) -> Int { self.f.temps.at(t) }
+
+    fn slot(self, t: Int) -> String { "%t${t}.slot" }
+
+    // Load a temp's current value into a fresh SSA name (`load`).
+    fn load(mut self, t: Int) -> String {
+        let ty = llty(self.temp_ty(t))
+        let slot = self.slot(t)
+        let r = self.fresh()
+        self.line("  ${r} = load ${ty}, ptr ${slot}")
+        r
+    }
+
+    // Store a value into a temp's slot, nothing for a unit temp (`store`).
+    fn store(mut self, t: Int, val: String) {
+        if self.temp_ty(t) == MIR_UNIT { return }
+        let ty = llty(self.temp_ty(t))
+        let slot = self.slot(t)
+        self.line("  store ${ty} ${val}, ptr ${slot}")
+    }
+
+    // The number of leading ABI parameter temps, the real parameters and
+    // the environment pointer if any (`abi_count`).
+    fn abi_count(self) -> Int { self.f.params + if self.f.takes_env { 1 } else { 0 } }
+
+    fn intern_string(mut self, s: String) -> Int {
+        match self.string_index.get(s) {
+            Some(i) => return i
+            None => ()
+        }
+        let i = self.strings.len()
+        self.strings.push(s)
+        let _ = self.string_index.insert(s, i)
+        i
+    }
+
+    /// The function's text (`emit`): its `define`, the entry block's slots
+    /// and parameters, then a labelled block per MIR block.
+    pub fn emit(mut self) -> Result<(), String> {
+        let symbol = if self.f.name == "main" { NOVA_ENTRY_SYMBOL } else { self.f.name }
+        let ret = llty(self.f.ret)
+        // Signature: non-unit ABI param temps become named LLVM parameters.
+        let abi = self.abi_count()
+        let mut params = StringBuilder::new()
+        for i in 0..abi {
+            if self.temp_ty(i) == MIR_UNIT { continue }
+            if !params.is_empty() { params.push(", ") }
+            params.push("${llty(self.temp_ty(i))} %p${i}")
+        }
+        self.line("define ${ret} @\"${symbol}\"(${params}) {")
+        // Entry block: a slot per non-unit temp, the parameters stored,
+        // then a jump to the first MIR block, which may be a loop's target.
+        self.line("entry:")
+        let temp_count = self.f.temps.len()
+        for i in 0..temp_count {
+            if self.temp_ty(i) == MIR_UNIT { continue }
+            let ty = llty(self.temp_ty(i))
+            let slot = self.slot(i)
+            self.line("  ${slot} = alloca ${ty}")
+        }
+        for i in 0..abi {
+            if self.temp_ty(i) == MIR_UNIT { continue }
+            let ty = llty(self.temp_ty(i))
+            let slot = self.slot(i)
+            self.line("  store ${ty} %p${i}, ptr ${slot}")
+        }
+        self.line("  br label %bb0")
+        let blocks = self.f.blocks
+        for i in 0..blocks.len() {
+            let block = blocks.at(i)
+            self.line("bb${i}:")
+            for k in 0..block.stmts.len() { self.stmt(block.stmts.at(k))? }
+            self.terminator(block.term)
+        }
+        self.line("}")
+        Ok(())
+    }
+
+    // A byte-offset GEP into a heap object, a fresh address (`gep_byte`).
+    fn gep_byte(mut self, base: String, byte_off: Int) -> String {
+        let r = self.fresh()
+        self.line("  ${r} = getelementptr inbounds i8, ptr ${base}, i64 ${byte_off}")
+        r
+    }
+
+    /// A statement's text (`stmt`).
+    pub fn stmt(mut self, stmt: MirStmt) -> Result<(), String> {
+        match stmt {
+            SConstInt(t, v) => self.store(t, "${v}")
+            SConstFloat(t, v) => {
+                let hex = float_hex(v)
+                self.store(t, hex)
+            }
+            SConstBool(t, v) => self.store(t, if v { "1" } else { "0" })
+            SConstUnit(_) => ()
+            SConstStr(t, s) => {
+                let idx = self.intern_string(s)
+                let n = if s.byte_len() == 0 { 1 } else { s.byte_len() }
+                let p = self.fresh()
+                self.line(
+                    "  ${p} = getelementptr inbounds [${n} x i8], ptr @str${idx}, i64 0, i64 0",
+                )
+                let r = self.fresh()
+                self.line("  ${r} = call ptr @nova_rt_str_new(ptr ${p}, i64 ${s.byte_len()})")
+                self.store(t, r)
+            }
+            SCopy(dst, src) => {
+                if self.temp_ty(src) != MIR_UNIT {
+                    let v = self.load(src)
+                    self.store(dst, v)
+                }
+            }
+            SBin(dst, op, class, lhs, rhs) => {
+                let l = self.load(lhs)
+                let r = self.load(rhs)
+                let opnd = llty(self.temp_ty(lhs))
+                let v = self.binop(op, class, opnd, l, r)?
+                self.store(dst, v)
+            }
+            SNeg(dst, class, src) => {
+                let v = self.load(src)
+                let ty = llty(self.temp_ty(src))
+                let r = self.fresh()
+                if class == OC_FLOAT {
+                    self.line("  ${r} = fneg ${ty} ${v}")
+                } else {
+                    self.line("  ${r} = sub ${ty} 0, ${v}")
+                }
+                self.store(dst, r)
+            }
+            SNot(dst, src) => {
+                let v = self.load(src)
+                let r = self.fresh()
+                self.line("  ${r} = xor i8 ${v}, 1")
+                self.store(dst, r)
+            }
+            SBitNot(dst, src) => {
+                let v = self.load(src)
+                let r = self.fresh()
+                self.line("  ${r} = xor i64 ${v}, -1")
+                self.store(dst, r)
+            }
+            SCall(dst, callee, args) => {
+                let ret = match self.ret_of.get(callee) {
+                    Some(c) => c
+                    None => MIR_UNIT
+                }
+                let arglist = self.arg_list(args)
+                self.emit_call(dst, ret, "@\"${callee}\"", arglist)
+            }
+            // A marker the async transform consumes; no IR expresses it.
+            SAwait(_, _) => return Err(
+                "an `.await` marker reached codegen: `nova-mir`'s async state-machine transform must split every `async fn` body at its await points before a module is emitted",
+            )
+            SCallRuntime(dst, func, args) => {
+                let ret = self.rt.rets.at(func)
+                let arglist = self.arg_list(args)
+                self.emit_call(dst, ret, "@${self.rt.symbols.at(func)}", arglist)
+            }
+            SCallIndirect(dst, callee, _, ret, args) => {
+                // `callee` is a fat pointer `{ code_ptr, env_ptr }`: call
+                // `code_ptr(env_ptr, args...)`, env first.
+                let fat = self.load(callee)
+                let code = self.fresh()
+                self.line("  ${code} = load ptr, ptr ${fat}")
+                let env_addr = self.gep_byte(fat, 8)
+                let env = self.fresh()
+                self.line("  ${env} = load ptr, ptr ${env_addr}")
+                let mut arglist = StringBuilder::new()
+                arglist.push("ptr ${env}")
+                for i in 0..args.len() {
+                    let a = args.at(i)
+                    if self.temp_ty(a) == MIR_UNIT { continue }
+                    let ty = llty(self.temp_ty(a))
+                    let v = self.load(a)
+                    arglist.push(", ${ty} ${v}")
+                }
+                self.emit_call(dst, ret, code, arglist.to_string())
+            }
+            SMakeClosure(dst, code, captures) => {
+                let env = if captures.is_empty() {
+                    "null"
+                } else {
+                    let size = 8 * captures.len()
+                    let env = self.fresh()
+                    self.line("  ${env} = call ptr @nova_rt_alloc(i64 ${size})")
+                    for i in 0..captures.len() {
+                        let (field, ty) = captures.at(i)
+                        if ty == MIR_UNIT { continue }
+                        let v = self.load(field)
+                        let addr = self.gep_byte(env, 8 * i)
+                        self.line("  store ${llty(ty)} ${v}, ptr ${addr}")
+                    }
+                    env
+                }
+                let fat = self.fresh()
+                self.line("  ${fat} = call ptr @nova_rt_alloc(i64 16)")
+                self.line("  store ptr @\"${code}\", ptr ${fat}")
+                let env_addr = self.gep_byte(fat, 8)
+                self.line("  store ptr ${env}, ptr ${env_addr}")
+                self.store(dst, fat)
+            }
+            SMakeSum(dst, tag, fields) => {
+                let size = 8 + 8 * fields.len()
+                let ptr = self.fresh()
+                self.line("  ${ptr} = call ptr @nova_rt_alloc(i64 ${size})")
+                self.line("  store i64 ${tag}, ptr ${ptr}")
+                for i in 0..fields.len() {
+                    let (field, ty) = fields.at(i)
+                    if ty == MIR_UNIT { continue }
+                    let v = self.load(field)
+                    let addr = self.gep_byte(ptr, 8 + 8 * i)
+                    self.line("  store ${llty(ty)} ${v}, ptr ${addr}")
+                }
+                self.store(dst, ptr)
+            }
+            SSumTag(dst, sum) => {
+                let p = self.load(sum)
+                let r = self.fresh()
+                self.line("  ${r} = load i64, ptr ${p}")
+                self.store(dst, r)
+            }
+            SSumField(dst, sum, index, ty) => {
+                if ty == MIR_UNIT { return Ok(()) }
+                let p = self.load(sum)
+                let addr = self.gep_byte(p, 8 + 8 * index)
+                let r = self.fresh()
+                self.line("  ${r} = load ${llty(ty)}, ptr ${addr}")
+                self.store(dst, r)
+            }
+            SMakeRecord(dst, fields) => {
+                let size = 8 * if fields.len() < 1 { 1 } else { fields.len() }
+                let ptr = self.fresh()
+                self.line("  ${ptr} = call ptr @nova_rt_alloc(i64 ${size})")
+                for i in 0..fields.len() {
+                    let (field, ty) = fields.at(i)
+                    if ty == MIR_UNIT { continue }
+                    let v = self.load(field)
+                    let addr = self.gep_byte(ptr, 8 * i)
+                    self.line("  store ${llty(ty)} ${v}, ptr ${addr}")
+                }
+                self.store(dst, ptr)
+            }
+            SRecordField(dst, rec, index, ty) => {
+                if ty == MIR_UNIT { return Ok(()) }
+                let p = self.load(rec)
+                let addr = self.gep_byte(p, 8 * index)
+                let r = self.fresh()
+                self.line("  ${r} = load ${llty(ty)}, ptr ${addr}")
+                self.store(dst, r)
+            }
+            SSetField(rec, index, value, ty) => {
+                // A unit-typed field has no machine representation to store.
+                if ty == MIR_UNIT { return Ok(()) }
+                let v = self.load(value)
+                let p = self.load(rec)
+                // The same `8 * index` offset `RecordField` loads from.
+                let addr = self.gep_byte(p, 8 * index)
+                self.line("  store ${llty(ty)} ${v}, ptr ${addr}")
+            }
+            SMakeArray(dst, elems) => {
+                let size = 8 + 8 * elems.len()
+                let ptr = self.fresh()
+                self.line("  ${ptr} = call ptr @nova_rt_alloc(i64 ${size})")
+                self.line("  store i64 ${elems.len()}, ptr ${ptr}")
+                for i in 0..elems.len() {
+                    let (field, ty) = elems.at(i)
+                    if ty == MIR_UNIT { continue }
+                    let v = self.load(field)
+                    let addr = self.gep_byte(ptr, 8 + 8 * i)
+                    self.line("  store ${llty(ty)} ${v}, ptr ${addr}")
+                }
+                self.store(dst, ptr)
+            }
+            SArrayAlloc(dst, len) => {
+                // `MakeArray`'s layout with the count known at run time:
+                // `8 + 8*len` bytes, `len` at offset 0.
+                let n = self.load(len)
+                let bytes = self.fresh()
+                self.line("  ${bytes} = mul i64 ${n}, 8")
+                let size = self.fresh()
+                self.line("  ${size} = add i64 ${bytes}, 8")
+                let ptr = self.fresh()
+                self.line("  ${ptr} = call ptr @nova_rt_alloc(i64 ${size})")
+                self.line("  store i64 ${n}, ptr ${ptr}")
+                self.store(dst, ptr)
+            }
+            SArrayLen(dst, arr) => {
+                let p = self.load(arr)
+                let r = self.fresh()
+                self.line("  ${r} = load i64, ptr ${p}")
+                self.store(dst, r)
+            }
+            SArrayGet(dst, arr, index, ty) => {
+                if ty == MIR_UNIT { return Ok(()) }
+                let addr = self.array_elem_addr(arr, index)
+                let r = self.fresh()
+                self.line("  ${r} = load ${llty(ty)}, ptr ${addr}")
+                self.store(dst, r)
+            }
+            SArraySet(arr, index, value, ty) => {
+                if ty == MIR_UNIT { return Ok(()) }
+                let v = self.load(value)
+                let addr = self.array_elem_addr(arr, index)
+                self.line("  store ${llty(ty)} ${v}, ptr ${addr}")
+            }
+        }
+        Ok(())
+    }
+
+    // The address of `arr[index]`, `arr + 8 + index*8` (`array_elem_addr`).
+    fn array_elem_addr(mut self, arr: Int, index: Int) -> String {
+        let base = self.load(arr)
+        let idx = self.load(index)
+        let scaled = self.fresh()
+        self.line("  ${scaled} = mul i64 ${idx}, 8")
+        let off = self.fresh()
+        self.line("  ${off} = add i64 ${scaled}, 8")
+        let addr = self.fresh()
+        self.line("  ${addr} = getelementptr inbounds i8, ptr ${base}, i64 ${off}")
+        addr
+    }
+
+    /// A comma-separated `<ty> <val>` argument list, unit temps skipped
+    /// (`arg_list`).
+    pub fn arg_list(mut self, args: Vec<Int>) -> String {
+        let mut out = StringBuilder::new()
+        for i in 0..args.len() {
+            let a = args.at(i)
+            if self.temp_ty(a) == MIR_UNIT { continue }
+            let ty = llty(self.temp_ty(a))
+            let v = self.load(a)
+            if !out.is_empty() { out.push(", ") }
+            out.push("${ty} ${v}")
+        }
+        out.to_string()
+    }
+
+    /// A call, its result stored into `dst` when the callee returns a
+    /// value; a void callee's is a statement (`emit_call`). `dst` is -1 for
+    /// none.
+    pub fn emit_call(mut self, dst: Int, ret: Int, callee: String, arglist: String) {
+        if ret == MIR_UNIT {
+            self.line("  call void ${callee}(${arglist})")
+        } else {
+            let r = self.fresh()
+            self.line("  ${r} = call ${llty(ret)} ${callee}(${arglist})")
+            if dst >= 0 { self.store(dst, r) }
+        }
+    }
+
+    /// A binary operation's text, its result's SSA name (`binop`): a
+    /// comparison an `i1` widened to the `i8` bool; a float `%` and a float
+    /// bitwise operator S0's errors.
+    pub fn binop(
+        mut self,
+        op: HirBinOp,
+        class: Int,
+        opnd: String,
+        l: String,
+        r: String,
+    ) -> Result<String, String> {
+        match cmp_pred(class, op) {
+            Some(pred) => {
+                let c = self.fresh()
+                self.line("  ${c} = ${pred} ${opnd} ${l}, ${r}")
+                let z = self.fresh()
+                self.line("  ${z} = zext i1 ${c} to i8")
+                return Ok(z)
+            }
+            None => ()
+        }
+        let instr = if class == OC_FLOAT {
+            match op {
+                OpAdd => "fadd"
+                OpSub => "fsub"
+                OpMul => "fmul"
+                OpDiv => "fdiv"
+                OpRem => return Err("float remainder (%) is not supported by the LLVM backend")
+                _ => return Err("bitwise operators are not defined for Float")
+            }
+        } else {
+            match op {
+                OpAdd => "add"
+                OpSub => "sub"
+                OpMul => "mul"
+                OpDiv => "sdiv"
+                OpRem => "srem"
+                OpBitAnd => "and"
+                OpBitOr => "or"
+                OpBitXor => "xor"
+                OpShl => "shl"
+                OpShr => "ashr"
+                _ => panic("handled as comparison above")
+            }
+        }
+        let d = self.fresh()
+        self.line("  ${d} = ${instr} ${opnd} ${l}, ${r}")
+        Ok(d)
+    }
+
+    /// A terminator's text (`terminator`).
+    pub fn terminator(mut self, term: MirTerm) {
+        match term {
+            TermGoto(b) => self.line("  br label %bb${b}")
+            TermBranch(cond, then_, else_) => {
+                let c = self.load(cond)
+                let c1 = self.fresh()
+                self.line("  ${c1} = icmp ne i8 ${c}, 0")
+                self.line("  br i1 ${c1}, label %bb${then_}, label %bb${else_}")
+            }
+            TermSwitch(disc, arms, default) => {
+                // The discriminant's own class: a sum tag's, an `Int`'s or a
+                // `Char`'s is `i64`, a `Bool` match's `i8`; every case
+                // constant shares it.
+                let ty = llty(self.temp_ty(disc))
+                let d = self.load(disc)
+                let mut table = StringBuilder::new()
+                for i in 0..arms.len() {
+                    let (value, block) = arms.at(i)
+                    table.push(" ${ty} ${value}, label %bb${block}")
+                }
+                self.line("  switch ${ty} ${d}, label %bb${default} [${table} ]")
+            }
+            TermReturn(value) => {
+                if value >= 0 && self.f.ret != MIR_UNIT {
+                    let val = self.load(value)
+                    self.line("  ret ${llty(self.f.ret)} ${val}")
+                } else {
+                    self.line("  ret void")
+                }
+            }
+            TermTrap => {
+                self.line("  call void @llvm.trap()")
+                self.line("  unreachable")
+            }
+        }
+    }
+}
+
+// A comparison's predicate (`binop`'s `cmp_pred`): `fcmp` on floats,
+// signed `icmp` on the rest; `None` for an operator that is not one.
+fn cmp_pred(class: Int, op: HirBinOp) -> Option<String> {
+    let float = class == OC_FLOAT
+    match op {
+        OpEq => Some(if float { "fcmp oeq" } else { "icmp eq" })
+        OpNe => Some(if float { "fcmp une" } else { "icmp ne" })
+        OpLt => Some(if float { "fcmp olt" } else { "icmp slt" })
+        OpLe => Some(if float { "fcmp ole" } else { "icmp sle" })
+        OpGt => Some(if float { "fcmp ogt" } else { "icmp sgt" })
+        OpGe => Some(if float { "fcmp oge" } else { "icmp sge" })
+        _ => None
+    }
+}
