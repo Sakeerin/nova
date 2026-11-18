@@ -97,12 +97,13 @@
 //! root that lowered followed by its `.ll`, `(Ll ok)` and what `build
 //! --release` writes, or `(Ll error "…")`, wherever the after form runs;
 //! [`split_ll`] cuts the `.ll` off after the comparison, so 5.4's checks
-//! read 5.4's text. Until N prints the `.ll` ([`N_LL`]), N's side runs
-//! without `--ll` and the `.ll` is checked on S0 alone: present exactly
-//! when the root lowered, an error on the float `%` case alone, and every
-//! form the emitter handles occurring in it, or listed unreachable
-//! ([`LL_UNREACHABLE`]). The `.ll` equals `build --release`'s intermediate
-//! on a few programs.
+//! read 5.4's text. N's after form is `selfhost mir --std DIR --ll FILE…`,
+//! and the `.ll` is compared byte for byte with the rest of the dump; on
+//! S0's side it is checked too: present exactly when the root lowered, an
+//! error on the float `%` case alone, and every form the emitter handles
+//! occurring in it, or listed unreachable ([`LL_UNREACHABLE`]). The `.ll`
+//! equals `build --release`'s intermediate on a few programs. A
+//! difference in it is reported by its line, `define` and block.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -627,7 +628,7 @@ fn compare_batch(
         (s0.join().expect("S0's thread"), n)
     });
     let (s0, n) = (s0?, n?);
-    let mismatch = first_difference(&as_n_prints(dump, &s0.stdout), &n.stdout);
+    let mismatch = first_difference(&s0.stdout, &n.stdout);
     if mismatch.is_none() && s0.code == Some(code) && n.code == Some(code) {
         return Ok(String::from_utf8_lossy(&s0.stdout).into_owned());
     }
@@ -649,17 +650,6 @@ fn compare_batch(
         }
     }
     Err(text)
-}
-
-/// S0's output of `dump` as N's must be: itself, or, when S0 was asked for
-/// the `.ll` and N was not ([`N_LL`]), without each root's `(Ll` part
-/// ([`split_ll`]), the `.ll` being checked on S0 alone (5.5a, spec §6.2).
-fn as_n_prints<'a>(dump: &Dump, s0: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
-    if dump.s0.contains(&"--ll") && !dump.n.contains(&"--ll") {
-        std::borrow::Cow::Owned(split_ll_bytes(s0).0)
-    } else {
-        std::borrow::Cow::Borrowed(s0)
-    }
 }
 
 /// Run `files`, relative to `dir`, through S0's and N's `dump`, `batch`
@@ -1877,6 +1867,216 @@ fn the_mir_mismatch_report_names_the_function_block_and_statement() {
     );
     assert!(!text.contains("outside any function"), "{text}");
     assert!(!text.contains("function \""), "{text}");
+}
+
+/// In a root's `.ll` (5.5a, spec §6.4) the report names the line of the
+/// `.ll`, counted from the line after `(Ll ok)`, and the `define` and the
+/// block it is in: a `define` line its own function, a label its own
+/// block, a line outside any function (the header, a declaration, a
+/// string global, the blank lines between) "outside any define", the C
+/// entry wrapper as `main`; the `(Ll` line itself says so. The MIR part
+/// before the `.ll` is reported as it was, and the next root's part starts
+/// afresh.
+#[test]
+fn the_ll_mismatch_report_names_the_define_and_block() {
+    const MIR_LL: Dump = Dump {
+        s0: &["check", "--dump-mir", "--ll"],
+        n: &["mir", "--std", "std", "--ll"],
+    };
+    let s0 = [
+        "== a.nova",
+        "(Mir runs=true checked=true lowered=true async_lowered=true functions=2 externs=0",
+        "  (Function \"main\" params=0 takes_env=false captures=0 ret=Unit async=false",
+        "    (Temp t0 I64)",
+        "    (Block bb0",
+        "      (Call t0 \"g.1\" ())",
+        "      (Return _)))",
+        "  (Function \"g.1\" params=0 takes_env=false captures=0 ret=I64 async=false",
+        "    (Temp t0 I64)",
+        "    (Block bb0",
+        "      (ConstInt t0 7)",
+        "      (Return t0))))",
+        "(Diagnostics)",
+        "(Ll ok)",
+        "; LLVM IR emitted by the Nova compiler (release backend).",
+        "; Requires LLVM >= 15 (opaque pointers).",
+        "",
+        "declare void @llvm.trap()",
+        "declare void @nova_rt_println(ptr)",
+        "declare ptr @nova_rt_str_new(ptr, i64)",
+        "",
+        "define void @\"nova_main\"() {",
+        "entry:",
+        "  %t0.slot = alloca i64",
+        "  br label %bb0",
+        "bb0:",
+        "  %r0 = call i64 @\"g.1\"()",
+        "  store i64 %r0, ptr %t0.slot",
+        "  ret void",
+        "}",
+        "",
+        "define i64 @\"g.1\"() {",
+        "entry:",
+        "  %t0.slot = alloca i64",
+        "  br label %bb0",
+        "bb0:",
+        "  store i64 7, ptr %t0.slot",
+        "  br label %bb1",
+        "bb1:",
+        "  %r0 = load i64, ptr %t0.slot",
+        "  ret i64 %r0",
+        "}",
+        "",
+        "@str0 = private unnamed_addr constant [2 x i8] c\"a\\0A\", align 1",
+        "",
+        "define i32 @main(i32 %argc, ptr %argv) {",
+        "entry:",
+        "  call void @nova_main()",
+        "  ret i32 0",
+        "}",
+        "== b.nova",
+        "(Mir runs=true checked=true lowered=true async_lowered=true functions=1 externs=0",
+        "  (Function \"main\" params=0 takes_env=false captures=0 ret=Unit async=false",
+        "    (Block bb0",
+        "      (Return _)))",
+        "(Diagnostics)",
+        "(Ll error \"float remainder (%) is not supported by the LLVM backend\")",
+        "",
+    ]
+    .join("\n");
+    let reported = |from: &str, to: &str| {
+        let n = s0.replacen(from, to, 1);
+        assert_ne!(s0, n, "{from} is not in:\n{s0}");
+        let m = first_difference(s0.as_bytes(), n.as_bytes()).expect("a difference");
+        report(
+            &m,
+            &MIR_LL,
+            Path::new("."),
+            Path::new("nova"),
+            Path::new("selfhost"),
+        )
+    };
+    assert_eq!(
+        reported("  ret i64 %r0", "  ret i64 %r1"),
+        "the dumps differ in a.nova, at line 40 of its dump, line 27 of its .ll, \
+         define \"g.1\", block bb1\n\
+         \x20 S0 (nova check --dump-mir --ll):    ret i64 %r0\n\
+         \x20 N  (selfhost mir --std std --ll):   ret i64 %r1\n\
+         reproduce, in .:\n\
+         \x20 nova check --dump-mir --ll a.nova > s0.txt\n\
+         \x20 selfhost mir --std std --ll a.nova > n.txt\n\
+         \x20 diff s0.txt n.txt\n\
+         and add the file to crates/nova-cli/tests/selfhost/cases/ once it is fixed"
+    );
+    for (from, to, at) in [
+        // The header, a declaration and the blank line after them.
+        (
+            "; Requires LLVM >= 15",
+            "; requires LLVM >= 15",
+            "line 2 of its .ll, outside any define",
+        ),
+        (
+            "declare void @nova_rt_println(ptr)",
+            "declare void @nova_rt_println(i64)",
+            "line 5 of its .ll, outside any define",
+        ),
+        (
+            "i64)\n\ndefine void",
+            "i64)\n \ndefine void",
+            "line 7 of its .ll, outside any define",
+        ),
+        // A `define` line, its entry block, a slot and its first MIR block.
+        (
+            "define void @\"nova_main\"() {",
+            "define void @\"nova_main\"(ptr %p0) {",
+            "line 8 of its .ll, define \"nova_main\"",
+        ),
+        (
+            "{\nentry:\n  %t0.slot = alloca i64\n  br label %bb0\nbb0:\n  %r0",
+            "{\nentry0:\n  %t0.slot = alloca i64\n  br label %bb0\nbb0:\n  %r0",
+            "line 9 of its .ll, define \"nova_main\", block entry",
+        ),
+        (
+            "  %t0.slot = alloca i64",
+            "  %t0.slot = alloca ptr",
+            "line 10 of its .ll, define \"nova_main\", block entry",
+        ),
+        (
+            "  store i64 %r0, ptr %t0.slot",
+            "  store i64 %r1, ptr %t0.slot",
+            "line 14 of its .ll, define \"nova_main\", block bb0",
+        ),
+        (
+            "  ret void\n}",
+            "  ret void\n  unreachable\n}",
+            "line 16 of its .ll, define \"nova_main\", block bb0",
+        ),
+        // The second function: its `define`, a block's label, its blocks.
+        (
+            "define i64 @\"g.1\"() {",
+            "define i64 @\"g.2\"() {",
+            "line 18 of its .ll, define \"g.1\"",
+        ),
+        (
+            "  store i64 7, ptr %t0.slot",
+            "  store i64 8, ptr %t0.slot",
+            "line 23 of its .ll, define \"g.1\", block bb0",
+        ),
+        (
+            "bb1:\n",
+            "bb2:\n",
+            "line 25 of its .ll, define \"g.1\", block bb1",
+        ),
+        // A string global, and the C entry wrapper.
+        (
+            "c\"a\\0A\"",
+            "c\"a\\0a\"",
+            "line 30 of its .ll, outside any define",
+        ),
+        (
+            "  call void @nova_main()",
+            "  call void @\"nova_main\"()",
+            "line 34 of its .ll, define main, block entry",
+        ),
+        // The `(Ll` line, and the MIR before it as it was.
+        (
+            "(Ll ok)",
+            "(Ll error \"no `main` function in MIR module\")",
+            "at line 13 of its dump, at its (Ll line",
+        ),
+        (
+            "(ConstInt t0 7)",
+            "(ConstInt t0 8)",
+            "at line 10 of its dump, function \"g.1\", block bb0, statement 0",
+        ),
+        // The next root's part, with no `.ll` walked.
+        (
+            "(Ll error \"float remainder",
+            "(Ll error \"Float remainder",
+            "b.nova, at line 6 of its dump, at its (Ll line",
+        ),
+        (
+            "async=false\n    (Block bb0\n      (Return _)))",
+            "async=false\n    (Block bb0\n      (Return t0)))",
+            "b.nova, at line 4 of its dump, function \"main\", block bb0, statement 0",
+        ),
+    ] {
+        let text = reported(from, to);
+        let first = text.lines().next().unwrap_or("");
+        assert!(
+            first.starts_with("the dumps differ in ") && first.ends_with(at),
+            "{at}: {text}"
+        );
+    }
+    // N leaves the `.ll` out: the report is at S0's `(Ll` line.
+    let text = reported(
+        "(Diagnostics)\n(Ll error",
+        "(Diagnostics)\n== c.nova\n(Ll error",
+    );
+    assert!(
+        text.starts_with("the dumps differ in b.nova, at line 6 of its dump, at its (Ll line\n"),
+        "{text}"
+    );
 }
 
 // --- 5.1b: the AST dump, the depth limit and S0's thread (ADR 0052) ---
@@ -4971,12 +5171,6 @@ const MIR_S0: &[&str] = &["check", "--dump-mir"];
 /// after form wherever the harness runs it.
 const MIR_LL_S0: &[&str] = &["check", "--dump-mir", "--ll"];
 
-/// Whether N prints the `.ll`, `selfhost mir --ll` (5.5a, spec §5.1): not
-/// yet, so N's after form runs without `--ll`, S0's is compared without its
-/// `(Ll` parts ([`as_n_prints`]), and the `.ll` is checked on S0 alone
-/// ([`check_ll`], [`every_form_the_emitter_handles_occurs_in_the_compared_ll`]).
-const N_LL: bool = false;
-
 /// The words of the one emitter error a program reaches, float `%`, which
 /// type-checks and which the emitter refuses (5.5a, spec §2 item 5).
 const FLOAT_REMAINDER_WORDS: &str = "float remainder (%) is not supported by the LLVM backend";
@@ -4988,8 +5182,8 @@ const FLOAT_REMAINDER_CASE: &str = "ll_a_float_remainder_errs.nova";
 /// --before-async`.
 const MIR_BEFORE_S0: &[&str] = &["check", "--dump-mir", "--before-async"];
 
-/// N's MIR dump, `selfhost mir --std DIR [--before-async]` (spec 5.4
-/// §6.3).
+/// N's MIR dump, `selfhost mir --std DIR [--before-async | --ll]` (spec
+/// 5.4 §6.3, 5.5a §5.1).
 const MIR_N: &[&str] = &["mir"];
 
 /// The MIR dump's two forms (spec 5.4 §3.1, §7.2): after the async
@@ -5012,9 +5206,8 @@ impl MirForm {
 }
 
 /// The MIR dump through both sides in `form`: S0's `check --dump-mir`,
-/// and N's `mir --std DIR`, each with `--before-async` for the before form,
-/// S0's with `--ll` for the after form, and N's too once it prints the
-/// `.ll` ([`N_LL`]), followed by the roots.
+/// and N's `mir --std DIR`, each with `--before-async` for the before form
+/// and with `--ll` for the after form, followed by the roots.
 fn mir_in(form: MirForm) -> &'static Dump {
     static DUMPS: [OnceLock<Dump>; 2] = [OnceLock::new(), OnceLock::new()];
     DUMPS[form as usize].get_or_init(|| {
@@ -5023,7 +5216,7 @@ fn mir_in(form: MirForm) -> &'static Dump {
         if form == MirForm::Before {
             n.push("--before-async");
         }
-        if form == MirForm::After && N_LL {
+        if form == MirForm::After {
             n.push("--ll");
         }
         Dump {
@@ -5106,37 +5299,28 @@ fn mir_dump_in(form: MirForm, with_n: bool, dir: &Path, files: &[String], code: 
 /// header or the end: no line of 5.4's grammar starts `(Ll`, and no `.ll`
 /// line starts `(` or `== ` (spec §4).
 fn split_ll(dump: &str) -> (String, String) {
-    let (mir, ll) = split_ll_bytes(dump.as_bytes());
-    (
-        String::from_utf8(mir).expect("the MIR dump is UTF-8"),
-        String::from_utf8(ll).expect("the .ll is UTF-8"),
-    )
-}
-
-/// [`split_ll`] on bytes, as the sides' outputs are compared.
-fn split_ll_bytes(dump: &[u8]) -> (Vec<u8>, Vec<u8>) {
-    let (mut mir, mut ll) = (Vec::with_capacity(dump.len()), Vec::new());
+    let (mut mir, mut ll) = (String::with_capacity(dump.len()), String::new());
     let mut in_ll = false;
-    for line in dump.split_inclusive(|&b| b == b'\n') {
-        if line.starts_with(b"== ") {
+    for line in dump.split_inclusive('\n') {
+        if line.starts_with("== ") {
             in_ll = false;
-            mir.extend_from_slice(line);
-            ll.extend_from_slice(line);
+            mir.push_str(line);
+            ll.push_str(line);
             continue;
         }
-        in_ll |= line.starts_with(b"(Ll ");
+        in_ll |= line.starts_with("(Ll ");
         if in_ll {
-            ll.extend_from_slice(line);
+            ll.push_str(line);
         } else {
-            mir.extend_from_slice(line);
+            mir.push_str(line);
         }
     }
     (mir, ll)
 }
 
-/// The `.ll` parts of S0's after form on S0 alone (5.5a, spec §4, §6.2):
-/// `mir` and `ll` as [`split_ll`] gives them, the same roots in the same
-/// order. A root's `(Ll` part is there exactly when its `(Mir` line says
+/// The `.ll` parts of S0's after form (5.5a, spec §4, §6.2), which N's
+/// equal: `mir` and `ll` as [`split_ll`] gives them, the same roots in the
+/// same order. A root's `(Ll` part is there exactly when its `(Mir` line says
 /// `lowered=true`; it is `(Ll ok)` and the `.ll`, ending in a line break,
 /// or one line `(Ll error "…")`, which only [`FLOAT_REMAINDER_CASE`] gives,
 /// with [`FLOAT_REMAINDER_WORDS`].
@@ -5540,8 +5724,8 @@ fn every_run_of_a_mir_dump_settles_e0004s_paths_on_windows() {
 /// spec §3.1, §6.3): no root, `--target` either way, `--test`,
 /// `--before-async` twice and std's part (S0's `--std`, N's `--std-part`)
 /// exit 2 with nothing on stdout; since 5.5a, `--ll` twice, with a value,
-/// and with `--before-async` in either order too (spec 5.5a §6.2), which N
-/// refuses today as any option it does not take.
+/// and with `--before-async` in either order too (spec 5.5a §6.2), N
+/// printing its usage line for each.
 #[test]
 fn both_sides_refuse_the_mir_dumps_shapes_alike() {
     let file = "tests/runtime/array_helpers.nova";
@@ -5560,6 +5744,12 @@ fn both_sides_refuse_the_mir_dumps_shapes_alike() {
         };
         let out = compare_batch(&dump, &root(), &[], 2, &nova(), selfhost());
         assert_eq!(out, Ok(String::new()), "{extra:?}");
+        let refused = run(selfhost(), dump.n, &root(), &[]).expect("run N");
+        assert_eq!(
+            refused.stderr.replace("\r\n", "\n"),
+            "usage: selfhost mir --std DIR [--before-async | --ll] FILE...\n",
+            "{extra:?}"
+        );
     }
     for form in [MirForm::After, MirForm::Before] {
         let n = mir_in(form).n;
@@ -6492,8 +6682,8 @@ fn the_mir_fuzzers_inputs_agree_and_hold_each_kind() {
     );
 }
 
-/// N's MIR on its own stack (5.4, spec §7.5, ADR 0057): N's `selfhost mir`
-/// on a main thread of 1 MB, as
+/// N's MIR on its own stack (5.4, spec §7.5, ADR 0057): N's `selfhost mir`,
+/// since 5.5a with `--ll` (spec 5.5a §6.1), on a main thread of 1 MB, as
 /// [`n_checks_128_levels_of_every_kind_on_a_1_mb_main_thread`] runs N's
 /// type checker, its dump S0's, which S0 makes on its 64 MB thread. The
 /// type checker's deep bodies, every kind of [`fuzz::BODY_DEEP_KINDS`] at
@@ -6503,7 +6693,7 @@ fn the_mir_fuzzers_inputs_agree_and_hold_each_kind() {
 /// [`fuzz::MIR_DEEP_TYPES`], 128 levels deep, as an instance's type
 /// argument ([`fuzz::mir_deep_type`]), so that `mangle_ty` and the
 /// substitution walk it. Each lowers clean; none makes a poll function, so
-/// the after form is the only one to compare.
+/// the after form, its `.ll` included, is the only one to compare.
 #[test]
 fn n_lowers_the_depth_cases_on_a_1_mb_main_thread() {
     let dir = fresh_dir("deep-n-mir");
@@ -6550,15 +6740,16 @@ fn n_lowers_the_depth_cases_on_a_1_mb_main_thread() {
         };
         assert!(walked, "{root}: {part}");
     }
-    let std_dir = std_dir();
-    let mut args = MIR_N.to_vec();
-    args.extend(["--std", std_dir.as_str()]);
+    let mut args = mir_in(MirForm::After).n.to_vec();
     args.extend(files.iter().map(String::as_str));
     let stack = if cfg!(unix) { Some(1024) } else { None };
     let (code, n) = n_args_on_stack(&dir, stack, &args);
-    assert_eq!(code, Some(0), "N's `selfhost mir` on a {stack:?} KB stack");
-    let s0 = as_n_prints(mir_in(MirForm::After), &s0.stdout);
-    if let Some(m) = first_difference(&s0, &n) {
+    assert_eq!(
+        code,
+        Some(0),
+        "N's `selfhost mir --ll` on a {stack:?} KB stack"
+    );
+    if let Some(m) = first_difference(&s0.stdout, &n) {
         panic!(
             "{}",
             report(&m, mir_in(MirForm::After), &dir, &nova(), selfhost())
@@ -6567,10 +6758,14 @@ fn n_lowers_the_depth_cases_on_a_1_mb_main_thread() {
     // The stack is the one set: `bodies-for-ranges-127.nova`, whose least
     // stack is about 212 KB (ADR 0057 §17), fails on 96 KB.
     if cfg!(unix) {
-        let mut args = MIR_N.to_vec();
-        args.extend(["--std", std_dir.as_str(), "bodies-for-ranges-127.nova"]);
+        let mut args = mir_in(MirForm::After).n.to_vec();
+        args.push("bodies-for-ranges-127.nova");
         let (code, _) = n_args_on_stack(&dir, Some(96), &args);
-        assert_ne!(code, Some(0), "N's `selfhost mir` passed on a 96 KB stack");
+        assert_ne!(
+            code,
+            Some(0),
+            "N's `selfhost mir --ll` passed on a 96 KB stack"
+        );
     }
 }
 
