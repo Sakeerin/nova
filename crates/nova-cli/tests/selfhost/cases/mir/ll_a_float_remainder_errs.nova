@@ -1,0 +1,5 @@
+fn main() {
+    let a = 5.5
+    let b = 2.0
+    println("${a % b}")
+}
