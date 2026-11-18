@@ -855,6 +855,25 @@ corpus programs) and programs nested 128 levels deep, which N lowers on
 a 1 MB stack. WASM's and test mode's MIR stay S0's. From here a change
 to MIR changes both compilers in one pull request.
 
+**Amended 2026-11-18 (branch `claude/loving-archimedes-frtf5q-55`, ADR
+0058):** step 5's backend is the textual LLVM IR of ADR 0048, not
+bindings, and it is ported in two parts
+(`docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`):
+5.5a, the `.ll` emitter, and 5.5b, the driver, linking and the golden
+suite built by stage1. 5.5a: `selfhost/` emits a program's LLVM IR from
+its native MIR as `nova-codegen-llvm` does, with `RtFunc`'s symbols and
+signatures and the emitter's errors in S0's words, and `selfhost mir
+--ll` prints each lowered root's `.ll` after its MIR, as S0's hidden
+`nova check --dump-mir --ll` does. The differential compares them byte
+for byte wherever it compares the MIR after the async transform: the
+corpus roots that run, the HIR cases that reach MIR, MIR's cases with
+both line endings (`ir_tests.rs`'s sources and a float `%` case among
+them), the MIR fuzzer's programs and programs nested 128 levels deep,
+which N emits on a 1 MB stack. No `clang` is needed: N is still built by
+S0's Cranelift backend. From here a change to the emitter, to
+`RtFunc`'s symbols or signatures, or to the runtime's ABI as the emitter
+spells it changes both compilers in one pull request.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)
