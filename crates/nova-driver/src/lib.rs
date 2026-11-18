@@ -2382,9 +2382,8 @@ mod ll_dumps {
             ),
             (
                 "extern.nova",
-                "extern \"C\" fn cbrt(x: Float) -> Float\n\
-                 fn main() {\n    let f = |x: Float| cbrt(x) * 2.0\n    \
-                 println(\"${[1.0, 8.0].map(f)}\")\n}\n",
+                "extern \"C\" {\n    fn cbrt(x: Float) -> Float\n}\nfn main() {\n    \
+                 let k = 2.0\n    let f = |x: Float| cbrt(x) * k\n    println(\"${f(8.0)}\")\n}\n",
             ),
             (
                 "frem.nova",
