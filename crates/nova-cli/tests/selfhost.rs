@@ -6809,6 +6809,10 @@ fn the_ll_dump_is_what_build_release_writes() {
                 .env("NOVA_CLANG", &missing)
                 .env("NOVA_LLC", &missing)
                 .env("NOVA_HOME", &home)
+                // CI sets `RUST_BACKTRACE=1`, under which the error's
+                // backtrace follows its words on stderr.
+                .env("RUST_BACKTRACE", "0")
+                .env("RUST_LIB_BACKTRACE", "0")
                 .stdin(Stdio::null()),
             CHILD_LIMIT,
             &format!("nova build --release {file}"),
