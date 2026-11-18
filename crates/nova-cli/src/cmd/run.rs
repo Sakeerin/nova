@@ -546,11 +546,13 @@ impl DumpKind {
 /// differential test. Hidden, with no stability promise, taken as
 /// [`DumpResolutionCmd`] is, only when `--dump-mir` is the first argument
 /// after `check`, by this parser of its own: after the flag it takes
-/// `--before-async` and files, `--` before a file that starts with `-`,
-/// the option once; it refuses everything else, `--std`, `--target`,
-/// `--test`, `--help` and `-h` included, in clap's words under the usage
-/// `nova check --dump-mir`. MIR has no std part, and the WASM target's and
-/// test mode's MIR are not compared.
+/// `--before-async`, `--ll` (5.5a, spec
+/// `docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`
+/// §3.1) and files, `--` before a file that starts with `-`, each option
+/// once; it refuses everything else, `--std`, `--target`, `--test`,
+/// `--help` and `-h` included, in clap's words under the usage `nova check
+/// --dump-mir`. MIR has no std part, and the WASM target's and test mode's
+/// MIR are not compared.
 #[derive(clap::Parser)]
 #[command(
     name = "nova check --dump-mir",
@@ -563,6 +565,11 @@ pub struct DumpMirCmd {
     /// The module as lowering left it, before the async transform.
     #[arg(long)]
     before_async: bool,
+
+    /// After the MIR of each root that lowered, its LLVM IR, as `build
+    /// --release` writes it. Not with `--before-async`.
+    #[arg(long)]
+    ll: bool,
 
     /// Each a program's root. Taken as they are, so that an empty one is a
     /// file that is not there.
@@ -630,8 +637,9 @@ impl DumpCmd {
 /// `--test` and `--target wasm`, with neither a file nor `--std`, or with
 /// both, it prints one line to stderr, nothing to stdout, and exits 2, as
 /// N does. The MIR dump (5.4) takes files alone, `--before-async` the
-/// module before the async transform; with no file it prints one line to
-/// stderr and exits 2.
+/// module before the async transform, `--ll` each lowered root's `.ll`
+/// after its MIR (5.5a); with no file, or with `--ll` and
+/// `--before-async`, it prints one line to stderr and exits 2.
 pub fn dump(cmd: DumpCmd) -> Result<()> {
     let code = match &cmd {
         DumpCmd::Front { kind, args } => dump_code(*kind, args)?,
@@ -647,12 +655,17 @@ pub fn dump(cmd: DumpCmd) -> Result<()> {
 type DumpOne = dyn Fn(&Path) -> std::io::Result<String>;
 
 fn dump_mir_code(args: &DumpMirCmd) -> Result<i32> {
+    // The emitter reads the after form alone (5.5a, spec §3.1).
+    if args.ll && args.before_async {
+        eprintln!("error: --dump-mir --ll takes no --before-async");
+        return Ok(2);
+    }
     if args.files.is_empty() {
         eprintln!("error: --dump-mir needs a FILE");
         return Ok(2);
     }
     // std is parsed, resolved and checked once for every program.
-    let dumps = nova_driver::MirDumps::new(args.before_async);
+    let dumps = nova_driver::MirDumps::new(args.before_async, args.ll);
     dump_files(&args.files, &move |file| dumps.dump(file))
 }
 
