@@ -6164,6 +6164,44 @@ fn every_form_the_emitter_handles_occurs_in_the_compared_ll() {
     }
     let runtime = runtime.expect("a .ll");
     assert!(runtime.len() >= 100, "{} runtime functions", runtime.len());
+    // The `.ll`'s size by set, N's root apart from the packages'.
+    let size = |parts: &[(String, String)]| {
+        let lines: usize = parts.iter().map(|(_, ll)| ll.lines().count()).sum();
+        let bytes: usize = parts.iter().map(|(_, ll)| ll.len()).sum();
+        format!("{} roots, {lines} lines, {bytes} bytes", parts.len())
+    };
+    let (n_root, packages): (Vec<_>, Vec<_>) = parts_by_root(&packages.2)
+        .into_iter()
+        .filter(|(_, ll)| !ll.is_empty())
+        .partition(|(root, _)| root == "selfhost/src/main.nova");
+    let printed = |ll: &str| -> Vec<(String, String)> {
+        parts_by_root(ll)
+            .into_iter()
+            .filter(|(_, ll)| !ll.is_empty())
+            .collect()
+    };
+    let in_cases = parts_by_root(&cases.ll);
+    eprintln!(
+        "the .ll by set: loose programs {}; packages' mains but N's {}; N's root {}; HIR cases \
+         {}; MIR cases {}",
+        size(&printed(&loose.2)),
+        size(&packages),
+        size(&n_root),
+        size(
+            &in_cases[..cases.hir]
+                .iter()
+                .filter(|(_, l)| !l.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+        ),
+        size(
+            &in_cases[cases.hir..]
+                .iter()
+                .filter(|(_, l)| !l.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+        ),
+    );
     assert!(
         roots >= 600 && errors == 1,
         "{roots} roots, {errors} errors"
@@ -6554,7 +6592,7 @@ fn the_ll_dump_is_what_build_release_writes() {
     let mir = "crates/nova-cli/tests/selfhost/cases/mir";
     let files: Vec<String> = [
         "tests/runtime/generics.nova".to_string(),
-        "examples/01-hello-world/src/main.nova".to_string(),
+        "examples/05-geometry/src/main.nova".to_string(),
         "tests/runtime/async_tasks.nova".to_string(),
         "tests/runtime/extern_ffi.nova".to_string(),
         format!("{mir}/mir_every_native_form.nova"),
