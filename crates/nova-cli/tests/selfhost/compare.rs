@@ -1,7 +1,8 @@
 //! The comparison of S0's and N's dumps, and the report of the first place
 //! they differ: the file, the line of its dump and of its source (in a MIR
-//! dump, which has no spans, its function, block and statement), both
-//! sides' lines, and how to reproduce it.
+//! dump, which has no spans, its function, block and statement; in a
+//! root's `.ll`, its line there, `define` and block), both sides' lines,
+//! and how to reproduce it.
 
 use std::path::Path;
 
@@ -122,7 +123,12 @@ pub fn first_difference(s0: &[u8], n: &[u8]) -> Option<Mismatch> {
 /// depth 0 the root's `(Mir` line and `(Diagnostics`; at depth 1 a
 /// `(Function` line, or an `(Extern` or a diagnostic's `(Error`; at depth 2
 /// a function's `(Temp` and `(Block` lines; at depth 3 a block's
-/// statements, then its terminator.
+/// statements, then its terminator. Since 5.5a (spec
+/// `docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`
+/// §6.4), a depth-0 line `(Ll ok)` enters the root's `.ll`, which runs to
+/// the next header, its lines counted from 1: a `define` line enters a
+/// function, a label (`entry:`, `bb<n>:`) a block, and `}` leaves the
+/// function.
 #[derive(Clone, Default)]
 struct MirWalk {
     /// Whether the part is a MIR root's: its first line starts `(Mir `.
@@ -134,15 +140,43 @@ struct MirWalk {
     block: Option<String>,
     /// The block's statement lines walked, its terminator counted as one.
     statements: usize,
+    /// In the root's `.ll`, the lines of it walked; `None` before it.
+    ll_lines: Option<usize>,
+    /// The `.ll` function the last line walked is in, as its `define`
+    /// names it ([`define_name`]); `None` outside any.
+    define: Option<String>,
+    /// The `.ll` block the last line walked is in, its label without the
+    /// colon; `None` outside any.
+    label: Option<String>,
 }
 
 impl MirWalk {
     /// Walk `line`, line `dump_line` of the root's part.
     fn step(&mut self, dump_line: usize, line: &[u8]) {
         if dump_line == 1 {
-            self.mir = line.starts_with(b"(Mir ");
+            *self = MirWalk {
+                mir: line.starts_with(b"(Mir "),
+                ..MirWalk::default()
+            };
         }
         if !self.mir {
+            return;
+        }
+        if let Some(lines) = self.ll_lines {
+            self.ll_lines = Some(lines + 1);
+            let (define, label) = self.ll_place(line);
+            self.define = define;
+            self.label = label;
+            if line.strip_suffix(b"\n").unwrap_or(line) == b"}" {
+                self.define = None;
+                self.label = None;
+            }
+            return;
+        }
+        if line.strip_suffix(b"\n").unwrap_or(line) == b"(Ll ok)" {
+            self.ll_lines = Some(0);
+            self.function = None;
+            self.block = None;
             return;
         }
         let line = text(line);
@@ -182,7 +216,11 @@ impl MirWalk {
     /// - a block's header: the function and that block;
     /// - a statement or a terminator: the function, the block, and its
     ///   index in the block from 0, as `Block::stmts` counts, the
-    ///   terminator after the last statement.
+    ///   terminator after the last statement;
+    /// - the `(Ll` line, `(Ll ok)` or `(Ll error`: "at its (Ll line";
+    /// - a line of the root's `.ll` (5.5a): its line there, and the
+    ///   function and block it is in ([`MirWalk::ll_place`]), or "outside
+    ///   any define".
     ///
     /// `None` for a part that is not a MIR root's, and at a header: the next
     /// root's `== FILE` line, where one side printed a line more than the
@@ -199,6 +237,17 @@ impl MirWalk {
         if !self.mir {
             return None;
         }
+        if let Some(lines) = self.ll_lines {
+            let at = lines + 1;
+            return Some(match self.ll_place(line) {
+                (None, _) => format!("line {at} of its .ll, outside any define"),
+                (Some(f), None) => format!("line {at} of its .ll, define {f}"),
+                (Some(f), Some(b)) => format!("line {at} of its .ll, define {f}, block {b}"),
+            });
+        }
+        if line.starts_with(b"(Ll ") {
+            return Some("at its (Ll line".to_string());
+        }
         let mut at = self.clone();
         at.step(dump_line, line);
         let depth = line.iter().take_while(|&&b| b == b' ').count() / 2;
@@ -211,6 +260,35 @@ impl MirWalk {
                 format!("function {f}, block {b}, statement {}", self.statements)
             }
         })
+    }
+
+    /// The `.ll` function and block `line` of the root's `.ll` is in, after
+    /// the lines walked: a `define` line's own function and no block; a
+    /// label's function and its own block; any other line's the walk's.
+    fn ll_place(&self, line: &[u8]) -> (Option<String>, Option<String>) {
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.starts_with(b"define ") {
+            return (Some(define_name(&text(line))), None);
+        }
+        if self.define.is_some() && !line.starts_with(b" ") && line.ends_with(b":") {
+            let label = text(&line[..line.len() - 1]);
+            return (self.define.clone(), Some(label));
+        }
+        (self.define.clone(), self.label.clone())
+    }
+}
+
+/// The function a `.ll` `define` line names: its symbol as it is quoted,
+/// `"g.1"` for `@"g.1"`, or as it is, `main` for the C entry wrapper's
+/// `@main`.
+fn define_name(line: &str) -> String {
+    let symbol = line.split_once('@').map_or("", |(_, rest)| rest);
+    match symbol
+        .strip_prefix('"')
+        .and_then(|rest| rest.split_once('"'))
+    {
+        Some((quoted, _)) => format!("\"{quoted}\""),
+        None => symbol.split('(').next().unwrap_or(symbol).to_string(),
     }
 }
 

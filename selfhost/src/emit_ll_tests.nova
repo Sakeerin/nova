@@ -1,0 +1,200 @@
+// N's own tests of the `.ll` emitter (5.5a, spec
+// docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md
+// §5.1): the escape of each byte class, `float_hex` of `-0.0`, a NaN and
+// numbers with exponents, `ret_of`'s duplicate key and a missing callee,
+// the runtime functions' symbols distinct (nova-mir's `rt_func_tests`)
+// and each declared as its signature says, and each of the emitter's
+// errors in S0's words on a module built by hand. The `.ll` differential
+// compares everything else with S0, and these pin what it may not reach:
+// no input has a symbol both a function and an extern, and only float `%`
+// of the errors is reachable from source.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import emit_ll
+import hir
+import mir
+
+// A module of one function, `name`, returning nothing, with `temps` and
+// one block of `stmts`; and `externs`.
+fn module_of(name: String, temps: [Int], stmts: [MirStmt], externs: [ExternDecl]) -> MirModule {
+    let f = MirFunction {
+        name: name,
+        params: 0,
+        takes_env: false,
+        capture_count: 0,
+        temps: Vec::from_array(temps),
+        ret: MIR_UNIT,
+        is_async: false,
+        blocks: Vec::from_array([MirBlock { stmts: Vec::from_array(stmts), term: TermReturn(-1) }]),
+    }
+    MirModule { functions: Vec::from_array([f]), externs: Vec::from_array(externs) }
+}
+
+// `main` applying `op` to two floats.
+fn float_bin(op: HirBinOp) -> MirModule {
+    module_of(
+        "main",
+        [MIR_F64, MIR_F64, MIR_F64],
+        [SConstFloat(0, 1.5), SConstFloat(1, 2.0), SBin(2, op, OC_FLOAT, 0, 1)],
+        [],
+    )
+}
+
+fn escaped(text: String) -> String {
+    let mut out = StringBuilder::new()
+    escape_bytes(out, text)
+    out.to_string()
+}
+
+fn ir_of(program: MirModule) -> String {
+    match compile_ir(program) {
+        Ok(text) => text
+        Err(e) => panic("the emitter refused a module it takes: ${e}")
+    }
+}
+
+@test
+fn escape_bytes_writes_each_byte_class_as_s0_does() {
+    // Printable ASCII is kept, the space and `~` at its two ends.
+    assert_eq(escaped(" az AZ 09 ~"), " az AZ 09 ~")
+    // `"` and `\`, two uppercase digits and no `x`.
+    assert_eq(escaped("say \"hi\" a\\b"), "say \\22hi\\22 a\\5Cb")
+    // Control bytes, NUL and DEL.
+    assert_eq(escaped("\t\n\r"), "\\09\\0A\\0D")
+    assert_eq(
+        escaped(string_from_chars([char_from_int(0).unwrap(), char_from_int(31).unwrap()])),
+        "\\00\\1F",
+    )
+    assert_eq(escaped(string_from_chars([char_from_int(127).unwrap()])), "\\7F")
+    // Each byte past ASCII on its own, uppercase: `é` is C3 A9, `─` E2 94 80.
+    assert_eq(escaped("café ─"), "caf\\C3\\A9 \\E2\\94\\80")
+    assert_eq(escaped(""), "")
+}
+
+@test
+fn float_hex_is_the_bits_in_16_uppercase_digits() {
+    assert_eq(float_hex(0.0), "0x0000000000000000")
+    assert_eq(float_hex(-0.0), "0x8000000000000000")
+    assert_eq(float_hex(1.5), "0x3FF8000000000000")
+    assert_eq(float_hex("NaN".parse_float().unwrap()), "0x7FF8000000000000")
+    assert_eq(float_hex("1e300".parse_float().unwrap()), "0x7E37E43C8800759C")
+    assert_eq(float_hex("2.5e-308".parse_float().unwrap()), "0x0011FA182C40C60D")
+    assert_eq(float_hex("-inf".parse_float().unwrap()), "0xFFF0000000000000")
+}
+
+@test
+fn a_symbol_both_a_function_and_an_extern_returns_the_externs_class() {
+    // `ret_of` takes the functions, then the externs: an extern's class
+    // replaces a function's of the same symbol, as S0's `collect` keeps
+    // the last. `both` is an `I64` function and an `F64` extern.
+    let both = MirFunction {
+        name: "both",
+        params: 0,
+        takes_env: false,
+        capture_count: 0,
+        temps: Vec::from_array([MIR_I64]),
+        ret: MIR_I64,
+        is_async: false,
+        blocks: Vec::from_array(
+            [MirBlock { stmts: Vec::from_array([SConstInt(0, 7)]), term: TermReturn(0) }],
+        ),
+    }
+    let main = module_of(
+        "main",
+        [MIR_F64, MIR_UNIT],
+        [SCall(0, "both", Vec::new()), SCall(-1, "nowhere", Vec::new())],
+        [ExternDecl { symbol: "both", abi: ExternAbiC, params: Vec::new(), ret: MIR_F64 }],
+    )
+    let program = MirModule {
+        functions: Vec::from_array([main.functions.at(0), both]),
+        externs: main.externs,
+    }
+    let text = ir_of(program)
+    assert(
+        text.contains("\n  %r0 = call double @\"both\"()\n  store double %r0, ptr %t0.slot\n"),
+        text,
+    )
+    // A callee `ret_of` lacks is `Unit`: a call with no result.
+    assert(text.contains("\n  call void @\"nowhere\"()\n  ret void\n}\n"), text)
+    assert(text.contains("\ndeclare double @\"both\"()\n\n"), text)
+    assert(text.contains("\ndefine i64 @\"both\"() {\nentry:\n  %t0.slot = alloca i64\n"), text)
+}
+
+@test
+fn every_runtime_function_has_a_distinct_symbol_and_its_signatures_declaration() {
+    let count = RT_FUNC_VARIANTS.len()
+    assert(
+        RT_FUNC_SIGNATURES.len() == count,
+        "${RT_FUNC_SIGNATURES.len()} signatures for ${count} variants",
+    )
+    let mut seen: Map<String, Int> = Map::new()
+    for f in 0..count {
+        let symbol = rt_func_symbol(f)
+        match seen.get(symbol) {
+            Some(g) => panic(
+                "`${RT_FUNC_VARIANTS[g]}` and `${RT_FUNC_VARIANTS[f]}` are both `${symbol}`",
+            )
+            None => ()
+        }
+        let _ = seen.insert(symbol, f)
+        assert(symbol.starts_with("nova_rt_"), symbol)
+        // Every signature reads, and its declaration spells it.
+        let _ = rt_func_signature(f)
+    }
+    assert_eq(rt_func_decl(rt_func("Println")), "declare void @nova_rt_println(ptr)")
+    assert_eq(rt_func_decl(rt_func("TestSelector")), "declare i64 @nova_rt_test_selector()")
+    assert_eq(rt_func_decl(rt_func("FloatFixed")), "declare ptr @nova_rt_float_fixed(double, i64)")
+    assert_eq(
+        rt_func_decl(rt_func("FileOpen")),
+        "declare i64 @nova_rt_file_open(ptr, i8, i8, i8, i8, i8, i8)",
+    )
+    assert_eq(rt_func_decl(rt_func("NetConnect")), "declare ptr @nova_rt_net_connect_future(ptr)")
+    assert_eq(
+        rt_func_decl(rt_func("RouterStateStore")),
+        "declare void @nova_rt_router_state_store(ptr)",
+    )
+}
+
+@test
+fn a_small_module_is_the_header_its_function_and_the_c_main() {
+    let text = ir_of(module_of("main", [MIR_UNIT], [], []))
+    assert(
+        text.starts_with(
+            "; LLVM IR emitted by the Nova compiler (release backend).\n; Requires LLVM >= 15 (opaque pointers).\n\ndeclare void @llvm.trap()\ndeclare void @nova_rt_println(ptr)\n",
+        ),
+        text,
+    )
+    assert(
+        text.ends_with(
+            "declare ptr @nova_rt_str_new(ptr, i64)\n\ndefine void @\"nova_main\"() {\nentry:\n  br label %bb0\nbb0:\n  ret void\n}\n\n\ndefine i32 @main(i32 %argc, ptr %argv) {\nentry:\n  call void @nova_main()\n  ret i32 0\n}\n",
+        ),
+        text,
+    )
+}
+
+@test
+fn each_error_of_the_emitter_is_in_s0s_words() {
+    let awaits = module_of("main", [MIR_PTR], [SAwait(-1, 0)], [])
+    let cases = [
+        (
+            awaits,
+            "an `.await` marker reached codegen: `nova-mir`'s async state-machine transform must split every `async fn` body at its await points before a module is emitted",
+        ),
+        (float_bin(OpRem), "float remainder (%) is not supported by the LLVM backend"),
+        (float_bin(OpBitAnd), "bitwise operators are not defined for Float"),
+        (float_bin(OpShl), "bitwise operators are not defined for Float"),
+        (module_of("helper", [MIR_UNIT], [], []), "no `main` function in MIR module"),
+    ]
+    for (program, words) in cases.iter() {
+        match compile_ir(program) {
+            Ok(_) => panic("the emitter took a module it refuses: ${words}")
+            Err(e) => assert_eq(e, words)
+        }
+    }
+    // The float operators it takes.
+    let text = ir_of(float_bin(OpAdd))
+    assert(text.contains("\n  store double 0x3FF8000000000000, ptr %t0.slot\n"), text)
+    assert(text.contains("\n  %r2 = fadd double %r0, %r1\n"), text)
+}
