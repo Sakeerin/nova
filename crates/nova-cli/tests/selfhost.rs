@@ -105,6 +105,16 @@
 //! equals `build --release`'s intermediate on a few programs. A
 //! difference in it is reported by its line, `define` and block.
 //!
+//! 5.5b (spec
+//! `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
+//! §6.2): N's `selfhost build FILE -o OUT --release --std DIR` writes the
+//! `.ll`, runs `clang` and `cc` on it and leaves a binary.
+//! [`s1_builds_the_golden_suite`], ignored here and run by CI's Selfhost
+//! job on its Linux leg, builds every golden program `release_golden_suite`
+//! walks with it, runs each with the tables both files include
+//! (`golden/shared.rs`), and holds each binary equal to S0 `build
+//! --release`'s, byte for byte.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -123,6 +133,8 @@
 mod compare;
 #[path = "selfhost/fuzz.rs"]
 mod fuzz;
+#[path = "golden/shared.rs"]
+mod golden;
 
 use std::env::consts::EXE_SUFFIX;
 use std::io::Read;
@@ -134,6 +146,10 @@ use std::time::{Duration, Instant};
 
 use compare::{first_difference, report, settle_paths, Dump, AST, TOKENS};
 use fuzz::SplitMix64;
+use golden::{
+    golden_dir, golden_programs, quoted_stderr, run_golden, run_within_limit,
+    RELEASE_GOLDEN_EXCLUDED,
+};
 
 /// How many files one process lexes.
 const BATCH: usize = 50;
@@ -6846,4 +6862,211 @@ fn the_ll_dump_is_what_build_release_writes() {
             "{file}"
         );
     }
+}
+
+/// The runtime both sides of [`s1_builds_the_golden_suite`] link: the one
+/// S1 links, so that S0's binary can equal S1's. `NOVA_RUNTIME_LIB` when it
+/// is set; else the one [`build_selfhost`] unpacked into its fresh
+/// `NOVA_HOME`, from a `nova` that carries a runtime, as CI's does
+/// (`NOVA_EMBED_RUNTIME=1`), which must be the only one there; else the one
+/// beside S0, where cargo leaves it in a checkout.
+fn golden_runtime() -> PathBuf {
+    if let Some(lib) = std::env::var_os("NOVA_RUNTIME_LIB") {
+        return PathBuf::from(lib);
+    }
+    let name = "libnova_runtime.a";
+    let unpacked = std::env::temp_dir()
+        .join("nova-selfhost-home")
+        .join("runtime");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&unpacked)
+        .map(|entries| {
+            entries
+                .map(|e| e.expect("read a directory entry").path().join(name))
+                .filter(|lib| lib.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    match found.len() {
+        0 => {
+            let beside = nova().parent().expect("nova's directory").join(name);
+            assert!(
+                beside.is_file(),
+                "no runtime for the golden walk: NOVA_RUNTIME_LIB is not set, \
+                 {} holds none, and none is beside S0 at {}",
+                unpacked.display(),
+                beside.display()
+            );
+            beside
+        }
+        1 => found.remove(0),
+        _ => panic!(
+            "{} holds more than one runtime: {found:?}",
+            unpacked.display()
+        ),
+    }
+}
+
+/// Golden program `name`'s two binaries, `s0` and `s1`, the same byte for
+/// byte, or where they first differ.
+fn same_binaries(s0: &Path, s1: &Path) -> Result<(), String> {
+    let a = std::fs::read(s0).map_err(|e| format!("cannot read {}: {e}", s0.display()))?;
+    let b = std::fs::read(s1).map_err(|e| format!("cannot read {}: {e}", s1.display()))?;
+    if a == b {
+        return Ok(());
+    }
+    let at = a
+        .iter()
+        .zip(&b)
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()));
+    Err(format!(
+        "S1's binary differs from S0's: {} bytes against S0's {}, first at offset {at}",
+        b.len(),
+        a.len()
+    ))
+}
+
+/// The golden suite built by S1's own `build` (spec
+/// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
+/// §6.2; decisions 1, 7 and 8a): every program `release_golden_suite`
+/// walks, built by `selfhost build SRC -o DIR/s1/NAME --release --std
+/// STD` and by S0's `nova build --release SRC -o DIR/s0/NAME`, one
+/// basename, so one `NAME.nova.ll`, and one runtime ([`golden_runtime`])
+/// for both; S1's binary run with the tables' standard input and variables
+/// must print its `.stdout` and exit with its status, and must equal S0's
+/// byte for byte. Four at a time; each pair of binaries is removed once
+/// compared, and the directory at the end.
+///
+/// It needs `clang` (`NOVA_CLANG`, or `clang`): without one it says so and
+/// passes, but under `NOVA_REQUIRE_CLANG=1` it fails. CI's Selfhost job
+/// runs it on its Linux leg, in a step of its own after this file's, with
+/// `clang-18` installed there, so the main step's time is untouched.
+#[test]
+#[ignore = "needs clang; the Selfhost job's Linux step runs it"]
+fn s1_builds_the_golden_suite() {
+    let required = std::env::var("NOVA_REQUIRE_CLANG").as_deref() == Ok("1");
+    let clang = std::env::var("NOVA_CLANG").unwrap_or_else(|_| "clang".to_string());
+    let Ok(probe) = Command::new(&clang).arg("--version").output() else {
+        assert!(
+            !required,
+            "NOVA_REQUIRE_CLANG=1, but `{clang} --version` does not run"
+        );
+        eprintln!("s1 golden: not run (no clang)");
+        return;
+    };
+    let version = String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let s1 = selfhost();
+    let runtime = golden_runtime();
+    let std_dir = root().join("std");
+    let source_dir = golden_dir();
+    let walk = golden_programs();
+    let dir = fresh_dir("golden");
+    for side in ["s0", "s1"] {
+        std::fs::create_dir_all(dir.join(side)).expect("create a side's directory");
+    }
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(4);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    // One build, of either side, within the walk's limit: its stdout, or
+    // why it failed, its stderr quoted.
+    let build = |program: &Path, args: &[&std::ffi::OsStr], what: &str| {
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .env("NOVA_RUNTIME_LIB", &runtime)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .env("RUST_LIB_BACKTRACE", "0");
+        match run_within_limit(command, None) {
+            Ok((stdout, _, Some(0))) => Ok(stdout),
+            Ok((_, stderr, status)) => Err(format!(
+                "{what} failed, exit status {status:?}{}",
+                quoted_stderr(&stderr)
+            )),
+            Err(why) => Err(format!("{what} {why}")),
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some(name) = walk.get(i) else { break };
+                let source = source_dir.join(format!("{name}.nova"));
+                let s0_exe = dir.join("s0").join(name);
+                let s1_exe = dir.join("s1").join(name);
+                let tmp = dir.join(format!("{name}.tmp"));
+                std::fs::create_dir_all(&tmp).expect("a temporary directory");
+                let built = build(
+                    s1,
+                    &[
+                        "build".as_ref(),
+                        source.as_os_str(),
+                        "-o".as_ref(),
+                        s1_exe.as_os_str(),
+                        "--release".as_ref(),
+                        "--std".as_ref(),
+                        std_dir.as_os_str(),
+                    ],
+                    "`selfhost build`",
+                )
+                .and_then(|stdout| {
+                    let want = format!("built {}\n", s1_exe.display());
+                    if stdout == want {
+                        Ok(())
+                    } else {
+                        Err(format!("`selfhost build` printed {stdout:?}, not {want:?}"))
+                    }
+                })
+                .and_then(|()| {
+                    build(
+                        &nova(),
+                        &[
+                            "build".as_ref(),
+                            "--release".as_ref(),
+                            source.as_os_str(),
+                            "-o".as_ref(),
+                            s0_exe.as_os_str(),
+                        ],
+                        "`nova build --release`",
+                    )
+                })
+                .and_then(|_| run_golden(name, &s1_exe, &tmp))
+                .and_then(|()| same_binaries(&s0_exe, &s1_exe));
+                for side in [&s0_exe, &s1_exe] {
+                    let _ = std::fs::remove_file(side);
+                    for ext in ["ll", "o"] {
+                        let _ =
+                            std::fs::remove_file(side.with_file_name(format!("{name}.nova.{ext}")));
+                    }
+                }
+                let _ = std::fs::remove_dir_all(&tmp);
+                if let Err(why) = built {
+                    failures.lock().unwrap().push(format!("{name}: {why}"));
+                }
+            });
+        }
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    let failures = failures.into_inner().unwrap();
+    println!(
+        "s1 golden: {} passed, {} excluded, {version}, runtime {}",
+        walk.len() - failures.len(),
+        RELEASE_GOLDEN_EXCLUDED.len(),
+        runtime.display()
+    );
+    assert!(
+        failures.is_empty(),
+        "{} of {} golden programs failed as S1 built them:\n\n{}",
+        failures.len(),
+        walk.len(),
+        failures.join("\n\n")
+    );
 }
