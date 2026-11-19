@@ -4,9 +4,9 @@
 // `MirTy`, `Temp`, `BlockId`, `Module`, `ExternDecl`, `Function`, `Block`,
 // `OperandClass`, `RtFunc`'s variant names in `RtFunc::ALL`'s order, `Stmt`
 // but its WASM-only `Mem`, `Terminator`, `mir_ty`, `mangle` and
-// `mangle_ty`. `RtFunc::symbol` and `signature` come with the emitter in
-// 5.5 (decision 7); the WASM code, `on_wasm` and `MemOp`, is S0's alone
-// (decision 4).
+// `mangle_ty`; since 5.5a, `RtFunc::symbol` and `signature`, which the
+// emitter reads (5.4's decision 7). The WASM code, `on_wasm` and `MemOp`,
+// is S0's alone (decision 4).
 //
 // The Rust's idioms, beyond hir.nova's (ADR 0057):
 //
@@ -184,6 +184,157 @@ pub const RT_FUNC_VARIANTS: [String] = [
     "RouterStateLoad",
     "RouterStateStore",
 ]
+
+/// Each runtime function's symbol and signature (`RtFunc::symbol`,
+/// `RtFunc::signature`), by its index, in `RtFunc::ALL`'s order as
+/// `RT_FUNC_VARIANTS`: the symbol, then the parameters' classes and the
+/// return class by their variants' names (5.5a, spec
+/// docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md
+/// §5.1). The emitter declares each and calls it by them (emit_ll.nova).
+pub const RT_FUNC_SIGNATURES: [(String, String)] = [
+    ("nova_rt_println", "(Ptr) -> Unit"),
+    ("nova_rt_print", "(Ptr) -> Unit"),
+    ("nova_rt_eprint", "(Ptr) -> Unit"),
+    ("nova_rt_eprintln", "(Ptr) -> Unit"),
+    ("nova_rt_str_concat", "(Ptr, Ptr) -> Ptr"),
+    ("nova_rt_str_concat_n", "(Ptr) -> Ptr"),
+    ("nova_rt_int_to_str", "(I64) -> Ptr"),
+    ("nova_rt_float_to_str", "(F64) -> Ptr"),
+    ("nova_rt_float_fixed", "(F64, I64) -> Ptr"),
+    ("nova_rt_str_to_float", "(Ptr) -> F64"),
+    ("nova_rt_str_is_float", "(Ptr) -> I8"),
+    ("nova_rt_float_to_bits", "(F64) -> I64"),
+    ("nova_rt_bool_to_str", "(I8) -> Ptr"),
+    ("nova_rt_char_to_str", "(I64) -> Ptr"),
+    ("nova_rt_str_eq", "(Ptr, Ptr) -> I8"),
+    ("nova_rt_str_cmp", "(Ptr, Ptr) -> I64"),
+    ("nova_rt_str_hash", "(Ptr) -> I64"),
+    ("nova_rt_str_len_chars", "(Ptr) -> I64"),
+    ("nova_rt_str_chars", "(Ptr) -> Ptr"),
+    ("nova_rt_str_from_chars", "(Ptr) -> Ptr"),
+    ("nova_rt_str_join", "(Ptr, Ptr) -> Ptr"),
+    ("nova_rt_str_index_of", "(Ptr, Ptr) -> I64"),
+    ("nova_rt_json_quote", "(Ptr) -> Ptr"),
+    ("nova_rt_str_to_upper", "(Ptr) -> Ptr"),
+    ("nova_rt_str_to_lower", "(Ptr) -> Ptr"),
+    ("nova_rt_alloc", "(I64) -> Ptr"),
+    ("nova_rt_check_bounds", "(I64, I64) -> Unit"),
+    ("nova_rt_panic_str", "(Ptr) -> Unit"),
+    ("nova_rt_test_selector", "() -> I64"),
+    ("nova_rt_task_spawn", "(Ptr) -> I64"),
+    ("nova_rt_task_block_on", "(Ptr) -> I64"),
+    ("nova_rt_task_is_done", "(Ptr) -> I8"),
+    ("nova_rt_task_take_output", "(I64) -> I64"),
+    ("nova_rt_task_release", "(Ptr) -> Unit"),
+    ("nova_rt_task_yield_future", "() -> Ptr"),
+    ("nova_rt_task_sleep_future_nanos", "(I64) -> Ptr"),
+    ("nova_rt_task_join_future", "(Ptr) -> Ptr"),
+    ("nova_rt_task_timeout_future", "(I64, Ptr) -> Ptr"),
+    ("nova_rt_fs_read_to_string", "(Ptr) -> I64"),
+    ("nova_rt_fs_write_string", "(Ptr, Ptr) -> I64"),
+    ("nova_rt_fs_take_string", "() -> Ptr"),
+    ("nova_rt_fs_last_error_message", "() -> Ptr"),
+    ("nova_rt_fs_temp_dir", "() -> Ptr"),
+    ("nova_rt_fs_exists", "(Ptr) -> I8"),
+    ("nova_rt_fs_create_dir", "(Ptr) -> I64"),
+    ("nova_rt_fs_create_dir_all", "(Ptr) -> I64"),
+    ("nova_rt_fs_remove_file", "(Ptr) -> I64"),
+    ("nova_rt_fs_remove_dir_all", "(Ptr) -> I64"),
+    ("nova_rt_fs_rename", "(Ptr, Ptr) -> I64"),
+    ("nova_rt_fs_read_dir", "(Ptr) -> I64"),
+    ("nova_rt_fs_take_string_array", "() -> Ptr"),
+    ("nova_rt_fs_kind", "(Ptr) -> I64"),
+    ("nova_rt_fs_read", "(Ptr) -> I64"),
+    ("nova_rt_fs_take_bytes", "() -> Ptr"),
+    ("nova_rt_fs_write", "(Ptr, Ptr) -> I64"),
+    ("nova_rt_file_open", "(Ptr, I8, I8, I8, I8, I8, I8) -> I64"),
+    ("nova_rt_file_close", "(I64) -> I64"),
+    ("nova_rt_file_read", "(I64, I64) -> I64"),
+    ("nova_rt_file_write", "(I64, Ptr) -> I64"),
+    ("nova_rt_file_flush", "(I64) -> I64"),
+    ("nova_rt_io_stdin_read", "(I64) -> I64"),
+    ("nova_rt_io_stdout_write", "(Ptr) -> I64"),
+    ("nova_rt_io_stderr_write", "(Ptr) -> I64"),
+    ("nova_rt_io_stdout_flush", "() -> I64"),
+    ("nova_rt_io_stderr_flush", "() -> I64"),
+    ("nova_rt_net_connect_future", "(Ptr) -> Ptr"),
+    ("nova_rt_net_close", "(I64) -> I64"),
+    ("nova_rt_net_read_future", "(I64, I64) -> Ptr"),
+    ("nova_rt_net_write_future", "(I64, Ptr) -> Ptr"),
+    ("nova_rt_net_read_timeout_future", "(I64, I64, I64) -> Ptr"),
+    ("nova_rt_net_listen", "(Ptr) -> I64"),
+    ("nova_rt_net_local_port", "(I64) -> I64"),
+    ("nova_rt_net_accept_future", "(I64) -> Ptr"),
+    ("nova_rt_bytes_len", "(Ptr) -> I64"),
+    ("nova_rt_bytes_from_string", "(Ptr) -> Ptr"),
+    ("nova_rt_bytes_is_utf8", "(Ptr) -> I8"),
+    ("nova_rt_bytes_to_string_unchecked", "(Ptr) -> Ptr"),
+    ("nova_rt_bytes_at", "(Ptr, I64) -> I64"),
+    ("nova_rt_bytes_slice", "(Ptr, I64, I64) -> Ptr"),
+    ("nova_rt_bytes_concat", "(Ptr, Ptr) -> Ptr"),
+    ("nova_rt_bytes_to_ints", "(Ptr) -> Ptr"),
+    ("nova_rt_bytes_from_ints", "(Ptr) -> Ptr"),
+    ("nova_rt_bytes_eq", "(Ptr, Ptr) -> I8"),
+    ("nova_rt_int_hash_seed", "() -> I64"),
+    ("nova_rt_http_parse_request", "(Ptr) -> Ptr"),
+    ("nova_rt_crypto_hash", "(I64, Ptr, Ptr, Ptr) -> I64"),
+    ("nova_rt_crypto_random_bytes", "(I64) -> I64"),
+    ("nova_rt_crypto_random_int", "(I64, I64) -> I64"),
+    ("nova_rt_crypto_pbkdf2_sha256", "(Ptr, Ptr, I64, I64) -> I64"),
+    ("nova_rt_crypto_pbkdf2_sha256_verify", "(Ptr, Ptr, I64, Ptr) -> I64"),
+    ("nova_rt_time_now_nanos", "() -> I64"),
+    ("nova_rt_time_now_epoch_nanos", "() -> I64"),
+    ("nova_rt_log_config_level", "() -> I64"),
+    ("nova_rt_log_config_to_stderr", "() -> I64"),
+    ("nova_rt_log_set_config", "(I64, I64) -> Unit"),
+    ("nova_rt_shutdown_requested", "() -> I8"),
+    ("nova_rt_process_arg_count", "() -> I64"),
+    ("nova_rt_process_arg", "(I64) -> Ptr"),
+    ("nova_rt_process_exit", "(I64) -> Unit"),
+    ("nova_rt_process_run", "(Ptr, Ptr, I8) -> I64"),
+    ("nova_rt_process_take_status", "() -> I64"),
+    ("nova_rt_process_take_stdout", "() -> Ptr"),
+    ("nova_rt_process_take_stderr", "() -> Ptr"),
+    ("nova_rt_process_env", "(Ptr) -> I8"),
+    ("nova_rt_process_current_exe", "() -> I64"),
+    ("nova_rt_ui_state_present", "() -> I8"),
+    ("nova_rt_ui_state_load", "() -> Ptr"),
+    ("nova_rt_ui_state_store", "(Ptr) -> Unit"),
+    ("nova_rt_router_state_present", "() -> I8"),
+    ("nova_rt_router_state_load", "() -> Ptr"),
+    ("nova_rt_router_state_store", "(Ptr) -> Unit"),
+]
+
+/// The symbol runtime function `f` is linked by (`RtFunc::symbol`).
+pub fn rt_func_symbol(f: Int) -> String {
+    let (symbol, _) = RT_FUNC_SIGNATURES[f]
+    symbol
+}
+
+/// Runtime function `f`'s parameter classes and return class
+/// (`RtFunc::signature`), read from `RT_FUNC_SIGNATURES`.
+pub fn rt_func_signature(f: Int) -> (Vec<Int>, Int) {
+    let (_, signature) = RT_FUNC_SIGNATURES[f]
+    read_signature(signature)
+}
+
+/// The parameter classes and return class a signature of
+/// `RT_FUNC_SIGNATURES` names, `"(Ptr, I64) -> Ptr"`.
+pub fn read_signature(signature: String) -> (Vec<Int>, Int) {
+    let arrow = signature.index_of(") -> ").unwrap()
+    let mut params: Vec<Int> = Vec::new()
+    let inside = signature.byte_slice(1, arrow)
+    if inside != "" { for name in inside.split(", ").iter() { params.push(mir_ty_of_name(name)) } }
+    let ret = mir_ty_of_name(signature.byte_slice(arrow + 5, signature.byte_len()))
+    (params, ret)
+}
+
+// The class whose variant's name is `name`, by `MIR_TY_NAMES`.
+fn mir_ty_of_name(name: String) -> Int {
+    let names = MIR_TY_NAMES
+    for i in 0..names.len() { if names[i] == name { return i } }
+    panic("no class is named `${name}`")
+}
 
 /// `RtFunc::StrConcat`, by its index (the lowering's own runtime
 /// functions, beside the builtins' table; `mir_tests.nova` holds each to
