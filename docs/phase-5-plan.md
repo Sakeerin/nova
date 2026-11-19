@@ -588,6 +588,41 @@ mir`, std's checked bodies spliced into each program on both sides.
 so the driver's item narrows to what 5.2 leaves: the command line and
 its exit codes, finding std next to the executable or in `$NOVA_HOME`,
 `clang` and `cc`, finding `libnova_runtime.a`, and linking.
+
+**Amended 2026-11-18 (5.5a, branch `claude/loving-archimedes-frtf5q-55`,
+ADR 0058; spec
+`docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`
+§1):** 5.5 is split in two, as the user decided on 2026-11-17.
+- **5.5a, the `.ll` emitter:** `RtFunc::symbol` and `signature` and
+  `nova-codegen-llvm`'s `compile_ir` ported (`selfhost/src/emit_ll.nova`),
+  N still built by S0's `nova build` (Cranelift), nothing needing
+  `clang`. **The public `--emit-ll` below becomes the hidden `--ll` of
+  `nova check --dump-mir`,** which prints each lowered root's `.ll` after
+  its MIR after form, in the same process, refused with
+  `--before-async`; N's side is `selfhost mir --ll`. Every `--help`
+  stays the base's.
+- **5.5a's gate,** in place of the first item of the gate below: per
+  host on Linux, macOS and Windows, N's `.ll` equals S0's byte for byte,
+  with exit codes, on the corpus roots that lower (N's own among them),
+  the cases that lower, `ir_tests.rs`'s sources as 14 cases, the float
+  `%` and hand cases, MIR's cases again with `\r\n`, the MIR fuzzer's
+  120 inputs and the 25 depth cases, which N runs on a 1 MB stack; the
+  emitter's one reachable error, float `%`, agrees in the dump, and its
+  unreachable errors are pinned by tests on both sides; every form the
+  emitter handles occurs in the compared `.ll` or is listed unreachable
+  with its reason; the dump's `.ll` equals `build --release`'s
+  intermediate; the `.ll` mismatch report names the `define` and the
+  block; CI's `selfhost.rs` is within the Selfhost job's lines, or the
+  user has ruled.
+- **5.5b, the driver and linking:** `clang` and `cc`, finding the
+  runtime, N's `build` and `check`, and the golden suite built by S1,
+  the gate's second item below. Its questions, the three below among
+  them, are deferred to its spec, not decided in 5.5a (ADR 0058 §14):
+  where the S1 golden suite runs and on which runtime, the intermediate
+  file's name, N's command line and exit codes and how it finds std and
+  the runtime, `check`'s output, N's `build` without `--release`, and
+  Windows linking.
+
 - **The emitter,** a port of `nova-codegen-llvm`, and `--emit-ll`.
 - **The driver:** the module loader, `clang` and `cc` through 5.0b's
   spawn, finding `libnova_runtime.a` as `link.rs` does, and the commands

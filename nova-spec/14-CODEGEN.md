@@ -72,6 +72,21 @@ LLVM backend's parity is now tested: every golden program of
 §3.2; ADR 0048, which also makes textual `.ll` through `clang` the backend
 of Phase 5's compiler). The hello-world test stays.
 
+**Amended 2026-11-18 (branch `claude/loving-archimedes-frtf5q-55`, ADR
+0058):** the `.ll` emitter exists twice, in `nova-codegen-llvm` and in
+the self-hosted compiler (`selfhost/src/emit_ll.nova`), with
+`RtFunc`'s symbols and signatures. The hidden `nova check --dump-mir
+--ll FILE…` prints, after each lowered root's MIR after the async
+transform, `(Ll ok)` and `compile_ir`'s text of that module, byte for
+byte the intermediate `<out>.nova.ll` that `nova build --release`
+writes, or one line `(Ll error "…")` with the emitter's words; it is in
+no `--help`. The self-hosted compiler's `selfhost mir --ll` prints the
+same, byte for byte, on every input the differential holds. The text
+names no triple, datalayout or path. A float `%` still
+type-checks and is still refused by the emitter, an internal error in
+`build --release`. WASM's and test mode's code generation stay the Rust
+compiler's alone.
+
 ### 2.3 WASM (browser target)
 - Crates: `wasm-encoder` (write modules), `walrus` (manipulate)
 - Target: `nova build --target wasm` and `nova bundle`
