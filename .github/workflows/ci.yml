@@ -188,6 +188,31 @@ jobs:
         run: cargo build --locked --workspace
       - name: cargo test --test selfhost (N on the release runtime)
         run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost
+      # S1 builds the golden suite (spec
+      # docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
+      # §6.2, §7): N's own `selfhost build` builds every program
+      # `release_golden_suite` walks, through `clang-18` and `cc`, on the
+      # release runtime the step's N unpacks; each runs as the Test job's
+      # walk runs it, and each binary must equal S0 `--release`'s byte for
+      # byte. On the Linux leg alone, after the step above, so that step's
+      # time and its lines are untouched; the install sits right before it,
+      # the Test job's step, asserting the same version (ADR 0048).
+      - name: Install clang 18.1.3 (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18
+          clang-18 --version
+          if ! clang-18 --version | head -n 1 | grep -q 'version 18\.1\.3'; then
+            echo "expected Ubuntu's clang 18.1.3; the pin in ADR 0048 needs to move"
+            exit 1
+          fi
+      - name: S1 builds the golden suite (Linux)
+        if: runner.os == 'Linux'
+        env:
+          NOVA_REQUIRE_CLANG: "1"
+          NOVA_CLANG: clang-18
+        run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost -- --ignored --exact s1_builds_the_golden_suite n_build_answers_as_s0_does_with_clang
       - name: N's own tests on the debug runtime
         env:
           NOVA_RUNTIME_LIB: ${{ github.workspace }}/target/debug/${{ matrix.runtime_lib }}
