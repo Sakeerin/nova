@@ -47,6 +47,13 @@
 //                             lowered root's `.ll` after its part (spec
 //                             docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md
 //                             §4, §5)
+//   selfhost build FILE [-o OUT] [--release] --std DIR
+//                             builds FILE as S0's `nova build --release
+//                             FILE -o OUT` does: its `.ll` written beside
+//                             OUT, `clang` and `cc` run on it, and `built
+//                             OUT` printed (spec
+//                             docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
+//                             §3, driver.nova)
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -57,6 +64,7 @@ import ast_dump
 import async_lower
 import builtins
 import diagnostic
+import driver
 import dump
 import emit_ll
 import emit_ll_tests
@@ -109,6 +117,10 @@ async fn main() {
     }
     if command == "mir" {
         mir_command(argv).await
+        return
+    }
+    if command == "build" {
+        build_command(argv).await
         return
     }
     // No file is refused, as S0's clap refuses it.
@@ -498,59 +510,6 @@ fn ll_part(program: MirModule) -> String {
 // kept its root from being read, `IOERR`; or why N refuses its package.
 type Dumped = | DumpedText(String) | DumpedIoError(IoError) | DumpedRefused(String)
 
-// What every program's resolution reads for `target`, under test mode
-// when `test`: the target's std modules, each read from under `dir` and
-// parsed once, labelled as the driver registers them (`<std/core>`), with
-// `std/test` after them under test mode, as `nova test` registers it;
-// `STD_MODULES`, parsed, which the WASM target's `missing` reads (a file
-// both lists name is parsed once); and the builtin table.
-async fn load_std(dir: String, target: CompileTarget, test: Bool) -> Result<StdSet, String> {
-    let mut parsed: Map<String, StdModule> = Map::new()
-    let natives = read_std_modules(dir, STD_MODULES, parsed).await?
-    let mut modules = match target {
-        CompileTargetNative => natives
-        CompileTargetWasm => read_std_modules(dir, WASM_STD_MODULES, parsed).await?
-    }
-    if test {
-        let mut with_test: Vec<StdModule> = Vec::new()
-        for m in modules.iter() { with_test.push(m) }
-        for m in read_std_modules(dir, [STD_TEST_MODULE], parsed).await?.iter() {
-            with_test.push(m)
-        }
-        modules = with_test
-    }
-    Ok(StdSet { modules: modules, natives: natives, builtins: builtin_table() })
-}
-
-// The std modules `list` names, in order, each read from under `dir` and
-// parsed, or taken from `parsed`, where each is kept by its file.
-async fn read_std_modules(
-    dir: String,
-    list: [(String, String)],
-    mut parsed: Map<String, StdModule>,
-) -> Result<Vec<StdModule>, String> {
-    let mut out: Vec<StdModule> = Vec::new()
-    for (name, rel) in list.iter() {
-        match parsed.get(rel) {
-            Some(m) => {
-                out.push(m)
-                continue
-            }
-            None => ()
-        }
-        let path = "${dir}/${rel}"
-        match read_to_string(path).await {
-            Ok(source) => {
-                let m = std_module(name, std_label(name), source)
-                let _ = parsed.insert(rel, m)
-                out.push(m)
-            }
-            Err(e) => return Err("error: cannot read std's ${path}: ${io_kind_name(e.kind)}")
-        }
-    }
-    Ok(out)
-}
-
 // The resolution dump of the program whose root is `path`
 // (nova-driver's `ResolutionDumps::dump`): `check`'s pipeline up to the
 // resolver, or under test mode `nova test`'s. A root directly in a
@@ -716,28 +675,6 @@ fn hir_of(
     Some(DumpedText(dump_hir_program(target, test, Some((resolved, tables)), diagnostics)))
 }
 
-// Each module's file label, the program's `sources` then std's modules
-// that parsed, as the resolver numbers them, and each program module's
-// source text, for a fix's edit; std's have none.
-fn labels_and_texts(
-    sources: Vec<ModuleSource>,
-    std_set: StdSet,
-) -> (Vec<String>, Vec<Option<String>>) {
-    let mut labels: Vec<String> = Vec::new()
-    let mut texts: Vec<Option<String>> = Vec::new()
-    for m in sources.iter() {
-        labels.push(m.label)
-        texts.push(m.text)
-    }
-    for s in std_set.modules.iter() {
-        if s.file.is_some() {
-            labels.push(s.label)
-            texts.push(None)
-        }
-    }
-    (labels, texts)
-}
-
 // Name each test of a module of a package's `tests/`
 // `<file stem>::<function>` (the driver's `name_tests`), as `nova test`'s
 // inventory names it.
@@ -755,19 +692,5 @@ fn name_tests(tests: Vec<TestFn>, definitions: Definitions, modules: Vec<Loaded>
             let mut named = t
             named.name = "${module_name(m.path)}::${t.name}"
         }
-    }
-}
-
-// The kind's name, as S0's dump prints it.
-fn io_kind_name(kind: IoErrorKind) -> String {
-    match kind {
-        NotFound => "NotFound"
-        PermissionDenied => "PermissionDenied"
-        AlreadyExists => "AlreadyExists"
-        InvalidData => "InvalidData"
-        Interrupted => "Interrupted"
-        TimedOut => "TimedOut"
-        ConnectionRefused => "ConnectionRefused"
-        Other => "Other"
     }
 }
