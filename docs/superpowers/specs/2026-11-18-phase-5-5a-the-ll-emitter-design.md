@@ -546,3 +546,96 @@ Ranked.
   and 110 s, or the user has ruled.
 - The full suite, fmt, clippy, the MSRV job, `nova fmt --check` over
   `selfhost/`, and `git diff` on `Cargo.lock` are clean.
+
+## Amendment (2026-11-18)
+
+Dated, with the plan (`docs/superpowers/plans/2026-11-18-phase-5-5a-the-ll-emitter.md`),
+after the prototype and its measurement on CI. Where this section and the
+text above differ, this section holds; ADR 0058 records each point.
+
+1. **`ir_tests.rs` gives 14 cases, not about 18** (the header's decision
+   3, §2 item 2, §6.1 item 3). Its 19 tests hand `ir_for` 20 sources;
+   six are dropped as already compared: both hello worlds (each the text
+   of `cases/check/check__hello_world_checks.nova`),
+   `tests/runtime/float_bits.nova` (a corpus root), and the await-free
+   async function, the field assignment and the repeated array (each the
+   text of a `lower_tests__` case). The 14 are
+   `cases/mir/ir_tests__<test>[_n].nova`, with three hand cases,
+   `ll_a_float_remainder_errs`, `ll_a_float_le_is_an_ordered_compare` and
+   `ll_a_string_of_every_escape_class`: 17 new cases. §6.3's two gaps are
+   filled so: `Switch` on `I8` by
+   `ir_tests__bool_match_switches_on_i8_not_i64`, `Le` on `Float` by the
+   hand case.
+2. **406 cases lower at the base, not 407** (the header's decision 3,
+   §6.1 item 2, §16), by the harness's own lists: 341 of the HIR cases
+   that reach MIR and 65 of `cases/mir/`'s roots. The 407 counted the
+   research's list of `cases/mir/`, 66 of its 92 roots. With the 17 new
+   cases, 423 cases print a `.ll` (341 and 82), one of them, the float
+   `%` case, an error.
+3. **clap's usage line names the flags used** (§3.1, which gives every
+   refused shape the usage `nova check --dump-mir [OPTIONS] [FILES]...`).
+   `--ll` twice prints that line; `--ll=x` prints `Usage: nova check
+   --dump-mir --ll [FILES]...`, under `error: unexpected value 'x' for
+   '--ll' found; no more were expected`, as the base's `--before-async=1`
+   already does. Either is one clap error, exit 2, nothing on stdout.
+   So `--ll` does appear in that one usage line, against §3.3 ("`--ll` in
+   no help or usage line") and §16's gate (the same words) as well as
+   §3.1: every `--help`, and every usage line but the one clap prints for
+   `--ll` given a value, stays without it.
+4. **§3.3's package is `examples/05-geometry`,** a package with a path
+   dependency: `examples/01-hello-world`, whose root §4's example shows,
+   has no `nova.toml`, so it is a loose program, not a package.
+   `the_ll_dump_is_what_build_release_writes` builds
+   `examples/05-geometry/src/main.nova` with `--release`, a package's
+   `src/main.nova` given as FILE.
+5. **N's root takes 92 MB more with `--ll`, not 40 to 60** (§9, §14 risk
+   2). On the release runtime N's `selfhost mir --std std` on its own root
+   peaks at 211 MB without `--ll` and 303 MB with it (23 and 24
+   collections, the largest live heap 101 and 102 MB); its stdout grows
+   from 5.49 to 17.74 MB. The `.ll` is built whole, as parts and one
+   joined string, beside both modules. No threshold applies; printing the
+   `.ll` as it is made (§5.2), the same bytes, stays the fallback.
+6. **`ret_of` with the function winning is killed by N's `@test` alone**
+   (§6.4, which has every mutant fail the differential, and §14 risk 5).
+   No input can reach it natively: a function's symbol and an extern's
+   coincide only for `main`, which E0900 reserves against an extern of
+   that name, or E0002 (a duplicate definition) in the same module as
+   `fn main`, and every other function's symbol holds a `.`, which no
+   extern's can. `a_symbol_both_a_function_and_an_extern_returns_the_externs_class`
+   pins it. The other eleven mutants §6.4 and the prototype ran fail the
+   differential, the switch always on `i64` and the unordered float `<=`
+   each on one case alone.
+7. **CI exports `RUST_BACKTRACE=1`** (§3.3's test). Under it `nova build
+   --release` on the float `%` case prints `anyhow`'s backtrace after the
+   error's words, so its stderr no longer ends with them, and
+   `the_ll_dump_is_what_build_release_writes` failed on all three systems
+   in the prototype's first run on CI (run 44259975902, item 8). The test
+   runs the build with `RUST_BACKTRACE=0` and `RUST_LIB_BACKTRACE=0`;
+   `selfhost.rs` passes with `RUST_BACKTRACE=1` exported.
+8. **CI's figures** (§9), from draft pull request Sakeerin/nova#144,
+   closed unmerged, `selfhost.rs`'s main step in the Selfhost job (S0 at
+   `opt-level = 1`, N on the release runtime), `finished in`:
+
+   | System | line | run 44260509656 (5.5a) | `main`, run 43853141585 |
+   |---|---|---|---|
+   | Linux | 80 s | 51.39 s (67 tests) | 77.03 s (64) |
+   | macOS | 100 s | 29.94 s (65) | 31.72 s (62) |
+   | Windows | 110 s | 93.86 s (61) | 79.94 s (58) |
+
+   The user's answer allowed one push, the prototype's `8cb1b42b`, to
+   `claude/loving-archimedes-frtf5q-55-ci` with that draft pull request,
+   for measurement. Its run, 44259975902 (the emitter and harness, before
+   the fix of item 7), failed the three Selfhost jobs (`ubuntu-24.04`,
+   `macos-latest`, `windows-latest`) at their `cargo test --test
+   selfhost` step, on `the_ll_dump_is_what_build_release_writes`, every
+   other job green. The fix, `36f74a9a`, with the records' commit
+   `3c6f1a07` before it, was then pushed to the same branch under the
+   same draft pull request without the user being asked again, a reading
+   of that answer rather than a second one. Its run, 44260509656, passed
+   all 19 jobs, its Test job's main step summing 2838 passed, 0 failed, 10
+   ignored on Linux, 2838, 0 and 9 on macOS, and 2815, 0 and 9 on Windows. Run 43853141585 is `main`'s at
+   5.4's merge, `1570ddbd`, this spec's base. The runners' spread between
+   runs of one tree is wider than 5.5a's cost (5.4's tree took 71.98 and
+   77.03 s on Linux, 31.72 and 89.34 s on macOS); locally, as the
+   Selfhost job runs it, the `.ll` adds about 1.4 s, within §9's
+   projected +1 to 2 s of local wall.
