@@ -491,11 +491,12 @@ written by hand: two roots, the first with two functions (`main` and
 an error. One full report (line 27 of the `.ll`, `define "g.1", block
 bb1`) is compared whole, then 17 places by the first line they name: the
 header, a declaration and the blank line after them; the first `define`
-line, `entry:`, a slot, a line of `bb0` and the line before `}`; the
-second `define`, a line of its `bb0` and its label `bb1`; a string
-global; the C wrapper (`define main, block entry`); the `(Ll` line and
-the MIR line before it; the second root's `(Ll` line and its MIR; and,
-apart, N leaving the `.ll` out, reported at S0's `(Ll` line.
+line, `entry:`, a slot, a line of `bb0` and its `}` line, where N has a
+line more (`  unreachable`), still named `block bb0`; the second
+`define`, a line of its `bb0` and its label `bb1`; a string global;
+the C wrapper (`define main, block entry`); the `(Ll` line and the MIR
+line before it; the second root's `(Ll` line and its MIR; and, apart,
+N leaving the `.ll` out, reported at S0's `(Ll` line.
 
 ### 10. The mutants
 
@@ -536,11 +537,15 @@ Measured locally on 4 cores, 2026-11-18: part 1's in its session, on
 its tree (S0, the harness and the cases those of its head `f3b32068`,
 whose last commit changed a driver unit test alone), part 2's at
 `8cb1b42b`; the `.ll`'s size by set and N on the debug runtime again
-on the tree this ADR is merged with (the merged tree), whose code is
-that of `36f74a9a` (it differs from it only in this ADR and two doc
-comments moved in `crates/nova-driver/src/lib.rs`), and whose
-`selfhost/` is as at `8cb1b42b`. Scripts and logs are outside the
-repository, not committed.
+on the tree this ADR is merged with (the merged tree), whose S0 and N
+are those of `36f74a9a`, and whose `selfhost/` is as at `8cb1b42b`. The
+merged tree differs from `36f74a9a` in this ADR, the 5.5a plan and the
+spec's amendment, none of them code; in two doc comments moved in
+`crates/nova-driver/src/lib.rs`; and in one test-only change to
+`selfhost.rs` made after the review: the coverage test (§8) reads a
+string global before a call, so that a global whose text holds `call `
+is not counted as a call, which leaves every figure of §8 as it was.
+Scripts and logs are outside the repository, not committed.
 
 **Agreement,** S0's `check --dump-mir --ll` against N's `mir --ll`,
 byte for byte with exit codes, per root (part 2):

@@ -6270,17 +6270,8 @@ fn ll_forms_of(mir: &str, ll: &str, found: &mut std::collections::BTreeMap<Strin
         }
     }
     for line in ll.lines() {
-        if let Some((_, call)) = line.split_once("call ") {
-            if let Some(symbol) = call.split_once(" @nova_rt_").map(|(_, s)| s) {
-                // `nova_rt_str_new` is `ConstStr`'s, which no `RtFunc` names.
-                let symbol = symbol.split('(').next().unwrap_or("");
-                if symbol != "str_new" {
-                    add(format!("call @nova_rt_{symbol}"));
-                }
-            }
-        } else if line.starts_with("declare ") && line.contains(" @\"") {
-            add("declare an extern".to_string());
-        } else if let Some((_, text)) = line
+        // A string global first: its text may hold `call `.
+        if let Some((_, text)) = line
             .strip_prefix("@str")
             .and_then(|l| l.split_once(" x i8] c\""))
         {
@@ -6300,6 +6291,16 @@ fn ll_forms_of(mir: &str, ll: &str, found: &mut std::collections::BTreeMap<Strin
                     _ => panic!("{line}: \\{escape} escapes a printable byte"),
                 });
             }
+        } else if let Some((_, call)) = line.split_once("call ") {
+            if let Some(symbol) = call.split_once(" @nova_rt_").map(|(_, s)| s) {
+                // `nova_rt_str_new` is `ConstStr`'s, which no `RtFunc` names.
+                let symbol = symbol.split('(').next().unwrap_or("");
+                if symbol != "str_new" {
+                    add(format!("call @nova_rt_{symbol}"));
+                }
+            }
+        } else if line.starts_with("declare ") && line.contains(" @\"") {
+            add("declare an extern".to_string());
         }
     }
 }
