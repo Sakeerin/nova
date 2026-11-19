@@ -520,18 +520,25 @@ impl HirDumps {
                     async_lowered: !before_async,
                 }
             });
+            // The after form's module, which `build --release` emits
+            // (5.5a, spec §3.3), is the one the `.ll` is made of.
+            if let (true, Some(Ok(module)), Some(mir)) = (wanted.ll, &after, &mut dumps.mir) {
+                mir.push_str(&ll_part(module));
+            }
             Some(dumps)
         })
     }
 }
 
-/// Which dumps of a root one check gives: the HIR dump's, and the MIR
-/// dump's after the async transform and before it (5.4).
+/// Which dumps of a root one check gives: the HIR dump's, the MIR dump's
+/// after the async transform and before it (5.4), and, after the after
+/// form of a root that lowered, its `.ll` (5.5a).
 #[derive(Clone, Copy)]
 struct Wanted {
     hir: bool,
     mir: bool,
     before: bool,
+    ll: bool,
 }
 
 impl Wanted {
@@ -539,15 +546,38 @@ impl Wanted {
         hir: true,
         mir: false,
         before: false,
+        ll: false,
     };
 
-    /// Every dump: the driver's guard's, natively.
+    /// Every dump but the `.ll`: the driver's guard's, natively. The `.ll`
+    /// is a function of the after form's module alone, so equal MIR gives
+    /// an equal `.ll` (5.5a, spec §3.3).
     #[cfg(test)]
     const ALL: Wanted = Wanted {
         hir: true,
         mir: true,
         before: true,
+        ll: false,
     };
+}
+
+/// A root's `.ll` part, after its MIR after form (5.5a, spec
+/// `docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`
+/// §4): `(Ll ok)` and `nova_codegen_llvm::compile_ir`'s text of `module`,
+/// byte for byte, ending in its own line break; or, when the emitter
+/// refuses the module, one line `(Ll error "…")`, the emitter's own words
+/// quoted as the dumps quote a string, without `build --release`'s context
+/// line.
+fn ll_part(module: &nova_mir::Module) -> String {
+    match nova_codegen_llvm::compile_ir(module) {
+        Ok(ir) => format!("(Ll ok)\n{ir}"),
+        Err(e) => {
+            let mut part = String::from("(Ll error ");
+            nova_resolver::dump::quote(&mut part, &e.to_string());
+            part.push_str(")\n");
+            part
+        }
+    }
 }
 
 /// One root's dumps, as [`Wanted`] asked for them.
@@ -586,31 +616,38 @@ impl RootDumps {
 /// functions are kept once and spliced into each program's shared check
 /// with their ids moved ([`nova_typeck::shared_module`], spec §5); a
 /// program the shared path cannot check, and every program when std alone
-/// gives a diagnostic or holds a test, is checked in full. A user sees
-/// nothing of it: `check`, `build`, `run`, `test` and the language server
-/// keep their own paths.
+/// gives a diagnostic or holds a test, is checked in full. With `ll`, the
+/// after form of a root that lowered is followed by its `.ll`
+/// ([`ll_part`], 5.5a): `nova_codegen_llvm::compile_ir` of the module the
+/// after form prints, which is the module `build --release` emits. A user
+/// sees nothing of it: `check`, `build`, `run`, `test` and the language
+/// server keep their own paths.
 pub struct MirDumps {
     hir: HirDumps,
     before_async: bool,
+    ll: bool,
 }
 
 impl MirDumps {
     /// std's modules, natively, parsed, resolved, their items collected
     /// and their bodies checked once, each program's dump after the async
-    /// transform or, with `before_async`, before it.
-    pub fn new(before_async: bool) -> MirDumps {
+    /// transform or, with `before_async`, before it; with `ll`, the after
+    /// form followed by the `.ll` (the before form takes none).
+    pub fn new(before_async: bool, ll: bool) -> MirDumps {
         MirDumps {
             hir: HirDumps::new(Target::Native, false),
             before_async,
+            ll,
         }
     }
 
     /// [`MirDumps::new`], each program resolving and checking std again,
     /// as `check` does: the dumps are the same, which a test checks.
-    pub fn unshared(before_async: bool) -> MirDumps {
+    pub fn unshared(before_async: bool, ll: bool) -> MirDumps {
         MirDumps {
             hir: HirDumps::unshared(Target::Native, false),
             before_async,
+            ll,
         }
     }
 
@@ -627,6 +664,7 @@ impl MirDumps {
             hir: false,
             mir: !self.before_async,
             before: self.before_async,
+            ll: self.ll && !self.before_async,
         };
         let dumps = self.hir.dumps(path, wanted)?;
         Ok(if self.before_async {
@@ -2213,6 +2251,185 @@ mod resolution_dumps {
             assert!(std.starts_with(&part), "{target:?} {test}");
             assert_eq!(&std[part.len()..], "(Diagnostics)\n");
         }
+    }
+}
+
+/// The `.ll` part of the MIR dump (5.5a, spec
+/// `docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`
+/// §3, §4): each emitter error's words, and the `.ll` printed after a
+/// lowered root's MIR is `compile_ir` of what `build --release` lowers.
+#[cfg(test)]
+mod ll_dumps {
+    use super::*;
+    use nova_mir::{Block, Function, MirTy, Module, OperandClass, Stmt, Temp, Terminator};
+
+    /// A native module of one function, `name`, with `temps` and one block
+    /// of `stmts` that returns nothing.
+    fn module_of(name: &str, temps: Vec<MirTy>, stmts: Vec<Stmt>) -> Module {
+        Module {
+            functions: vec![Function {
+                name: name.to_string(),
+                params: 0,
+                takes_env: false,
+                capture_count: 0,
+                temps,
+                ret: MirTy::Unit,
+                is_async: false,
+                blocks: vec![Block {
+                    stmts,
+                    term: Terminator::Return(None),
+                }],
+            }],
+            externs: Vec::new(),
+            runtime_alloc: None,
+            runtime_exports: Vec::new(),
+        }
+    }
+
+    /// `main` applying `op` to two floats.
+    fn float_bin(op: hir::BinOp) -> Module {
+        module_of(
+            "main",
+            vec![MirTy::F64; 3],
+            vec![
+                Stmt::ConstFloat(Temp(0), 1.5),
+                Stmt::ConstFloat(Temp(1), 2.0),
+                Stmt::Bin {
+                    dst: Temp(2),
+                    op,
+                    class: OperandClass::Float,
+                    lhs: Temp(0),
+                    rhs: Temp(1),
+                },
+            ],
+        )
+    }
+
+    /// A root's `.ll` part (5.5a, spec §4): `(Ll ok)` and the emitter's
+    /// text, byte for byte, ending in its line break; or one line `(Ll
+    /// error "…")` with the emitter's own words, quoted, for each module
+    /// it refuses: an `Await` the transform left, a float `%`, a float
+    /// bitwise operator and no `main`.
+    #[test]
+    fn the_ll_part_is_the_emitters_text_or_its_words_quoted() {
+        let small = module_of("main", vec![MirTy::Unit], Vec::new());
+        let text = nova_codegen_llvm::compile_ir(&small).expect("a module the emitter takes");
+        assert_eq!(ll_part(&small), format!("(Ll ok)\n{text}"));
+        assert!(text.starts_with("; LLVM IR emitted by the Nova compiler (release backend).\n"));
+        assert!(
+            text.contains("\ndefine void @\"nova_main\"() {\nentry:\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("\n  call void @nova_main()\n  ret i32 0\n}\n"),
+            "{text}"
+        );
+        let awaits = module_of(
+            "main",
+            vec![MirTy::Ptr],
+            vec![Stmt::Await {
+                dst: None,
+                future: Temp(0),
+            }],
+        );
+        for (module, words) in [
+            (
+                awaits,
+                "an `.await` marker reached codegen: `nova-mir`'s async state-machine \
+                 transform must split every `async fn` body at its await points before a \
+                 module is emitted",
+            ),
+            (
+                float_bin(hir::BinOp::Rem),
+                "float remainder (%) is not supported by the LLVM backend",
+            ),
+            (
+                float_bin(hir::BinOp::BitAnd),
+                "bitwise operators are not defined for Float",
+            ),
+            (
+                module_of("helper", vec![MirTy::Unit], Vec::new()),
+                "no `main` function in MIR module",
+            ),
+        ] {
+            let error = nova_codegen_llvm::compile_ir(&module).expect_err(words);
+            assert_eq!(error.to_string(), words);
+            assert_eq!(ll_part(&module), format!("(Ll error \"{words}\")\n"));
+        }
+    }
+
+    /// The `.ll` the MIR dump prints after a root's after form is what
+    /// `build --release` emits (5.5a, spec §2 item 4, §3.3): the dump with
+    /// `--ll` is the dump without it, then `(Ll ok)` and
+    /// `nova_codegen_llvm::compile_ir` of the module [`lower_to_mir`] makes
+    /// of the root, `build_program_release`'s, from the full check, though
+    /// the dump splices std's shared functions in; for a float `%`, the
+    /// emitter's error both ways; a root that did not lower, or the before
+    /// form, has no `.ll`.
+    #[test]
+    fn the_ll_dump_is_the_module_build_release_emits() {
+        let dir = std::env::temp_dir().join("nova-driver-ll-dump");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let programs = [
+            (
+                "hello.nova",
+                "fn main() {\n    println(\"hi \\\"there\\\"\")\n}\n",
+            ),
+            (
+                "async.nova",
+                "async fn h() -> Int { 1 }\nasync fn k() -> Int { h().await + 1 }\n\
+                 fn main() { println(\"${block_on(k())}\") }\n",
+            ),
+            (
+                "extern.nova",
+                "extern \"C\" {\n    fn cbrt(x: Float) -> Float\n}\nfn main() {\n    \
+                 let k = 2.0\n    let f = |x: Float| cbrt(x) * k\n    println(\"${f(8.0)}\")\n}\n",
+            ),
+            (
+                "frem.nova",
+                "fn main() {\n    let a = 5.5\n    println(\"${a % 2.0}\")\n}\n",
+            ),
+            ("nomain.nova", "fn helper() {}\n"),
+            ("bad.nova", "fn main() { let x: Int = \"s\" }\n"),
+        ];
+        let (with, without, before) = (
+            MirDumps::new(false, true),
+            MirDumps::new(false, false),
+            MirDumps::new(true, true),
+        );
+        for (name, text) in programs {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            let mir = without.dump(&path).unwrap();
+            let dumped = with.dump(&path).unwrap();
+            let part = dumped
+                .strip_prefix(mir.as_str())
+                .unwrap_or_else(|| panic!("{name}: {dumped}"));
+            assert_eq!(
+                before.dump(&path).unwrap(),
+                MirDumps::new(true, false).dump(&path).unwrap(),
+                "{name}"
+            );
+            if !mir.starts_with("(Mir runs=true checked=true lowered=true ") {
+                assert!(["nomain.nova", "bad.nova"].contains(&name), "{name}: {mir}");
+                assert_eq!(part, "", "{name}");
+                continue;
+            }
+            let module = match lower_to_mir(Program::for_file(&path)).unwrap() {
+                Outcome::Ok(module) => module,
+                Outcome::Failed { errors } => panic!("{name}: {errors} errors"),
+            };
+            let expected = match nova_codegen_llvm::compile_ir(&module) {
+                Ok(ir) => format!("(Ll ok)\n{ir}"),
+                Err(e) => {
+                    assert_eq!(name, "frem.nova", "{e}");
+                    format!("(Ll error \"{e}\")\n")
+                }
+            };
+            assert_eq!(part, expected, "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
