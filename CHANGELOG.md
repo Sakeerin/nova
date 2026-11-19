@@ -26,6 +26,9 @@ dump (spec
 full HIR dump (§4; ADR 0056). Phase 5.4, the self-hosted MIR and the MIR
 dump, natively (spec
 `docs/superpowers/specs/2026-11-14-phase-5-4-mir-design.md`; ADR 0057).
+Phase 5.5a, the self-hosted `.ll` emitter and the `.ll` dump (spec
+`docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`;
+ADR 0058).
 
 ### Added
 
@@ -312,6 +315,33 @@ dump, natively (spec
   Nothing a user sees changes with 5.4: `nova check` gives what it gave,
   byte for byte, on every `.nova` file the repository tracks, and `nova
   test` and `nova build` on its 11 packages outside `crates/`; the
+  packages under `crates/`, test fixtures, were not compared.
+- **`nova check --dump-mir --ll FILE…`, hidden:** after the MIR of each
+  program that lowered, after the async transform, its LLVM IR: `(Ll
+  ok)` and the text `nova build --release` writes for it, byte for byte,
+  or one line `(Ll error "…")` with the emitter's own words, as for a
+  float `%`, which type-checks and which the emitter refuses. A program
+  that did not lower prints none. It is refused with `--before-async`,
+  is absent from `--help`, carries no stability promise and is taken
+  only after `--dump-mir` (5.5a, ADR 0058).
+- **The self-hosted `.ll` emitter, in `selfhost/`:** N emits a
+  program's textual LLVM IR from its native MIR as `nova-codegen-llvm`
+  does, function for function: the runtime functions' declarations with
+  their symbols and signatures, every function's slots, blocks and
+  instructions, the escapes, floats as their bits in hex, the string
+  globals and the C `main`, and the emitter's errors word for word.
+  `selfhost mir --std DIR --ll FILE…` prints the same dump as `nova
+  check --dump-mir --ll`; the differential compares them byte for byte
+  on the corpus roots that run, the HIR cases that reach MIR, MIR's
+  cases with both line endings, among them `ir_tests.rs`'s sources and a
+  float `%` case, a MIR fuzzer's programs and programs nested 128 levels
+  deep, which N emits on a 1 MB stack. N is still built by Cranelift and
+  needs no `clang`. A change to the emitter, to the runtime functions'
+  symbols, signatures or order, or to the runtime's ABI as the emitter
+  spells it now changes both compilers in one pull request (ADR 0058).
+  Nothing a user sees changes with 5.5a: `nova check` gives what it
+  gave, byte for byte, on every `.nova` file the repository tracks, and
+  `nova test` and `nova build` on its 11 packages outside `crates/`; the
   packages under `crates/`, test fixtures, were not compared.
 
 ### Changed
