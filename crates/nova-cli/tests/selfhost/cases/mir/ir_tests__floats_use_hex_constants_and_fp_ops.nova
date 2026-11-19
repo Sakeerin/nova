@@ -1,0 +1,6 @@
+fn main() {
+let a = 3.5
+ let b = 2.0
+ let c = a * b - 1.0
+println("${c > 5.0}")
+}

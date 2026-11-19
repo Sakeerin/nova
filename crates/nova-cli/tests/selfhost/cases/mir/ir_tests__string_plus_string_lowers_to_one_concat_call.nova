@@ -1,0 +1,2 @@
+fn join(a: String, b: String) -> String { a + b }
+fn main() { println(join("x", "y")) }
