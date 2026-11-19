@@ -1,0 +1,10 @@
+fn main() {
+    let quoted = "say \"hi\""
+    let slashed = "a\\b"
+    let control = "tab\there\0nul\r\n"
+    let past = "café ─"
+    let empty = ""
+    let raw = "first
+second"
+    println("${quoted} ${slashed} ${control} ${past} ${empty} ${raw}")
+}

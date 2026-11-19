@@ -1,0 +1,3 @@
+type Shape = | Circle(Int) | Rect(Int, Int) | Empty
+fn area(s: Shape) -> Int { match s { Circle(r) => r, Rect(w, h) => w, Empty => 0 } }
+fn main() { println("${area(Empty)}") }

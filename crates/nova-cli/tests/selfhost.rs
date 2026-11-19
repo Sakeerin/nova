@@ -99,8 +99,10 @@
 //! [`split_ll`] cuts the `.ll` off after the comparison, so 5.4's checks
 //! read 5.4's text. Until N prints the `.ll` ([`N_LL`]), N's side runs
 //! without `--ll` and the `.ll` is checked on S0 alone: present exactly
-//! when the root lowered, and an error on the float `%` case alone. The
-//! `.ll` equals `build --release`'s intermediate on a few programs.
+//! when the root lowered, an error on the float `%` case alone, and every
+//! form the emitter handles occurring in it, or listed unreachable
+//! ([`LL_UNREACHABLE`]). The `.ll` equals `build --release`'s intermediate
+//! on a few programs.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -4972,7 +4974,7 @@ const MIR_LL_S0: &[&str] = &["check", "--dump-mir", "--ll"];
 /// Whether N prints the `.ll`, `selfhost mir --ll` (5.5a, spec §5.1): not
 /// yet, so N's after form runs without `--ll`, S0's is compared without its
 /// `(Ll` parts ([`as_n_prints`]), and the `.ll` is checked on S0 alone
-/// ([`check_ll`]).
+/// ([`check_ll`], [`every_form_the_emitter_handles_occurs_in_the_compared_ll`]).
 const N_LL: bool = false;
 
 /// The words of the one emitter error a program reaches, float `%`, which
@@ -5666,6 +5668,8 @@ struct MirCases {
     after: String,
     /// S0's before form.
     before: String,
+    /// S0's `.ll` parts, a header per program (5.5a, [`split_ll`]).
+    ll: String,
     /// How many of the programs, the first, are HIR cases.
     hir: usize,
     /// How many programs in all.
@@ -5679,21 +5683,24 @@ fn agree_on_mir_cases(check: &Path, mir: &Path) -> MirCases {
     let (loose, apart) = mir_hir_cases();
     let roots = case_roots(mir);
     assert!(roots.apart.is_empty());
-    let (mut after, mut before, _) = agree_on_mir_forms(check, loose, 0);
+    let (mut after, mut before, mut ll) = agree_on_mir_forms(check, loose, 0);
     for dir in apart {
         let name = dir.file_name().expect("a case's directory");
-        let (a, b, _) = agree_on_mir_forms(&check.join(name), &["main.nova".to_string()], 0);
+        let (a, b, l) = agree_on_mir_forms(&check.join(name), &["main.nova".to_string()], 0);
         after.push_str(&a);
         before.push_str(&b);
+        ll.push_str(&l);
     }
     let own: Vec<String> = roots.loose.into_iter().chain(roots.packages).collect();
-    let (a, b, _) = agree_on_mir_forms(mir, &own, 0);
+    let (a, b, l) = agree_on_mir_forms(mir, &own, 0);
     after.push_str(&a);
     before.push_str(&b);
+    ll.push_str(&l);
     let hir = loose.len() + apart.len();
     MirCases {
         after,
         before,
+        ll,
         hir,
         count: hir + own.len(),
     }
@@ -5717,7 +5724,6 @@ fn mir_cases() -> &'static MirCases {
 /// ([`MIR_CODES`]).
 #[test]
 fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
-    let root = root();
     let (loose, packages) = mir_corpus();
     assert!(loose.len() >= 240, "only {} loose programs", loose.len());
     assert!(
@@ -5725,14 +5731,12 @@ fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
         "only {} packages' src/main.nova",
         packages.len()
     );
-    // The loose programs, the packages' mains and the cases side by side;
-    // the loose programs' once a run, which the MIR fuzzer's bases read.
+    // The loose programs, the packages' mains and the cases side by side,
+    // each once a run: the MIR fuzzer's bases read the loose programs', and
+    // the coverage test of the `.ll` all three (5.5a).
     let (sets, cases) = std::thread::scope(|scope| {
         let cases = scope.spawn(mir_cases);
-        let runs = vec![
-            scope.spawn(|| loose_mir().clone()),
-            scope.spawn(|| agree_on_mir_forms(&root, &packages, 0)),
-        ];
+        let runs = vec![scope.spawn(loose_mir), scope.spawn(package_mir)];
         (joined(runs), joined(vec![cases]).remove(0))
     });
     let corpus = [
@@ -5854,6 +5858,394 @@ fn the_mir_dumps_agree_on_the_corpus_and_the_cases() {
     eprintln!("the MIR cases' codes: {codes:?}");
 }
 
+/// The statements S0's emitter takes from a native build's MIR after the
+/// async transform, by the MIR dump's kinds (5.5a, spec §6.3): every
+/// native statement but `Await`, which the transform consumes and whose
+/// arm is an error ([`LL_ERRORS`]).
+const LL_STATEMENTS: [&str; 25] = [
+    "ConstInt",
+    "ConstFloat",
+    "ConstBool",
+    "ConstStr",
+    "ConstUnit",
+    "Copy",
+    "Bin",
+    "Neg",
+    "Not",
+    "BitNot",
+    "Call",
+    "CallIndirect",
+    "CallRuntime",
+    "MakeClosure",
+    "MakeSum",
+    "SumTag",
+    "SumField",
+    "MakeRecord",
+    "RecordField",
+    "SetField",
+    "MakeArray",
+    "ArrayAlloc",
+    "ArrayLen",
+    "ArrayGet",
+    "ArraySet",
+];
+
+/// The terminators, by the MIR dump's kinds.
+const LL_TERMINATORS: [&str; 5] = ["Goto", "Branch", "Switch", "Return", "Trap"];
+
+/// The (operator, class) pairs the type checker admits in a `Bin` (spec
+/// 5.5a §6.3): 16 on `Int`, 10 on `Float`, `Eq` and `Ne` on `Bool`. A float
+/// `%` is an error ([`LL_ERRORS`]).
+const LL_BINS: [(&str, &[&str]); 3] = [
+    (
+        "Int",
+        &[
+            "Add", "Sub", "Mul", "Div", "Rem", "BitAnd", "BitOr", "BitXor", "Shl", "Shr", "Eq",
+            "Ne", "Lt", "Le", "Gt", "Ge",
+        ],
+    ),
+    (
+        "Float",
+        &[
+            "Add", "Sub", "Mul", "Div", "Eq", "Ne", "Lt", "Le", "Gt", "Ge",
+        ],
+    ),
+    ("Bool", &["Eq", "Ne"]),
+];
+
+/// The emitter's errors (`bail!`), each by a name and the start of its
+/// words: a root's `(Ll error "…")` line is the form `(Ll error NAME)`.
+const LL_ERRORS: [(&str, &str); 5] = [
+    ("no main", "no `main` function in MIR module"),
+    ("Await", "an `.await` marker reached codegen: "),
+    ("Mem", "a WASM memory access ("),
+    ("float %", FLOAT_REMAINDER_WORDS),
+    (
+        "float bitwise",
+        "bitwise operators are not defined for Float",
+    ),
+];
+
+/// The forms of [`ll_forms`] the compared `.ll` may lack, each with its
+/// reason (5.5a, spec §2 items 5 and 7, §5.3, §6.3).
+const LL_UNREACHABLE: [(&str, &str); 7] = [
+    (
+        "call @nova_rt_test_selector",
+        "TestSelector: only test mode's synthesized `main` calls it, and test mode's code \
+         generation is not compared",
+    ),
+    (
+        "call @nova_rt_task_is_done",
+        "TaskIsDone: no native std function calls it, and a program's call is E0001",
+    ),
+    (
+        "call @nova_rt_task_take_output",
+        "TaskTakeOutput: no MIR statement emits it",
+    ),
+    (
+        "(Ll error no main)",
+        "lowering gives E0601 first, so no module without `main` reaches the emitter",
+    ),
+    (
+        "(Ll error Await)",
+        "an `Await` is in the before form alone, which takes no `.ll`",
+    ),
+    (
+        "(Ll error Mem)",
+        "a memory access is in a WASM build's MIR alone",
+    ),
+    (
+        "(Ll error float bitwise)",
+        "`&`, `|`, `^`, `<<` and `&=` on `Float` are E0013 and `~` E0010 before MIR, and lowering \
+         makes no other float `Bin`",
+    ),
+];
+
+/// Every form the emitter handles (5.5a, spec §6.3), as
+/// [`ll_forms_of`] names what it finds: in the MIR after form, each
+/// statement and terminator by its kind, `(ConstStr "")`, each `Bin` pair
+/// of [`LL_BINS`] as `(Bin OP CLASS)`, `(Neg Int)` and `(Neg Float)`,
+/// `(Switch I8)` and `(Switch I64)` by the discriminant's class, `(Return
+/// a value)` and `(Return _)`, `(Temp Unit)`, `(Function takes_env=true)`
+/// and `(Call an extern)`; in the `.ll`, `call @SYMBOL` of each of
+/// `runtime`, a string global with each escape (`\22`, `\5C`, `a control
+/// byte`, `a byte past ASCII`), `c"\00"` and `declare an extern`; and each
+/// of [`LL_ERRORS`].
+fn ll_forms(runtime: &[String]) -> Vec<String> {
+    let mut forms: Vec<String> = LL_STATEMENTS
+        .iter()
+        .chain(&LL_TERMINATORS)
+        .map(|k| format!("({k}"))
+        .collect();
+    for (class, ops) in LL_BINS {
+        forms.extend(ops.iter().map(|op| format!("(Bin {op} {class})")));
+    }
+    forms.extend(
+        [
+            "(ConstStr \"\")",
+            "(Neg Int)",
+            "(Neg Float)",
+            "(Switch I8)",
+            "(Switch I64)",
+            "(Return a value)",
+            "(Return _)",
+            "(Temp Unit)",
+            "(Function takes_env=true)",
+            "(Call an extern)",
+            "\\22",
+            "\\5C",
+            "a control byte",
+            "a byte past ASCII",
+            "c\"\\00\"",
+            "declare an extern",
+        ]
+        .map(String::from),
+    );
+    forms.extend(runtime.iter().map(|s| format!("call @{s}")));
+    forms.extend(
+        LL_ERRORS
+            .iter()
+            .map(|(name, _)| format!("(Ll error {name})")),
+    );
+    forms
+}
+
+/// The runtime functions an `.ll` declares, in order: the lines between
+/// `llvm.trap`'s declaration and `nova_rt_str_new`'s, each `declare TYPE
+/// @SYMBOL(…)` (spec 5.5a §6.3: every `.ll` declares them all).
+fn ll_runtime(ll: &str) -> Vec<String> {
+    ll.lines()
+        .skip_while(|l| *l != "declare void @llvm.trap()")
+        .skip(1)
+        .take_while(|l| *l != "declare ptr @nova_rt_str_new(ptr, i64)")
+        .map(|l| {
+            let symbol = l.split('@').nth(1).and_then(|r| r.split('(').next());
+            symbol
+                .unwrap_or_else(|| panic!("a declaration: {l}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// The forms of [`ll_forms`] in one root's MIR after form, `mir`, and its
+/// `.ll` part, `ll` ([`split_ll`]), added to `found` with a count each: an
+/// error's form alone for a root whose `.ll` is an error, whose MIR reaches
+/// no `.ll`.
+fn ll_forms_of(mir: &str, ll: &str, found: &mut std::collections::BTreeMap<String, usize>) {
+    let mut add = |form: String| *found.entry(form).or_default() += 1;
+    if let Some(error) = ll.strip_prefix("(Ll error \"") {
+        let (name, _) = LL_ERRORS
+            .iter()
+            .find(|(_, words)| error.starts_with(words))
+            .unwrap_or_else(|| panic!("an error of no list: {ll}"));
+        add(format!("(Ll error {name})"));
+        return;
+    }
+    let mut externs: Vec<&str> = Vec::new();
+    let mut temps: Vec<&str> = Vec::new();
+    for line in mir.lines() {
+        if let Some(rest) = line.strip_prefix("  (Extern \"") {
+            externs.push(rest.split('"').next().unwrap_or(""));
+        } else if line.starts_with("  (Function ") {
+            temps.clear();
+            if line.contains(" takes_env=true ") {
+                add("(Function takes_env=true)".to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("    (Temp t") {
+            let class = rest.split([' ', ')']).nth(1).unwrap_or("");
+            temps.push(class);
+            if class == "Unit" {
+                add("(Temp Unit)".to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("      (") {
+            let fields: Vec<&str> = rest.split(' ').collect();
+            let kind = fields[0].trim_end_matches(')');
+            add(format!("({kind}"));
+            match kind {
+                "ConstStr" if line.ends_with(" \"\")") => add("(ConstStr \"\")".to_string()),
+                "Bin" => add(format!("(Bin {} {})", fields[2], fields[3])),
+                "Neg" => add(format!("(Neg {})", fields[2])),
+                "Switch" => {
+                    let disc: usize = fields[1][1..].parse().expect("a temp");
+                    add(format!("(Switch {})", temps[disc]));
+                }
+                // A block's last line closes the nodes above it too.
+                "Return" if fields[1].trim_end_matches(')') == "_" => add("(Return _)".to_string()),
+                "Return" => add("(Return a value)".to_string()),
+                "Call" if externs.contains(&rest.split('"').nth(1).unwrap_or("")) => {
+                    add("(Call an extern)".to_string())
+                }
+                _ => {}
+            }
+        }
+    }
+    for line in ll.lines() {
+        if let Some((_, call)) = line.split_once("call ") {
+            if let Some(symbol) = call.split_once(" @nova_rt_").map(|(_, s)| s) {
+                // `nova_rt_str_new` is `ConstStr`'s, which no `RtFunc` names.
+                let symbol = symbol.split('(').next().unwrap_or("");
+                if symbol != "str_new" {
+                    add(format!("call @nova_rt_{symbol}"));
+                }
+            }
+        } else if line.starts_with("declare ") && line.contains(" @\"") {
+            add("declare an extern".to_string());
+        } else if let Some((_, text)) = line
+            .strip_prefix("@str")
+            .and_then(|l| l.split_once(" x i8] c\""))
+        {
+            let text = text
+                .strip_suffix("\", align 1")
+                .unwrap_or_else(|| panic!("a string global: {line}"));
+            if text == "\\00" && line.contains(" constant [1 x i8] ") {
+                add("c\"\\00\"".to_string());
+            }
+            for escape in text.split('\\').skip(1) {
+                let byte = u8::from_str_radix(&escape[..2], 16).expect("two hex digits");
+                add(match byte {
+                    b'"' => "\\22".to_string(),
+                    b'\\' => "\\5C".to_string(),
+                    0..=0x1f | 0x7f => "a control byte".to_string(),
+                    0x80..=0xff => "a byte past ASCII".to_string(),
+                    _ => panic!("{line}: \\{escape} escapes a printable byte"),
+                });
+            }
+        }
+    }
+}
+
+/// Every form S0's emitter handles occurs in the `.ll` compared on the
+/// native corpus's roots that run and the cases (5.5a, spec §6.3, one run
+/// with [`the_mir_dumps_agree_on_the_corpus_and_the_cases`]), read from S0's
+/// output of the roots that printed one: their MIR after form, which
+/// determines their `.ll`, and the `.ll` itself ([`ll_forms_of`]); or it is
+/// in [`LL_UNREACHABLE`] with its reason, and absent. Every `.ll` declares
+/// the same runtime functions, so every symbol and signature is compared on
+/// every input, whatever the calls.
+#[test]
+fn every_form_the_emitter_handles_occurs_in_the_compared_ll() {
+    let (loose, packages, cases) = std::thread::scope(|scope| {
+        let cases = scope.spawn(mir_cases);
+        let runs = vec![scope.spawn(loose_mir), scope.spawn(package_mir)];
+        let mut runs = joined(runs);
+        let packages = runs.pop().expect("the packages'");
+        (
+            runs.pop().expect("the loose programs'"),
+            packages,
+            joined(vec![cases]).remove(0),
+        )
+    });
+    let mut found = std::collections::BTreeMap::new();
+    let mut runtime: Option<Vec<String>> = None;
+    let (mut roots, mut errors) = (0, 0);
+    for (mir, ll) in [
+        (&loose.0, &loose.2),
+        (&packages.0, &packages.2),
+        (&cases.after, &cases.ll),
+    ] {
+        let (mir, ll) = (parts_by_root(mir), parts_by_root(ll));
+        assert_eq!(mir.len(), ll.len());
+        for ((root, mir), (_, ll)) in mir.iter().zip(&ll) {
+            if ll.is_empty() {
+                continue;
+            }
+            roots += 1;
+            if ll.starts_with("(Ll ok)\n") {
+                let declared = ll_runtime(ll);
+                match &runtime {
+                    Some(first) => assert_eq!(&declared, first, "{root}"),
+                    None => runtime = Some(declared),
+                }
+            } else {
+                errors += 1;
+            }
+            ll_forms_of(mir, ll, &mut found);
+        }
+    }
+    let runtime = runtime.expect("a .ll");
+    assert!(runtime.len() >= 100, "{} runtime functions", runtime.len());
+    // The `.ll`'s size by set, N's root apart from the packages'.
+    let size = |parts: &[(String, String)]| {
+        let lines: usize = parts.iter().map(|(_, ll)| ll.lines().count()).sum();
+        let bytes: usize = parts.iter().map(|(_, ll)| ll.len()).sum();
+        format!("{} roots, {lines} lines, {bytes} bytes", parts.len())
+    };
+    let (n_root, packages): (Vec<_>, Vec<_>) = parts_by_root(&packages.2)
+        .into_iter()
+        .filter(|(_, ll)| !ll.is_empty())
+        .partition(|(root, _)| root == "selfhost/src/main.nova");
+    let printed = |ll: &str| -> Vec<(String, String)> {
+        parts_by_root(ll)
+            .into_iter()
+            .filter(|(_, ll)| !ll.is_empty())
+            .collect()
+    };
+    let in_cases = parts_by_root(&cases.ll);
+    eprintln!(
+        "the .ll by set: loose programs {}; packages' mains but N's {}; N's root {}; HIR cases \
+         {}; MIR cases {}",
+        size(&printed(&loose.2)),
+        size(&packages),
+        size(&n_root),
+        size(
+            &in_cases[..cases.hir]
+                .iter()
+                .filter(|(_, l)| !l.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+        ),
+        size(
+            &in_cases[cases.hir..]
+                .iter()
+                .filter(|(_, l)| !l.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+        ),
+    );
+    assert!(
+        roots >= 600 && errors == 1,
+        "{roots} roots, {errors} errors"
+    );
+    let forms = ll_forms(&runtime);
+    let unlisted: Vec<&String> = found.keys().filter(|f| !forms.contains(f)).collect();
+    assert!(unlisted.is_empty(), "{unlisted:?} are in no list");
+    let unreachable: Vec<&str> = LL_UNREACHABLE.iter().map(|(f, _)| *f).collect();
+    let stray: Vec<&&str> = unreachable
+        .iter()
+        .filter(|f| !forms.iter().any(|g| g == *f))
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "LL_UNREACHABLE names {stray:?}, which is no form"
+    );
+    let missing: Vec<&String> = forms
+        .iter()
+        .filter(|f| !found.contains_key(*f) && !unreachable.contains(&f.as_str()))
+        .collect();
+    assert!(missing.is_empty(), "no compared .ll holds {missing:?}");
+    let reached: Vec<&&str> = unreachable
+        .iter()
+        .filter(|f| found.contains_key(**f))
+        .collect();
+    assert!(
+        reached.is_empty(),
+        "{reached:?} occur, yet LL_UNREACHABLE lists them"
+    );
+    let rare: Vec<String> = found
+        .iter()
+        .filter(|(_, n)| **n < 3)
+        .map(|(f, n)| format!("{f} {n}"))
+        .collect();
+    eprintln!(
+        "the .ll of {roots} roots, {errors} an error: {} of {} forms, {} runtime functions \
+         declared; {} unreachable; seen under three times: {rare:?}",
+        found.len(),
+        forms.len(),
+        runtime.len(),
+        unreachable.len()
+    );
+}
+
 /// MIR's cases and the HIR cases that reach MIR as a Windows checkout has
 /// them ([`crlf`]), in both forms as [`agree_on_mir_forms`] compares them
 /// (spec 5.4 §7.2): each part is there and the codes are those of the
@@ -5916,6 +6308,10 @@ fn agree_on_mir_cases_with_crlf(compared: &mut bool) {
         assert_eq!(codes_in(dumps), codes_in(lf), "{form:?}");
         assert_ne!(dumps, lf, "{form:?}: no place moved");
     }
+    // A string literal's raw line break reaches the `.ll` (5.5a, spec §6.1).
+    let raw = |crlf: bool| format!("c\"first{}\\0Asecond\"", if crlf { "\\0D" } else { "" });
+    assert!(crlf.ll.contains(&raw(true)) && !crlf.ll.contains(&raw(false)));
+    assert!(lf.ll.contains(&raw(false)) && !lf.ll.contains(&raw(true)));
     *compared = true;
 }
 
@@ -5925,6 +6321,14 @@ fn agree_on_mir_cases_with_crlf(compared: &mut bool) {
 fn loose_mir() -> &'static (String, String, String) {
     static DUMP: OnceLock<(String, String, String)> = OnceLock::new();
     DUMP.get_or_init(|| agree_on_mir_forms(&root(), &loose_corpus(), 0))
+}
+
+/// [`loose_mir`] of the corpus packages' `src/main.nova` ([`mir_corpus`]),
+/// N's own among them: the corpus test's, and the coverage test of the
+/// `.ll` reads it too (5.5a).
+fn package_mir() -> &'static (String, String, String) {
+    static DUMP: OnceLock<(String, String, String)> = OnceLock::new();
+    DUMP.get_or_init(|| agree_on_mir_forms(&root(), &mir_corpus().1, 0))
 }
 
 /// The MIR fuzzer's seeds (5.4, spec §7.4): its own, past the body
