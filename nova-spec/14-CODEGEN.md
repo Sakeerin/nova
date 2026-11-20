@@ -87,6 +87,17 @@ type-checks and is still refused by the emitter, an internal error in
 `build --release`. WASM's and test mode's code generation stay the Rust
 compiler's alone.
 
+**Amended 2026-11-20 (branch `claude/loving-archimedes-frtf5q-55b`, ADR
+0059):** the self-hosted compiler runs `clang` as `nova build --release`
+does, on Linux and macOS: `selfhost build` writes `<out>.nova.ll` beside
+the output, runs `$NOVA_CLANG` or `clang`, probed by `--version`, as
+`clang -O2 -c <ll> -o <out>.nova.o`, with and without `--release`,
+removes the object, and removes the `.ll` on success or leaves it on a
+failure, as S0 does. It never runs `llc`. Its binaries equal S0
+`--release`'s, byte for byte, for the same output basename, which the
+`.ll`'s name reaches; the 147 golden programs are held to that on
+Ubuntu's `clang-18` 18.1.3.
+
 ### 2.3 WASM (browser target)
 - Crates: `wasm-encoder` (write modules), `walrus` (manipulate)
 - Target: `nova build --target wasm` and `nova bundle`
@@ -389,6 +400,15 @@ token `nova_wake`, and either exports `nova_turn` and `nova_gc_switches`
 - Native: use system linker (`cc`, `clang`, `link.exe`) via `cc-rs`
 - Static linking by default (no shared libnova needed)
 - WASM: no linker needed, single module
+
+**Amended 2026-11-20 (branch `claude/loving-archimedes-frtf5q-55b`, ADR
+0059):** the self-hosted compiler links as `nova build` does on Linux
+and macOS: after `clang` has run it finds `libnova_runtime.a` from
+`NOVA_RUNTIME_LIB`, or in its executable's directory or one of the two
+above it (it carries no runtime), and runs `$CC` or `cc` as `-o <out>
+<obj> <runtime> -lpthread -ldl -lm`, the Rust compiler's line, with its
+messages. On Windows its `build` refuses with `Error: selfhost build
+links on Linux and macOS only`; it does not look for `link.exe`.
 
 ---
 

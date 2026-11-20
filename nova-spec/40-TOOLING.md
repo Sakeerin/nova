@@ -157,6 +157,13 @@ build --help` says `--release` optimizes `app.wasm` for size with binaryen's
 (`docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`
 §4; ADR 0047).
 
+**Amended 2026-11-20 (branch `claude/loving-archimedes-frtf5q-55b`):**
+`nova build` and `nova check` are unchanged by 5.5b, which gives the
+self-hosted compiler its own `selfhost build` and `selfhost check`, held
+to `nova build --release` and `nova check` on a probe set
+(`docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`;
+ADR 0059). No `--help` changes.
+
 ### 1.2 Project Template (`nova new`)
 
 ```

@@ -874,6 +874,23 @@ S0's Cranelift backend. From here a change to the emitter, to
 `RtFunc`'s symbols or signatures, or to the runtime's ABI as the emitter
 spells it changes both compilers in one pull request.
 
+**Amended 2026-11-20 (branch `claude/loving-archimedes-frtf5q-55b`, ADR
+0059):** 5.5b, the driver and linking
+(`docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`).
+`selfhost/` builds programs: `selfhost build FILE [-o OUT] [--release]
+--std DIR` writes the `.ll` S0 writes, runs `clang` and `cc` on it as
+S0's `nova build --release` does, on Linux and macOS, finding the
+runtime from `NOVA_RUNTIME_LIB` or beside the executable, and leaves the
+same binary, byte for byte, for the same `-o` basename; it refuses
+Windows. `selfhost check FILE --std DIR` prints each diagnostic's code
+and locus, `error[CODE]: MESSAGE` and `PATH:LINE:COL`. A new CI step on
+Ubuntu builds the 147 golden programs with stage1's own `build`, runs
+them and holds each binary equal to S0 `--release`'s; two probe tests
+hold N's `build` and `check` to S0's stdout, exit codes and messages.
+std is found only where `--std` names it. Stage1 built N with its own
+`build`, and the result was, byte for byte, the stage1 that S0's `nova
+build --release` makes with the same `-o` basename.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)

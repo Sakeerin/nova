@@ -623,6 +623,44 @@ ADR 0058; spec
   the runtime, `check`'s output, N's `build` without `--release`, and
   Windows linking.
 
+**Amended 2026-11-20 (5.5b, branch `claude/loving-archimedes-frtf5q-55b`,
+ADR 0059; spec
+`docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`):**
+5.5b's questions, decided by the user on 2026-11-19 (ADR 0059 §16):
+- **The driver:** `selfhost build FILE [-o OUT] [--release] --std DIR`
+  and `selfhost check FILE --std DIR` (`selfhost/src/driver.nova`),
+  file mode only. `build` writes S0's intermediate, `<out>.nova.ll`
+  beside OUT, runs `clang -O2 -c` on it (`$NOVA_CLANG` or `clang`; no
+  `llc`), looks for the runtime after `clang` as S0 does
+  (`$NOVA_RUNTIME_LIB`, else beside the executable or two directories
+  above it; no embedded runtime), links with S0's `cc` line, and prints
+  `built OUT`; without `--release` it does the same, `-O2` too. Exit
+  codes 0, 1 and 2, and S0's messages in anyhow's layout. **std is found
+  only where `--std` names it,** never next to the executable or in
+  `$NOVA_HOME`, which narrows the 2026-11-02 amendment above. N's `build`
+  refuses Windows, which it knows by its executable's path, with its own
+  message; `check` runs there. `check` prints each diagnostic's
+  `SEVERITY[CODE]: MESSAGE` and `  ┌─ PATH:LINE:COL` lines, codespan's
+  header and loci (ADR 0048 decision 1), not codespan's layout. No std
+  builtin, no emitter change; S0 is unchanged.
+- **5.5b's gate,** the second item of the gate below with the user's
+  additions: on Ubuntu, in a new step of the Selfhost job's Linux leg
+  with `clang-18` 18.1.3 installed there, S1's own `build` builds the 147
+  golden programs on the release runtime, each runs with its table's
+  stdin and variables and matches its `.stdout` and status, and each
+  binary equals S0 `--release`'s for the same `-o` basename, byte for
+  byte; N's `build` and `check` give S0's stdout, exit codes and
+  messages on a probe set (39 cases without `clang` on Linux, macOS and
+  Windows, 10 with it on Linux), S0's stderr cut to its headers, loci
+  and error, ADR 0059 §7's exceptions listed; N's `build` refuses
+  Windows on CI's Windows leg; `selfhost.rs`'s main step is within the
+  Selfhost job's lines and the new step's and the install's times are
+  recorded, or the user has ruled.
+- **For 5.6:** every stage is built with one `-o` basename, so that the
+  `.ll`'s name, which reaches the binary, is the same; S1 building N with
+  its own `build` gave the `--release` S1 byte for byte, and that S2
+  built N to itself (ADR 0059 §13).
+
 - **The emitter,** a port of `nova-codegen-llvm`, and `--emit-ll`.
 - **The driver:** the module loader, `clang` and `cc` through 5.0b's
   spawn, finding `libnova_runtime.a` as `link.rs` does, and the commands
