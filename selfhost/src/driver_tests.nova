@@ -1,0 +1,214 @@
+// N's own tests of its driver (5.5b, spec
+// docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
+// §9): the intermediate's name, the default output's stem, the Windows
+// shapes, anyhow's layout, `check`'s line and column and its loci, the
+// `{:?}` quoting of a tool's name, a failed tool's status line and the
+// U+FFFD fallback for its output. The probe tests in
+// crates/nova-cli/tests/selfhost.rs compare `build` and `check` with S0;
+// these pin the pieces where no probe reaches, or where one would say
+// less: Windows on Linux, a name-less output, two causes of several lines.
+//
+// They live in `src/`, imported by `main.nova`, for the reason
+// lexer_tests.nova gives.
+
+import diagnostic
+import driver
+import loader
+import token
+
+// A label of `file` on `start..end`.
+fn label(file: String, start: Int, end: Int, primary: Bool) -> Label {
+    Label { file: file, span: Span { start: start, end: end }, message: "here", primary: primary }
+}
+
+// `line_and_column`'s two numbers, as `LINE:COLUMN`.
+fn at(text: String, offset: Int) -> String {
+    let (line, column) = line_and_column(text, offset)
+    "${line}:${column}"
+}
+
+// `loci`'s pairs, as `FILE@START` joined by spaces.
+fn loci_of(labels: [Label]) -> String {
+    let mut parts: Vec<String> = Vec::new()
+    for (file, start) in loci(Vec::from_array(labels)).iter() { parts.push("${file}@${start}") }
+    " ".join(parts.to_array())
+}
+
+@test
+fn the_intermediate_is_named_for_the_outputs_file_name_as_s0_names_it() {
+    // nova-driver's `intermediate`: the whole file name, then `.nova.EXT`,
+    // so `-o out.ll` never names the output itself.
+    assert_eq(intermediate("out.ll", "ll"), "out.ll.nova.ll")
+    assert_eq(intermediate("x", "o"), "x.nova.o")
+    assert_eq(intermediate("a/b", "ll"), "a/b.nova.ll")
+    assert_eq(intermediate("./x", "ll"), "./x.nova.ll")
+    // A trailing `/`: `Path::file_name` is the last part, and
+    // `with_file_name` replaces it.
+    assert_eq(intermediate("dir/", "ll"), "dir.nova.ll")
+    assert_eq(intermediate("a/b/", "ll"), "a/b.nova.ll")
+    // A name-less output: `out`, inside it.
+    assert_eq(intermediate("..", "ll"), "../out.nova.ll")
+    assert_eq(intermediate("/", "ll"), "/out.nova.ll")
+    assert_eq(intermediate(".", "ll"), "./out.nova.ll")
+}
+
+@test
+fn the_default_output_is_files_stem_as_path_file_stem_gives_it() {
+    assert_eq(file_stem_or("a.b.nova", "out"), "a.b")
+    assert_eq(file_stem_or("dir/a.b.nova", "out"), "a.b")
+    // A leading dot is no extension; a trailing one is an empty one.
+    assert_eq(file_stem_or(".nova", "out"), ".nova")
+    assert_eq(file_stem_or("x.", "out"), "x")
+    // No stem: S0's `out`.
+    assert_eq(file_stem_or("..", "out"), "out")
+    let args = build_args(Vec::from_array(["selfhost", "build", "d/hello.nova", "--std", "s"]))
+    assert_eq(args.unwrap().output, "hello")
+}
+
+@test
+fn windows_is_known_by_a_drive_or_a_double_backslash() {
+    assert(windows_shape("C:\\x\\selfhost.exe"), "a drive")
+    assert(windows_shape("d:/x"), "a lowercase drive")
+    assert(windows_shape("\\\\?\\C:\\x"), "a verbatim prefix")
+    assert(windows_shape("\\\\server\\share\\x"), "a UNC prefix")
+    assert(!windows_shape("/x/selfhost"), "Unix's absolute path")
+    assert(!windows_shape("x"), "a bare name")
+    assert(!windows_shape("1:/x"), "a digit is no drive")
+    assert(!windows_shape("C"), "one byte")
+    assert(!windows_shape(""), "nothing")
+}
+
+@test
+fn the_command_lines_take_what_the_spec_says_and_refuse_the_rest() {
+    let build = |words: [String]| build_args(Vec::from_array(words)).is_some()
+    let check = |words: [String]| check_args(Vec::from_array(words)).is_some()
+    assert(build(["s", "build", "a.nova", "-o", "x", "--release", "--std", "d"]), "build")
+    assert(build(["s", "build", "--std=d", "--output=x", "a.nova"]), "= forms")
+    assert(build(["s", "build", "--std", "d", "--", "-a.nova"]), "-- ends options")
+    assert(!build(["s", "build", "a.nova"]), "no --std")
+    assert(!build(["s", "build", "--std", "d"]), "no FILE")
+    assert(!build(["s", "build", "a.nova", "--release", "--release", "--std", "d"]), "twice")
+    assert(!build(["s", "build", "a.nova", "--release=yes", "--std", "d"]), "--release=")
+    assert(check(["s", "check", "a.nova", "--std", "d"]), "check")
+    assert(!check(["s", "check", "a.nova", "-o", "x", "--std", "d"]), "check takes no -o")
+    assert(!check(["s", "check", "a.nova", "--output=x", "--std", "d"]), "nor --output=")
+    assert(!check(["s", "check", "a.nova", "--release", "--std", "d"]), "nor --release")
+}
+
+@test
+fn a_failure_is_printed_in_anyhows_layout() {
+    assert_eq(
+        failure_text("could not compile due to 1 previous error", []),
+        "Error: could not compile due to 1 previous error",
+    )
+    assert_eq(
+        failure_text("failed to open a", ["gone"]),
+        "Error: failed to open a\n\nCaused by:\n    gone",
+    )
+    // Empty lines are indented too.
+    assert_eq(
+        failure_text("h", ["clang failed (exit status: 3):\n\n"]),
+        "Error: h\n\nCaused by:\n    clang failed (exit status: 3):\n    \n    ",
+    )
+    // Several causes are numbered, a later line indented seven.
+    assert_eq(
+        failure_text("h", ["failed to spawn linker: \"x\"", "No such file\nor directory"]),
+        "Error: h\n\nCaused by:\n    0: failed to spawn linker: \"x\"\n    1: No such file\n       or directory",
+    )
+}
+
+@test
+fn line_and_column_count_line_feeds_and_characters_as_codespan_does() {
+    assert_eq(at("abc", 0), "1:1")
+    assert_eq(at("abc", 2), "1:3")
+    // A tab is one column.
+    assert_eq(at("\t\tx", 2), "1:3")
+    // `\r\n` is one line break, and `\r` a column before it.
+    assert_eq(at("a\r\nb\r\nc", 6), "3:1")
+    assert_eq(at("a\r\nb", 1), "1:2")
+    // A character of several bytes is one column: CJK, an emoji, Thai.
+    assert_eq(at("世界🎉 x", 11), "1:5")
+    assert_eq(at("ชื่อ x", 13), "1:6")
+    // On a line feed, the line it ends; past the end, the end.
+    assert_eq(at("ab\ncd", 2), "1:3")
+    assert_eq(at("ab\n", 3), "2:1")
+    assert_eq(at("ab", 9), "1:3")
+}
+
+@test
+fn a_files_locus_is_its_earliest_primary_label_else_its_earliest_secondary() {
+    // The earliest primary, though a secondary comes before it.
+    assert_eq(loci_of([label("a", 30, 35, true), label("a", 3, 9, false)]), "a@30")
+    assert_eq(loci_of([label("a", 30, 35, true), label("a", 10, 12, true)]), "a@10")
+    // No primary: the earliest secondary.
+    assert_eq(loci_of([label("a", 30, 35, false), label("a", 10, 12, false)]), "a@10")
+    // A primary after secondaries takes the locus.
+    assert_eq(loci_of([label("a", 3, 4, false), label("a", 40, 41, true)]), "a@40")
+    // Two files: one locus each, in the order the labels first name them.
+    assert_eq(
+        loci_of([label("b", 20, 21, true), label("a", 5, 6, false), label("b", 2, 3, false)]),
+        "b@20 a@5",
+    )
+    assert_eq(loci_of([]), "")
+}
+
+@test
+fn a_diagnostic_prints_its_header_and_one_locus_per_file() {
+    let mut d = Diagnostic::error("E0074", "method `len` is defined twice")
+    d.add_primary("main", Span { start: 5, end: 11 }, "here")
+    d.add_secondary("<std/strings>", Span { start: 3, end: 4 }, "also")
+    d.add_secondary("nowhere", Span { start: 0, end: 1 }, "a file S0 would not know")
+    d.add_note("a note, not printed")
+    let files = Vec::from_array(
+        [
+            SourceFile { label: "main", path: "d/main.nova", text: "impl String {" },
+            SourceFile { label: "<std/strings>", path: "<std/strings>", text: "\n\n\tx" },
+        ],
+    )
+    assert_eq(
+        diagnostic_lines(d, files),
+        "error[E0074]: method `len` is defined twice\n  ┌─ d/main.nova:1:6\n  ┌─ <std/strings>:3:2",
+    )
+    let mut w = Diagnostic::warning("E0021", "unreachable match arm")
+    w.add_primary("main", Span { start: 0, end: 1 }, "here")
+    assert_eq(
+        diagnostic_lines(w, files),
+        "warning[E0021]: unreachable match arm\n  ┌─ d/main.nova:1:1",
+    )
+    // No code: codespan leaves the brackets out; no label: no locus.
+    assert_eq(diagnostic_lines(Diagnostic::error("", "bare"), files), "error: bare")
+}
+
+@test
+fn a_tools_name_is_quoted_as_debug_quotes_it() {
+    assert_eq(debug_quoted("cc"), "\"cc\"")
+    assert_eq(debug_quoted("/x/no tool"), "\"/x/no tool\"")
+    assert_eq(debug_quoted("a\"b"), "\"a\\\"b\"")
+    assert_eq(debug_quoted("c:\\x\\y"), "\"c:\\\\x\\\\y\"")
+}
+
+@test
+fn a_failed_tools_cause_is_its_status_line_and_its_output_trimmed() {
+    let none = bytes_from_ints([])
+    assert_eq(status_cause("clang", 3, none, none), "clang failed (exit status: 3):\n\n")
+    let out = bytes_from_ints([32, 111, 117, 116, 10])
+    let err = bytes_from_ints([10, 101, 114, 114, 10, 10])
+    assert_eq(status_cause("linking", 1, out, err), "linking failed (exit status: 1):\nout\nerr")
+    // A signal: N's status is 128 + n (spec 5.5b §3.6).
+    assert_eq(status_cause("linking", 137, none, none), "linking failed (exit status: 137):\n\n")
+}
+
+@test
+fn a_tools_output_that_is_not_utf8_keeps_its_ascii_and_marks_each_other_byte() {
+    assert_eq(tool_text(bytes_from_ints([104, 105])), "hi")
+    // UTF-8 is kept whole.
+    assert_eq(tool_text(bytes_from_ints([226, 156, 147])).byte_len(), 3)
+    // Not UTF-8: `h`, U+FFFD (EF BF BD) for 0xFF, `i`.
+    let text = tool_text(bytes_from_ints([104, 255, 105]))
+    assert_eq(text.byte_len(), 5)
+    assert_eq(text.byte_at(0), 104)
+    assert_eq(text.byte_at(1), 239)
+    assert_eq(text.byte_at(2), 191)
+    assert_eq(text.byte_at(3), 189)
+    assert_eq(text.byte_at(4), 105)
+}
