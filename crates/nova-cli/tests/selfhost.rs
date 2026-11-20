@@ -7177,6 +7177,7 @@ const PROBE_INPUTS: &[(&str, &str)] = &[
 /// working directory, then runs `cc` with them: a probe's `CC`, made
 /// executable in every case's directory on Unix, so that `cc`'s command
 /// line is left behind and compared.
+#[cfg(unix)]
 const CC_ARGS: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > cc-args.txt\nexec cc \"$@\"\n";
 
 /// What the copy of `examples/05-geometry` gets appended to its library's
