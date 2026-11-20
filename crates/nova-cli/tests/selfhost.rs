@@ -7173,6 +7173,12 @@ const PROBE_INPUTS: &[(&str, &str)] = &[
     ),
 ];
 
+/// A `cc` that writes its arguments, one a line, to `cc-args.txt` in its
+/// working directory, then runs `cc` with them: a probe's `CC`, made
+/// executable in every case's directory on Unix, so that `cc`'s command
+/// line is left behind and compared.
+const CC_ARGS: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > cc-args.txt\nexec cc \"$@\"\n";
+
 /// What the copy of `examples/05-geometry` gets appended to its library's
 /// `src/units.nova`: an error on its line 27, a 2-digit line.
 const GEOMETRY_ERROR: &str = "\npub fn broken() -> Int { \"no\" }\n";
@@ -7499,6 +7505,14 @@ fn probe_dir(under: &Path, name: &str, geometry: bool) -> PathBuf {
         std::fs::write(&file, text).expect("write a probe input");
     }
     std::fs::create_dir_all(dir.join("dir.nova")).expect("make dir.nova");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("cc-args");
+        std::fs::write(&script, CC_ARGS).expect("write cc-args");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make cc-args executable");
+    }
     if geometry {
         let from = root().join("examples").join("05-geometry");
         for rel in [
@@ -7763,8 +7777,12 @@ fn n_build_and_check_answer_as_s0_does() {
 /// §6.3), each with the runtime both sides link given as
 /// `NOVA_RUNTIME_LIB` where it does not name its own: success, with `-o`
 /// and with the default name from a relative FILE; a warning and success;
-/// `clang` and `cc` that fail; `cc` and the runtime missing; a text file as
-/// the runtime, where `ld`'s lines are the same on both sides.
+/// `clang` and `cc` that fail, `clang` with no runtime too, which S0 looks
+/// for after `clang` has run; `cc` and the runtime missing; a text file as
+/// the runtime, where `ld`'s lines are the same on both sides; and `cc`'s
+/// command line, which [`CC_ARGS`] records, beside a binary that does not
+/// show every flag (`-lpthread`, `-ldl` and `-lm` are part of glibc 2.34's
+/// libc and of macOS's libSystem).
 const CLANG_PROBES: &[Probe] = {
     use Expect::Same;
     use ProbeVar::{InDir, Text};
@@ -7804,6 +7822,16 @@ const CLANG_PROBES: &[Probe] = {
             &["build", "--release", "clean.nova", "-o", "cf"],
             &[("NOVA_CLANG", Text("false"))],
         ),
+        // The runtime is looked for after `clang` has run, as S0 does:
+        // `clang`'s failure is the one reported.
+        build(
+            "clang fails, and no runtime",
+            &["build", "--release", "clean.nova", "-o", "cfr"],
+            &[
+                ("NOVA_CLANG", Text("false")),
+                ("NOVA_RUNTIME_LIB", InDir("no-such-runtime.a")),
+            ],
+        ),
         build(
             "cc fails",
             &["build", "--release", "clean.nova", "-o", "ccf"],
@@ -7813,6 +7841,11 @@ const CLANG_PROBES: &[Probe] = {
             "cc missing",
             &["build", "--release", "clean.nova", "-o", "ccm"],
             &[("CC", InDir("no-such-tool"))],
+        ),
+        build(
+            "cc's command line",
+            &["build", "--release", "warn.nova", "-o", "ca"],
+            &[("CC", InDir("cc-args"))],
         ),
         build(
             "NOVA_RUNTIME_LIB missing",
@@ -7894,8 +7927,8 @@ fn n_build_answers_as_s0_does_with_clang() {
                 .keys()
                 .filter(|f| f.ends_with(".nova.ll") || f.ends_with(".nova.o"))
                 .collect();
-            if n_run.left.len() != 1 || !intermediates.is_empty() {
-                why = Some("a build left more than its binary".to_string());
+            if !intermediates.is_empty() {
+                why = Some("a build left its .ll or its object".to_string());
             }
         }
         if let Some(why) = why {
