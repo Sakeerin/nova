@@ -8037,12 +8037,16 @@ fn n_build_answers_as_s0_does_with_clang() {
         }
         let tmp = dir.join("tmp");
         std::fs::create_dir_all(&tmp).expect("a temporary directory");
-        // `clean.nova` prints `clean`; `arrays`'s `.stdout` is not that.
-        match run_golden("arrays", &hi, &tmp) {
-            Err(why) if why.starts_with("standard output differs") => {}
-            other => failures.push(format!(
-                "the golden harness took a wrong standard output: {other:?}"
-            )),
+        // `clean.nova` prints `clean`: `arrays`'s `.stdout` is another
+        // text, and `fs_already_exists`'s holds `cleaned`, which a check
+        // looser than equality could take.
+        for name in ["arrays", "fs_already_exists"] {
+            match run_golden(name, &hi, &tmp) {
+                Err(why) if why.starts_with("standard output differs") => {}
+                other => failures.push(format!(
+                    "the golden harness took a wrong standard output for {name}: {other:?}"
+                )),
+            }
         }
         if same_binaries(&hi, &hi).is_err()
             || !same_binaries(&hi, &other)
