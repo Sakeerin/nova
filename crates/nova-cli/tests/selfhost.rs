@@ -7083,8 +7083,10 @@ fn s1_builds_the_golden_suite() {
 /// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
 /// §7): with `--exact`, a name that matches no test runs nothing and the
 /// step still passes, so a name misspelt or dropped there, or a test no
-/// longer ignored here, would go unseen. Both files are read as text, with
-/// CRLF line endings too, as a Windows checkout may leave them.
+/// longer ignored here, would go unseen; so would a step that lost
+/// `--ignored`, which then runs none of them, or `--test selfhost`. The
+/// step must also sit in the Selfhost job. Both files are read as text,
+/// with CRLF line endings too, as a Windows checkout may leave them.
 #[test]
 fn the_ci_step_names_every_clang_test() {
     const STEP: &str = "- name: S1 builds the golden suite (Linux)";
@@ -7113,6 +7115,25 @@ fn the_ci_step_names_every_clang_test() {
         .copied()
         .collect();
     assert!(!names.is_empty(), "the step names no test: {run}");
+    // `--test selfhost`, then `--`, then `--ignored`, before `--exact`.
+    let test = words.windows(2).position(|w| w == ["--test", "selfhost"]);
+    let dashes = words.iter().position(|w| *w == "--");
+    let ignored = words.iter().position(|w| *w == "--ignored");
+    assert!(
+        matches!((test, dashes, ignored), (Some(t), Some(d), Some(i)) if t < d && d < i && i < exact),
+        "the step's `run:` line does not run `--test selfhost -- --ignored` before `--exact`: {run}"
+    );
+    // The step's job: the nearest line above it at a job's indent.
+    let job = lines[..at]
+        .iter()
+        .rev()
+        .find(|l| indent(l) == 2 && !l.trim().is_empty() && !l.trim().starts_with('#'))
+        .map(|l| l.trim());
+    assert_eq!(
+        job,
+        Some("selfhost:"),
+        "the step `{STEP}` is not in the Selfhost job"
+    );
 
     // This file's top-level tests: each name, and its attributes.
     let mut tests: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -7255,6 +7276,15 @@ const PROBE_INPUTS: &[(&str, &str)] = &[
         "frem.nova",
         "fn main() {\n    let a = 5.5\n    let b = 2.0\n    println(\"${a % b}\")\n}\n",
     ),
+    // A package whose manifest has a key N's manifest reader does not read.
+    (
+        "pkg/nova.toml",
+        "[package]\nname = \"pkg\"\nversion = \"0.1.0\"\nedition = \"2026\"\nfrobnicate = \"1\"\n",
+    ),
+    (
+        "pkg/src/main.nova",
+        "fn main() {\n    println(\"pkg\")\n}\n",
+    ),
 ];
 
 /// A `cc` that writes its arguments, one a line, to `cc-args.txt` in its
@@ -7284,10 +7314,15 @@ enum Expect {
     /// A usage error: both exit 2, print nothing on stdout and leave
     /// nothing; N prints this line. clap's text is not matched (§3.6).
     Usage(&'static str),
+    /// N alone, on a case S0 answers otherwise by design: N exits with
+    /// this code, prints nothing on stdout, leaves nothing, and prints this
+    /// stderr. S0 is not run.
+    Alone(i32, &'static str),
 }
 
 /// One case of the probe set: its name; S0's arguments, `None` where N
-/// alone is run (no `--std` or no FILE, which S0 has no form of); N's,
+/// alone is run (no `--std` or no FILE, a manifest N does not read, std
+/// missing from `--std`'s directory: S0 has no form of these); N's,
 /// `--std DIR` added to them when `std` is set; the variables both sides
 /// get, a value naming a file of the case's directory by its name there;
 /// whether it builds, which N refuses on Windows; and how it is compared.
@@ -7387,7 +7422,7 @@ fn the_extraction_keeps_the_headers_the_loci_and_the_error() {
 /// `clang` (spec 5.5b §6.3): `check`'s, `build --release`'s that stop
 /// before `clang` runs or find none, and the usage errors.
 const PROBES: &[Probe] = {
-    use Expect::{Same, Usage};
+    use Expect::{Alone, Same, Usage};
     use ProbeVar::InDir;
     const NO_TOOL: &[(&str, ProbeVar)] = &[
         ("NOVA_CLANG", InDir("no-such-tool")),
@@ -7444,6 +7479,25 @@ const PROBES: &[Probe] = {
             vars: &[],
             links: false,
             expect: Usage(line),
+        }
+    }
+    // N alone, failing: `std` when N is given the tree's std, `links` for
+    // `build`.
+    const fn n_fails(
+        name: &'static str,
+        n: &'static [&'static str],
+        std: bool,
+        links: bool,
+        expect: Expect,
+    ) -> Probe {
+        Probe {
+            name,
+            s0: None,
+            n,
+            std,
+            vars: &[],
+            links,
+            expect,
         }
     }
     &[
@@ -7555,6 +7609,12 @@ const PROBES: &[Probe] = {
             &["check", "clean.nova", "-o", "x"],
             N_CHECK_USAGE,
         ),
+        usage(
+            "build an empty FILE",
+            &["build", "--release", ""],
+            N_BUILD_USAGE,
+        ),
+        usage("check an empty FILE", &["check", ""], N_CHECK_USAGE),
         alone(
             "N builds without --std",
             &["build", "clean.nova", "--release"],
@@ -7574,6 +7634,55 @@ const PROBES: &[Probe] = {
             "N checks without FILE",
             &["check", "--std", "std"],
             N_CHECK_USAGE,
+        ),
+        // N alone, failing, its lines pinned and not compared with S0's:
+        // S0 has no form of either case. A manifest key N's reader does not
+        // read, which S0 warns of as M0006 and goes on (a difference ADR
+        // 0059 §7 records); and std missing from `--std`'s directory, which
+        // S0 has built in. A relative `--std`, a directory under the case's
+        // own, names the same path on every platform. On Windows each
+        // `build` is N's refusal, as for every case that builds.
+        n_fails(
+            "N checks a manifest it does not read",
+            &["check", "pkg/src/main.nova"],
+            true,
+            false,
+            Alone(
+                1,
+                "Error: selfhost check cannot read pkg/src/main.nova: pkg/nova.toml: the key \
+                 `package.frobnicate` is not read\n",
+            ),
+        ),
+        n_fails(
+            "N builds a manifest it does not read",
+            &["build", "--release", "pkg/src/main.nova"],
+            true,
+            true,
+            Alone(
+                1,
+                "Error: selfhost build cannot read pkg/src/main.nova: pkg/nova.toml: the key \
+                 `package.frobnicate` is not read\n",
+            ),
+        ),
+        n_fails(
+            "N checks with no std",
+            &["check", "clean.nova", "--std", "no-std"],
+            false,
+            false,
+            Alone(
+                2,
+                "error: cannot read std's no-std/core/lib.nova: NotFound\n",
+            ),
+        ),
+        n_fails(
+            "N builds with no std",
+            &["build", "--release", "clean.nova", "--std", "no-std"],
+            false,
+            true,
+            Alone(
+                2,
+                "error: cannot read std's no-std/core/lib.nova: NotFound\n",
+            ),
         ),
     ]
 };
@@ -7737,6 +7846,14 @@ fn probe_difference(expect: Expect, s0: &ProbeRun, n: &ProbeRun, windows: bool) 
             }
             (n.stderr != line).then(|| format!("N's stderr is not {line:?}"))
         }
+        Expect::Alone(code, stderr) => {
+            if n.code != Some(code) || !n.stdout.is_empty() || !n.left.is_empty() {
+                return Some(format!(
+                    "N did not exit {code} with nothing on stdout and nothing left"
+                ));
+            }
+            (n.stderr != stderr).then(|| format!("N's stderr is not {stderr:?}"))
+        }
     }
 }
 
@@ -7757,10 +7874,11 @@ fn probe_vars(
 }
 
 /// Each of `probes`, four at a time, each in a fresh directory of its own
-/// under `under`, S0 then N; the failures, each with both sides' output.
-/// On Windows N refuses to build, so a case that builds is N's refusal
-/// there alone: exit 1, nothing on stdout and nothing left (spec 5.5b
-/// §3.5, §3.6), and S0 is not run.
+/// under `under`, N then S0, S0 only where the case names its arguments;
+/// the failures, each with both sides' output. On Windows N refuses to
+/// build, so a case that builds is N's refusal there alone: exit 1,
+/// nothing on stdout and nothing left (spec 5.5b §3.5, §3.6), and S0 is
+/// not run.
 fn run_probes(probes: &[Probe], under: &Path, home: &Path, n: &Path) -> Vec<String> {
     let std_dir = root().join("std");
     let windows = cfg!(windows);
@@ -7838,8 +7956,10 @@ fn run_probes(probes: &[Probe], under: &Path, home: &Path, n: &Path) -> Vec<Stri
 /// and N's stderr must be S0's as §4.3 extracts it: each diagnostic's
 /// header and loci, then anyhow's error. §3.6's exceptions, where they
 /// apply: clap's usage text, against which N's own line is pinned (exit 2
-/// and empty stdout compared); N without `--std` or FILE, run alone;
-/// Windows, where N refuses each `build` and S0's is not compared, and a
+/// and empty stdout compared); N without `--std` or FILE, run alone; N
+/// alone on a manifest it does not read and on std missing from `--std`'s
+/// directory, its exit code and lines pinned, as S0 warns M0006 there and
+/// has std built in; Windows, where N refuses each `build` and S0's is not compared, and a
 /// locus's `\` is read as `/`.
 #[test]
 fn n_build_and_check_answer_as_s0_does() {

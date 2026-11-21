@@ -1,9 +1,9 @@
 // N's own tests of its driver (5.5b, spec
 // docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
 // §9): the intermediate's name, the default output's stem, the Windows
-// shapes, anyhow's layout, `check`'s line and column and its loci, the
-// `{:?}` quoting of a tool's name, a failed tool's status line and the
-// U+FFFD fallback for its output. The probe tests in
+// shapes and refusal, anyhow's layout, `check`'s line and column and its
+// loci, the `{:?}` quoting of a tool's name, a failed tool's status line
+// and the U+FFFD fallback for its output. The probe tests in
 // crates/nova-cli/tests/selfhost.rs compare `build` and `check` with S0;
 // these pin the pieces where no probe reaches, or where one would say
 // less: Windows on Linux, a name-less output, two causes of several lines.
@@ -89,10 +89,21 @@ fn the_command_lines_take_what_the_spec_says_and_refuse_the_rest() {
     assert(!build(["s", "build", "--std", "d"]), "no FILE")
     assert(!build(["s", "build", "a.nova", "--release", "--release", "--std", "d"]), "twice")
     assert(!build(["s", "build", "a.nova", "--release=yes", "--std", "d"]), "--release=")
+    assert(!build(["s", "build", "", "--std", "d"]), "an empty FILE")
+    assert(!check(["s", "check", "--std", "d", "--", ""]), "an empty FILE after --")
     assert(check(["s", "check", "a.nova", "--std", "d"]), "check")
     assert(!check(["s", "check", "a.nova", "-o", "x", "--std", "d"]), "check takes no -o")
     assert(!check(["s", "check", "a.nova", "--output=x", "--std", "d"]), "nor --output=")
     assert(!check(["s", "check", "a.nova", "--release", "--std", "d"]), "nor --release")
+}
+
+@test
+fn the_windows_refusal_is_the_specs_text() {
+    // Spec 5.5b §3.5's words, which no input reaches on Linux or macOS.
+    assert_eq(
+        failure_text(WINDOWS_REFUSAL, []),
+        "Error: selfhost build links on Linux and macOS only",
+    )
 }
 
 @test

@@ -650,7 +650,7 @@ ADR 0059; spec
   stdin and variables and matches its `.stdout` and status, and each
   binary equals S0 `--release`'s for the same `-o` basename, byte for
   byte; N's `build` and `check` give S0's stdout, exit codes and
-  messages on a probe set (39 cases without `clang` on Linux, macOS and
+  messages on a probe set (45 cases without `clang` on Linux, macOS and
   Windows, 10 with it on Linux, and N's `build` with no runtime, with a
   runtime two directories up and without `--release`), S0's stderr cut
   to its headers, loci and error, ADR 0059 §7's exceptions listed; N's

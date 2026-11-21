@@ -96,7 +96,9 @@ removes the object, and removes the `.ll` on success or leaves it on a
 failure, as S0 does. It never runs `llc`. Its binaries equal S0
 `--release`'s, byte for byte, for the same output basename, which the
 `.ll`'s name reaches; the 147 golden programs are held to that on
-Ubuntu's `clang-18` 18.1.3.
+Ubuntu's `clang-18` 18.1.3. Its linking on macOS has not yet run: the
+tests that link, the clang probe test and the golden step, run on Linux
+only.
 
 ### 2.3 WASM (browser target)
 - Crates: `wasm-encoder` (write modules), `walrus` (manipulate)
@@ -407,8 +409,9 @@ and macOS: after `clang` has run it finds `libnova_runtime.a` from
 `NOVA_RUNTIME_LIB`, or in its executable's directory or one of the two
 above it (it carries no runtime), and runs `$CC` or `cc` as `-o <out>
 <obj> <runtime> -lpthread -ldl -lm`, the Rust compiler's line, with its
-messages. On Windows its `build` refuses with `Error: selfhost build
-links on Linux and macOS only`; it does not look for `link.exe`.
+messages; on macOS that line has not yet run (the tests that link run
+on Linux only). On Windows its `build` refuses with `Error: selfhost
+build links on Linux and macOS only`; it does not look for `link.exe`.
 
 ---
 
