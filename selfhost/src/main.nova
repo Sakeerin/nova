@@ -54,6 +54,12 @@
 //                             OUT` printed (spec
 //                             docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
 //                             §3, driver.nova)
+//   selfhost check FILE --std DIR
+//                             checks FILE as S0's `nova check FILE` does,
+//                             each diagnostic printed as its header and
+//                             loci, `error[CODE]: MESSAGE` and `  ┌─
+//                             PATH:LINE:COL`, then `ok: FILE` or `Error:
+//                             found N error(s)` (spec 5.5b §4, driver.nova)
 //
 // A file with lex or parse errors is dumped with them, and the exit code
 // stays 0. A file that cannot be read prints `IOERR` and its kind after its
@@ -122,6 +128,10 @@ async fn main() {
     }
     if command == "build" {
         build_command(argv).await
+        return
+    }
+    if command == "check" {
+        check_command(argv).await
         return
     }
     // No file is refused, as S0's clap refuses it.

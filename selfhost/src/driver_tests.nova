@@ -1,10 +1,10 @@
 // N's own tests of its driver (5.5b, spec
 // docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
 // §9): the intermediate's name, the default output's stem, the Windows
-// shapes, anyhow's layout, a diagnostic's line and column and its loci, the
+// shapes, anyhow's layout, `check`'s line and column and its loci, the
 // `{:?}` quoting of a tool's name, a failed tool's status line and the
 // U+FFFD fallback for its output. The probe tests in
-// crates/nova-cli/tests/selfhost.rs compare `build` with S0;
+// crates/nova-cli/tests/selfhost.rs compare `build` and `check` with S0;
 // these pin the pieces where no probe reaches, or where one would say
 // less: Windows on Linux, a name-less output, two causes of several lines.
 //
@@ -81,6 +81,7 @@ fn windows_is_known_by_a_drive_or_a_double_backslash() {
 @test
 fn the_command_lines_take_what_the_spec_says_and_refuse_the_rest() {
     let build = |words: [String]| build_args(Vec::from_array(words)).is_some()
+    let check = |words: [String]| check_args(Vec::from_array(words)).is_some()
     assert(build(["s", "build", "a.nova", "-o", "x", "--release", "--std", "d"]), "build")
     assert(build(["s", "build", "--std=d", "--output=x", "a.nova"]), "= forms")
     assert(build(["s", "build", "--std", "d", "--", "-a.nova"]), "-- ends options")
@@ -88,6 +89,10 @@ fn the_command_lines_take_what_the_spec_says_and_refuse_the_rest() {
     assert(!build(["s", "build", "--std", "d"]), "no FILE")
     assert(!build(["s", "build", "a.nova", "--release", "--release", "--std", "d"]), "twice")
     assert(!build(["s", "build", "a.nova", "--release=yes", "--std", "d"]), "--release=")
+    assert(check(["s", "check", "a.nova", "--std", "d"]), "check")
+    assert(!check(["s", "check", "a.nova", "-o", "x", "--std", "d"]), "check takes no -o")
+    assert(!check(["s", "check", "a.nova", "--output=x", "--std", "d"]), "nor --output=")
+    assert(!check(["s", "check", "a.nova", "--release", "--std", "d"]), "nor --release")
 }
 
 @test
