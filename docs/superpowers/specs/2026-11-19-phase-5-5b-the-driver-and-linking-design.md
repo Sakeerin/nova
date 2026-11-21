@@ -548,3 +548,113 @@ Ranked.
 - The full suite, fmt, clippy (with `--test selfhost`), the MSRV job,
   `nova fmt --check` over `selfhost/`, `release_golden_suite`, and `git
   diff` on `Cargo.lock` are clean.
+
+## Amendment (2026-11-20)
+
+Dated, with the plan (`docs/superpowers/plans/2026-11-20-phase-5-5b-the-driver-and-linking.md`),
+after the prototype and its measurement on CI. Where this section and the
+text above differ, this section holds; ADR 0059 records each point.
+
+1. **The main step's cost** (§10, third item; §14, risk 1). §10
+   projected +1 to 3 s for the first probe test in `selfhost.rs`'s main
+   step. Locally it measured +9 to 15 s (about +9 s as the Selfhost job
+   runs `selfhost.rs`, +15 s without the release runtime; the probe test
+   about 3.5 s alone). On CI it did not show above the runners' spread:
+   on run 44674948875, Linux 56.75 s, macOS 86.12 s and Windows 70.30 s,
+   against `main`'s 54.92, 67.47 and 66.85 s on run 44479648345, each
+   under its line of 80, 100 and 110 s.
+2. **The new step's time** (§10, second item; §14, risk 1). Projected at
+   46 to 57 s on CI; it took 30.3 s (`2 passed`, `finished in 30.21s`),
+   and the install 10.7 s, on run 44674948875. Locally, as the Selfhost
+   job runs it, 25 to 39 s.
+3. **§6.3's lists grow.** The main probe test has 39 cases against
+   §6.3's 24: five more `check` cases (Thai combining marks, the
+   sibling's error named from `./d/` too, labels in two files, a label
+   in std, float `%`), four more `build` cases (a directory as FILE, no
+   `clang` with the default name and with a warning, no `clang` and no
+   runtime), four more usage cases (`build`'s `--release=yes`, and
+   `check`'s unknown option, second FILE and `-o`), and two more cases on
+   N alone (`check`'s, as `build`'s). The clang list gains three cases.
+   Two in the prototype, each
+   for mutants no case of the list could kill: "clang fails, and no
+   runtime" (`NOVA_CLANG=false` with `NOVA_RUNTIME_LIB` at a missing file:
+   the runtime is looked for only after `clang` runs) and "cc's command
+   line" (a `CC` that records its arguments, Unix only: `-lpthread` and
+   `-lm` change no binary on glibc 2.34+ or macOS). A third with the plan,
+   for the mutant that looked for the runtime in N's own directory alone:
+   "a runtime two directories up" (N copied into `up/bin`, the runtime
+   beside `up`, `NOVA_RUNTIME_LIB` unset: `built up`). The clang test's
+   report counts each case that ran, 16 when all run: the list's 10,
+   three on N alone, and the golden harness's three refusals. And a test
+   §6.3 and §7 do not name: `the_ci_step_names_every_clang_test`, in the
+   main step on all three systems, holds §7's step to the tests
+   `selfhost.rs` ignores as needing `clang`. With `--exact`, a name there
+   that matches no test runs nothing and the step passes; the plan's
+   mutant of a misspelt name (41) passed until this test was added, and
+   is now caught, not accepted.
+4. **§9's locus rule** ("the earliest primary against an earlier
+   secondary") **has no source input that reaches it:** of the codes
+   with more than one label that the probes reach, E0002 holds both in
+   one file, and S0 lists its primary label first; E0074's probes each
+   label two files, one label in each (two modules of a program, and a
+   program and std). So every file's first label is its locus, no input
+   was found that does otherwise, and only N's `@test`
+   `a_files_locus_is_its_earliest_primary_label_else_its_earliest_secondary`
+   covers it.
+5. **The research's `frem.nova`** (§2's float `%` row) wrote `{a % b}`
+   without `$`, so it built and never reached float `%`; the probe's
+   input writes `${a % b}`.
+6. **Local clippy sees only Linux's items.** `CC_ARGS`, used only inside
+   a `#[cfg(unix)]` block, was dead code on Windows, and run 44672859855's
+   Clippy (`windows-latest`) failed on it under `-D warnings`. The
+   constant is `#[cfg(unix)]` (`ecfcd0f8`), and the plan's checks run
+   `selfhost.rs`'s clippy again with the diff's `#[cfg(unix)]` items
+   turned off.
+7. **Where the prototype's part 2 says two mutants survived until a case
+   was added, they were four:** M3b (item 3's first case), M4a and M4b
+   (its second), and H2, the golden harness's stdout check, which first
+   ran only a binary whose output no `.stdout` held, until
+   `fs_already_exists` was added. The plan's mutants found a fifth (item
+   3's third clang case) and a sixth, the misspelt name in §7's step
+   (item 3's test).
+8. **The open decisions, as settled** (ADR 0059 §17; each cheap to
+   change):
+   - `build` checks in full, as S0's `build` does, not `selfhost mir`'s
+     shared-std path; all 147 binaries are equal either way;
+   - std's loading (`load_std`, `read_std_modules`, `labels_and_texts`,
+     `io_kind_name`) moved verbatim from `main.nova` to `driver.nova`,
+     public: Nova forbids import cycles, and `check` needs it too;
+   - std unreadable is N's existing `error: cannot read std's PATH:
+     KIND`, exit 2, as `selfhost mir` gives it (§3.4 has no row);
+   - the command line's edges (§3.1): an empty value, and a separate value
+     that starts with `-` but is not `-`, refused; `-` alone a FILE;
+     `-oX` and `-o=X` refused;
+   - a refused manifest (§3.2, step 2): `Error: selfhost build cannot
+     read FILE: WHY`, and `check`'s `Error: selfhost check cannot read
+     FILE: WHY`, exit 1;
+   - the CI line names both ignored tests, as §7 writes it (the plan's
+     first task names the golden test alone, its second adds the other
+     with it);
+   - §4.3's extraction keeps every line from the first `Error: ` line,
+     not the last line alone: anyhow's causes span several lines;
+   - std's loci are read from `--std` on demand, since N's std modules
+     keep no text; a std file N cannot read leaves its locus out;
+   - each probe has its own directory; the files each side leaves are
+     compared, then removed before the other side runs;
+   - `golden_dir()` and `run_golden()` live in `golden/shared.rs` with
+     the tables (§6.1), so both walks run and judge a binary alike.
+9. **CI's figures** (§10, last item; §16). The prototype was pushed to
+   `claude/loving-archimedes-frtf5q-55b-ci` with draft Sakeerin/nova#146,
+   measurement only, closed unmerged:
+   - run 44672859855 (head `77d247c7`): Clippy (`windows-latest`) failed
+     (item 6); every other job green; `selfhost.rs` `finished in` 56.35 s
+     on Linux (69 passed, 2 ignored), 71.15 s on macOS (67, 2) and 63.56 s
+     on Windows (63, 2); the install 9.1 s and the new step 30.4 s;
+   - run 44674948875 (head `fe0e5f10`): 19 of 19 jobs green;
+     `selfhost.rs` 56.75 s on Linux, 86.12 s on macOS and 70.30 s on
+     Windows (69, 67 and 63 passed, 2 ignored each), margins 23.25, 13.88
+     and 39.70 s against 80, 100 and 110 s; the install 10.7 s and the new
+     step 30.3 s; the Selfhost jobs 3m26s, 4m20s and 3m55s. The Test job's
+     sums were not extracted;
+   - `main` at `e71446df`, run 44479648345: `selfhost.rs` 54.92, 67.47
+     and 66.85 s (margins 25.1, 32.5 and 43.2 s).
