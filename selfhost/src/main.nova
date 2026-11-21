@@ -65,6 +65,7 @@ import async_lower
 import builtins
 import diagnostic
 import driver
+import driver_tests
 import dump
 import emit_ll
 import emit_ll_tests

@@ -14,7 +14,13 @@
 // are gone, `built OUT` is on stdout and the exit code is 0. A failure
 // prints S0's words in anyhow's layout and exits 1; a command line it does
 // not take prints its usage line and exits 2. Without `--release` it does
-// the same, `-O2` too (decision 6), where S0 would use Cranelift.
+// the same, `-O2` too (decision 6), where S0 would use Cranelift. On
+// Windows, which N knows by its executable's path, `build` refuses
+// (§3.5).
+//
+// `build` prints each diagnostic, warnings too, as `SEVERITY[CODE]:
+// MESSAGE` and one `  ┌─ PATH:LINE:COL` line per file its labels name, on
+// stderr (§4.1).
 
 import builtins
 import diagnostic
@@ -30,6 +36,9 @@ import typeck_body
 /// `selfhost build`'s usage line, which every command line it does not
 /// take prints (spec 5.5b §3.1).
 pub const BUILD_USAGE: String = "usage: selfhost build FILE [-o OUT] [--release] --std DIR"
+
+/// N's refusal to build on Windows (spec 5.5b §3.5).
+pub const WINDOWS_REFUSAL: String = "selfhost build links on Linux and macOS only"
 
 // S0's words when neither `clang` nor `llc` can be spawned
 // (`compile_ir_to_object`); N looks for `clang` alone, and says the same.
@@ -119,10 +128,11 @@ pub fn build_args(argv: Vec<String>) -> Option<BuildArgs> {
 }
 
 /// `selfhost build` (spec 5.5b §3.2), in S0's order: the command line;
-/// std read from its directory; FILE loaded, checked and lowered; the
-/// `.ll` emitted and written beside the output; `clang`, the runtime and
-/// `cc` (`compile_and_link`); the object removed whatever happened, and on
-/// success the `.ll` too, and `built OUT` printed.
+/// the Windows refusal; std read from its directory; FILE loaded, checked
+/// and lowered, its diagnostics printed; the `.ll` emitted and written
+/// beside the output; `clang`, the runtime and `cc` (`compile_and_link`);
+/// the object removed whatever happened, and on success the `.ll` too, and
+/// `built OUT` printed.
 pub async fn build_command(argv: Vec<String>) {
     let args = match build_args(argv) {
         Some(a) => a
@@ -131,6 +141,10 @@ pub async fn build_command(argv: Vec<String>) {
             exit(2)
             return
         }
+    }
+    if on_windows() {
+        fail(WINDOWS_REFUSAL, [])
+        return
     }
     let std_set = match load_std(args.std_dir, CompileTargetNative, false).await {
         Ok(s) => s
@@ -141,9 +155,10 @@ pub async fn build_command(argv: Vec<String>) {
         }
     }
     let path = args.file
-    let program = match compile_root(path, std_set).await {
-        CompiledModule(p, _) => p
-        CompiledErrors(diagnostics) => {
+    let (lowered, warnings, files) = match compile_root(path, std_set).await {
+        CompiledModule(p, ds, fs) => (p, ds, fs)
+        CompiledErrors(diagnostics, files) => {
+            print_diagnostics(diagnostics, files, args.std_dir).await
             fail(could_not_compile(error_count(diagnostics)), [])
             return
         }
@@ -156,7 +171,8 @@ pub async fn build_command(argv: Vec<String>) {
             return
         }
     }
-    let ir = match compile_ir(program) {
+    print_diagnostics(warnings, files, args.std_dir).await
+    let ir = match compile_ir(lowered) {
         Ok(text) => text
         Err(words) => {
             fail("internal LLVM IR generation error (this is a compiler bug)", [words])
@@ -184,13 +200,40 @@ pub async fn build_command(argv: Vec<String>) {
     }
 }
 
-/// What `compile_root` made of a root: its lowered module and every
-/// diagnostic, warnings, on the way; the diagnostics of the stage that
-/// stopped it; the error that kept it from being read; or why N refuses
-/// its package's manifest.
+/// Whether `path`, the running executable's, is a Windows path (spec 5.5b
+/// §3.5): an ASCII letter and `:`, a drive, or `\\`, a `\\?\` or UNC
+/// prefix, at its start. Unix's absolute paths start with `/`.
+pub fn windows_shape(path: String) -> Bool {
+    if path.starts_with("\\\\") { return true }
+    if path.byte_len() < 2 || path.byte_at(1) != 58 { return false }
+    let c = path.byte_at(0)
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+// Whether N runs on Windows, by its executable's path (spec 5.5b §3.5);
+// taken for Unix when the system cannot say, so that `build` goes on to
+// §3.3's own error. No inherited state is read.
+fn on_windows() -> Bool {
+    match current_exe() {
+        Ok(path) => windows_shape(path)
+        Err(_) => false
+    }
+}
+
+/// One file a diagnostic's label may name: its label, as N's diagnostics
+/// carry it (`main`, `<std/core>`), the path S0's `FileDb` names it by
+/// (FILE as given, the path the loader joined and read, or the label for
+/// std), and its text.
+pub record SourceFile { pub label: String, pub path: String, pub text: String }
+
+/// What `compile_root` made of a root: its lowered module, every
+/// diagnostic, warnings, on the way, and the files they may name; the
+/// diagnostics of the stage that stopped it, and the files; the error
+/// that kept it from being read; or why N refuses its package's
+/// manifest.
 pub type Compiled =
-    | CompiledModule(MirModule, Vec<Diagnostic>)
-    | CompiledErrors(Vec<Diagnostic>)
+    | CompiledModule(MirModule, Vec<Diagnostic>, Vec<SourceFile>)
+    | CompiledErrors(Vec<Diagnostic>, Vec<SourceFile>)
     | CompiledIoError(IoError)
     | CompiledRefused(String)
 
@@ -218,9 +261,11 @@ pub async fn compile_root(path: String, std_set: StdSet) -> Compiled {
         Err(e) => return CompiledIoError(e)
     }
     let modules = load.modules
+    let mut files: Vec<SourceFile> = Vec::new()
+    for m in modules.iter() { files.push(SourceFile { label: m.name, path: m.path, text: m.text }) }
     let mut diagnostics: Vec<Diagnostic> = Vec::new()
     for d in load.diagnostics.iter() { diagnostics.push(d) }
-    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics) }
+    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics, files) }
     strip_test_functions(modules, false)
     let mut sources: Vec<ModuleSource> = Vec::new()
     for m in modules.iter() {
@@ -238,21 +283,147 @@ pub async fn compile_root(path: String, std_set: StdSet) -> Compiled {
     }
     let resolved = resolve_program_for(CompileTargetNative, sources, std_set)
     for d in resolved.diagnostics.iter() { diagnostics.push(d) }
-    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics) }
+    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics, files) }
     let (labels, texts) = labels_and_texts(sources, std_set)
     let mut tables = check_items(resolved.items, resolved.definitions, labels, texts)
     tables.check_bodies(resolved.newline_splits)
     for d in tables.diagnostics.iter() { diagnostics.push(d) }
-    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics) }
+    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics, files) }
     let program = full_module(tables)
     keep_the_entry_main(program, resolved.definitions)
     match lower_module_with(program, false) {
-        Ok(lowered) => CompiledModule(lowered, diagnostics)
+        Ok(lowered) => CompiledModule(lowered, diagnostics, files)
         Err(errors) => {
             for d in errors.iter() { diagnostics.push(d) }
-            CompiledErrors(diagnostics)
+            CompiledErrors(diagnostics, files)
         }
     }
+}
+
+/// A diagnostic's lines as `build` prints them (spec 5.5b §4.1): its
+/// header, `SEVERITY[CODE]: MESSAGE`, codespan's, the severity
+/// lowercase and `[CODE]` left out when there is no code; then one locus
+/// line per file its labels name (`loci`), `  ┌─ PATH:LINE:COL`, a label
+/// whose file is not in `files` left out, as S0's renderer leaves out a
+/// label whose file it does not know. No snippet, note, help or blank line.
+pub fn diagnostic_lines(d: Diagnostic, files: Vec<SourceFile>) -> String {
+    let mut out = StringBuilder::new()
+    out.push(severity_name(d.severity))
+    if d.code != "" { out.push("[${d.code}]") }
+    out.push(": ${d.message}")
+    for (label, start) in loci(d.labels).iter() {
+        match source_file(files, label) {
+            Some(f) => {
+                let (line, column) = line_and_column(f.text, start)
+                out.push("\n  ┌─ ${f.path}:${line}:${column}")
+            }
+            None => ()
+        }
+    }
+    out.to_string()
+}
+
+// A severity as codespan names it in a header.
+fn severity_name(severity: Severity) -> String {
+    match severity {
+        SeverityError => "error"
+        SeverityWarning => "warning"
+        SeverityNote => "note"
+        SeverityHelp => "help"
+    }
+}
+
+/// The loci codespan prints for `labels` (codespan-reporting 0.11.1,
+/// `term/views.rs`): one per file they name, in the order they first name
+/// it, each its file's label and a byte offset, the earliest start of its
+/// primary labels, or of its secondary ones when it has none; of two
+/// labels with one start and one style, the first.
+pub fn loci(labels: Vec<Label>) -> Vec<(String, Int)> {
+    let mut names: Vec<String> = Vec::new()
+    let mut starts: Vec<Int> = Vec::new()
+    let mut primary: Vec<Bool> = Vec::new()
+    for l in labels.iter() {
+        let mut i = 0
+        while i < names.len() && names.at(i) != l.file { i += 1 }
+        if i == names.len() {
+            names.push(l.file)
+            starts.push(l.span.start)
+            primary.push(l.primary)
+        } else if (l.primary && !primary.at(i))
+            || (l.primary == primary.at(i) && l.span.start < starts.at(i)) {
+            starts.set(i, l.span.start)
+            primary.set(i, l.primary)
+        }
+    }
+    let mut out: Vec<(String, Int)> = Vec::new()
+    let mut i = 0
+    while i < names.len() {
+        out.push((names.at(i), starts.at(i)))
+        i += 1
+    }
+    out
+}
+
+/// The line and column of byte `offset` in `text`, as codespan counts them
+/// (spec 5.5b §4.2): the line 1 plus the `\n` bytes before it, so `\r\n`
+/// is one line break; the column 1 plus the characters between its line's
+/// start and it, the bytes that are not UTF-8 continuation bytes, so a tab
+/// is one column, and so is a Thai mark, a CJK character or an emoji. An
+/// offset past the end counts to the end.
+pub fn line_and_column(text: String, offset: Int) -> (Int, Int) {
+    let end = if offset < text.byte_len() { offset } else { text.byte_len() }
+    let mut line = 1
+    let mut column = 1
+    let mut i = 0
+    while i < end {
+        let b = text.byte_at(i)
+        if b == 10 {
+            line += 1
+            column = 1
+        } else if b < 128 || b >= 192 {
+            column += 1
+        }
+        i += 1
+    }
+    (line, column)
+}
+
+// The file of `files` whose label is `label`.
+fn source_file(files: Vec<SourceFile>, label: String) -> Option<SourceFile> {
+    for f in files.iter() { if f.label == label { return Some(f) } }
+    None
+}
+
+// `files`, and each std module a label of `diagnostics` names, read from
+// under `std_dir` (`STD_MODULES`), its path its label, `<std/strings>`, as
+// S0's `FileDb` names an embedded std module.
+async fn with_std_files(
+    diagnostics: Vec<Diagnostic>,
+    files: Vec<SourceFile>,
+    std_dir: String,
+) -> Vec<SourceFile> {
+    let mut out: Vec<SourceFile> = Vec::new()
+    for f in files.iter() { out.push(f) }
+    for d in diagnostics.iter() {
+        for l in d.labels.iter() {
+            if source_file(out, l.file).is_some() { continue }
+            for (name, rel) in STD_MODULES.iter() {
+                if std_label(name) != l.file { continue }
+                match read_to_string("${std_dir}/${rel}").await {
+                    Ok(text) => out.push(SourceFile { label: l.file, path: l.file, text: text })
+                    Err(_) => ()
+                }
+            }
+        }
+    }
+    out
+}
+
+// Each of `diagnostics` on stderr, as `diagnostic_lines` gives it.
+async fn print_diagnostics(diagnostics: Vec<Diagnostic>, files: Vec<SourceFile>, std_dir: String) {
+    if diagnostics.len() == 0 { return }
+    let all = with_std_files(diagnostics, files, std_dir).await
+    for d in diagnostics.iter() { eprintln(diagnostic_lines(d, all)) }
 }
 
 // How many of `diagnostics` are errors.
@@ -331,11 +502,20 @@ fn run_tool(
         Err(e) => Err(["failed to spawn ${spawn}: ${debug_quoted(program)}", e.message])
         Ok(output) => {
             if output.status == 0 { return Ok(()) }
-            let stdout = tool_text(output.stdout).trim()
-            let stderr = tool_text(output.stderr).trim()
-            Err(["${failed} failed (exit status: ${output.status}):\n${stdout}\n${stderr}"])
+            Err([status_cause(failed, output.status, output.stdout, output.stderr)])
         }
     }
+}
+
+/// The cause of a tool that ran and failed, as S0's `run_tool` and
+/// `run_linker` word it: `FAILED failed (exit status: N):`, then its
+/// stdout and its stderr, each as text (`tool_text`) and trimmed, on lines
+/// of their own, empty ones too. A signal's status is N's `128 + n`, where
+/// Rust prints `signal: n (NAME)` (spec 5.5b §3.6).
+pub fn status_cause(failed: String, status: Int, stdout: Bytes, stderr: Bytes) -> String {
+    let out = tool_text(stdout).trim()
+    let err = tool_text(stderr).trim()
+    "${failed} failed (exit status: ${status}):\n${out}\n${err}"
 }
 
 /// `text` quoted as Rust's `{:?}` quotes a program's name, for the names

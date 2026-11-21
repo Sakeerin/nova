@@ -212,7 +212,7 @@ jobs:
         env:
           NOVA_REQUIRE_CLANG: "1"
           NOVA_CLANG: clang-18
-        run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost -- --ignored --exact s1_builds_the_golden_suite
+        run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost -- --ignored --exact s1_builds_the_golden_suite n_build_answers_as_s0_does_with_clang
       - name: N's own tests on the debug runtime
         env:
           NOVA_RUNTIME_LIB: ${{ github.workspace }}/target/debug/${{ matrix.runtime_lib }}
