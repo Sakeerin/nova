@@ -113,7 +113,12 @@
 //! job on its Linux leg, builds every golden program `release_golden_suite`
 //! walks with it, runs each with the tables both files include
 //! (`golden/shared.rs`), and holds each binary equal to S0 `build
-//! --release`'s, byte for byte.
+//! --release`'s, byte for byte. On a probe set (§6.3) `build` answers as
+//! S0's does: the same stdout, exit code and files left behind, and N's
+//! stderr S0's as [`extracted_stderr`] extracts it;
+//! [`n_build_and_check_answer_as_s0_does`] here, on every system, with no
+//! `clang`, and [`n_build_answers_as_s0_does_with_clang`], ignored here and
+//! run beside the golden walk.
 //!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
@@ -7152,5 +7157,883 @@ fn the_ci_step_names_every_clang_test() {
     assert_eq!(
         names, clang,
         "the step's names are not the tests selfhost.rs ignores as needing clang"
+    );
+}
+
+/// The inputs of the probe set (spec
+/// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
+/// §6.3), each written into every case's directory: a path relative to it
+/// and its text. `dir.nova` is a directory, made beside them.
+const PROBE_INPUTS: &[(&str, &str)] = &[
+    // E0021 alone: a warning.
+    (
+        "warn.nova",
+        "fn main() {\n    let v = 1\n    match v {\n        _ => println(\"a\")\n        \
+         1 => println(\"b\")\n    }\n}\n",
+    ),
+    // Two errors, the second on line 10.
+    (
+        "two.nova",
+        "fn main() {\n    let a: Int = true\n    println(\"${a}\")\n\n\n\n\n\n\n    \
+         let b: String = 5\n    println(b)\n}\n",
+    ),
+    // Clean.
+    ("clean.nova", "fn main() {\n    println(\"clean\")\n}\n"),
+    // Float `%`: the emitter refuses it.
+    (
+        "frem.nova",
+        "fn main() {\n    let a = 5.5\n    let b = 2.0\n    println(\"${a % b}\")\n}\n",
+    ),
+];
+
+/// A `cc` that writes its arguments, one a line, to `cc-args.txt` in its
+/// working directory, then runs `cc` with them: a probe's `CC`, made
+/// executable in every case's directory on Unix, so that `cc`'s command
+/// line is left behind and compared.
+#[cfg(unix)]
+const CC_ARGS: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > cc-args.txt\nexec cc \"$@\"\n";
+
+/// N's refusal to build on Windows (spec 5.5b §3.5).
+const N_REFUSES_WINDOWS: &str = "Error: selfhost build links on Linux and macOS only\n";
+
+/// N's usage line for `build` (spec 5.5b §3.1).
+const N_BUILD_USAGE: &str = "usage: selfhost build FILE [-o OUT] [--release] --std DIR\n";
+
+/// How a probe's two sides are compared.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Expect {
+    /// Stdout, the exit code, N's stderr against S0's extracted
+    /// ([`extracted_stderr`]), and what each left behind, byte for byte.
+    Same,
+    /// A usage error: both exit 2, print nothing on stdout and leave
+    /// nothing; N prints this line. clap's text is not matched (§3.6).
+    Usage(&'static str),
+}
+
+/// One case of the probe set: its name; S0's arguments, `None` where N
+/// alone is run (no `--std` or no FILE, which S0 has no form of); N's,
+/// `--std DIR` added to them when `std` is set; the variables both sides
+/// get, a value naming a file of the case's directory by its name there;
+/// whether it builds, which N refuses on Windows; and how it is compared.
+struct Probe {
+    name: &'static str,
+    s0: Option<&'static [&'static str]>,
+    n: &'static [&'static str],
+    std: bool,
+    vars: &'static [(&'static str, ProbeVar)],
+    links: bool,
+    expect: Expect,
+}
+
+/// A variable's value for a probe: a file in the case's directory, by its
+/// name there, absolute; or a value as it is.
+#[derive(Clone, Copy)]
+enum ProbeVar {
+    InDir(&'static str),
+    Text(&'static str),
+}
+
+/// What one side did on one probe: its stdout, stderr and exit code, and
+/// the files it left in the case's directory, by their paths there with
+/// `/` between their parts, and their bytes.
+struct ProbeRun {
+    stdout: Vec<u8>,
+    stderr: String,
+    code: Option<i32>,
+    left: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+/// S0's stderr as N's is compared with it (spec 5.5b §4.3): the lines that
+/// begin `error[`, `warning[`, `note[` or `help[`; the lines whose first
+/// non-blank text is `┌─ `, re-indented to two spaces, a `\` of their path
+/// read as `/` on `windows`; and, from the first line that begins `Error: `
+/// on, every line as it is, anyhow's error and its causes. A diagnostic's
+/// snippet, notes and help, and the blank lines between, are left out. A
+/// message holding a line break would lose its second line here, and N's
+/// stderr, which keeps it, would then differ.
+fn extracted_stderr(stderr: &str, windows: bool) -> String {
+    let lines: Vec<&str> = stderr.lines().collect();
+    let tail = lines
+        .iter()
+        .position(|line| line.starts_with("Error: "))
+        .unwrap_or(lines.len());
+    let mut out = String::new();
+    for line in &lines[..tail] {
+        if ["error[", "warning[", "note[", "help["]
+            .iter()
+            .any(|head| line.starts_with(head))
+        {
+            out.push_str(line);
+            out.push('\n');
+        } else if let Some(locus) = line.trim_start().strip_prefix("┌─ ") {
+            out.push_str("  ┌─ ");
+            if windows {
+                out.push_str(&locus.replace('\\', "/"));
+            } else {
+                out.push_str(locus);
+            }
+            out.push('\n');
+        }
+    }
+    for line in &lines[tail..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn the_extraction_keeps_the_headers_the_loci_and_the_error() {
+    let s0 = "error[E0074]: method `len` is defined by multiple overlapping inherent impls\n    \
+              ┌─ overlap.nova:1:6\n    │\n  1 │ impl String {\n    │      ^^^^^^ here\n    \
+              │\n    ┌─ <std/strings>:193:6\n    │\n193 │ impl String {\n    │      ------ \
+              `len` is also defined by std's impl\n\nwarning[E0021]: unreachable match arm\n  \
+              ┌─ d\\w.nova:5:9\n  │\n  = help: remove the unreachable arm\n\n\
+              Error: release build failed; generated LLVM IR left at x.nova.ll\n\nCaused by:\n    \
+              no LLVM toolchain\n";
+    let tail = "Error: release build failed; generated LLVM IR left at x.nova.ll\n\n\
+                Caused by:\n    no LLVM toolchain\n";
+    let head = "error[E0074]: method `len` is defined by multiple overlapping inherent impls\n  \
+                ┌─ overlap.nova:1:6\n  ┌─ <std/strings>:193:6\nwarning[E0021]: unreachable \
+                match arm\n";
+    assert_eq!(
+        extracted_stderr(s0, false),
+        format!("{head}  ┌─ d\\w.nova:5:9\n{tail}")
+    );
+    assert_eq!(
+        extracted_stderr(s0, true),
+        format!("{head}  ┌─ d/w.nova:5:9\n{tail}")
+    );
+    assert_eq!(extracted_stderr("", false), "");
+}
+
+/// The probe cases N's `build` and `check` answer as S0 does with no
+/// `clang` (spec 5.5b §6.3): `check`'s, `build --release`'s that stop
+/// before `clang` runs or find none, and the usage errors.
+const PROBES: &[Probe] = {
+    use Expect::{Same, Usage};
+    use ProbeVar::InDir;
+    const NO_TOOL: &[(&str, ProbeVar)] = &[
+        ("NOVA_CLANG", InDir("no-such-tool")),
+        ("NOVA_LLC", InDir("no-such-tool")),
+    ];
+    const NO_TOOL_NO_RUNTIME: &[(&str, ProbeVar)] = &[
+        ("NOVA_CLANG", InDir("no-such-tool")),
+        ("NOVA_LLC", InDir("no-such-tool")),
+        ("NOVA_RUNTIME_LIB", InDir("no-such-runtime.a")),
+    ];
+    const fn build(
+        name: &'static str,
+        args: &'static [&'static str],
+        vars: &'static [(&'static str, ProbeVar)],
+    ) -> Probe {
+        Probe {
+            name,
+            s0: Some(args),
+            n: args,
+            std: true,
+            vars,
+            links: true,
+            expect: Same,
+        }
+    }
+    const fn usage(name: &'static str, args: &'static [&'static str], line: &'static str) -> Probe {
+        Probe {
+            name,
+            s0: Some(args),
+            n: args,
+            std: true,
+            vars: &[],
+            links: false,
+            expect: Usage(line),
+        }
+    }
+    const fn alone(name: &'static str, n: &'static [&'static str], line: &'static str) -> Probe {
+        Probe {
+            name,
+            s0: None,
+            n,
+            std: false,
+            vars: &[],
+            links: false,
+            expect: Usage(line),
+        }
+    }
+    &[
+        build(
+            "build compile errors",
+            &["build", "--release", "two.nova"],
+            NO_TOOL,
+        ),
+        build(
+            "build a missing FILE",
+            &["build", "--release", "nope.nova"],
+            NO_TOOL,
+        ),
+        build(
+            "build a directory as FILE",
+            &["build", "--release", "dir.nova"],
+            NO_TOOL,
+        ),
+        build(
+            "build into a missing directory",
+            &["build", "--release", "clean.nova", "-o", "nodir/x"],
+            NO_TOOL,
+        ),
+        build(
+            "build with no clang",
+            &["build", "--release", "clean.nova", "-o", "nc"],
+            NO_TOOL,
+        ),
+        build(
+            "build with no clang, the default name",
+            &["build", "--release", "clean.nova"],
+            NO_TOOL,
+        ),
+        build(
+            "build with no clang, a warning",
+            &["build", "--release", "warn.nova", "--output", "wn"],
+            NO_TOOL,
+        ),
+        build(
+            "build with no clang and no runtime",
+            &["build", "--release", "clean.nova", "--output=nr"],
+            NO_TOOL_NO_RUNTIME,
+        ),
+        build(
+            "build float %",
+            &["build", "--release", "frem.nova", "-o", "fr"],
+            NO_TOOL,
+        ),
+        usage(
+            "build an unknown option",
+            &["build", "--release", "--bogus", "clean.nova"],
+            N_BUILD_USAGE,
+        ),
+        usage(
+            "build -o twice",
+            &["build", "--release", "clean.nova", "-o", "a", "-o", "b"],
+            N_BUILD_USAGE,
+        ),
+        usage(
+            "build a second FILE",
+            &["build", "--release", "clean.nova", "two.nova"],
+            N_BUILD_USAGE,
+        ),
+        usage(
+            "build --release=yes",
+            &["build", "--release=yes", "clean.nova"],
+            N_BUILD_USAGE,
+        ),
+        alone(
+            "N builds without --std",
+            &["build", "clean.nova", "--release"],
+            N_BUILD_USAGE,
+        ),
+        alone(
+            "N builds without FILE",
+            &["build", "--release", "--std", "std"],
+            N_BUILD_USAGE,
+        ),
+    ]
+};
+
+/// A fresh directory for probe `name` under `under`, holding
+/// [`PROBE_INPUTS`] and the directory `dir.nova`.
+fn probe_dir(under: &Path, name: &str) -> PathBuf {
+    let dir = under.join(name.replace([' ', ',', '%', '.', '/', '\''], "-"));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, text) in PROBE_INPUTS {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().expect("a parent")).expect("a case's directory");
+        std::fs::write(&file, text).expect("write a probe input");
+    }
+    std::fs::create_dir_all(dir.join("dir.nova")).expect("make dir.nova");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("cc-args");
+        std::fs::write(&script, CC_ARGS).expect("write cc-args");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make cc-args executable");
+    }
+    dir
+}
+
+/// Every file under `dir`, by its path there with `/` between its parts.
+fn files_under(dir: &Path) -> std::collections::BTreeSet<String> {
+    fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                walk(base, &path, out);
+            } else {
+                let rel = path.strip_prefix(base).expect("under the case's directory");
+                out.insert(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+    let mut out = std::collections::BTreeSet::new();
+    walk(dir, dir, &mut out);
+    out
+}
+
+/// `program` with `args` in `dir`, `NOVA_HOME` at `home`, `NO_COLOR=1` and
+/// no backtrace on either side (CI sets `RUST_BACKTRACE=1`), with `vars`
+/// set and `removed` unset: what it printed and its exit code, and what it
+/// left in `dir` beside `before`, which is read and removed, so the other
+/// side finds the directory as this one did.
+#[allow(clippy::too_many_arguments)]
+fn probe_side(
+    program: &Path,
+    args: &[String],
+    dir: &Path,
+    home: &Path,
+    vars: &[(&str, std::ffi::OsString)],
+    removed: &[&str],
+    before: &std::collections::BTreeSet<String>,
+) -> Result<ProbeRun, String> {
+    let mut command = Command::new(program);
+    command
+        .current_dir(dir)
+        .args(args)
+        .env("NOVA_HOME", home)
+        .env("NO_COLOR", "1")
+        .env("RUST_BACKTRACE", "0")
+        .env("RUST_LIB_BACKTRACE", "0")
+        .stdin(Stdio::null());
+    for (name, value) in vars {
+        command.env(name, value);
+    }
+    for name in removed {
+        command.env_remove(name);
+    }
+    let what = format!("{} {}", program.display(), args.join(" "));
+    let out = output_within(&mut command, CHILD_LIMIT, &what)?;
+    let mut left = std::collections::BTreeMap::new();
+    for rel in files_under(dir).difference(before) {
+        let path = dir.join(rel);
+        left.insert(
+            rel.clone(),
+            std::fs::read(&path).expect("read a file left behind"),
+        );
+        std::fs::remove_file(&path).expect("remove a file left behind");
+    }
+    Ok(ProbeRun {
+        stdout: out.stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        code: out.status.code(),
+        left,
+    })
+}
+
+/// A side's run, for a report.
+fn shown(side: &str, run: &ProbeRun) -> String {
+    format!(
+        "--- {side}: exit {:?}, left {:?}\n--- stdout ---\n{}--- stderr ---\n{}",
+        run.code,
+        run.left.keys().collect::<Vec<_>>(),
+        String::from_utf8_lossy(&run.stdout),
+        run.stderr
+    )
+}
+
+/// Where `s0` and `n`, the two sides of one case, part, if they do, as
+/// `expect` compares them (spec 5.5b §6.3): `None` when they agree.
+fn probe_difference(expect: Expect, s0: &ProbeRun, n: &ProbeRun, windows: bool) -> Option<String> {
+    match expect {
+        Expect::Same => {
+            let extracted = extracted_stderr(&s0.stderr, windows);
+            if s0.code != n.code {
+                return Some(format!("exit {:?} against S0's {:?}", n.code, s0.code));
+            }
+            if s0.stdout != n.stdout {
+                return Some("stdout differs".to_string());
+            }
+            if extracted != n.stderr {
+                return Some(format!(
+                    "stderr differs from S0's extracted:\n--- S0, extracted ---\n{extracted}"
+                ));
+            }
+            if s0.left.keys().ne(n.left.keys()) {
+                return Some("the files left behind differ".to_string());
+            }
+            for (name, bytes) in &s0.left {
+                if n.left[name] != *bytes {
+                    return Some(format!("{name}, left behind, differs from S0's"));
+                }
+            }
+            None
+        }
+        Expect::Usage(line) => {
+            for (side, run) in [("S0", s0), ("N", n)] {
+                if run.code != Some(2) || !run.stdout.is_empty() || !run.left.is_empty() {
+                    return Some(format!(
+                        "{side} is not a usage error: exit 2, nothing on stdout, nothing left"
+                    ));
+                }
+            }
+            (n.stderr != line).then(|| format!("N's stderr is not {line:?}"))
+        }
+    }
+}
+
+/// The variables of a probe in `dir`.
+fn probe_vars(
+    vars: &[(&'static str, ProbeVar)],
+    dir: &Path,
+) -> Vec<(&'static str, std::ffi::OsString)> {
+    vars.iter()
+        .map(|(name, value)| {
+            let value = match value {
+                ProbeVar::InDir(file) => dir.join(file).into_os_string(),
+                ProbeVar::Text(text) => std::ffi::OsString::from(text),
+            };
+            (*name, value)
+        })
+        .collect()
+}
+
+/// Each of `probes`, four at a time, each in a fresh directory of its own
+/// under `under`, S0 then N; the failures, each with both sides' output.
+/// On Windows N refuses to build, so a case that builds is N's refusal
+/// there alone: exit 1, nothing on stdout and nothing left (spec 5.5b
+/// §3.5, §3.6), and S0 is not run.
+fn run_probes(probes: &[Probe], under: &Path, home: &Path, n: &Path) -> Vec<String> {
+    let std_dir = root().join("std");
+    let windows = cfg!(windows);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failures = std::sync::Mutex::new(Vec::<String>::new());
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            s.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Some(probe) = probes.get(i) else { break };
+                let dir = probe_dir(under, probe.name);
+                let before = files_under(&dir);
+                let vars = probe_vars(probe.vars, &dir);
+                let mut n_args: Vec<String> = probe.n.iter().map(|a| a.to_string()).collect();
+                if probe.std {
+                    n_args.push("--std".to_string());
+                    n_args.push(std_dir.to_string_lossy().into_owned());
+                }
+                let result = (|| -> Result<Option<String>, String> {
+                    let n_run = probe_side(n, &n_args, &dir, home, &vars, &[], &before)?;
+                    if windows && probe.links {
+                        let refused = n_run.code == Some(1)
+                            && n_run.stdout.is_empty()
+                            && n_run.stderr == N_REFUSES_WINDOWS
+                            && n_run.left.is_empty();
+                        return Ok((!refused)
+                            .then(|| format!("N did not refuse Windows\n{}", shown("N", &n_run))));
+                    }
+                    let s0_run = match probe.s0 {
+                        Some(args) => {
+                            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+                            probe_side(&nova(), &args, &dir, home, &vars, &[], &before)?
+                        }
+                        // N alone: what S0 would do is not asked; a usage
+                        // error is compared with itself.
+                        None => ProbeRun {
+                            stdout: Vec::new(),
+                            stderr: String::new(),
+                            code: Some(2),
+                            left: std::collections::BTreeMap::new(),
+                        },
+                    };
+                    Ok(
+                        probe_difference(probe.expect, &s0_run, &n_run, windows).map(|why| {
+                            format!("{why}\n{}{}", shown("S0", &s0_run), shown("N", &n_run))
+                        }),
+                    )
+                })();
+                let failure = match result {
+                    Ok(None) => None,
+                    Ok(Some(why)) => Some(why),
+                    Err(why) => Some(why),
+                };
+                if let Some(why) = failure {
+                    failures.lock().unwrap().push(format!(
+                        "{} (`{}`): {why}",
+                        probe.name,
+                        n_args.join(" ")
+                    ));
+                }
+                let _ = std::fs::remove_dir_all(&dir);
+            });
+        }
+    });
+    failures.into_inner().unwrap()
+}
+
+/// N's `build` and `check` answer as S0's do (spec
+/// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
+/// §6.3, decision 8b), on the cases that need no `clang` ([`PROBES`]): on
+/// each, S0 and N in one fixed directory, a fresh `NOVA_HOME`, `NO_COLOR=1`
+/// and no backtrace, must print the same stdout, exit with the same code,
+/// and leave the same files, byte for byte (the `.ll` with no `clang`),
+/// and N's stderr must be S0's as §4.3 extracts it: each diagnostic's
+/// header and loci, then anyhow's error. §3.6's exceptions, where they
+/// apply: clap's usage text, against which N's own line is pinned (exit 2
+/// and empty stdout compared); N without `--std` or FILE, run alone;
+/// Windows, where N refuses each `build` and S0's is not compared, and a
+/// locus's `\` is read as `/`.
+#[test]
+fn n_build_and_check_answer_as_s0_does() {
+    let n = selfhost();
+    let under = fresh_dir("probe");
+    let home = under.join("home");
+    std::fs::create_dir_all(&home).expect("create $NOVA_HOME");
+    let failures = run_probes(PROBES, &under, &home, n);
+    let _ = std::fs::remove_dir_all(&under);
+    assert!(
+        failures.is_empty(),
+        "{} of {} probes failed:\n\n{}",
+        failures.len(),
+        PROBES.len(),
+        failures.join("\n\n")
+    );
+}
+
+/// The probe cases that run `clang`, the runtime and `cc` (spec 5.5b
+/// §6.3), each with the runtime both sides link given as
+/// `NOVA_RUNTIME_LIB` where it does not name its own: success, with `-o`
+/// and with the default name from a relative FILE; a warning and success;
+/// `clang` and `cc` that fail, `clang` with no runtime too, which S0 looks
+/// for after `clang` has run; `cc` and the runtime missing; a text file as
+/// the runtime, where `ld`'s lines are the same on both sides; and `cc`'s
+/// command line, which [`CC_ARGS`] records, beside a binary that does not
+/// show every flag (`-lpthread`, `-ldl` and `-lm` are part of glibc 2.34's
+/// libc and of macOS's libSystem).
+const CLANG_PROBES: &[Probe] = {
+    use Expect::Same;
+    use ProbeVar::{InDir, Text};
+    const fn build(
+        name: &'static str,
+        args: &'static [&'static str],
+        vars: &'static [(&'static str, ProbeVar)],
+    ) -> Probe {
+        Probe {
+            name,
+            s0: Some(args),
+            n: args,
+            std: true,
+            vars,
+            links: true,
+            expect: Same,
+        }
+    }
+    &[
+        build(
+            "built with -o",
+            &["build", "--release", "clean.nova", "-o", "hi"],
+            &[],
+        ),
+        build(
+            "built with the default name",
+            &["build", "--release", "clean.nova"],
+            &[],
+        ),
+        build(
+            "built with a warning",
+            &["build", "--release", "warn.nova", "-o", "wn"],
+            &[],
+        ),
+        build(
+            "clang fails",
+            &["build", "--release", "clean.nova", "-o", "cf"],
+            &[("NOVA_CLANG", Text("false"))],
+        ),
+        // The runtime is looked for after `clang` has run, as S0 does:
+        // `clang`'s failure is the one reported.
+        build(
+            "clang fails, and no runtime",
+            &["build", "--release", "clean.nova", "-o", "cfr"],
+            &[
+                ("NOVA_CLANG", Text("false")),
+                ("NOVA_RUNTIME_LIB", InDir("no-such-runtime.a")),
+            ],
+        ),
+        build(
+            "cc fails",
+            &["build", "--release", "clean.nova", "-o", "ccf"],
+            &[("CC", Text("false"))],
+        ),
+        build(
+            "cc missing",
+            &["build", "--release", "clean.nova", "-o", "ccm"],
+            &[("CC", InDir("no-such-tool"))],
+        ),
+        build(
+            "cc's command line",
+            &["build", "--release", "warn.nova", "-o", "ca"],
+            &[("CC", InDir("cc-args"))],
+        ),
+        build(
+            "NOVA_RUNTIME_LIB missing",
+            &["build", "--release", "clean.nova", "-o", "rm"],
+            &[("NOVA_RUNTIME_LIB", InDir("no-such-runtime.a"))],
+        ),
+        build(
+            "NOVA_RUNTIME_LIB a text file",
+            &["build", "--release", "clean.nova", "-o", "rt"],
+            &[("NOVA_RUNTIME_LIB", InDir("clean.nova"))],
+        ),
+    ]
+};
+
+/// S0's words when no runtime is found beside it (`beside_exe`), as
+/// written there, for an executable at `exe`.
+fn no_runtime_words(exe: &Path) -> String {
+    format!(
+        "could not find the Nova runtime library (libnova_runtime.a) near {}, and this nova \
+         does not carry one. Install nova with the release profile, which is `cargo \
+         install`'s default, or build it with NOVA_EMBED_RUNTIME=1; in a checkout, `cargo \
+         build -p nova-runtime` puts the library beside it. NOVA_RUNTIME_LIB can also name \
+         one.",
+        exe.display()
+    )
+}
+
+/// N's `build` answers as S0's does where `clang` runs (spec 5.5b §6.3):
+/// [`CLANG_PROBES`] compared as [`n_build_and_check_answer_as_s0_does`]
+/// compares its cases, the binaries left behind byte for byte, and no
+/// `.ll` or `.o` beside a binary built; then, on N alone, no runtime (N
+/// copied alone into a fixed directory, `NOVA_RUNTIME_LIB` unset), against
+/// `beside_exe`'s words as written there, since CI's S0 carries a runtime,
+/// with N's own path (§3.6); and N's `build` without `--release`, which
+/// builds as with it (decision 6), the same binary for the same name. It
+/// needs `clang`, as [`s1_builds_the_golden_suite`] does, and runs in the
+/// same CI step. A binary built here also shows the golden harness
+/// refusing a wrong standard output and a different binary.
+#[test]
+#[ignore = "needs clang; the Selfhost job's Linux step runs it"]
+fn n_build_answers_as_s0_does_with_clang() {
+    let required = std::env::var("NOVA_REQUIRE_CLANG").as_deref() == Ok("1");
+    let clang = std::env::var("NOVA_CLANG").unwrap_or_else(|_| "clang".to_string());
+    if Command::new(&clang).arg("--version").output().is_err() {
+        assert!(
+            !required,
+            "NOVA_REQUIRE_CLANG=1, but `{clang} --version` does not run"
+        );
+        eprintln!("n build probes: not run (no clang)");
+        return;
+    }
+    let n = selfhost();
+    let runtime = golden_runtime();
+    let under = fresh_dir("probe-clang");
+    let home = under.join("home");
+    std::fs::create_dir_all(&home).expect("create $NOVA_HOME");
+    // The runtime, where a case does not name its own.
+    let runtime_var = [("NOVA_RUNTIME_LIB", runtime.clone().into_os_string())];
+    let std_dir = root().join("std").to_string_lossy().into_owned();
+    let mut failures = Vec::new();
+    // Every case counts once as it runs, so the report's "N of M" is out
+    // of the cases that ran.
+    let mut ran = 0;
+    for probe in CLANG_PROBES {
+        ran += 1;
+        let dir = probe_dir(&under, probe.name);
+        let before = files_under(&dir);
+        let mut vars = probe_vars(probe.vars, &dir);
+        if !vars.iter().any(|(name, _)| *name == "NOVA_RUNTIME_LIB") {
+            vars.extend(runtime_var.iter().cloned());
+        }
+        let mut n_args: Vec<String> = probe.n.iter().map(|a| a.to_string()).collect();
+        n_args.extend(["--std".to_string(), std_dir.clone()]);
+        let s0_args: Vec<String> = probe.s0.unwrap().iter().map(|a| a.to_string()).collect();
+        let s0_run = probe_side(&nova(), &s0_args, &dir, &home, &vars, &[], &before)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let n_run = probe_side(n, &n_args, &dir, &home, &vars, &[], &before)
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut why = probe_difference(probe.expect, &s0_run, &n_run, false);
+        if why.is_none() && n_run.code == Some(0) {
+            let intermediates: Vec<&String> = n_run
+                .left
+                .keys()
+                .filter(|f| f.ends_with(".nova.ll") || f.ends_with(".nova.o"))
+                .collect();
+            if !intermediates.is_empty() {
+                why = Some("a build left its .ll or its object".to_string());
+            }
+        }
+        if let Some(why) = why {
+            failures.push(format!(
+                "{} (`{}`): {why}\n{}{}",
+                probe.name,
+                n_args.join(" "),
+                shown("S0", &s0_run),
+                shown("N", &n_run)
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // No runtime: N alone, copied into a fixed directory with none near it.
+    ran += 1;
+    let alone = fresh_dir("alone");
+    let exe = alone.join(format!("selfhost{EXE_SUFFIX}"));
+    std::fs::copy(n, &exe).expect("copy N alone");
+    for dir in exe.ancestors().skip(1).take(3) {
+        assert!(
+            !dir.join("libnova_runtime.a").exists(),
+            "{} holds a runtime",
+            dir.display()
+        );
+    }
+    let dir = probe_dir(&under, "no runtime");
+    let before = files_under(&dir);
+    let args: Vec<String> = [
+        "build",
+        "clean.nova",
+        "-o",
+        "nr",
+        "--release",
+        "--std",
+        &std_dir,
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    let run = probe_side(
+        &exe,
+        &args,
+        &dir,
+        &home,
+        &[],
+        &["NOVA_RUNTIME_LIB"],
+        &before,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let want = format!(
+        "Error: release build failed; generated LLVM IR left at nr.nova.ll\n\nCaused by:\n    \
+         {}\n",
+        no_runtime_words(&exe)
+    );
+    if run.code != Some(1)
+        || !run.stdout.is_empty()
+        || run.stderr != want
+        || run.left.keys().ne(["nr.nova.ll"].iter())
+    {
+        failures.push(format!(
+            "no runtime: not S0's words with N's path\n--- want ---\n{want}{}",
+            shown("N", &run)
+        ));
+    }
+
+    // A runtime two directories up: N looks for it in its own directory,
+    // the parent and the grandparent, as S0's `beside_exe` does (spec
+    // §3.3), so a copy of N in `up/bin` finds the one beside `up`.
+    ran += 1;
+    let deep = alone.join("up").join("bin");
+    std::fs::create_dir_all(&deep).expect("make up/bin");
+    let deep_exe = deep.join(format!("selfhost{EXE_SUFFIX}"));
+    std::fs::copy(n, &deep_exe).expect("copy N into up/bin");
+    std::fs::copy(&runtime, alone.join("libnova_runtime.a")).expect("copy the runtime");
+    let dir = probe_dir(&under, "a runtime two directories up");
+    let before = files_under(&dir);
+    let args: Vec<String> = [
+        "build",
+        "clean.nova",
+        "-o",
+        "up",
+        "--release",
+        "--std",
+        &std_dir,
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect();
+    let run = probe_side(
+        &deep_exe,
+        &args,
+        &dir,
+        &home,
+        &[],
+        &["NOVA_RUNTIME_LIB"],
+        &before,
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    if run.code != Some(0) || run.stdout != b"built up\n" || run.left.keys().ne(["up"].iter()) {
+        failures.push(format!(
+            "a runtime two directories up: not found\n{}",
+            shown("N", &run)
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&alone);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Without `--release`, as with it (decision 6); and the golden
+    // harness, on a binary built here, refuses a wrong standard output and
+    // a different binary.
+    ran += 1;
+    let dir = probe_dir(&under, "without release");
+    let before = files_under(&dir);
+    let mut runs = Vec::new();
+    for release in [true, false] {
+        let mut args: Vec<String> = ["build", "clean.nova", "-o", "hi", "--std", &std_dir]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        if release {
+            args.push("--release".to_string());
+        }
+        runs.push(
+            probe_side(n, &args, &dir, &home, &runtime_var, &[], &before)
+                .unwrap_or_else(|e| panic!("{e}")),
+        );
+    }
+    if runs[0].code != Some(0) || runs[0].stdout != runs[1].stdout || runs[0].left != runs[1].left {
+        failures.push(format!(
+            "without --release: not as with it\n{}{}",
+            shown("N --release", &runs[0]),
+            shown("N", &runs[1])
+        ));
+    } else {
+        let hi = dir.join(format!("hi{EXE_SUFFIX}"));
+        let other = dir.join("other");
+        std::fs::write(&hi, &runs[0].left["hi"]).expect("write the binary back");
+        let mut bytes = runs[0].left["hi"].clone();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        std::fs::write(&other, &bytes).expect("write a binary one byte off");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hi, std::fs::Permissions::from_mode(0o755))
+                .expect("make the binary executable");
+        }
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp).expect("a temporary directory");
+        // `clean.nova` prints `clean`: `arrays`'s `.stdout` is another
+        // text, and `fs_already_exists`'s holds `cleaned`, which a check
+        // looser than equality could take.
+        for name in ["arrays", "fs_already_exists"] {
+            ran += 1;
+            match run_golden(name, &hi, &tmp) {
+                Err(why) if why.starts_with("standard output differs") => {}
+                other => failures.push(format!(
+                    "the golden harness took a wrong standard output for {name}: {other:?}"
+                )),
+            }
+        }
+        ran += 1;
+        if same_binaries(&hi, &hi).is_err()
+            || !same_binaries(&hi, &other)
+                .is_err_and(|why| why.ends_with(&format!("first at offset {last}")))
+        {
+            failures.push("the golden harness took a different binary".to_string());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&under);
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} clang cases failed:\n\n{}",
+        failures.len(),
+        failures.join("\n\n")
     );
 }
