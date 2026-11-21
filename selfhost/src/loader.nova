@@ -770,9 +770,15 @@ async fn is_file(path: String) -> Bool {
 
 /// A module's name from its path, its file's stem, or `main` when it has
 /// none (`FrontendContext::module_name`).
-pub fn module_name(path: String) -> String {
+pub fn module_name(path: String) -> String { file_stem_or(path, "main") }
+
+/// The stem of `path`'s file name (`Path::file_stem`), or `fallback` when
+/// it has none: the name before its last `.`, unless that `.` begins it,
+/// as `.nova`'s stem is `.nova`. `module_name`'s fallback is `main`, and
+/// the driver's default output's `out` (spec 5.5b §3.2).
+pub fn file_stem_or(path: String, fallback: String) -> String {
     let name = file_name(path)
-    if name == "" || name == ".." { return "main" }
+    if name == "" || name == ".." { return fallback }
     let n = name.byte_len()
     let mut dot = -1
     let mut i = n - 1
@@ -786,10 +792,10 @@ pub fn module_name(path: String) -> String {
     if dot <= 0 { name } else { name.byte_slice(0, dot) }
 }
 
-// The last part of `path` (`Path::file_name`), "" for none: a path's
-// last component, past any `/` or `.` component that ends it, unless it is
-// `..`.
-fn file_name(path: String) -> String {
+/// The last part of `path` (`Path::file_name`), "" for none: a path's
+/// last component, past any `/` or `.` component that ends it, unless it
+/// is `..`.
+pub fn file_name(path: String) -> String {
     let lo = before_body(path)
     let end = trim_back(path, lo, path.byte_len())
     if end == lo { return "" }

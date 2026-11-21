@@ -1,0 +1,555 @@
+// N's driver (5.5b, spec
+// docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
+// §3): `selfhost build`, a port of S0's file-mode `nova build --release`
+// (nova-cli's `build`, nova-driver's `build_program_release`, `link.rs`'s
+// `compile_ir_to_object`, `link_executable` and `link_cc`), and the
+// loading of std that every command of N's shares.
+//
+//   selfhost build FILE [-o OUT | --output OUT] [--release] --std DIR
+//
+// FILE is loaded as `selfhost mir` loads it, checked and lowered natively;
+// the emitter's text is written to `<OUT>.nova.ll`, `clang -O2 -c` makes
+// `<OUT>.nova.o` of it, and `cc` links that with the runtime into OUT,
+// FILE's stem when there is no `-o`. On success the object and the `.ll`
+// are gone, `built OUT` is on stdout and the exit code is 0. A failure
+// prints S0's words in anyhow's layout and exits 1; a command line it does
+// not take prints its usage line and exits 2. Without `--release` it does
+// the same, `-O2` too (decision 6), where S0 would use Cranelift.
+
+import builtins
+import diagnostic
+import emit_ll
+import loader
+import mir
+import mono
+import resolver
+import splice
+import typeck
+import typeck_body
+
+/// `selfhost build`'s usage line, which every command line it does not
+/// take prints (spec 5.5b §3.1).
+pub const BUILD_USAGE: String = "usage: selfhost build FILE [-o OUT] [--release] --std DIR"
+
+// S0's words when neither `clang` nor `llc` can be spawned
+// (`compile_ir_to_object`); N looks for `clang` alone, and says the same.
+const NO_TOOLCHAIN: String = "no LLVM toolchain found for `--release`: install LLVM (so `clang` or `llc` is on PATH), or set NOVA_CLANG / NOVA_LLC to one"
+
+/// What `selfhost build`'s command line names: the root, the output, the
+/// std directory, and whether `--release` was given.
+pub record BuildArgs {
+    pub file: String,
+    pub output: String,
+    pub std_dir: String,
+    pub release: Bool,
+}
+
+/// `selfhost build`'s command line, from `argv`'s third argument on
+/// (spec 5.5b §3.1): each option once, in any order, `-o OUT`, `--output
+/// OUT`, `--output=OUT`, `--release`, `--std DIR`, `--std=DIR`, and one
+/// FILE; `--` ends the options. `None` for anything else: a second FILE or
+/// option, an unknown option, `--release=…`, no FILE, no `--std`, or an
+/// option without its value, which an empty one is, and a separate one
+/// that begins with `-` but is not `-`, as clap takes that for an option.
+/// The output is FILE's stem, `out` when it has none, when no `-o` names
+/// one.
+pub fn build_args(argv: Vec<String>) -> Option<BuildArgs> {
+    let mut file: Option<String> = None
+    let mut output: Option<String> = None
+    let mut std_dir: Option<String> = None
+    let mut release = false
+    let mut only_files = false
+    let mut i = 2
+    while i < argv.len() {
+        let a = argv.at(i)
+        i += 1
+        if only_files || a == "-" || !a.starts_with("-") {
+            if file.is_some() { return None }
+            file = Some(a)
+            continue
+        }
+        if a == "--" {
+            only_files = true
+            continue
+        }
+        if a == "--release" {
+            if release { return None }
+            release = true
+            continue
+        }
+        let mut is_std = false
+        let mut value = ""
+        if a.starts_with("--output=") {
+            value = a.byte_slice(9, a.byte_len())
+        } else if a.starts_with("--std=") {
+            is_std = true
+            value = a.byte_slice(6, a.byte_len())
+        } else if a == "-o" || a == "--output" || a == "--std" {
+            is_std = a == "--std"
+            if i < argv.len() {
+                value = argv.at(i)
+                i += 1
+                if value.starts_with("-") && value != "-" { return None }
+            }
+        } else {
+            return None
+        }
+        if value == "" { return None }
+        if is_std {
+            if std_dir.is_some() { return None }
+            std_dir = Some(value)
+        } else {
+            if output.is_some() { return None }
+            output = Some(value)
+        }
+    }
+    let root = match file {
+        Some(f) => f
+        None => return None
+    }
+    let dir = match std_dir {
+        Some(d) => d
+        None => return None
+    }
+    let out = match output {
+        Some(o) => o
+        None => file_stem_or(root, "out")
+    }
+    Some(BuildArgs { file: root, output: out, std_dir: dir, release: release })
+}
+
+/// `selfhost build` (spec 5.5b §3.2), in S0's order: the command line;
+/// std read from its directory; FILE loaded, checked and lowered; the
+/// `.ll` emitted and written beside the output; `clang`, the runtime and
+/// `cc` (`compile_and_link`); the object removed whatever happened, and on
+/// success the `.ll` too, and `built OUT` printed.
+pub async fn build_command(argv: Vec<String>) {
+    let args = match build_args(argv) {
+        Some(a) => a
+        None => {
+            eprintln(BUILD_USAGE)
+            exit(2)
+            return
+        }
+    }
+    let std_set = match load_std(args.std_dir, CompileTargetNative, false).await {
+        Ok(s) => s
+        Err(message) => {
+            eprintln(message)
+            exit(2)
+            return
+        }
+    }
+    let path = args.file
+    let program = match compile_root(path, std_set).await {
+        CompiledModule(p, _) => p
+        CompiledErrors(diagnostics) => {
+            fail(could_not_compile(error_count(diagnostics)), [])
+            return
+        }
+        CompiledIoError(e) => {
+            fail("failed to open ${path}", [e.message])
+            return
+        }
+        CompiledRefused(why) => {
+            fail("selfhost build cannot read ${path}: ${why}", [])
+            return
+        }
+    }
+    let ir = match compile_ir(program) {
+        Ok(text) => text
+        Err(words) => {
+            fail("internal LLVM IR generation error (this is a compiler bug)", [words])
+            return
+        }
+    }
+    let out = args.output
+    let ll = intermediate(out, "ll")
+    match write_string(ll, ir).await {
+        Ok(_) => ()
+        Err(e) => {
+            fail("failed to write ${ll}", [e.message])
+            return
+        }
+    }
+    let obj = intermediate(out, "o")
+    let linked = compile_and_link(ll, obj, out).await
+    let _ = remove_file(obj).await
+    match linked {
+        Ok(_) => {
+            let _ = remove_file(ll).await
+            println("built ${out}")
+        }
+        Err(causes) => fail("release build failed; generated LLVM IR left at ${ll}", causes)
+    }
+}
+
+/// What `compile_root` made of a root: its lowered module and every
+/// diagnostic, warnings, on the way; the diagnostics of the stage that
+/// stopped it; the error that kept it from being read; or why N refuses
+/// its package's manifest.
+pub type Compiled =
+    | CompiledModule(MirModule, Vec<Diagnostic>)
+    | CompiledErrors(Vec<Diagnostic>)
+    | CompiledIoError(IoError)
+    | CompiledRefused(String)
+
+/// The root `path` loaded as `selfhost mir` loads it, a loose program or a
+/// module of the package whose `src/` or `tests/` it is directly in, its
+/// `@test` functions stripped, then resolved, checked and lowered natively
+/// in full, std's bodies with it, as S0's `build` does
+/// (`FrontendContext::check`, then `lower_module_with`): each stage's
+/// diagnostics after the last's, the first stage with an error the last.
+pub async fn compile_root(path: String, std_set: StdSet) -> Compiled {
+    let mut graph: Option<Graph> = None
+    let mut kind = RootLoose
+    match package_of(path).await {
+        Some((dir, k)) => {
+            match read_graph(dir).await {
+                Ok(g) => graph = Some(g)
+                Err(why) => return CompiledRefused(why)
+            }
+            kind = k
+        }
+        None => ()
+    }
+    let load = match load_program(graph, path, kind).await {
+        Ok(l) => l
+        Err(e) => return CompiledIoError(e)
+    }
+    let modules = load.modules
+    let mut diagnostics: Vec<Diagnostic> = Vec::new()
+    for d in load.diagnostics.iter() { diagnostics.push(d) }
+    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics) }
+    strip_test_functions(modules, false)
+    let mut sources: Vec<ModuleSource> = Vec::new()
+    for m in modules.iter() {
+        sources.push(
+            ModuleSource {
+                name: m.name,
+                label: m.name,
+                file: m.ast,
+                imports: m.imports,
+                text: Some(m.text),
+                package: m.package,
+                importable: m.importable,
+            },
+        )
+    }
+    let resolved = resolve_program_for(CompileTargetNative, sources, std_set)
+    for d in resolved.diagnostics.iter() { diagnostics.push(d) }
+    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics) }
+    let (labels, texts) = labels_and_texts(sources, std_set)
+    let mut tables = check_items(resolved.items, resolved.definitions, labels, texts)
+    tables.check_bodies(resolved.newline_splits)
+    for d in tables.diagnostics.iter() { diagnostics.push(d) }
+    if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics) }
+    let program = full_module(tables)
+    keep_the_entry_main(program, resolved.definitions)
+    match lower_module_with(program, false) {
+        Ok(lowered) => CompiledModule(lowered, diagnostics)
+        Err(errors) => {
+            for d in errors.iter() { diagnostics.push(d) }
+            CompiledErrors(diagnostics)
+        }
+    }
+}
+
+// How many of `diagnostics` are errors.
+fn error_count(diagnostics: Vec<Diagnostic>) -> Int {
+    let mut n = 0
+    for d in diagnostics.iter() { if d.is_error() { n += 1 } }
+    n
+}
+
+// S0's last line for a build that did not compile (nova-cli's
+// `could_not_compile`).
+fn could_not_compile(errors: Int) -> String {
+    let s = if errors == 1 { "" } else { "s" }
+    "could not compile due to ${errors} previous error${s}"
+}
+
+/// An intermediate file's path beside `output` (nova-driver's
+/// `intermediate`): its file name, `out` when it has none, then `.nova.`
+/// and `ext`, so that it never names the output itself: `-o out.ll` gives
+/// `out.ll.nova.ll`.
+pub fn intermediate(output: String, ext: String) -> String {
+    let name = file_name(output)
+    if name == "" { return path_join(output, "out.nova.${ext}") }
+    let file = "${name}.nova.${ext}"
+    match path_parent(output) {
+        Some(dir) => path_join(dir, file)
+        None => file
+    }
+}
+
+// `clang`, the runtime and `cc` (spec 5.5b §3.3), as S0's
+// `compile_ir_to_object` and `link_executable` run them: `clang -O2 -c LL
+// -o OBJ`, `$NOVA_CLANG` or `clang`, when it can be spawned; then the
+// runtime, looked for only now, as S0 does; then `$CC` or `cc`, `-o OUT
+// OBJ RUNTIME -lpthread -ldl -lm`. The causes of the first failure, in
+// S0's words.
+async fn compile_and_link(ll: String, obj: String, out: String) -> Result<(), [String]> {
+    let clang = env_or("NOVA_CLANG", "clang")
+    if !tool_available(clang) { return Err([NO_TOOLCHAIN]) }
+    run_tool(clang, ["-O2", "-c", ll, "-o", obj], "clang", "clang")?
+    let runtime = find_runtime().await?
+    let cc = env_or("CC", "cc")
+    run_tool(cc, ["-o", out, obj, runtime, "-lpthread", "-ldl", "-lm"], "linker", "linking")
+}
+
+// The variable `name`'s value, or `fallback` when it is not set
+// (`std::env::var(name).unwrap_or_else`).
+fn env_or(name: String, fallback: String) -> String {
+    match env(name) {
+        Some(value) => value
+        None => fallback
+    }
+}
+
+// Whether `tool` can be spawned, whatever its status (`tool_available`:
+// `<tool> --version`).
+fn tool_available(tool: String) -> Bool {
+    match run(tool, ["--version"]) {
+        Ok(_) => true
+        Err(_) => false
+    }
+}
+
+// `program` run with `args` (`run_tool`, `run_linker`): what it printed is
+// dropped when it succeeds; it cannot be spawned, two causes, `failed to
+// spawn SPAWN: "PROGRAM"` and the system's words; it fails, one, `FAILED
+// failed (exit status: N):` and its stdout and stderr, each trimmed, on
+// lines of their own.
+fn run_tool(
+    program: String,
+    args: [String],
+    spawn: String,
+    failed: String,
+) -> Result<(), [String]> {
+    match run(program, args) {
+        Err(e) => Err(["failed to spawn ${spawn}: ${debug_quoted(program)}", e.message])
+        Ok(output) => {
+            if output.status == 0 { return Ok(()) }
+            let stdout = tool_text(output.stdout).trim()
+            let stderr = tool_text(output.stderr).trim()
+            Err(["${failed} failed (exit status: ${output.status}):\n${stdout}\n${stderr}"])
+        }
+    }
+}
+
+/// `text` quoted as Rust's `{:?}` quotes a program's name, for the names
+/// N meets: in `"`, with `"` and `\` escaped.
+pub fn debug_quoted(text: String) -> String {
+    let mut out = StringBuilder::new()
+    out.push("\"")
+    let n = text.byte_len()
+    let mut start = 0
+    let mut i = 0
+    while i < n {
+        let b = text.byte_at(i)
+        if b == 34 || b == 92 {
+            out.push(text.byte_slice(start, i))
+            out.push("\\")
+            start = i
+        }
+        i += 1
+    }
+    out.push(text.byte_slice(start, n))
+    out.push("\"")
+    out.to_string()
+}
+
+/// A tool's output as text (`String::from_utf8_lossy`): itself when it is
+/// UTF-8; else its ASCII bytes kept and U+FFFD for each other byte.
+pub fn tool_text(bytes: Bytes) -> String {
+    match bytes.to_string() {
+        Some(text) => text
+        None => {
+            let mut kept: Vec<Int> = Vec::new()
+            for b in bytes.to_ints().iter() {
+                if b < 128 {
+                    kept.push(b)
+                } else {
+                    kept.push(239)
+                    kept.push(191)
+                    kept.push(189)
+                }
+            }
+            bytes_from_ints(kept.to_array()).to_string().unwrap()
+        }
+    }
+}
+
+// The runtime library (spec 5.5b §3.3; `find_runtime_lib` without an
+// embedded runtime): `$NOVA_RUNTIME_LIB`, which must exist; else
+// `libnova_runtime.a` in the executable's directory or one of the two
+// above it (`beside_exe`, without its `build/` rule for cargo's test
+// binaries); else S0's words, with N's path.
+async fn find_runtime() -> Result<String, [String]> {
+    match env("NOVA_RUNTIME_LIB") {
+        Some(lib) => {
+            if exists(lib).await { return Ok(lib) }
+            return Err(["NOVA_RUNTIME_LIB points to ${lib}, which does not exist"])
+        }
+        None => ()
+    }
+    let exe = match current_exe() {
+        Ok(path) => path
+        Err(e) => return Err(["locating the nova executable", e.message])
+    }
+    let name = "libnova_runtime.a"
+    let mut dir = path_parent(exe)
+    let mut tried = 0
+    while tried < 3 {
+        let d = match dir {
+            Some(d) => d
+            None => break
+        }
+        let candidate = path_join(d, name)
+        if exists(candidate).await { return Ok(candidate) }
+        dir = path_parent(d)
+        tried += 1
+    }
+    Err(
+        [
+            "could not find the Nova runtime library (${name}) near ${exe}, and this nova does not carry one. Install nova with the release profile, which is `cargo install`'s default, or build it with NOVA_EMBED_RUNTIME=1; in a checkout, `cargo build -p nova-runtime` puts the library beside it. NOVA_RUNTIME_LIB can also name one.",
+        ],
+    )
+}
+
+/// An error as S0's `main` prints it, anyhow's layout (spec 5.5b §2 item
+/// 3): `Error: HEAD`; then, when there are causes, a blank line, `Caused
+/// by:` and each cause's lines indented four spaces, empty ones too, the
+/// causes numbered `0:`, `1:` when there are several, a numbered cause's
+/// later lines indented seven.
+pub fn failure_text(head: String, causes: [String]) -> String {
+    let mut out = StringBuilder::new()
+    out.push("Error: ${head}")
+    if causes.len() > 0 {
+        out.push("\n\nCaused by:")
+        let numbered = causes.len() > 1
+        let mut n = 0
+        for cause in causes.iter() {
+            out.push("\n")
+            let mut first = true
+            for line in cause.split("\n").iter() {
+                if first {
+                    if numbered {
+                        let number = "${n}"
+                        out.push(" ".repeat(5 - number.byte_len()))
+                        out.push("${number}: ")
+                    } else {
+                        out.push("    ")
+                    }
+                    first = false
+                } else {
+                    out.push(if numbered { "\n       " } else { "\n    " })
+                }
+                out.push(line)
+            }
+            n += 1
+        }
+    }
+    out.to_string()
+}
+
+// `failure_text` on stderr, then the exit code 1, as S0's `main` exits
+// with an error.
+fn fail(head: String, causes: [String]) {
+    eprintln(failure_text(head, causes))
+    exit(1)
+}
+
+// ---------------------------------------------------------------------------
+// std, as every command of N's reads it
+// ---------------------------------------------------------------------------
+
+// What every program's resolution reads for `target`, under test mode
+// when `test`: the target's std modules, each read from under `dir` and
+// parsed once, labelled as the driver registers them (`<std/core>`), with
+// `std/test` after them under test mode, as `nova test` registers it;
+// `STD_MODULES`, parsed, which the WASM target's `missing` reads (a file
+// both lists name is parsed once); and the builtin table.
+pub async fn load_std(dir: String, target: CompileTarget, test: Bool) -> Result<StdSet, String> {
+    let mut parsed: Map<String, StdModule> = Map::new()
+    let natives = read_std_modules(dir, STD_MODULES, parsed).await?
+    let mut modules = match target {
+        CompileTargetNative => natives
+        CompileTargetWasm => read_std_modules(dir, WASM_STD_MODULES, parsed).await?
+    }
+    if test {
+        let mut with_test: Vec<StdModule> = Vec::new()
+        for m in modules.iter() { with_test.push(m) }
+        for m in read_std_modules(dir, [STD_TEST_MODULE], parsed).await?.iter() {
+            with_test.push(m)
+        }
+        modules = with_test
+    }
+    Ok(StdSet { modules: modules, natives: natives, builtins: builtin_table() })
+}
+
+// The std modules `list` names, in order, each read from under `dir` and
+// parsed, or taken from `parsed`, where each is kept by its file.
+async fn read_std_modules(
+    dir: String,
+    list: [(String, String)],
+    mut parsed: Map<String, StdModule>,
+) -> Result<Vec<StdModule>, String> {
+    let mut out: Vec<StdModule> = Vec::new()
+    for (name, rel) in list.iter() {
+        match parsed.get(rel) {
+            Some(m) => {
+                out.push(m)
+                continue
+            }
+            None => ()
+        }
+        let path = "${dir}/${rel}"
+        match read_to_string(path).await {
+            Ok(source) => {
+                let m = std_module(name, std_label(name), source)
+                let _ = parsed.insert(rel, m)
+                out.push(m)
+            }
+            Err(e) => return Err("error: cannot read std's ${path}: ${io_kind_name(e.kind)}")
+        }
+    }
+    Ok(out)
+}
+
+// Each module's file label, the program's `sources` then std's modules
+// that parsed, as the resolver numbers them, and each program module's
+// source text, for a fix's edit; std's have none.
+pub fn labels_and_texts(
+    sources: Vec<ModuleSource>,
+    std_set: StdSet,
+) -> (Vec<String>, Vec<Option<String>>) {
+    let mut labels: Vec<String> = Vec::new()
+    let mut texts: Vec<Option<String>> = Vec::new()
+    for m in sources.iter() {
+        labels.push(m.label)
+        texts.push(m.text)
+    }
+    for s in std_set.modules.iter() {
+        if s.file.is_some() {
+            labels.push(s.label)
+            texts.push(None)
+        }
+    }
+    (labels, texts)
+}
+
+// The kind's name, as S0's dump prints it.
+pub fn io_kind_name(kind: IoErrorKind) -> String {
+    match kind {
+        NotFound => "NotFound"
+        PermissionDenied => "PermissionDenied"
+        AlreadyExists => "AlreadyExists"
+        InvalidData => "InvalidData"
+        Interrupted => "Interrupted"
+        TimedOut => "TimedOut"
+        ConnectionRefused => "ConnectionRefused"
+        Other => "Other"
+    }
+}
