@@ -29,6 +29,9 @@ dump, natively (spec
 Phase 5.5a, the self-hosted `.ll` emitter and the `.ll` dump (spec
 `docs/superpowers/specs/2026-11-18-phase-5-5a-the-ll-emitter-design.md`;
 ADR 0058).
+Phase 5.5b, the self-hosted driver and linking (spec
+`docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`;
+ADR 0059).
 
 ### Added
 
@@ -343,6 +346,40 @@ ADR 0058).
   gave, byte for byte, on every `.nova` file the repository tracks, and
   `nova test` and `nova build` on its 11 packages outside `crates/`; the
   packages under `crates/`, test fixtures, were not compared.
+- **The self-hosted driver, `selfhost build` and `selfhost check`:**
+  `selfhost build FILE [-o OUT] [--release] --std DIR` builds a program
+  as `nova build --release FILE -o OUT` does, on Linux and macOS: its
+  `.ll` written beside OUT as `<out>.nova.ll`, `clang -O2 -c` and `cc` run
+  on it with S0's lines, the runtime found from `NOVA_RUNTIME_LIB` or
+  beside the executable, `built OUT` printed, and S0's messages and exit
+  codes on every failure; without `--release` it builds the same way.
+  It refuses Windows with its own message. `selfhost check FILE --std
+  DIR` prints each diagnostic's code and locus, `error[CODE]: MESSAGE`
+  and `  ┌─ PATH:LINE:COL`, then `ok: FILE` or `Error: found N
+  error(s)`. std is read only from `--std`; there is no project mode
+  (5.5b, ADR 0059).
+- **S1 builds the golden suite, in CI:** a new step of the Selfhost
+  job's Linux leg installs `clang-18` 18.1.3 and runs
+  `s1_builds_the_golden_suite`: the self-hosted compiler, built by the
+  Rust one, builds every golden program the release walk builds with its
+  own `selfhost build`, runs each with the walk's stdin and variables
+  against its `.stdout`, and holds each binary equal, byte for byte, to
+  `nova build --release`'s for the same `-o` basename. The walk's tables
+  are now one file both test files include. A main-step test,
+  `the_ci_step_names_every_clang_test`, holds the step's `--exact` names
+  to the tests `selfhost.rs` ignores as needing `clang`, since a name
+  that matches no test would run nothing (ADR 0059).
+- **Two probe tests** hold N's `build` and `check` to S0's on the same
+  inputs: the same stdout, exit code and files left behind, and N's
+  stderr equal to S0's cut to each diagnostic's header and loci and to
+  anyhow's error. `n_build_and_check_answer_as_s0_does` runs 39 cases
+  with no `clang` in `selfhost.rs`'s main step on all three systems;
+  `n_build_answers_as_s0_does_with_clang` runs 10 with it, and N's
+  `build` with no runtime, with a runtime two directories up and without
+  `--release`, in the new step. What cannot match (clap's usage text,
+  Windows, a signal's status text, `check`'s snippets) is listed in ADR
+  0059. Nothing a user sees changes with 5.5b: S0's sources are
+  unchanged, so `nova build` and `nova check` are too.
 
 ### Changed
 
