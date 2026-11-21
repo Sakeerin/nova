@@ -1,11 +1,15 @@
 // N's driver (5.5b, spec
 // docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md
-// §3): `selfhost build`, a port of S0's file-mode `nova build --release`
-// (nova-cli's `build`, nova-driver's `build_program_release`, `link.rs`'s
-// `compile_ir_to_object`, `link_executable` and `link_cc`), and the
-// loading of std that every command of N's shares.
+// §3, §4): `selfhost build`, a port of S0's file-mode `nova build
+// --release` (nova-cli's `build`, nova-driver's `build_program_release`,
+// `link.rs`'s `compile_ir_to_object`, `link_executable` and `link_cc`);
+// `selfhost check`, S0's file-mode `nova check`, each diagnostic printed
+// as its header and loci, codespan's (`check_program_counted_for`,
+// nova-diagnostics' `render`); and the loading of std that every command
+// of N's shares.
 //
 //   selfhost build FILE [-o OUT | --output OUT] [--release] --std DIR
+//   selfhost check FILE --std DIR
 //
 // FILE is loaded as `selfhost mir` loads it, checked and lowered natively;
 // the emitter's text is written to `<OUT>.nova.ll`, `clang -O2 -c` makes
@@ -16,11 +20,13 @@
 // not take prints its usage line and exits 2. Without `--release` it does
 // the same, `-O2` too (decision 6), where S0 would use Cranelift. On
 // Windows, which N knows by its executable's path, `build` refuses
-// (§3.5).
+// (§3.5); `check` does not link, and runs there too.
 //
-// `build` prints each diagnostic, warnings too, as `SEVERITY[CODE]:
+// `check` loads, checks and, for a program that runs, lowers FILE as
+// `build` does, prints each diagnostic, warnings too, as `SEVERITY[CODE]:
 // MESSAGE` and one `  ┌─ PATH:LINE:COL` line per file its labels name, on
-// stderr (§4.1).
+// stderr, then `ok: FILE` on stdout, or `Error: found N error(s)` and the
+// exit code 1. `build` prints its diagnostics the same way.
 
 import builtins
 import diagnostic
@@ -37,6 +43,9 @@ import typeck_body
 /// take prints (spec 5.5b §3.1).
 pub const BUILD_USAGE: String = "usage: selfhost build FILE [-o OUT] [--release] --std DIR"
 
+/// `selfhost check`'s usage line (spec 5.5b §3.1).
+pub const CHECK_USAGE: String = "usage: selfhost check FILE --std DIR"
+
 /// N's refusal to build on Windows (spec 5.5b §3.5).
 pub const WINDOWS_REFUSAL: String = "selfhost build links on Linux and macOS only"
 
@@ -44,8 +53,9 @@ pub const WINDOWS_REFUSAL: String = "selfhost build links on Linux and macOS onl
 // (`compile_ir_to_object`); N looks for `clang` alone, and says the same.
 const NO_TOOLCHAIN: String = "no LLVM toolchain found for `--release`: install LLVM (so `clang` or `llc` is on PATH), or set NOVA_CLANG / NOVA_LLC to one"
 
-/// What `selfhost build`'s command line names: the root, the output, the
-/// std directory, and whether `--release` was given.
+/// What `selfhost build`'s or `check`'s command line names: the root, the
+/// output, the std directory, and whether `--release` was given; `check`'s
+/// has neither of those two.
 pub record BuildArgs {
     pub file: String,
     pub output: String,
@@ -62,7 +72,14 @@ pub record BuildArgs {
 /// that begins with `-` but is not `-`, as clap takes that for an option.
 /// The output is FILE's stem, `out` when it has none, when no `-o` names
 /// one.
-pub fn build_args(argv: Vec<String>) -> Option<BuildArgs> {
+pub fn build_args(argv: Vec<String>) -> Option<BuildArgs> { command_args(argv, true) }
+
+/// `selfhost check`'s command line (spec 5.5b §3.1): `build`'s, with
+/// neither an output nor `--release`.
+pub fn check_args(argv: Vec<String>) -> Option<BuildArgs> { command_args(argv, false) }
+
+// `build`'s command line when `build`, else `check`'s.
+fn command_args(argv: Vec<String>, build: Bool) -> Option<BuildArgs> {
     let mut file: Option<String> = None
     let mut output: Option<String> = None
     let mut std_dir: Option<String> = None
@@ -82,13 +99,16 @@ pub fn build_args(argv: Vec<String>) -> Option<BuildArgs> {
             continue
         }
         if a == "--release" {
-            if release { return None }
+            if release || !build { return None }
             release = true
             continue
         }
         let mut is_std = false
         let mut value = ""
-        if a.starts_with("--output=") {
+        let output_option = a.starts_with("--output=") || a == "-o" || a == "--output"
+        if output_option && !build {
+            return None
+        } else if a.starts_with("--output=") {
             value = a.byte_slice(9, a.byte_len())
         } else if a.starts_with("--std=") {
             is_std = true
@@ -155,7 +175,7 @@ pub async fn build_command(argv: Vec<String>) {
         }
     }
     let path = args.file
-    let (lowered, warnings, files) = match compile_root(path, std_set).await {
+    let (lowered, warnings, files) = match compile_root(path, std_set, true).await {
         CompiledModule(p, ds, fs) => (p, ds, fs)
         CompiledErrors(diagnostics, files) => {
             print_diagnostics(diagnostics, files, args.std_dir).await
@@ -172,7 +192,7 @@ pub async fn build_command(argv: Vec<String>) {
         }
     }
     print_diagnostics(warnings, files, args.std_dir).await
-    let ir = match compile_ir(lowered) {
+    let ir = match compile_ir(lowered.unwrap()) {
         Ok(text) => text
         Err(words) => {
             fail("internal LLVM IR generation error (this is a compiler bug)", [words])
@@ -197,6 +217,45 @@ pub async fn build_command(argv: Vec<String>) {
             println("built ${out}")
         }
         Err(causes) => fail("release build failed; generated LLVM IR left at ${ll}", causes)
+    }
+}
+
+/// `selfhost check` (spec 5.5b §4), as S0's file-mode `nova check`: the
+/// command line; std read from its directory; FILE loaded, checked and,
+/// when it runs, lowered; each diagnostic printed (§4.1); then `ok: FILE`,
+/// or `Error: found N error(s)` and the exit code 1. It does not link, so
+/// it runs on Windows too.
+pub async fn check_command(argv: Vec<String>) {
+    let args = match check_args(argv) {
+        Some(a) => a
+        None => {
+            eprintln(CHECK_USAGE)
+            exit(2)
+            return
+        }
+    }
+    let std_set = match load_std(args.std_dir, CompileTargetNative, false).await {
+        Ok(s) => s
+        Err(message) => {
+            eprintln(message)
+            exit(2)
+            return
+        }
+    }
+    let path = args.file
+    match compile_root(path, std_set, false).await {
+        CompiledModule(_, warnings, files) => {
+            print_diagnostics(warnings, files, args.std_dir).await
+            println("ok: ${path}")
+        }
+        CompiledErrors(diagnostics, files) => {
+            print_diagnostics(diagnostics, files, args.std_dir).await
+            let n = error_count(diagnostics)
+            let s = if n == 1 { "" } else { "s" }
+            fail("found ${n} error${s}", [])
+        }
+        CompiledIoError(e) => fail("failed to open ${path}", [e.message])
+        CompiledRefused(why) => fail("selfhost check cannot read ${path}: ${why}", [])
     }
 }
 
@@ -226,31 +285,39 @@ fn on_windows() -> Bool {
 /// std), and its text.
 pub record SourceFile { pub label: String, pub path: String, pub text: String }
 
-/// What `compile_root` made of a root: its lowered module, every
-/// diagnostic, warnings, on the way, and the files they may name; the
-/// diagnostics of the stage that stopped it, and the files; the error
-/// that kept it from being read; or why N refuses its package's
+/// What `compile_root` made of a root: its lowered module, when it was
+/// lowered, every diagnostic, warnings, on the way, and the files they
+/// may name; the diagnostics of the stage that stopped it, and the files;
+/// the error that kept it from being read; or why N refuses its package's
 /// manifest.
 pub type Compiled =
-    | CompiledModule(MirModule, Vec<Diagnostic>, Vec<SourceFile>)
+    | CompiledModule(Option<MirModule>, Vec<Diagnostic>, Vec<SourceFile>)
     | CompiledErrors(Vec<Diagnostic>, Vec<SourceFile>)
     | CompiledIoError(IoError)
     | CompiledRefused(String)
 
 /// The root `path` loaded as `selfhost mir` loads it, a loose program or a
 /// module of the package whose `src/` or `tests/` it is directly in, its
-/// `@test` functions stripped, then resolved, checked and lowered natively
-/// in full, std's bodies with it, as S0's `build` does
-/// (`FrontendContext::check`, then `lower_module_with`): each stage's
-/// diagnostics after the last's, the first stage with an error the last.
-pub async fn compile_root(path: String, std_set: StdSet) -> Compiled {
+/// `@test` functions stripped, then resolved and checked natively in full,
+/// std's bodies with it, as S0's `build` and `check` do
+/// (`FrontendContext::check`), and lowered (`lower_module_with`) when
+/// `build`, or when the program runs, as `check` decides it
+/// (`check_program_counted_for`): a loose program, or a package's
+/// `src/main.nova`. Each stage's diagnostics follow the last's; the first
+/// stage with an error is the last.
+pub async fn compile_root(path: String, std_set: StdSet, build: Bool) -> Compiled {
     let mut graph: Option<Graph> = None
     let mut kind = RootLoose
+    let mut runs = true
     match package_of(path).await {
         Some((dir, k)) => {
             match read_graph(dir).await {
                 Ok(g) => graph = Some(g)
                 Err(why) => return CompiledRefused(why)
+            }
+            runs = match k {
+                RootSrc => module_name(path) == "main"
+                _ => false
             }
             kind = k
         }
@@ -289,10 +356,11 @@ pub async fn compile_root(path: String, std_set: StdSet) -> Compiled {
     tables.check_bodies(resolved.newline_splits)
     for d in tables.diagnostics.iter() { diagnostics.push(d) }
     if error_count(diagnostics) > 0 { return CompiledErrors(diagnostics, files) }
+    if !build && !runs { return CompiledModule(None, diagnostics, files) }
     let program = full_module(tables)
     keep_the_entry_main(program, resolved.definitions)
     match lower_module_with(program, false) {
-        Ok(lowered) => CompiledModule(lowered, diagnostics, files)
+        Ok(lowered) => CompiledModule(Some(lowered), diagnostics, files)
         Err(errors) => {
             for d in errors.iter() { diagnostics.push(d) }
             CompiledErrors(diagnostics, files)
@@ -300,8 +368,8 @@ pub async fn compile_root(path: String, std_set: StdSet) -> Compiled {
     }
 }
 
-/// A diagnostic's lines as `build` prints them (spec 5.5b §4.1): its
-/// header, `SEVERITY[CODE]: MESSAGE`, codespan's, the severity
+/// A diagnostic's lines as `check` and `build` print them (spec 5.5b
+/// §4.1): its header, `SEVERITY[CODE]: MESSAGE`, codespan's, the severity
 /// lowercase and `[CODE]` left out when there is no code; then one locus
 /// line per file its labels name (`loci`), `  ┌─ PATH:LINE:COL`, a label
 /// whose file is not in `files` left out, as S0's renderer leaves out a

@@ -113,9 +113,10 @@
 //! job on its Linux leg, builds every golden program `release_golden_suite`
 //! walks with it, runs each with the tables both files include
 //! (`golden/shared.rs`), and holds each binary equal to S0 `build
-//! --release`'s, byte for byte. On a probe set (§6.3) `build` answers as
-//! S0's does: the same stdout, exit code and files left behind, and N's
-//! stderr S0's as [`extracted_stderr`] extracts it;
+//! --release`'s, byte for byte. N's `selfhost check FILE --std DIR` prints
+//! each diagnostic's header and loci (§4). On a probe set (§6.3) both
+//! commands answer as S0's do: the same stdout, exit code and files left
+//! behind, and N's stderr S0's as [`extracted_stderr`] extracts it;
 //! [`n_build_and_check_answer_as_s0_does`] here, on every system, with no
 //! `clang`, and [`n_build_answers_as_s0_does_with_clang`], ignored here and
 //! run beside the golden walk.
@@ -7163,9 +7164,46 @@ fn the_ci_step_names_every_clang_test() {
 /// The inputs of the probe set (spec
 /// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
 /// §6.3), each written into every case's directory: a path relative to it
-/// and its text. `dir.nova` is a directory, made beside them.
+/// and its text. `dir.nova` is a directory, made beside them, and a copy
+/// of `examples/05-geometry`, given an error in its library's second
+/// module, goes into the case that checks it.
 const PROBE_INPUTS: &[(&str, &str)] = &[
-    // E0021 alone: a warning.
+    // E0001, with a help.
+    (
+        "unknown.nova",
+        "fn main() {\n    let count = 3\n    println(\"${cuont}\")\n}\n",
+    ),
+    // E0002, its secondary label on an earlier line than its primary.
+    (
+        "dup.nova",
+        "fn helper() -> Int { 1 }\n\nfn helper() -> Int { 2 }\n\nfn main() {\n    \
+         println(\"${helper()}\")\n}\n",
+    ),
+    // E0010 on spans of several lines, the second's start on line 12.
+    (
+        "multiline.nova",
+        "fn pick(b: Bool) -> Int {\n    if b {\n        \"yes\"\n    } else {\n        \
+         \"no\"\n    }\n}\n\nfn main() {\n    let x: Int = if true {\n        1\n    } \
+         else {\n        \"two\"\n    }\n    println(\"${x} ${pick(true)}\")\n}\n",
+    ),
+    // Tabs before the span: one column each.
+    (
+        "tabs.nova",
+        "fn main() {\n\tlet x: Int = \"tab\"\n\t\tlet y: Bool = 1\n    println(\"${x} \
+         ${y}\")\n}\n",
+    ),
+    // L0001 after CJK, an emoji and Thai: a column per character.
+    (
+        "wide.nova",
+        "fn main() {\n    let s = \"世界🎉 สวัสดี\" ¤ 1\n    println(s)\n}\n",
+    ),
+    // L0001 on each character of a Thai name, combining marks among them.
+    (
+        "thai.nova",
+        "fn main() {\n    let ชื่อ = \"สวัสดี 世界 🎉\"\n    let n: Int = \"สวัสดี 世界 🎉\"\n    \
+         println(\"${ชื่อ} ${n}\")\n}\n",
+    ),
+    // E0021 alone: a warning, and `ok:`.
     (
         "warn.nova",
         "fn main() {\n    let v = 1\n    match v {\n        _ => println(\"a\")\n        \
@@ -7177,9 +7215,42 @@ const PROBE_INPUTS: &[(&str, &str)] = &[
         "fn main() {\n    let a: Int = true\n    println(\"${a}\")\n\n\n\n\n\n\n    \
          let b: String = 5\n    println(b)\n}\n",
     ),
+    // Windows line endings: `\r\n` is one line break.
+    (
+        "crlf.nova",
+        "fn main() {\r\n    let x: Int = \"crlf\"\r\n}\r\n",
+    ),
+    // A sibling's error: its locus names the path the loader joined.
+    (
+        "d/a.nova",
+        "import b::{twice}\n\nfn main() {\n    println(\"${twice(2)}\")\n}\n",
+    ),
+    (
+        "d/b.nova",
+        "pub fn twice(n: Int) -> Int {\n    n * \"2\"\n}\n",
+    ),
+    // E0074 labelled in two files, its primary in the second it names.
+    (
+        "g/a.nova",
+        "import b::{Shape}\n\nimpl Shape {\n    fn area(self) -> Int { 0 }\n}\n\nfn \
+         main() {\n    println(\"${Shape { w: 1 }.area()}\")\n}\n",
+    ),
+    (
+        "g/b.nova",
+        "pub record Shape { pub w: Int }\n\nimpl Shape {\n    pub fn area(self) -> Int \
+         { self.w }\n}\n",
+    ),
+    // E0074 labelled in the program and in std: `<std/strings>`'s locus.
+    (
+        "overlap.nova",
+        "impl String {\n    fn len(self) -> Int { 0 }\n}\n\nfn main() {\n    \
+         println(\"${\"ab\".len()}\")\n}\n",
+    ),
+    // A parse error.
+    ("parse.nova", "fn main() {\n    let x = (1 + \n}\n"),
     // Clean.
     ("clean.nova", "fn main() {\n    println(\"clean\")\n}\n"),
-    // Float `%`: the emitter refuses it.
+    // Float `%`: `check` is clean; the emitter refuses it.
     (
         "frem.nova",
         "fn main() {\n    let a = 5.5\n    let b = 2.0\n    println(\"${a % b}\")\n}\n",
@@ -7193,11 +7264,16 @@ const PROBE_INPUTS: &[(&str, &str)] = &[
 #[cfg(unix)]
 const CC_ARGS: &str = "#!/bin/sh\nprintf '%s\\n' \"$@\" > cc-args.txt\nexec cc \"$@\"\n";
 
+/// What the copy of `examples/05-geometry` gets appended to its library's
+/// `src/units.nova`: an error on its line 27, a 2-digit line.
+const GEOMETRY_ERROR: &str = "\npub fn broken() -> Int { \"no\" }\n";
+
 /// N's refusal to build on Windows (spec 5.5b §3.5).
 const N_REFUSES_WINDOWS: &str = "Error: selfhost build links on Linux and macOS only\n";
 
-/// N's usage line for `build` (spec 5.5b §3.1).
+/// N's usage lines (spec 5.5b §3.1).
 const N_BUILD_USAGE: &str = "usage: selfhost build FILE [-o OUT] [--release] --std DIR\n";
+const N_CHECK_USAGE: &str = "usage: selfhost check FILE --std DIR\n";
 
 /// How a probe's two sides are compared.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -7322,6 +7398,17 @@ const PROBES: &[Probe] = {
         ("NOVA_LLC", InDir("no-such-tool")),
         ("NOVA_RUNTIME_LIB", InDir("no-such-runtime.a")),
     ];
+    const fn check(name: &'static str, args: &'static [&'static str]) -> Probe {
+        Probe {
+            name,
+            s0: Some(args),
+            n: args,
+            std: true,
+            vars: &[],
+            links: false,
+            expect: Same,
+        }
+    }
     const fn build(
         name: &'static str,
         args: &'static [&'static str],
@@ -7360,6 +7447,34 @@ const PROBES: &[Probe] = {
         }
     }
     &[
+        check(
+            "check an unknown name, with a help",
+            &["check", "unknown.nova"],
+        ),
+        check("check a secondary label first", &["check", "dup.nova"]),
+        check("check spans of several lines", &["check", "multiline.nova"]),
+        check("check after tabs", &["check", "tabs.nova"]),
+        check(
+            "check after CJK, an emoji and Thai",
+            &["check", "wide.nova"],
+        ),
+        check("check Thai combining marks", &["check", "thai.nova"]),
+        check("check a warning alone", &["check", "warn.nova"]),
+        check("check two errors, a 2-digit line", &["check", "two.nova"]),
+        check("check Windows line endings", &["check", "crlf.nova"]),
+        check("check a sibling's error", &["check", "d/a.nova"]),
+        check("check a sibling's error from ./", &["check", "./d/a.nova"]),
+        check("check labels in two files", &["check", "g/a.nova"]),
+        check("check a label in std", &["check", "overlap.nova"]),
+        check(
+            "check a path dependency's error",
+            &["check", "05-geometry/src/main.nova"],
+        ),
+        check("check a parse error", &["check", "parse.nova"]),
+        check("check a clean program", &["check", "clean.nova"]),
+        check("check float %", &["check", "frem.nova"]),
+        check("check a missing FILE", &["check", "nope.nova"]),
+        check("check a directory as FILE", &["check", "dir.nova"]),
         build(
             "build compile errors",
             &["build", "--release", "two.nova"],
@@ -7425,6 +7540,21 @@ const PROBES: &[Probe] = {
             &["build", "--release=yes", "clean.nova"],
             N_BUILD_USAGE,
         ),
+        usage(
+            "check an unknown option",
+            &["check", "--bogus", "clean.nova"],
+            N_CHECK_USAGE,
+        ),
+        usage(
+            "check a second FILE",
+            &["check", "clean.nova", "two.nova"],
+            N_CHECK_USAGE,
+        ),
+        usage(
+            "check -o",
+            &["check", "clean.nova", "-o", "x"],
+            N_CHECK_USAGE,
+        ),
         alone(
             "N builds without --std",
             &["build", "clean.nova", "--release"],
@@ -7435,12 +7565,23 @@ const PROBES: &[Probe] = {
             &["build", "--release", "--std", "std"],
             N_BUILD_USAGE,
         ),
+        alone(
+            "N checks without --std",
+            &["check", "clean.nova"],
+            N_CHECK_USAGE,
+        ),
+        alone(
+            "N checks without FILE",
+            &["check", "--std", "std"],
+            N_CHECK_USAGE,
+        ),
     ]
 };
 
 /// A fresh directory for probe `name` under `under`, holding
-/// [`PROBE_INPUTS`] and the directory `dir.nova`.
-fn probe_dir(under: &Path, name: &str) -> PathBuf {
+/// [`PROBE_INPUTS`], the directory `dir.nova` and, when `geometry`, the
+/// copy of `examples/05-geometry` with [`GEOMETRY_ERROR`].
+fn probe_dir(under: &Path, name: &str, geometry: bool) -> PathBuf {
     let dir = under.join(name.replace([' ', ',', '%', '.', '/', '\''], "-"));
     let _ = std::fs::remove_dir_all(&dir);
     for (path, text) in PROBE_INPUTS {
@@ -7456,6 +7597,24 @@ fn probe_dir(under: &Path, name: &str) -> PathBuf {
         std::fs::write(&script, CC_ARGS).expect("write cc-args");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("make cc-args executable");
+    }
+    if geometry {
+        let from = root().join("examples").join("05-geometry");
+        for rel in [
+            "nova.toml",
+            "src/main.nova",
+            "shapes/nova.toml",
+            "shapes/src/lib.nova",
+            "shapes/src/units.nova",
+        ] {
+            let to = dir.join("05-geometry").join(rel);
+            std::fs::create_dir_all(to.parent().expect("a parent")).expect("a directory");
+            std::fs::copy(from.join(rel), &to).expect("copy examples/05-geometry");
+        }
+        let units = dir.join("05-geometry/shapes/src/units.nova");
+        let mut text = std::fs::read_to_string(&units).expect("read units.nova");
+        text.push_str(GEOMETRY_ERROR);
+        std::fs::write(&units, text).expect("write units.nova");
     }
     dir
 }
@@ -7612,7 +7771,8 @@ fn run_probes(probes: &[Probe], under: &Path, home: &Path, n: &Path) -> Vec<Stri
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let Some(probe) = probes.get(i) else { break };
-                let dir = probe_dir(under, probe.name);
+                let geometry = probe.n.iter().any(|a| a.starts_with("05-geometry"));
+                let dir = probe_dir(under, probe.name, geometry);
                 let before = files_under(&dir);
                 let vars = probe_vars(probe.vars, &dir);
                 let mut n_args: Vec<String> = probe.n.iter().map(|a| a.to_string()).collect();
@@ -7836,7 +7996,7 @@ fn n_build_answers_as_s0_does_with_clang() {
     let mut ran = 0;
     for probe in CLANG_PROBES {
         ran += 1;
-        let dir = probe_dir(&under, probe.name);
+        let dir = probe_dir(&under, probe.name, false);
         let before = files_under(&dir);
         let mut vars = probe_vars(probe.vars, &dir);
         if !vars.iter().any(|(name, _)| *name == "NOVA_RUNTIME_LIB") {
@@ -7884,7 +8044,7 @@ fn n_build_answers_as_s0_does_with_clang() {
             dir.display()
         );
     }
-    let dir = probe_dir(&under, "no runtime");
+    let dir = probe_dir(&under, "no runtime", false);
     let before = files_under(&dir);
     let args: Vec<String> = [
         "build",
@@ -7933,7 +8093,7 @@ fn n_build_answers_as_s0_does_with_clang() {
     let deep_exe = deep.join(format!("selfhost{EXE_SUFFIX}"));
     std::fs::copy(n, &deep_exe).expect("copy N into up/bin");
     std::fs::copy(&runtime, alone.join("libnova_runtime.a")).expect("copy the runtime");
-    let dir = probe_dir(&under, "a runtime two directories up");
+    let dir = probe_dir(&under, "a runtime two directories up", false);
     let before = files_under(&dir);
     let args: Vec<String> = [
         "build",
@@ -7971,7 +8131,7 @@ fn n_build_answers_as_s0_does_with_clang() {
     // harness, on a binary built here, refuses a wrong standard output and
     // a different binary.
     ran += 1;
-    let dir = probe_dir(&under, "without release");
+    let dir = probe_dir(&under, "without release", false);
     let before = files_under(&dir);
     let mut runs = Vec::new();
     for release in [true, false] {
