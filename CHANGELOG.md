@@ -348,7 +348,8 @@ ADR 0059).
   packages under `crates/`, test fixtures, were not compared.
 - **The self-hosted driver, `selfhost build` and `selfhost check`:**
   `selfhost build FILE [-o OUT] [--release] --std DIR` builds a program
-  as `nova build --release FILE -o OUT` does, on Linux and macOS: its
+  as `nova build --release FILE -o OUT` does, on Linux (macOS's linking,
+  S0's line, has not yet run; the tests that link run on Linux only): its
   `.ll` written beside OUT as `<out>.nova.ll`, `clang -O2 -c` and `cc` run
   on it with S0's lines, the runtime found from `NOVA_RUNTIME_LIB` or
   beside the executable, `built OUT` printed, and S0's messages and exit
@@ -372,8 +373,9 @@ ADR 0059).
 - **Two probe tests** hold N's `build` and `check` to S0's on the same
   inputs: the same stdout, exit code and files left behind, and N's
   stderr equal to S0's cut to each diagnostic's header and loci and to
-  anyhow's error. `n_build_and_check_answer_as_s0_does` runs 39 cases
-  with no `clang` in `selfhost.rs`'s main step on all three systems;
+  anyhow's error. `n_build_and_check_answer_as_s0_does` runs 45 cases
+  with no `clang` in `selfhost.rs`'s main step on all three systems, 8
+  of them on N alone with N's lines pinned;
   `n_build_answers_as_s0_does_with_clang` runs 10 with it, and N's
   `build` with no runtime, with a runtime two directories up and without
   `--release`, in the new step. What cannot match (clap's usage text,

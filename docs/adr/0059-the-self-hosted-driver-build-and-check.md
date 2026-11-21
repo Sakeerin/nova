@@ -33,6 +33,13 @@ The plan's mutants and its fact-check added three things after part 3:
 - §8, a main-step test that holds CI's step to the ignored tests;
 - §11, the plan's mutants, and the two that these additions kill.
 
+The review's fixes (2026-11-21) added four more:
+- §1, an empty FILE refused as a usage error, as clap refuses it;
+- §9, two usage cases for it and four cases on N alone, pinned;
+- §7, three differences from S0 not recorded before;
+- §8 and §11, the CI step's test holding `--ignored` too, an `@test`
+  that catches the Windows refusal's words on Linux, and six mutants.
+
 ## Decision
 
 ### 1. The command lines (the user's decision 5)
@@ -43,14 +50,15 @@ selfhost check FILE --std DIR
 ```
 
 N's `main.nova` dispatches `build` and `check` to a new
-`selfhost/src/driver.nova` (803 lines, 596 of code; code lines exclude
+`selfhost/src/driver.nova` (804 lines, 596 of code; code lines exclude
 blank lines and lines that start with `//` after their indentation).
 `build_args` and `check_args` read the command line (spec §3.1):
 - **Each option once, in any order:** `-o OUT`, `--output OUT`,
   `--output=OUT`, `--release`, `--std DIR`, `--std=DIR`, and one FILE.
   `--` ends the options, and `-` alone is a FILE.
 - **Refused:** a second FILE or option, an unknown option,
-  `--release=…`, no FILE, no `--std`, an option without its value, an
+  `--release=…`, no FILE, an empty FILE (after `--` too; clap's `a value
+  is required for '[FILE]'`), no `--std`, an option without its value, an
   empty value, and a separate value that starts with `-` but is not `-`
   itself (clap takes that for an option). `-oX` and `-o=X` are unknown
   options. `check` takes neither an output nor `--release`.
@@ -183,8 +191,8 @@ byte, on the probe set (§9), but where it says it differs:
 | `clang` fails | | the release head and `clang failed (exit status: N):` with its output | 1 |
 | runtime missing, a text file, or not found | | the release head and S0's cause; with a text file, the linker's failure and its output, the same on both sides | 1 |
 | `cc` missing / fails | | the release head and `0: failed to spawn linker: "…"`, `1: …` / `linking failed (exit status: N):` and its output | 1 |
-| manifest refused | | `Error: selfhost build cannot read FILE: WHY`, or `selfhost check` (differs: S0 syncs) | 1 |
-| std unreadable | | `error: cannot read std's PATH: KIND` (N's own; S0 embeds std) | 2 |
+| manifest refused | | `Error: selfhost build cannot read FILE: WHY`, or `selfhost check` (differs: S0 warns M0006 and goes on, or syncs; a probe on N alone, not compared with S0, §9) | 1 |
+| std unreadable | | `error: cannot read std's PATH: KIND` (N's own; S0 embeds std; a probe on N alone, not compared with S0, §9) | 2 |
 
 ### 6. `check`'s lines, and the extraction of S0's stderr (the user's decision 3)
 
@@ -255,6 +263,13 @@ Recorded as (differs), and kept out of the probe set's comparison:
 - tool output with invalid UTF-8 that also holds valid multi-byte
   characters, or with whitespace outside N's `trim` at its ends;
 - Windows: `build` refused (§4), and a locus's `\` read as `/`;
+- `--help` and `-h`: S0 prints its help and exits 0; N prints its usage
+  line and exits 2;
+- a FILE path that is not UTF-8: N's arguments are read lossily, so N
+  says `failed to open` where S0 reads the file;
+- an executable path that is not UTF-8: N's `current_exe` fails, so
+  with `NOVA_RUNTIME_LIB` unset N says `locating the nova executable`
+  where S0 looks beside its executable;
 - a Nova panic, an abort with 134, against Rust's 101;
 - `check`'s snippets, notes, help and colour.
 
@@ -324,7 +339,12 @@ the step `S1 builds the golden suite (Linux)` and the names after
 - each name is a test of the file, marked `#[ignore]`;
 - the names are exactly the tests marked `#[ignore = "needs clang;
   ..."]`, today `s1_builds_the_golden_suite` and
-  `n_build_answers_as_s0_does_with_clang`.
+  `n_build_answers_as_s0_does_with_clang`;
+- the line has `--test selfhost`, then `--`, then `--ignored`, before
+  `--exact`: without `--ignored` the step runs none of the ignored tests
+  and passes (the review's fixes);
+- the step sits in the Selfhost job: the nearest line above it at a
+  job's indent is `selfhost:`.
 
 It needs no crate, no network and no N, and takes under 10 ms.
 
@@ -338,7 +358,7 @@ exit code, §6's extraction of stderr, and the files each side leaves, a
 removed before the other side runs.
 
 **`n_build_and_check_answer_as_s0_does`,** in the main step on all three
-systems, 4 threads, 39 cases:
+systems, 4 threads, 45 cases:
 - **19 `check` cases:** an unknown name with a help (E0001); a duplicate
   whose secondary label comes first (E0002); spans of several lines
   (E0010); after tabs; after CJK, an emoji and Thai; Thai combining
@@ -354,11 +374,21 @@ systems, 4 threads, 39 cases:
   `NOVA_LLC` naming a missing file) with `-o`, with the default name, and
   with a warning, each leaving both `.ll`s, equal; no `clang` and no
   runtime; float `%`, no `.ll`.
-- **7 usage cases,** compared on exit 2 and empty stdout, N's line
+- **9 usage cases,** compared on exit 2 and empty stdout, N's line
   pinned: `build` with an unknown option, `-o` twice, a second FILE,
-  `--release=yes`; `check` with an unknown option, a second FILE, `-o`.
-- **4 cases on N alone,** which S0 has no form of: no `--std` and no FILE,
-  for `build` and for `check`.
+  `--release=yes`, an empty FILE; `check` with an unknown option, a
+  second FILE, `-o`, an empty FILE.
+- **8 cases on N alone,** which S0 has no form of, not compared with S0:
+  no `--std` and no FILE, for `build` and for `check`, N's usage line
+  pinned; and, pinned by exit code and stderr with nothing on stdout and
+  nothing left, for `check` and for `build --release`: a package whose
+  `nova.toml` has a key N's reader does not read (`frobnicate`), `Error:
+  selfhost check cannot read pkg/src/main.nova: pkg/nova.toml: the key
+  `package.frobnicate` is not read` (or `build`), exit 1, where S0 warns
+  M0006 and goes on (§5, §7); and `--std no-std`, a directory missing
+  under the case's own, `error: cannot read std's no-std/core/lib.nova:
+  NotFound`, exit 2, where S0 has std built in. The relative `--std`
+  names the same path on every system.
 
 On Windows a case that builds is N's refusal alone (exit 1, nothing on
 stdout, nothing left), and S0 is not run for it. The extraction has a
@@ -406,14 +436,18 @@ test (§13).
 
 ### 10. N's `@test`s
 
-`selfhost/src/driver_tests.nova` (214 lines, 163 of code), 11 `@test`s,
+`selfhost/src/driver_tests.nova` (225 lines, 172 of code), 12 `@test`s,
 run under `the_selfhost_tests_pass` on both runtimes:
 `the_intermediate_is_named_for_the_outputs_file_name_as_s0_names_it` (a
 trailing `/`, an output with no name, `-o out.ll`);
 `the_default_output_is_files_stem_as_path_file_stem_gives_it`
 (`a.b.nova`, `.nova`, `x.`);
 `windows_is_known_by_a_drive_or_a_double_backslash`;
-`the_command_lines_take_what_the_spec_says_and_refuse_the_rest`;
+`the_command_lines_take_what_the_spec_says_and_refuse_the_rest` (an
+empty FILE too, after `--` as well);
+`the_windows_refusal_is_the_specs_text` (`failure_text(WINDOWS_REFUSAL,
+[])` against spec §3.5's words, which no input reaches on Linux or
+macOS);
 `a_failure_is_printed_in_anyhows_layout` (no cause, one, one with empty
 lines, two);
 `line_and_column_count_line_feeds_and_characters_as_codespan_does`
@@ -424,8 +458,8 @@ lines, two);
 `a_tools_name_is_quoted_as_debug_quotes_it`;
 `a_failed_tools_cause_is_its_status_line_and_its_output_trimmed`;
 `a_tools_output_that_is_not_utf8_keeps_its_ascii_and_marks_each_other_byte`.
-N's `nova test` passes 119 (108 before), on the debug runtime and on the
-release runtime. `selfhost/src` is now 57 files and 32,356 lines.
+N's `nova test` passes 120 (108 before), on the debug runtime and on the
+release runtime. `selfhost/src` is now 57 files and 32,368 lines.
 
 ### 11. The mutants
 
@@ -491,14 +525,34 @@ Two of them survived until a test was added:
   a name dropped from the step (63) and `#[ignore]` removed from the
   clang test (64).
 
-Four are accepted:
+Three are accepted:
 - **T5** (an environment entry dropped) is equivalent: `env` refuses
-  names that hold `=`.
+  names that hold `=`, so equivalent only while that refusal is right.
 - **H5** (S1's `built OUT` line not checked) is covered by the clang
   test, which compares that line.
 - **A1** (`clang`'s arguments in another order) gives the same command.
-- **W4** (the Windows refusal's words) is unreachable on Linux, and CI's
-  Windows leg catches it.
+
+**W4** (the Windows refusal's words, the plan's 45), accepted until the
+review's fixes as unreachable on Linux, is now caught on every system by
+the `@test` `the_windows_refusal_is_the_specs_text` (§10); CI's Windows
+leg still catches it in the main probe test too. So 61 of the 64 are
+caught.
+
+**The review's fixes** (2026-11-21) re-ran the 53 mutants of
+`driver.nova` and `selfhost.rs`: H5 and A1 pass by design as before, W4
+is caught, and the other 50 fail as before, a main-probe count now out
+of 45, five counts higher where a new case meets the edit (§9): M7 27
+(the two manifest cases, which exit through `fail`), M8b 11 (the two
+N-alone `build` cases, refused as Windows), `build`'s usage line 7 and
+`check`'s 6 (the empty FILE), and `Error:` lowercased 27, which also
+fails the new `@test`. Six mutants were added, each caught:
+- the empty-FILE refusal removed: the main probe test (2 of 45) and the
+  `@test`;
+- `--ignored` dropped from CI's step: `the_ci_step_names_every_clang_test`,
+  while the step's own command runs no test and passes;
+- the four N-alone failures' exit codes changed (`check`'s and `build`'s
+  std, 2 to 1; `check`'s and `build`'s manifest, 1 to 2): the main probe
+  test (1 of 45) each.
 
 ### 12. The figures of parts 1 and 2
 
@@ -750,8 +804,9 @@ ADR 0058 is not changed.
   `check` needs them too.
 - **std unreadable** is N's existing `error: cannot read std's PATH:
   KIND`, exit 2, as `selfhost mir` gives it; spec §3.4 has no row.
-- **The command line's edges** (§1): an empty value and a separate value
-  that starts with `-` refused; `-` alone a FILE; `-oX` and `-o=X`
+- **The command line's edges** (§1): an empty value, an empty FILE (as
+  clap refuses it; the review's fixes) and a separate value that starts
+  with `-` refused; `-` alone a FILE; `-oX` and `-o=X`
   refused. If wrong, a different exit code from clap's on unusual forms.
 - **A refused manifest's head names FILE,** `Error: selfhost build
   cannot read FILE: WHY`, and `check`'s mirrors it, `Error: selfhost
@@ -774,13 +829,16 @@ ADR 0058 is not changed.
 ## Consequences
 
 - N builds programs: `selfhost build` writes S0's `.ll`, runs `clang` and
-  `cc` as S0 does on Linux and macOS, and leaves the same binary, byte
-  for byte, as S0's `nova build --release` for the same `-o` basename:
-  on the 147 golden programs (§8), and on N itself (§13).
+  `cc` as S0 does, and leaves the same binary, byte for byte, as S0's
+  `nova build --release` for the same `-o` basename: on the 147 golden
+  programs (§8), and on N itself (§13), on Linux. Its linking on macOS
+  has not yet run: the tests that link, the clang probe test and the
+  golden step, run on Ubuntu alone (spec §14, risk 8); macOS's `cc` line
+  is S0's.
 - `selfhost check` prints each diagnostic's code and locus, S0's header
   and locus lines; N's `build` and `check` give S0's stdout, exit codes
-  and messages on 39 probe cases without `clang` and 10 with it, §7's
-  exceptions listed.
+  and messages on 45 probe cases without `clang`, 8 of them on N alone
+  and pinned, and 10 with it, §7's exceptions listed.
 - N's `build` refuses Windows with its own message.
 - S1 builds N in about 13 s locally, at about 204 MB, and S2 builds N to
   itself (§13): 5.6's S1 == S2 == S3 holds here with one `-o` basename.

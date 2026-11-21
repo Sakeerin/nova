@@ -567,14 +567,17 @@ text above differ, this section holds; ADR 0059 records each point.
    46 to 57 s on CI; it took 30.3 s (`2 passed`, `finished in 30.21s`),
    and the install 10.7 s, on run 44674948875. Locally, as the Selfhost
    job runs it, 25 to 39 s.
-3. **§6.3's lists grow.** The main probe test has 39 cases against
+3. **§6.3's lists grow.** The main probe test has 45 cases against
    §6.3's 24: five more `check` cases (Thai combining marks, the
    sibling's error named from `./d/` too, labels in two files, a label
    in std, float `%`), four more `build` cases (a directory as FILE, no
    `clang` with the default name and with a warning, no `clang` and no
-   runtime), four more usage cases (`build`'s `--release=yes`, and
-   `check`'s unknown option, second FILE and `-o`), and two more cases on
-   N alone (`check`'s, as `build`'s). The clang list gains three cases.
+   runtime), six more usage cases (`build`'s `--release=yes`, and
+   `check`'s unknown option, second FILE and `-o`; with the review's
+   fixes, an empty FILE for each command), and six more cases on N alone
+   (`check`'s, as `build`'s; with the review's fixes, a manifest N does
+   not read and std missing from `--std`'s directory, each for both
+   commands, pinned and not compared with S0: item 10). The clang list gains three cases.
    Two in the prototype, each
    for mutants no case of the list could kill: "clang fails, and no
    runtime" (`NOVA_CLANG=false` with `NOVA_RUNTIME_LIB` at a missing file:
@@ -658,3 +661,35 @@ text above differ, this section holds; ADR 0059 records each point.
      sums were not extracted;
    - `main` at `e71446df`, run 44479648345: `selfhost.rs` 54.92, 67.47
      and 66.85 s (margins 25.1, 32.5 and 43.2 s).
+10. **The review's fixes** (2026-11-21, ADR 0059 §1, §7 to §11):
+    - **An empty FILE** (§3.1): N took `""` as FILE and said `failed to
+      open`, exit 1, where clap refuses it, exit 2. N now refuses it as
+      a usage error, after `--` too, for `build` and `check`; a usage
+      probe for each command and a line of N's command-line `@test`
+      hold it.
+    - **§3.6's list gains three:** `--help` and `-h`, where S0 prints
+      its help and exits 0 and N prints its usage line and exits 2; a
+      FILE path that is not UTF-8, which N's arguments read lossily, so
+      N says `failed to open` where S0 reads the file; and an executable
+      path that is not UTF-8, where N's `current_exe` fails, so with
+      `NOVA_RUNTIME_LIB` unset N says `locating the nova executable`.
+    - **N's linking on macOS has not yet run** (§14, risk 8): the tests
+      that link, the clang probe test and the golden step, run on Linux
+      only. The main probe test runs on all three systems, but none of
+      its cases reaches `clang`.
+    - **Four cases on N alone,** each for `check` and `build --release`:
+      a manifest key N's reader does not read (`Error: selfhost check
+      cannot read FILE: MANIFEST: the key `package.frobnicate` is not
+      read`, exit 1; S0 warns M0006 and goes on), and std missing from
+      `--std`'s directory (`error: cannot read std's PATH/core/lib.nova:
+      NotFound`, exit 2; S0 has std built in). The main probe test has
+      45 cases.
+    - **The CI step's test** also holds the step's `run:` line to
+      `--test selfhost`, `--`, then `--ignored`, before `--exact`, and
+      the step to the Selfhost job: without `--ignored` the step runs
+      none of the ignored tests and passes.
+    - **The plan's mutant 45** (the Windows refusal's words), accepted
+      as unreachable on Linux, is caught there by N's new `@test`
+      `the_windows_refusal_is_the_specs_text`: 12 `@test`s in
+      `driver_tests.nova`, 120 in all. Of the 64 mutants, 61 are caught
+      and three accepted; six added for these fixes are each caught.

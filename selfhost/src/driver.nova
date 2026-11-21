@@ -67,9 +67,10 @@ pub record BuildArgs {
 /// (spec 5.5b §3.1): each option once, in any order, `-o OUT`, `--output
 /// OUT`, `--output=OUT`, `--release`, `--std DIR`, `--std=DIR`, and one
 /// FILE; `--` ends the options. `None` for anything else: a second FILE or
-/// option, an unknown option, `--release=…`, no FILE, no `--std`, or an
-/// option without its value, which an empty one is, and a separate one
-/// that begins with `-` but is not `-`, as clap takes that for an option.
+/// option, an unknown option, `--release=…`, no FILE, an empty FILE, after
+/// `--` too, as clap refuses it, no `--std`, or an option without its
+/// value, which an empty one is, and a separate one that begins with `-`
+/// but is not `-`, as clap takes that for an option.
 /// The output is FILE's stem, `out` when it has none, when no `-o` names
 /// one.
 pub fn build_args(argv: Vec<String>) -> Option<BuildArgs> { command_args(argv, true) }
@@ -90,7 +91,7 @@ fn command_args(argv: Vec<String>, build: Bool) -> Option<BuildArgs> {
         let a = argv.at(i)
         i += 1
         if only_files || a == "-" || !a.starts_with("-") {
-            if file.is_some() { return None }
+            if file.is_some() || a == "" { return None }
             file = Some(a)
             continue
         }
