@@ -32,6 +32,9 @@ ADR 0058).
 Phase 5.5b, the self-hosted driver and linking (spec
 `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`;
 ADR 0059).
+Phase 5.6a, the bootstrap gate (spec
+`docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`;
+ADR 0060).
 
 ### Added
 
@@ -382,6 +385,30 @@ ADR 0059).
   Windows, a signal's status text, `check`'s snippets) is listed in ADR
   0059. Nothing a user sees changes with 5.5b: S0's sources are
   unchanged, so `nova build` and `nova check` are too.
+- **The bootstrap gate, in CI:** a new step of the Selfhost job's Linux
+  leg, after the golden step, runs `the_bootstrap_holds_s1_s2_s3`. The
+  Rust compiler's `nova build --release` builds the self-hosted compiler
+  into stage 1. Stage 1's own `build` then builds it into stage 2, and
+  stage 2's into stage 3, in that order, with one `-o` basename and one
+  runtime archive. The self-hosted compiler's `.ll` of itself must be
+  the same from all three compilers, and stage 1, stage 2 and stage 3
+  must be the same binary, byte for byte. A mismatch is reported by the
+  `.ll`'s line, `define` and block, or by both binaries' sizes and first
+  differing offset, and the files are kept. The step prints `cc`'s and
+  `ld`'s versions. `the_ci_step_names_every_clang_test` now holds both
+  clang steps, and a main-step test holds the two reports and the four
+  comparisons (5.6a, ADR 0060).
+- **ADR 0060, the bootstrap gate and its tolerances:** there is no
+  tolerance on the bytes, under four conditions: one `-o` basename, one
+  `clang` (18.1.3), one runtime archive, and one `cc` and `ld` within a
+  job. It records what varies the binary and what does not, why the
+  Cranelift-built stage 1 is not the chain's start, and a search of the
+  self-hosted compiler for `Map` iteration that could reach its output.
+- **`selfhost/README.md`:** what the self-hosted compiler is (in the
+  repository, not shipped), its commands and their usage lines, how to
+  build stage 1, 2 and 3 by hand and compare them, how its tests run,
+  and the rule that the two compilers change together in one pull
+  request.
 
 ### Changed
 
