@@ -8427,6 +8427,45 @@ fn ll_difference(a: (&str, &Path), b: (&str, &Path)) -> Result<(), String> {
     ))
 }
 
+/// Stage `stage`'s binary under the bootstrap's directory `dir`:
+/// `s1/selfhost` for S1. One basename for every stage, since the `.ll`'s
+/// name is in the binary (its `STT_FILE`).
+fn stage_binary(dir: &Path, stage: &str) -> PathBuf {
+    dir.join(stage.to_lowercase()).join("selfhost")
+}
+
+/// N's `.ll` from stage `stage`'s front-end-only run under the bootstrap's
+/// directory `dir`: `ll-s0/selfhost.nova.ll` for S0.
+fn stage_ll(dir: &Path, stage: &str) -> PathBuf {
+    dir.join(format!("ll-{}", stage.to_lowercase()))
+        .join("selfhost.nova.ll")
+}
+
+/// The bootstrap's comparisons on the stages' files under `dir`, every one
+/// run, in order (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §3.4): N's `.ll` from S1, then from S2, against S0's
+/// ([`ll_difference`]); then S2's binary against S1's, and S3's against
+/// S2's ([`same_binaries`]); and each one's report that fails, in that
+/// order. N's `.ll` comes first: equal `.ll`s and differing binaries point
+/// at the toolchain or the link, differing `.ll`s at the front end.
+fn bootstrap_failures(dir: &Path) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (a, b) in [("S0", "S1"), ("S0", "S2")] {
+        let (a_ll, b_ll) = (stage_ll(dir, a), stage_ll(dir, b));
+        if let Err(why) = ll_difference((a, a_ll.as_path()), (b, b_ll.as_path())) {
+            failures.push(why);
+        }
+    }
+    for (a, b) in [("S1", "S2"), ("S2", "S3")] {
+        let (a_exe, b_exe) = (stage_binary(dir, a), stage_binary(dir, b));
+        if let Err(why) = same_binaries((a, a_exe.as_path()), (b, b_exe.as_path())) {
+            failures.push(why);
+        }
+    }
+    failures
+}
+
 /// The bootstrap gate (spec
 /// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
 /// §3, §4; ADR 0060): S0's `nova build --release` builds N
@@ -8440,9 +8479,9 @@ fn ll_difference(a: (&str, &Path), b: (&str, &Path)) -> Result<(), String> {
 /// succeeds removes. S1's build has a fresh `NOVA_HOME`, where S0 unpacks
 /// the runtime it carries, and S2's and S3's link the runtime S1 linked
 /// ([`runtime_in`]): one archive for all three. Then N's `.ll` from S1 and
-/// from S2 must equal S0's ([`ll_difference`]), and S2 must equal S1 and
-/// S3 equal S2, byte for byte ([`same_binaries`]). Every comparison runs,
-/// and the test fails with each one that fails. A stage that fails stops
+/// from S2 must equal S0's, and S2 must equal S1 and S3 equal S2, byte for
+/// byte ([`bootstrap_failures`]); the test fails with each comparison that
+/// fails. A stage that fails stops
 /// the chain. On success it prints the sizes, `clang`'s version, the
 /// runtime and each stage's time, and removes its directory; on a failure
 /// the directory is kept.
@@ -8482,9 +8521,6 @@ fn the_bootstrap_holds_s1_s2_s3() {
     let missing = dir.join("no-such-tool");
     let source = root().join("selfhost").join("src").join("main.nova");
     let std_dir = root().join("std");
-    // One basename for every stage: the `.ll`'s name is in the binary.
-    let binary = |stage: &str| dir.join(stage).join("selfhost");
-    let ll = |stage: &str| dir.join(format!("ll-{stage}")).join("selfhost.nova.ll");
     // A build of N by `builder` into `out`, in S0's words for the first
     // stage, in N's for the others, as a printable line and a command.
     let command = |builder: &Path, n_side: bool, out: &Path| {
@@ -8518,23 +8554,16 @@ fn the_bootstrap_holds_s1_s2_s3() {
         (out, start.elapsed())
     };
 
-    let stages = [
-        ("S1", "s1", "s0", "S0"),
-        ("S2", "s2", "s1", "S1"),
-        ("S3", "s3", "s2", "S2"),
-    ];
+    let stages = [("S1", "S0"), ("S2", "S1"), ("S3", "S2")];
     let mut builder = nova();
     let mut runtime: Option<PathBuf> = None;
     let mut times = Vec::new();
-    for (k, (stage, out_dir, by, by_name)) in stages.into_iter().enumerate() {
+    for (k, (stage, by)) in stages.into_iter().enumerate() {
         let n_side = k > 0;
-        let out = binary(out_dir);
+        let out = stage_binary(&dir, stage);
+        let ll = stage_ll(&dir, by);
         let (build_line, mut build) = command(&builder, n_side, &out);
-        let (ll_line, mut front) = command(
-            &builder,
-            n_side,
-            &dir.join(format!("ll-{by}")).join("selfhost"),
-        );
+        let (ll_line, mut front) = command(&builder, n_side, &ll.with_file_name("selfhost"));
         build.env("NOVA_HOME", &home);
         front
             .env("NOVA_HOME", &home_ll)
@@ -8545,8 +8574,8 @@ fn the_bootstrap_holds_s1_s2_s3() {
             front.env("NOVA_RUNTIME_LIB", runtime);
         }
         let ((built, build_time), (fronted, front_time)) = std::thread::scope(|s| {
-            let fronted = s.spawn(|| timed(front, &format!("{by_name}'s front-end run")));
-            let built = timed(build, &format!("{stage}'s build by {by_name}"));
+            let fronted = s.spawn(|| timed(front, &format!("{by}'s front-end run")));
+            let built = timed(build, &format!("{stage}'s build by {by}"));
             (built, fronted.join().expect("the front-end run's thread"))
         });
         let mut why = Vec::new();
@@ -8555,63 +8584,49 @@ fn the_bootstrap_holds_s1_s2_s3() {
                 let want = format!("built {}\n", out.display());
                 if o.stdout != want.as_bytes() {
                     why.push(format!(
-                        "{stage}'s build by {by_name} printed {:?}, not {want:?}\n  {build_line}",
+                        "{stage}'s build by {by} printed {:?}, not {want:?}\n  {build_line}",
                         String::from_utf8_lossy(&o.stdout)
                     ));
                 }
             }
             Ok(o) => why.push(format!(
-                "{stage}'s build by {by_name} failed, exit status {}\n  {build_line}{}",
+                "{stage}'s build by {by} failed, exit status {}\n  {build_line}{}",
                 o.status,
                 quoted_stderr(&String::from_utf8_lossy(&o.stderr))
             )),
             Err(e) => why.push(format!("{e}\n  {build_line}")),
         }
         match fronted {
-            Ok(o) if o.status.code() == Some(1) && ll(by).is_file() => {}
-            Ok(o) => {
-                why.push(format!(
-                "{by_name}'s front-end run, `NOVA_CLANG` a file that is not there, exited with {} \
+            Ok(o) if o.status.code() == Some(1) && ll.is_file() => {}
+            Ok(o) => why.push(format!(
+                "{by}'s front-end run, `NOVA_CLANG` a file that is not there, exited with {} \
                  and {} {}, where it must exit 1 and leave it\n  {ll_line}{}",
                 o.status,
-                if ll(by).is_file() { "left" } else { "did not leave" },
-                ll(by).display(),
+                if ll.is_file() {
+                    "left"
+                } else {
+                    "did not leave"
+                },
+                ll.display(),
                 quoted_stderr(&String::from_utf8_lossy(&o.stderr))
-            ))
-            }
+            )),
             Err(e) => why.push(format!("{e}\n  {ll_line}")),
         }
         assert!(
             why.is_empty(),
-            "the bootstrap stopped at {stage}, so the stages after it were not built:\n\n{}\n\n\
-             kept: {}",
+            "the bootstrap stopped at {stage}; no later stage was built:\n\n{}\n\nkept: {}",
             why.join("\n\n"),
             dir.display()
         );
         if runtime.is_none() {
             runtime = Some(runtime_in(&home));
         }
-        times.push((stage, by_name, build_time, front_time));
+        times.push((stage, by, build_time, front_time));
         builder = out;
     }
 
-    // N's `.ll` first, then the binaries: equal `.ll`s and differing
-    // binaries point at the toolchain or the link, differing `.ll`s at
-    // the front end.
     let compared = Instant::now();
-    let mut failures = Vec::new();
-    for (a, b) in [("S0", "S1"), ("S0", "S2")] {
-        let (a_ll, b_ll) = (ll(&a.to_lowercase()), ll(&b.to_lowercase()));
-        if let Err(why) = ll_difference((a, a_ll.as_path()), (b, b_ll.as_path())) {
-            failures.push(why);
-        }
-    }
-    for (a, b) in [("S1", "S2"), ("S2", "S3")] {
-        let (a_exe, b_exe) = (binary(&a.to_lowercase()), binary(&b.to_lowercase()));
-        if let Err(why) = same_binaries((a, a_exe.as_path()), (b, b_exe.as_path())) {
-            failures.push(why);
-        }
-    }
+    let failures = bootstrap_failures(&dir);
     let compared = compared.elapsed();
     assert!(
         failures.is_empty(),
@@ -8623,17 +8638,17 @@ fn the_bootstrap_holds_s1_s2_s3() {
     let size = |path: PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     println!(
         "bootstrap: S1 == S2 == S3, {} bytes each; N's .ll the same from S0, S1 and S2, {} bytes",
-        size(binary("s1")),
-        size(ll("s0"))
+        size(stage_binary(&dir, "S1")),
+        size(stage_ll(&dir, "S0"))
     );
     println!("bootstrap: {version}");
     println!(
         "bootstrap: runtime {}",
         runtime.as_deref().unwrap_or(Path::new("")).display()
     );
-    for (stage, by_name, build_time, front_time) in &times {
+    for (stage, by, build_time, front_time) in &times {
         println!(
-            "bootstrap: {stage} by {by_name} {:.2} s, {by_name}'s .ll beside it {:.2} s",
+            "bootstrap: {stage} by {by} {:.2} s, {by}'s .ll beside it {:.2} s",
             build_time.as_secs_f64(),
             front_time.as_secs_f64()
         );
@@ -8653,7 +8668,11 @@ fn the_bootstrap_holds_s1_s2_s3() {
 /// the `diff` of the two files kept, on a difference in a block, on a
 /// `define` line, outside any `define`, and where one `.ll` ends first;
 /// [`same_binaries`] names both stages, both sizes and the first differing
-/// offset, and keeps the golden test's words for S0 and S1.
+/// offset, and keeps the golden test's words for S0 and S1. And
+/// [`bootstrap_failures`] runs all four comparisons, in order, on files
+/// laid out as the gate lays them out: with one file made to differ, its
+/// comparisons fail, and no other, so none is skipped, loosened or made
+/// against the wrong stage.
 #[test]
 fn the_bootstrap_reports_name_the_stage() {
     let dir = fresh_dir("bootstrap-report");
@@ -8738,6 +8757,69 @@ fn the_bootstrap_reports_name_the_stage() {
     assert_eq!(
         same_binaries(("S0", one.as_path()), ("S1", other.as_path())),
         Err("S1's binary differs from S0's: 5 bytes against S0's 8, first at offset 5".to_string())
+    );
+
+    // The four comparisons, each run, in order, on the stages' files: one
+    // file made to differ at a time, its comparisons fail and no other.
+    let stages = dir.join("stages");
+    let lay_out = || {
+        for stage in ["S0", "S1", "S2"] {
+            let ll = stage_ll(&stages, stage);
+            std::fs::create_dir_all(ll.parent().expect("a directory")).expect("make ll-sN");
+            std::fs::write(&ll, &s0).expect("write a stage's .ll");
+        }
+        for stage in ["S1", "S2", "S3"] {
+            let exe = stage_binary(&stages, stage);
+            std::fs::create_dir_all(exe.parent().expect("a directory")).expect("make sN");
+            std::fs::write(&exe, b"\x7fELF\x02\x01\x01\x00").expect("write a stage's binary");
+        }
+    };
+    lay_out();
+    assert_eq!(bootstrap_failures(&stages), Vec::<String>::new());
+    let ll_from = |stage: &str| {
+        format!(
+            "N's .ll from {stage} differs from S0's at line 10 of its .ll, define \"g.1\", block \
+             bb0\n  S0:   store i64 7, ptr %t0.slot\n  {stage}:   store i64 8, ptr %t0.slot\n\
+             both kept: diff {} {}",
+            stage_ll(&stages, "S0").display(),
+            stage_ll(&stages, stage).display()
+        )
+    };
+    let binary_of = |a: &str, b: &str| {
+        format!("{b}'s binary differs from {a}'s: 8 bytes against {a}'s 8, first at offset 7")
+    };
+    for (changed, want) in [
+        (stage_ll(&stages, "S1"), vec![ll_from("S1")]),
+        (stage_ll(&stages, "S2"), vec![ll_from("S2")]),
+        (stage_binary(&stages, "S1"), vec![binary_of("S1", "S2")]),
+        (stage_binary(&stages, "S3"), vec![binary_of("S2", "S3")]),
+        (
+            stage_binary(&stages, "S2"),
+            vec![binary_of("S1", "S2"), binary_of("S2", "S3")],
+        ),
+    ] {
+        lay_out();
+        if changed.ends_with("selfhost.nova.ll") {
+            std::fs::write(&changed, s0.replace("  store i64 7", "  store i64 8"))
+                .expect("write a different .ll");
+        } else {
+            std::fs::write(&changed, b"\x7fELF\x02\x01\x01\x01").expect("write a different binary");
+        }
+        assert_eq!(bootstrap_failures(&stages), want, "{}", changed.display());
+    }
+    // S0's `.ll` differing fails both `.ll` comparisons, S1's first.
+    lay_out();
+    std::fs::write(
+        stage_ll(&stages, "S0"),
+        s0.replace("  store i64 7", "  store i64 8"),
+    )
+    .expect("write a different .ll");
+    let failures = bootstrap_failures(&stages);
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(
+        failures[0].starts_with("N's .ll from S1 differs from S0's at line 10")
+            && failures[1].starts_with("N's .ll from S2 differs from S0's at line 10"),
+        "{failures:?}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
