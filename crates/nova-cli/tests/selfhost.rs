@@ -8590,7 +8590,7 @@ fn the_bootstrap_holds_s1_s2_s3() {
                 }
             }
             Ok(o) => why.push(format!(
-                "{stage}'s build by {by} failed, exit status {}\n  {build_line}{}",
+                "{stage}'s build by {by} failed ({})\n  {build_line}{}",
                 o.status,
                 quoted_stderr(&String::from_utf8_lossy(&o.stderr))
             )),
@@ -8599,8 +8599,8 @@ fn the_bootstrap_holds_s1_s2_s3() {
         match fronted {
             Ok(o) if o.status.code() == Some(1) && ll.is_file() => {}
             Ok(o) => why.push(format!(
-                "{by}'s front-end run, `NOVA_CLANG` a file that is not there, exited with {} \
-                 and {} {}, where it must exit 1 and leave it\n  {ll_line}{}",
+                "{by}'s front-end run, `NOVA_CLANG` a file that is not there, ended ({}) and \
+                 {} {}, where it must exit 1 and leave it\n  {ll_line}{}",
                 o.status,
                 if ll.is_file() {
                     "left"
