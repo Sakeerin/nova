@@ -121,6 +121,14 @@
 //! `clang`, and [`n_build_answers_as_s0_does_with_clang`], ignored here and
 //! run beside the golden walk.
 //!
+//! 5.6a (spec
+//! `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+//! §3, §4; ADR 0060): [`the_bootstrap_holds_s1_s2_s3`], ignored here and
+//! run by CI's Selfhost job on its Linux leg in a step of its own, builds
+//! the chain in order, S1 by S0 `--release`, S2 by S1 and S3 by S2, one
+//! `-o` basename, and holds N's `.ll` from S1 and S2 equal to S0's and
+//! S1 == S2 == S3, byte for byte.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -6877,13 +6885,23 @@ fn the_ll_dump_is_what_build_release_writes() {
 /// (`NOVA_EMBED_RUNTIME=1`), which must be the only one there; else the one
 /// beside S0, where cargo leaves it in a checkout.
 fn golden_runtime() -> PathBuf {
+    runtime_in(&std::env::temp_dir().join("nova-selfhost-home"))
+}
+
+/// The runtime S0 links in a build whose `NOVA_HOME` is `home`, found in
+/// S0's order (`link.rs`): `NOVA_RUNTIME_LIB` when it is set; else the one
+/// S0 unpacked into `home/runtime/<version>-<crc32>/` from the runtime it
+/// carries, which must be the only one there; else the one beside S0.
+/// [`golden_runtime`] asks with [`build_selfhost`]'s home, and
+/// [`the_bootstrap_holds_s1_s2_s3`] with the home of S1's build (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §3.1).
+fn runtime_in(home: &Path) -> PathBuf {
     if let Some(lib) = std::env::var_os("NOVA_RUNTIME_LIB") {
         return PathBuf::from(lib);
     }
     let name = "libnova_runtime.a";
-    let unpacked = std::env::temp_dir()
-        .join("nova-selfhost-home")
-        .join("runtime");
+    let unpacked = home.join("runtime");
     let mut found: Vec<PathBuf> = std::fs::read_dir(&unpacked)
         .map(|entries| {
             entries
@@ -6897,8 +6915,8 @@ fn golden_runtime() -> PathBuf {
             let beside = nova().parent().expect("nova's directory").join(name);
             assert!(
                 beside.is_file(),
-                "no runtime for the golden walk: NOVA_RUNTIME_LIB is not set, \
-                 {} holds none, and none is beside S0 at {}",
+                "no runtime: NOVA_RUNTIME_LIB is not set, {} holds none, and none is \
+                 beside S0 at {}",
                 unpacked.display(),
                 beside.display()
             );
@@ -6912,23 +6930,30 @@ fn golden_runtime() -> PathBuf {
     }
 }
 
-/// Golden program `name`'s two binaries, `s0` and `s1`, the same byte for
-/// byte, or where they first differ.
-fn same_binaries(s0: &Path, s1: &Path) -> Result<(), String> {
-    let a = std::fs::read(s0).map_err(|e| format!("cannot read {}: {e}", s0.display()))?;
-    let b = std::fs::read(s1).map_err(|e| format!("cannot read {}: {e}", s1.display()))?;
-    if a == b {
+/// Two binaries the same byte for byte, or where they first differ, each
+/// given with the name of the side or stage that built it (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §4): `b`'s size against `a`'s, and the first offset where they differ,
+/// or the shorter's length. The golden test passes `"S0"` and `"S1"`.
+fn same_binaries(a: (&str, &Path), b: (&str, &Path)) -> Result<(), String> {
+    let ((a_name, a_path), (b_name, b_path)) = (a, b);
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let (a_bytes, b_bytes) = (read(a_path)?, read(b_path)?);
+    if a_bytes == b_bytes {
         return Ok(());
     }
-    let at = a
+    let at = a_bytes
         .iter()
-        .zip(&b)
+        .zip(&b_bytes)
         .position(|(x, y)| x != y)
-        .unwrap_or(a.len().min(b.len()));
+        .unwrap_or(a_bytes.len().min(b_bytes.len()));
     Err(format!(
-        "S1's binary differs from S0's: {} bytes against S0's {}, first at offset {at}",
-        b.len(),
-        a.len()
+        "{b_name}'s binary differs from {a_name}'s: {} bytes against {a_name}'s {}, first at \
+         offset {at}",
+        b_bytes.len(),
+        a_bytes.len()
     ))
 }
 
@@ -7045,7 +7070,7 @@ fn s1_builds_the_golden_suite() {
                     )
                 })
                 .and_then(|_| run_golden(name, &s1_exe, &tmp))
-                .and_then(|()| same_binaries(&s0_exe, &s1_exe));
+                .and_then(|()| same_binaries(("S0", s0_exe.as_path()), ("S1", s1_exe.as_path())));
                 for side in [&s0_exe, &s1_exe] {
                     let _ = std::fs::remove_file(side);
                     for ext in ["ll", "o"] {
@@ -7077,63 +7102,96 @@ fn s1_builds_the_golden_suite() {
     );
 }
 
-/// CI's step "S1 builds the golden suite (Linux)" names, after `--exact`,
-/// exactly the tests this file marks `#[ignore = "needs clang; ..."]`
-/// (spec
+/// CI's clang steps, "S1 builds the golden suite (Linux)" (spec
 /// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
-/// §7): with `--exact`, a name that matches no test runs nothing and the
-/// step still passes, so a name misspelt or dropped there, or a test no
-/// longer ignored here, would go unseen; so would a step that lost
-/// `--ignored`, which then runs none of them, or `--test selfhost`. The
-/// step must also sit in the Selfhost job. Both files are read as text,
-/// with CRLF line endings too, as a Windows checkout may leave them.
+/// §7) and "The bootstrap, S1 == S2 == S3 (Linux)" (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §6.2), name after `--exact`, between them, exactly the tests this file
+/// marks `#[ignore = "needs clang; ..."]`, each on one step alone: with
+/// `--exact`, a name that matches no test runs nothing and the step still
+/// passes, so a name misspelt or dropped there, or a test no longer ignored
+/// here, would go unseen; so would a step that lost `--ignored`, which then
+/// runs none of them, or `--test selfhost`. Each step must sit in the
+/// Selfhost job. A step's command is its `run:` line or, after `run: |`,
+/// the block's `cargo test` line. Both files are read as text, with CRLF
+/// line endings too, as a Windows checkout may leave them.
 #[test]
 fn the_ci_step_names_every_clang_test() {
-    const STEP: &str = "- name: S1 builds the golden suite (Linux)";
+    const STEPS: [&str; 2] = [
+        "- name: S1 builds the golden suite (Linux)",
+        "- name: The bootstrap, S1 == S2 == S3 (Linux)",
+    ];
     let path = root().join(".github").join("workflows").join("ci.yml");
     let ci =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let lines: Vec<&str> = ci.lines().map(|l| l.trim_end_matches('\r')).collect();
     let indent = |l: &str| l.len() - l.trim_start().len();
-    let at = lines
-        .iter()
-        .position(|l| l.trim() == STEP)
-        .unwrap_or_else(|| panic!("ci.yml has no step `{STEP}`"));
-    let run = lines[at + 1..]
-        .iter()
-        .take_while(|l| l.trim().is_empty() || indent(l) > indent(lines[at]))
-        .find_map(|l| l.trim().strip_prefix("run:"))
-        .unwrap_or_else(|| panic!("ci.yml's step `{STEP}` has no `run:` line"));
-    let words: Vec<&str> = run.split_whitespace().collect();
-    let exact = words
-        .iter()
-        .position(|w| *w == "--exact")
-        .unwrap_or_else(|| panic!("the step's `run:` line has no `--exact`: {run}"));
-    let mut names: Vec<&str> = words[exact + 1..]
-        .iter()
-        .take_while(|w| !w.starts_with('-'))
-        .copied()
-        .collect();
-    assert!(!names.is_empty(), "the step names no test: {run}");
-    // `--test selfhost`, then `--`, then `--ignored`, before `--exact`.
-    let test = words.windows(2).position(|w| w == ["--test", "selfhost"]);
-    let dashes = words.iter().position(|w| *w == "--");
-    let ignored = words.iter().position(|w| *w == "--ignored");
-    assert!(
-        matches!((test, dashes, ignored), (Some(t), Some(d), Some(i)) if t < d && d < i && i < exact),
-        "the step's `run:` line does not run `--test selfhost -- --ignored` before `--exact`: {run}"
-    );
-    // The step's job: the nearest line above it at a job's indent.
-    let job = lines[..at]
-        .iter()
-        .rev()
-        .find(|l| indent(l) == 2 && !l.trim().is_empty() && !l.trim().starts_with('#'))
-        .map(|l| l.trim());
-    assert_eq!(
-        job,
-        Some("selfhost:"),
-        "the step `{STEP}` is not in the Selfhost job"
-    );
+    // Each step's names after `--exact`, in the order of `STEPS`.
+    let mut named: Vec<(&str, Vec<&str>)> = Vec::new();
+    for step in STEPS {
+        let at = lines
+            .iter()
+            .position(|l| l.trim() == step)
+            .unwrap_or_else(|| panic!("ci.yml has no step `{step}`"));
+        let body: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|l| l.trim().is_empty() || indent(l) > indent(lines[at]))
+            .copied()
+            .collect();
+        let run_at = body
+            .iter()
+            .position(|l| l.trim().starts_with("run:"))
+            .unwrap_or_else(|| panic!("ci.yml's step `{step}` has no `run:` line"));
+        let run_line = body[run_at]
+            .trim()
+            .strip_prefix("run:")
+            .unwrap_or("")
+            .trim();
+        let run = if run_line == "|" {
+            body[run_at + 1..]
+                .iter()
+                .take_while(|l| l.trim().is_empty() || indent(l) > indent(body[run_at]))
+                .map(|l| l.trim())
+                .find(|l| l.starts_with("cargo test"))
+                .unwrap_or_else(|| {
+                    panic!("ci.yml's step `{step}` has no `cargo test` line in its `run: |` block")
+                })
+        } else {
+            run_line
+        };
+        let words: Vec<&str> = run.split_whitespace().collect();
+        let exact = words
+            .iter()
+            .position(|w| *w == "--exact")
+            .unwrap_or_else(|| panic!("the step `{step}`'s command has no `--exact`: {run}"));
+        let names: Vec<&str> = words[exact + 1..]
+            .iter()
+            .take_while(|w| !w.starts_with('-'))
+            .copied()
+            .collect();
+        assert!(!names.is_empty(), "the step `{step}` names no test: {run}");
+        // `--test selfhost`, then `--`, then `--ignored`, before `--exact`.
+        let test = words.windows(2).position(|w| w == ["--test", "selfhost"]);
+        let dashes = words.iter().position(|w| *w == "--");
+        let ignored = words.iter().position(|w| *w == "--ignored");
+        assert!(
+            matches!((test, dashes, ignored), (Some(t), Some(d), Some(i)) if t < d && d < i && i < exact),
+            "the step `{step}`'s command does not run `--test selfhost -- --ignored` before \
+             `--exact`: {run}"
+        );
+        // The step's job: the nearest line above it at a job's indent.
+        let job = lines[..at]
+            .iter()
+            .rev()
+            .find(|l| indent(l) == 2 && !l.trim().is_empty() && !l.trim().starts_with('#'))
+            .map(|l| l.trim());
+        assert_eq!(
+            job,
+            Some("selfhost:"),
+            "the step `{step}` is not in the Selfhost job"
+        );
+        named.push((step, names));
+    }
 
     // This file's top-level tests: each name, and its attributes.
     let mut tests: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -7156,14 +7214,22 @@ fn the_ci_step_names_every_clang_test() {
         }
         attrs.clear();
     }
-    for name in &names {
-        let Some((_, attrs)) = tests.iter().find(|(test, _)| test == name) else {
-            panic!("the step names `{name}`, which is no test in selfhost.rs");
-        };
-        assert!(
-            attrs.iter().any(|a| a.starts_with("#[ignore")),
-            "the step names `{name}`, which selfhost.rs does not mark #[ignore]"
-        );
+    let mut names: Vec<&str> = Vec::new();
+    for (step, on_step) in &named {
+        for name in on_step {
+            let Some((_, attrs)) = tests.iter().find(|(test, _)| test == name) else {
+                panic!("the step `{step}` names `{name}`, which is no test in selfhost.rs");
+            };
+            assert!(
+                attrs.iter().any(|a| a.starts_with("#[ignore")),
+                "the step `{step}` names `{name}`, which selfhost.rs does not mark #[ignore]"
+            );
+            assert!(
+                !names.contains(name),
+                "`{name}` is named more than once on the steps"
+            );
+            names.push(name);
+        }
     }
     let mut clang: Vec<&str> = tests
         .iter()
@@ -7178,7 +7244,7 @@ fn the_ci_step_names_every_clang_test() {
     clang.sort_unstable();
     assert_eq!(
         names, clang,
-        "the step's names are not the tests selfhost.rs ignores as needing clang"
+        "the steps' names are not the tests selfhost.rs ignores as needing clang"
     );
 }
 
@@ -8302,8 +8368,8 @@ fn n_build_answers_as_s0_does_with_clang() {
             }
         }
         ran += 1;
-        if same_binaries(&hi, &hi).is_err()
-            || !same_binaries(&hi, &other)
+        if same_binaries(("S0", hi.as_path()), ("S1", hi.as_path())).is_err()
+            || !same_binaries(("S0", hi.as_path()), ("S1", other.as_path()))
                 .is_err_and(|why| why.ends_with(&format!("first at offset {last}")))
         {
             failures.push("the golden harness took a different binary".to_string());
@@ -8316,4 +8382,362 @@ fn n_build_answers_as_s0_does_with_clang() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+/// N's `.ll` from stage `b`, the same byte for byte as stage `a`'s, each
+/// given by the stage's name and the file's path; or where they first
+/// differ (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §4): each `.ll` is read as one root's MIR part, `(Mir bootstrap)`, then
+/// `(Ll ok)`, then the `.ll`, which [`first_difference`] walks as it walks
+/// a root's `.ll` in the MIR dump, so the report names the line of the
+/// `.ll`, its `define` and its block, both lines, and the `diff` of the two
+/// files, which are kept.
+fn ll_difference(a: (&str, &Path), b: (&str, &Path)) -> Result<(), String> {
+    let ((a_name, a_path), (b_name, b_path)) = (a, b);
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let part = |ll: Vec<u8>| {
+        let mut part = b"== selfhost/src/main.nova\n(Mir bootstrap)\n(Ll ok)\n".to_vec();
+        part.extend(ll);
+        part
+    };
+    let (a_ll, b_ll) = (read(a_path)?, read(b_path)?);
+    // The line of the first differing byte, for a place the walk cannot
+    // give: a line of one `.ll` that starts `== `, where the other ends.
+    let line = 1 + a_ll
+        .iter()
+        .zip(&b_ll)
+        .take_while(|(x, y)| x == y)
+        .filter(|(x, _)| **x == b'\n')
+        .count();
+    let Some(m) = first_difference(&part(a_ll), &part(b_ll)) else {
+        return Ok(());
+    };
+    let at = m.place.unwrap_or_else(|| format!("line {line} of its .ll"));
+    let shown = |s: Option<String>| s.unwrap_or_else(|| "(nothing: the .ll ended)".to_string());
+    Err(format!(
+        "N's .ll from {b_name} differs from {a_name}'s at {at}\n  {a_name}: {}\n  {b_name}: {}\n\
+         both kept: diff {} {}",
+        shown(m.s0),
+        shown(m.n),
+        a_path.display(),
+        b_path.display()
+    ))
+}
+
+/// The bootstrap gate (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §3, §4; ADR 0060): S0's `nova build --release` builds N
+/// (`selfhost/src/main.nova`, in place) into S1, then S1's own `build`
+/// builds N into S2, then S2's builds it into S3, strictly in order, each
+/// into a directory of its own with one `-o` basename, `selfhost`, so one
+/// `selfhost.nova.ll`. Beside each build, and only there, its builder makes
+/// N's `.ll` in a front-end-only run: the same command into a directory of
+/// its own, with `NOVA_CLANG` and `NOVA_LLC`, which only S0 reads, a file
+/// that is not there, so it exits 1 and leaves the `.ll` that a build that
+/// succeeds removes. S1's build has a fresh `NOVA_HOME`, where S0 unpacks
+/// the runtime it carries, and S2's and S3's link the runtime S1 linked
+/// ([`runtime_in`]): one archive for all three. Then N's `.ll` from S1 and
+/// from S2 must equal S0's ([`ll_difference`]), and S2 must equal S1 and
+/// S3 equal S2, byte for byte ([`same_binaries`]). Every comparison runs,
+/// and the test fails with each one that fails. A stage that fails stops
+/// the chain. On success it prints the sizes, `clang`'s version, the
+/// runtime and each stage's time, and removes its directory; on a failure
+/// the directory is kept.
+///
+/// It needs `clang`, as [`s1_builds_the_golden_suite`] does: without one it
+/// says so and passes, but under `NOVA_REQUIRE_CLANG=1` it fails. CI's
+/// Selfhost job runs it on its Linux leg, in a step of its own after the
+/// golden step.
+#[test]
+#[ignore = "needs clang; the Selfhost job's Linux step runs it"]
+fn the_bootstrap_holds_s1_s2_s3() {
+    let required = std::env::var("NOVA_REQUIRE_CLANG").as_deref() == Ok("1");
+    let clang = std::env::var("NOVA_CLANG").unwrap_or_else(|_| "clang".to_string());
+    let Ok(probe) = Command::new(&clang).arg("--version").output() else {
+        assert!(
+            !required,
+            "NOVA_REQUIRE_CLANG=1, but `{clang} --version` does not run"
+        );
+        eprintln!("bootstrap: not run (no clang)");
+        return;
+    };
+    let version = String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let started = Instant::now();
+    let dir = fresh_dir("bootstrap");
+    for sub in [
+        "s1", "s2", "s3", "ll-s0", "ll-s1", "ll-s2", "home", "home-ll",
+    ] {
+        std::fs::create_dir_all(dir.join(sub)).expect("create a stage's directory");
+    }
+    let home = dir.join("home");
+    let home_ll = dir.join("home-ll");
+    let missing = dir.join("no-such-tool");
+    let source = root().join("selfhost").join("src").join("main.nova");
+    let std_dir = root().join("std");
+    // One basename for every stage: the `.ll`'s name is in the binary.
+    let binary = |stage: &str| dir.join(stage).join("selfhost");
+    let ll = |stage: &str| dir.join(format!("ll-{stage}")).join("selfhost.nova.ll");
+    // A build of N by `builder` into `out`, in S0's words for the first
+    // stage, in N's for the others, as a printable line and a command.
+    let command = |builder: &Path, n_side: bool, out: &Path| {
+        let mut args: Vec<String> = Vec::new();
+        if n_side {
+            args.extend(["build".to_string(), source.display().to_string()]);
+            args.extend(["-o".to_string(), out.display().to_string()]);
+            args.extend(["--release".to_string(), "--std".to_string()]);
+            args.push(std_dir.display().to_string());
+        } else {
+            args.extend(["build".to_string(), "--release".to_string()]);
+            args.push(source.display().to_string());
+            args.extend(["-o".to_string(), out.display().to_string()]);
+        }
+        let line = format!("{} {}", builder.display(), args.join(" "));
+        let mut command = Command::new(builder);
+        command
+            .args(&args)
+            .current_dir(&dir)
+            .env("NOVA_CLANG", &clang)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .env("RUST_LIB_BACKTRACE", "0")
+            .stdin(Stdio::null());
+        (line, command)
+    };
+    // What a run did, and how long it took.
+    let timed = |mut command: Command, what: &str| {
+        let start = Instant::now();
+        let out = output_within(&mut command, CHILD_LIMIT, what);
+        (out, start.elapsed())
+    };
+
+    let stages = [
+        ("S1", "s1", "s0", "S0"),
+        ("S2", "s2", "s1", "S1"),
+        ("S3", "s3", "s2", "S2"),
+    ];
+    let mut builder = nova();
+    let mut runtime: Option<PathBuf> = None;
+    let mut times = Vec::new();
+    for (k, (stage, out_dir, by, by_name)) in stages.into_iter().enumerate() {
+        let n_side = k > 0;
+        let out = binary(out_dir);
+        let (build_line, mut build) = command(&builder, n_side, &out);
+        let (ll_line, mut front) = command(
+            &builder,
+            n_side,
+            &dir.join(format!("ll-{by}")).join("selfhost"),
+        );
+        build.env("NOVA_HOME", &home);
+        front
+            .env("NOVA_HOME", &home_ll)
+            .env("NOVA_CLANG", &missing)
+            .env("NOVA_LLC", &missing);
+        if let Some(runtime) = &runtime {
+            build.env("NOVA_RUNTIME_LIB", runtime);
+            front.env("NOVA_RUNTIME_LIB", runtime);
+        }
+        let ((built, build_time), (fronted, front_time)) = std::thread::scope(|s| {
+            let fronted = s.spawn(|| timed(front, &format!("{by_name}'s front-end run")));
+            let built = timed(build, &format!("{stage}'s build by {by_name}"));
+            (built, fronted.join().expect("the front-end run's thread"))
+        });
+        let mut why = Vec::new();
+        match built {
+            Ok(o) if o.status.success() => {
+                let want = format!("built {}\n", out.display());
+                if o.stdout != want.as_bytes() {
+                    why.push(format!(
+                        "{stage}'s build by {by_name} printed {:?}, not {want:?}\n  {build_line}",
+                        String::from_utf8_lossy(&o.stdout)
+                    ));
+                }
+            }
+            Ok(o) => why.push(format!(
+                "{stage}'s build by {by_name} failed, exit status {}\n  {build_line}{}",
+                o.status,
+                quoted_stderr(&String::from_utf8_lossy(&o.stderr))
+            )),
+            Err(e) => why.push(format!("{e}\n  {build_line}")),
+        }
+        match fronted {
+            Ok(o) if o.status.code() == Some(1) && ll(by).is_file() => {}
+            Ok(o) => {
+                why.push(format!(
+                "{by_name}'s front-end run, `NOVA_CLANG` a file that is not there, exited with {} \
+                 and {} {}, where it must exit 1 and leave it\n  {ll_line}{}",
+                o.status,
+                if ll(by).is_file() { "left" } else { "did not leave" },
+                ll(by).display(),
+                quoted_stderr(&String::from_utf8_lossy(&o.stderr))
+            ))
+            }
+            Err(e) => why.push(format!("{e}\n  {ll_line}")),
+        }
+        assert!(
+            why.is_empty(),
+            "the bootstrap stopped at {stage}, so the stages after it were not built:\n\n{}\n\n\
+             kept: {}",
+            why.join("\n\n"),
+            dir.display()
+        );
+        if runtime.is_none() {
+            runtime = Some(runtime_in(&home));
+        }
+        times.push((stage, by_name, build_time, front_time));
+        builder = out;
+    }
+
+    // N's `.ll` first, then the binaries: equal `.ll`s and differing
+    // binaries point at the toolchain or the link, differing `.ll`s at
+    // the front end.
+    let compared = Instant::now();
+    let mut failures = Vec::new();
+    for (a, b) in [("S0", "S1"), ("S0", "S2")] {
+        let (a_ll, b_ll) = (ll(&a.to_lowercase()), ll(&b.to_lowercase()));
+        if let Err(why) = ll_difference((a, a_ll.as_path()), (b, b_ll.as_path())) {
+            failures.push(why);
+        }
+    }
+    for (a, b) in [("S1", "S2"), ("S2", "S3")] {
+        let (a_exe, b_exe) = (binary(&a.to_lowercase()), binary(&b.to_lowercase()));
+        if let Err(why) = same_binaries((a, a_exe.as_path()), (b, b_exe.as_path())) {
+            failures.push(why);
+        }
+    }
+    let compared = compared.elapsed();
+    assert!(
+        failures.is_empty(),
+        "the bootstrap does not hold: {} of 4 comparisons failed:\n\n{}\n\nkept: {}",
+        failures.len(),
+        failures.join("\n\n"),
+        dir.display()
+    );
+    let size = |path: PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "bootstrap: S1 == S2 == S3, {} bytes each; N's .ll the same from S0, S1 and S2, {} bytes",
+        size(binary("s1")),
+        size(ll("s0"))
+    );
+    println!("bootstrap: {version}");
+    println!(
+        "bootstrap: runtime {}",
+        runtime.as_deref().unwrap_or(Path::new("")).display()
+    );
+    for (stage, by_name, build_time, front_time) in &times {
+        println!(
+            "bootstrap: {stage} by {by_name} {:.2} s, {by_name}'s .ll beside it {:.2} s",
+            build_time.as_secs_f64(),
+            front_time.as_secs_f64()
+        );
+    }
+    println!(
+        "bootstrap: compared in {:.2} s; {:.2} s in all",
+        compared.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The bootstrap's two reports (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §4, §7), on short texts, with no `clang`: [`ll_difference`] names the
+/// stage, the line of the `.ll`, its `define` and block, both lines and
+/// the `diff` of the two files kept, on a difference in a block, on a
+/// `define` line, outside any `define`, and where one `.ll` ends first;
+/// [`same_binaries`] names both stages, both sizes and the first differing
+/// offset, and keeps the golden test's words for S0 and S1.
+#[test]
+fn the_bootstrap_reports_name_the_stage() {
+    let dir = fresh_dir("bootstrap-report");
+    let s0 = [
+        "; LLVM IR emitted by the Nova compiler (release backend).",
+        "",
+        "declare void @llvm.trap()",
+        "",
+        "define i64 @\"g.1\"() {",
+        "entry:",
+        "  %t0.slot = alloca i64",
+        "  br label %bb0",
+        "bb0:",
+        "  store i64 7, ptr %t0.slot",
+        "  ret i64 7",
+        "}",
+        "",
+    ]
+    .join("\n");
+    let a = dir.join("ll-s0.ll");
+    std::fs::write(&a, &s0).expect("write S0's .ll");
+    let b = dir.join("ll-s2.ll");
+    std::fs::write(&b, &s0).expect("write S2's .ll");
+    assert_eq!(
+        ll_difference(("S0", a.as_path()), ("S2", b.as_path())),
+        Ok(())
+    );
+    let kept = format!("both kept: diff {} {}", a.display(), b.display());
+    for (from, to, at, s0_line, s2_line) in [
+        (
+            "  store i64 7",
+            "  store i64 8",
+            "line 10 of its .ll, define \"g.1\", block bb0",
+            "  store i64 7, ptr %t0.slot",
+            "  store i64 8, ptr %t0.slot",
+        ),
+        (
+            "@\"g.1\"() {",
+            "@\"g.2\"() {",
+            "line 5 of its .ll, define \"g.1\"",
+            "define i64 @\"g.1\"() {",
+            "define i64 @\"g.2\"() {",
+        ),
+        (
+            "@llvm.trap()",
+            "@llvm.debugtrap()",
+            "line 3 of its .ll, outside any define",
+            "declare void @llvm.trap()",
+            "declare void @llvm.debugtrap()",
+        ),
+        (
+            "  ret i64 7\n}\n",
+            "",
+            "line 11 of its .ll, define \"g.1\", block bb0",
+            "  ret i64 7",
+            "(nothing: the .ll ended)",
+        ),
+    ] {
+        std::fs::write(&b, s0.replace(from, to)).expect("write S2's .ll");
+        assert_eq!(
+            ll_difference(("S0", a.as_path()), ("S2", b.as_path())),
+            Err(format!(
+                "N's .ll from S2 differs from S0's at {at}\n  S0: {s0_line}\n  S2: {s2_line}\n{kept}"
+            )),
+            "{from:?}"
+        );
+    }
+
+    let one = dir.join("one");
+    let other = dir.join("other");
+    std::fs::write(&one, b"\x7fELF\x02\x01\x01\x00").expect("write a binary");
+    std::fs::write(&other, b"\x7fELF\x02\x01\x01\x01").expect("write a binary");
+    assert_eq!(
+        same_binaries(("S1", one.as_path()), ("S2", one.as_path())),
+        Ok(())
+    );
+    assert_eq!(
+        same_binaries(("S2", one.as_path()), ("S3", other.as_path())),
+        Err("S3's binary differs from S2's: 8 bytes against S2's 8, first at offset 7".to_string())
+    );
+    std::fs::write(&other, b"\x7fELF\x02").expect("write a shorter binary");
+    assert_eq!(
+        same_binaries(("S0", one.as_path()), ("S1", other.as_path())),
+        Err("S1's binary differs from S0's: 5 bytes against S0's 8, first at offset 5".to_string())
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
