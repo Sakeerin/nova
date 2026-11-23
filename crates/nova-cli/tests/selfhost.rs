@@ -6912,23 +6912,30 @@ fn golden_runtime() -> PathBuf {
     }
 }
 
-/// Golden program `name`'s two binaries, `s0` and `s1`, the same byte for
-/// byte, or where they first differ.
-fn same_binaries(s0: &Path, s1: &Path) -> Result<(), String> {
-    let a = std::fs::read(s0).map_err(|e| format!("cannot read {}: {e}", s0.display()))?;
-    let b = std::fs::read(s1).map_err(|e| format!("cannot read {}: {e}", s1.display()))?;
-    if a == b {
+/// Two binaries the same byte for byte, or where they first differ, each
+/// given with the name of the side or stage that built it (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §4): `b`'s size against `a`'s, and the first offset where they differ,
+/// or the shorter's length. The golden test passes `"S0"` and `"S1"`.
+fn same_binaries(a: (&str, &Path), b: (&str, &Path)) -> Result<(), String> {
+    let ((a_name, a_path), (b_name, b_path)) = (a, b);
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let (a_bytes, b_bytes) = (read(a_path)?, read(b_path)?);
+    if a_bytes == b_bytes {
         return Ok(());
     }
-    let at = a
+    let at = a_bytes
         .iter()
-        .zip(&b)
+        .zip(&b_bytes)
         .position(|(x, y)| x != y)
-        .unwrap_or(a.len().min(b.len()));
+        .unwrap_or(a_bytes.len().min(b_bytes.len()));
     Err(format!(
-        "S1's binary differs from S0's: {} bytes against S0's {}, first at offset {at}",
-        b.len(),
-        a.len()
+        "{b_name}'s binary differs from {a_name}'s: {} bytes against {a_name}'s {}, first at \
+         offset {at}",
+        b_bytes.len(),
+        a_bytes.len()
     ))
 }
 
@@ -7045,7 +7052,7 @@ fn s1_builds_the_golden_suite() {
                     )
                 })
                 .and_then(|_| run_golden(name, &s1_exe, &tmp))
-                .and_then(|()| same_binaries(&s0_exe, &s1_exe));
+                .and_then(|()| same_binaries(("S0", s0_exe.as_path()), ("S1", s1_exe.as_path())));
                 for side in [&s0_exe, &s1_exe] {
                     let _ = std::fs::remove_file(side);
                     for ext in ["ll", "o"] {
@@ -8302,8 +8309,8 @@ fn n_build_answers_as_s0_does_with_clang() {
             }
         }
         ran += 1;
-        if same_binaries(&hi, &hi).is_err()
-            || !same_binaries(&hi, &other)
+        if same_binaries(("S0", hi.as_path()), ("S1", hi.as_path())).is_err()
+            || !same_binaries(("S0", hi.as_path()), ("S1", other.as_path()))
                 .is_err_and(|why| why.ends_with(&format!("first at offset {last}")))
         {
             failures.push("the golden harness took a different binary".to_string());
@@ -8316,4 +8323,270 @@ fn n_build_answers_as_s0_does_with_clang() {
         failures.len(),
         failures.join("\n\n")
     );
+}
+
+/// N's `.ll` from stage `b`, the same byte for byte as stage `a`'s, each
+/// given by the stage's name and the file's path; or where they first
+/// differ (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §4): each `.ll` is read as one root's MIR part, `(Mir bootstrap)`, then
+/// `(Ll ok)`, then the `.ll`, which [`first_difference`] walks as it walks
+/// a root's `.ll` in the MIR dump, so the report names the line of the
+/// `.ll`, its `define` and its block, both lines, and the `diff` of the two
+/// files, which are kept.
+fn ll_difference(a: (&str, &Path), b: (&str, &Path)) -> Result<(), String> {
+    let ((a_name, a_path), (b_name, b_path)) = (a, b);
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let part = |ll: Vec<u8>| {
+        let mut part = b"== selfhost/src/main.nova\n(Mir bootstrap)\n(Ll ok)\n".to_vec();
+        part.extend(ll);
+        part
+    };
+    let (a_ll, b_ll) = (read(a_path)?, read(b_path)?);
+    // The line of the first differing byte, for a place the walk cannot
+    // give: a line of one `.ll` that starts `== `, where the other ends.
+    let line = 1 + a_ll
+        .iter()
+        .zip(&b_ll)
+        .take_while(|(x, y)| x == y)
+        .filter(|(x, _)| **x == b'\n')
+        .count();
+    let Some(m) = first_difference(&part(a_ll), &part(b_ll)) else {
+        return Ok(());
+    };
+    let at = m.place.unwrap_or_else(|| format!("line {line} of its .ll"));
+    let shown = |s: Option<String>| s.unwrap_or_else(|| "(nothing: the .ll ended)".to_string());
+    Err(format!(
+        "N's .ll from {b_name} differs from {a_name}'s at {at}\n  {a_name}: {}\n  {b_name}: {}\n\
+         both kept: diff {} {}",
+        shown(m.s0),
+        shown(m.n),
+        a_path.display(),
+        b_path.display()
+    ))
+}
+
+/// Stage `stage`'s binary under the bootstrap's directory `dir`:
+/// `s1/selfhost` for S1. One basename for every stage, since the `.ll`'s
+/// name is in the binary (its `STT_FILE`).
+fn stage_binary(dir: &Path, stage: &str) -> PathBuf {
+    dir.join(stage.to_lowercase()).join("selfhost")
+}
+
+/// N's `.ll` from stage `stage`'s front-end-only run under the bootstrap's
+/// directory `dir`: `ll-s0/selfhost.nova.ll` for S0.
+fn stage_ll(dir: &Path, stage: &str) -> PathBuf {
+    dir.join(format!("ll-{}", stage.to_lowercase()))
+        .join("selfhost.nova.ll")
+}
+
+/// The bootstrap's comparisons on the stages' files under `dir`, every one
+/// run, in order (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §3.4): N's `.ll` from S1, then from S2, against S0's
+/// ([`ll_difference`]); then S2's binary against S1's, and S3's against
+/// S2's ([`same_binaries`]); and each one's report that fails, in that
+/// order. N's `.ll` comes first: equal `.ll`s and differing binaries point
+/// at the toolchain or the link, differing `.ll`s at the front end.
+fn bootstrap_failures(dir: &Path) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (a, b) in [("S0", "S1"), ("S0", "S2")] {
+        let (a_ll, b_ll) = (stage_ll(dir, a), stage_ll(dir, b));
+        if let Err(why) = ll_difference((a, a_ll.as_path()), (b, b_ll.as_path())) {
+            failures.push(why);
+        }
+    }
+    for (a, b) in [("S1", "S2"), ("S2", "S3")] {
+        let (a_exe, b_exe) = (stage_binary(dir, a), stage_binary(dir, b));
+        if let Err(why) = same_binaries((a, a_exe.as_path()), (b, b_exe.as_path())) {
+            failures.push(why);
+        }
+    }
+    failures
+}
+
+/// The bootstrap's two reports (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §4, §7), on short texts, with no `clang`: [`ll_difference`] names the
+/// stage, the line of the `.ll`, its `define` and block, both lines and
+/// the `diff` of the two files kept, on a difference in a block, on a
+/// `define` line, outside any `define`, where one `.ll` ends first, and
+/// where the other goes on with a line that starts `== `, which only the
+/// fallback place names; [`same_binaries`] names both stages, both sizes
+/// and the first differing offset, and keeps the golden test's words for
+/// S0 and S1; each names a file it cannot read. And
+/// [`bootstrap_failures`] runs all four comparisons, in order, on files
+/// laid out as the gate lays them out: with one file made to differ, its
+/// comparisons fail, and no other, so none is skipped, loosened or made
+/// against the wrong stage.
+#[test]
+fn the_bootstrap_reports_name_the_stage() {
+    let dir = fresh_dir("bootstrap-report");
+    let s0 = [
+        "; LLVM IR emitted by the Nova compiler (release backend).",
+        "",
+        "declare void @llvm.trap()",
+        "",
+        "define i64 @\"g.1\"() {",
+        "entry:",
+        "  %t0.slot = alloca i64",
+        "  br label %bb0",
+        "bb0:",
+        "  store i64 7, ptr %t0.slot",
+        "  ret i64 7",
+        "}",
+        "",
+    ]
+    .join("\n");
+    let a = dir.join("ll-s0.ll");
+    std::fs::write(&a, &s0).expect("write S0's .ll");
+    let b = dir.join("ll-s2.ll");
+    std::fs::write(&b, &s0).expect("write S2's .ll");
+    assert_eq!(
+        ll_difference(("S0", a.as_path()), ("S2", b.as_path())),
+        Ok(())
+    );
+    let kept = format!("both kept: diff {} {}", a.display(), b.display());
+    for (from, to, at, s0_line, s2_line) in [
+        (
+            "  store i64 7",
+            "  store i64 8",
+            "line 10 of its .ll, define \"g.1\", block bb0",
+            "  store i64 7, ptr %t0.slot",
+            "  store i64 8, ptr %t0.slot",
+        ),
+        (
+            "@\"g.1\"() {",
+            "@\"g.2\"() {",
+            "line 5 of its .ll, define \"g.1\"",
+            "define i64 @\"g.1\"() {",
+            "define i64 @\"g.2\"() {",
+        ),
+        (
+            "@llvm.trap()",
+            "@llvm.debugtrap()",
+            "line 3 of its .ll, outside any define",
+            "declare void @llvm.trap()",
+            "declare void @llvm.debugtrap()",
+        ),
+        (
+            "  ret i64 7\n}\n",
+            "",
+            "line 11 of its .ll, define \"g.1\", block bb0",
+            "  ret i64 7",
+            "(nothing: the .ll ended)",
+        ),
+        (
+            "}\n",
+            "}\n== x\n",
+            "line 13 of its .ll",
+            "(nothing: the .ll ended)",
+            "== x",
+        ),
+    ] {
+        std::fs::write(&b, s0.replace(from, to)).expect("write S2's .ll");
+        assert_eq!(
+            ll_difference(("S0", a.as_path()), ("S2", b.as_path())),
+            Err(format!(
+                "N's .ll from S2 differs from S0's at {at}\n  S0: {s0_line}\n  S2: {s2_line}\n{kept}"
+            )),
+            "{from:?}"
+        );
+    }
+
+    let one = dir.join("one");
+    let other = dir.join("other");
+    std::fs::write(&one, b"\x7fELF\x02\x01\x01\x00").expect("write a binary");
+    std::fs::write(&other, b"\x7fELF\x02\x01\x01\x01").expect("write a binary");
+    assert_eq!(
+        same_binaries(("S1", one.as_path()), ("S2", one.as_path())),
+        Ok(())
+    );
+    assert_eq!(
+        same_binaries(("S2", one.as_path()), ("S3", other.as_path())),
+        Err("S3's binary differs from S2's: 8 bytes against S2's 8, first at offset 7".to_string())
+    );
+    std::fs::write(&other, b"\x7fELF\x02").expect("write a shorter binary");
+    assert_eq!(
+        same_binaries(("S0", one.as_path()), ("S1", other.as_path())),
+        Err("S1's binary differs from S0's: 5 bytes against S0's 8, first at offset 5".to_string())
+    );
+    let missing = dir.join("no-such-file");
+    let unread = format!("cannot read {}: ", missing.display());
+    assert!(
+        ll_difference(("S0", a.as_path()), ("S1", missing.as_path()))
+            .is_err_and(|why| why.starts_with(&unread)),
+        "{unread}"
+    );
+    assert!(
+        same_binaries(("S1", one.as_path()), ("S2", missing.as_path()))
+            .is_err_and(|why| why.starts_with(&unread)),
+        "{unread}"
+    );
+
+    // The four comparisons, each run, in order, on the stages' files: one
+    // file made to differ at a time, its comparisons fail and no other.
+    let stages = dir.join("stages");
+    let lay_out = || {
+        for stage in ["S0", "S1", "S2"] {
+            let ll = stage_ll(&stages, stage);
+            std::fs::create_dir_all(ll.parent().expect("a directory")).expect("make ll-sN");
+            std::fs::write(&ll, &s0).expect("write a stage's .ll");
+        }
+        for stage in ["S1", "S2", "S3"] {
+            let exe = stage_binary(&stages, stage);
+            std::fs::create_dir_all(exe.parent().expect("a directory")).expect("make sN");
+            std::fs::write(&exe, b"\x7fELF\x02\x01\x01\x00").expect("write a stage's binary");
+        }
+    };
+    lay_out();
+    assert_eq!(bootstrap_failures(&stages), Vec::<String>::new());
+    let ll_from = |stage: &str| {
+        format!(
+            "N's .ll from {stage} differs from S0's at line 10 of its .ll, define \"g.1\", block \
+             bb0\n  S0:   store i64 7, ptr %t0.slot\n  {stage}:   store i64 8, ptr %t0.slot\n\
+             both kept: diff {} {}",
+            stage_ll(&stages, "S0").display(),
+            stage_ll(&stages, stage).display()
+        )
+    };
+    let binary_of = |a: &str, b: &str| {
+        format!("{b}'s binary differs from {a}'s: 8 bytes against {a}'s 8, first at offset 7")
+    };
+    for (changed, want) in [
+        (stage_ll(&stages, "S1"), vec![ll_from("S1")]),
+        (stage_ll(&stages, "S2"), vec![ll_from("S2")]),
+        (stage_binary(&stages, "S1"), vec![binary_of("S1", "S2")]),
+        (stage_binary(&stages, "S3"), vec![binary_of("S2", "S3")]),
+        (
+            stage_binary(&stages, "S2"),
+            vec![binary_of("S1", "S2"), binary_of("S2", "S3")],
+        ),
+    ] {
+        lay_out();
+        if changed.ends_with("selfhost.nova.ll") {
+            std::fs::write(&changed, s0.replace("  store i64 7", "  store i64 8"))
+                .expect("write a different .ll");
+        } else {
+            std::fs::write(&changed, b"\x7fELF\x02\x01\x01\x01").expect("write a different binary");
+        }
+        assert_eq!(bootstrap_failures(&stages), want, "{}", changed.display());
+    }
+    // S0's `.ll` differing fails both `.ll` comparisons, S1's first.
+    lay_out();
+    std::fs::write(
+        stage_ll(&stages, "S0"),
+        s0.replace("  store i64 7", "  store i64 8"),
+    )
+    .expect("write a different .ll");
+    let failures = bootstrap_failures(&stages);
+    assert_eq!(failures.len(), 2, "{failures:?}");
+    assert!(
+        failures[0].starts_with("N's .ll from S1 differs from S0's at line 10")
+            && failures[1].starts_with("N's .ll from S2 differs from S0's at line 10"),
+        "{failures:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
