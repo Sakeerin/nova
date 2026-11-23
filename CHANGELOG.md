@@ -396,10 +396,11 @@ ADR 0060).
   `.ll`'s line, `define` and block, or by both binaries' sizes and first
   differing offset, and the files are kept. The step prints `cc`'s and
   `ld`'s versions. `the_ci_step_names_every_clang_test` now holds both
-  clang steps, each to `NOVA_REQUIRE_CLANG: "1"` and its Linux-only
-  `if:`, and the bootstrap step to `--nocapture` and both versions; a
-  main-step test holds the two reports and the four comparisons (5.6a,
-  ADR 0060).
+  clang steps, each to `NOVA_REQUIRE_CLANG: "1"`, `NOVA_CLANG: clang-18`
+  and its Linux-only `if:`, with no `continue-on-error:` or `shell:` key,
+  no `--skip` and nothing but test names after `--exact`, and the
+  bootstrap step to `--nocapture` and both versions; a main-step test
+  holds the two reports and the four comparisons (5.6a, ADR 0060).
 - **ADR 0060, the bootstrap gate and its tolerances:** there is no
   tolerance on the bytes, under four conditions: one `-o` basename, one
   `clang` (18.1.3), one runtime archive, and one `cc` and `ld` within a

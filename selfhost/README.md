@@ -55,7 +55,12 @@ usage: selfhost check FILE --std DIR
     with S0's line (`$CC`, or `cc`);
   - it finds the runtime in `$NOVA_RUNTIME_LIB`, or else beside the
     executable or up to two directories above it;
-  - it removes the `.ll` and the object once the build succeeds;
+  - after `clang` and the link, whether they succeeded or not, it
+    removes the object, `OUT.nova.o`; it removes the `.ll` only when the
+    build succeeds, so a build that fails there leaves `OUT.nova.ll` and
+    says so (`release build failed; generated LLVM IR left at …`). S0's
+    `nova build --release` removes the same files at the same points (on
+    Windows its object is `OUT.nova.obj`);
   - without `--release` it builds the same way.
 
   It refuses Windows. Its linking on macOS has not yet run.
@@ -67,9 +72,11 @@ The chain needs:
 - `cc`;
 - a release build of the runtime.
 
-A checkout's `nova` carries no runtime unless it is built with
-`NOVA_EMBED_RUNTIME=1`. Point `NOVA_RUNTIME_LIB` at a release
-`libnova_runtime.a`, and give all three stages **the same file**.
+A debug build's `nova` (`cargo build`) carries no runtime unless it is
+built with `NOVA_EMBED_RUNTIME=1`; a release build (`cargo build
+--release`, as `cargo install` makes) embeds one by default. Point
+`NOVA_RUNTIME_LIB` at a release `libnova_runtime.a`, and give all three
+stages **the same file**.
 
 Use **one `-o` basename for every stage**, in different directories. The
 `.ll`'s name, `selfhost.nova.ll` here, reaches the binary.
@@ -142,7 +149,10 @@ cargo test --workspace --test selfhost
   - `n_build_answers_as_s0_does_with_clang` holds N's `build` to S0's
     messages.
   - `the_bootstrap_holds_s1_s2_s3` is the bootstrap gate:
-    - S1 by S0 `--release`, S2 by S1 and S3 by S2, in order;
+    - S1 by S0 `--release`, S2 by S1 and S3 by S2, in order, each
+      linked with `cc`: the gate removes a caller's `CC`, which both
+      drivers would link with, so the step's `cc --version` names the
+      link driver;
     - N's `.ll` from S1 and S2 equal to S0's;
     - S1 == S2 == S3 (ADR 0060).
 
@@ -151,8 +161,10 @@ cargo test --workspace --test selfhost
 
   `the_ci_step_names_every_clang_test` holds the steps' names to
   exactly these tests, since a name that matches nothing would run
-  nothing. It holds each step to `NOVA_REQUIRE_CLANG: "1"` and `if:
-  runner.os == 'Linux'`, and the bootstrap step to `--nocapture`, `cc
+  nothing. It holds each step to `NOVA_REQUIRE_CLANG: "1"`, `NOVA_CLANG:
+  clang-18` in its `env:` and `if: runner.os == 'Linux'`, with no
+  `continue-on-error:` or `shell:` key, no `--skip`, and nothing but test
+  names after `--exact`; and the bootstrap step to `--nocapture`, `cc
   --version` and `ld --version`.
 - **Clippy** lints the file by name, because `--all-targets` skips it:
 
