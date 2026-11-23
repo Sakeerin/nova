@@ -462,9 +462,11 @@ text above differ, this section holds; ADR 0060 records each point.
 2. **The debug runtime** (§3.6, "not measured"). S1 == S2 == S3 holds on
    the debug runtime beside S0, as a checkout runs the gate without
    `NOVA_RUNTIME_LIB`: 14,288,496 bytes each, N's `.ll` the same 12,760,111
-   bytes. It takes about 66 s (66.96 s on the prototype; 64.24 and
-   62.85 s in the plan's replay), not 45: on the debug runtime N's own
-   front end takes 10 to 11 s.
+   bytes. That size is this checkout's, with Rust 1.97's debug runtime,
+   which holds its build paths: the same tree at another path gives
+   another size, and the chain holds there too. It takes about 66 s
+   (66.96 s on the prototype; 64.24 and 62.85 s in the plan's replay),
+   not 45: on the debug runtime N's own front end takes 10 to 11 s.
 3. **The local time** (§8, first two items). The test took 45.0 to 45.8
    s as CI runs it (`NOVA_EMBED_RUNTIME=1`, `opt-level = 1`) on the
    prototype, at the top of the 43 to 45 s projected, and 44.14 and
@@ -495,18 +497,29 @@ text above differ, this section holds; ADR 0060 records each point.
      step's command to `--nocapture` and its block to `cc --version` and
      `ld --version`; and the gate checks the runtime it hands on (item
      8).
+   - **The review's checks,** from the review of the branch: the CI step
+     test also holds each clang step to `NOVA_CLANG: clang-18` in its own
+     `env:`, and refuses a `continue-on-error:` or `shell:` key in either
+     step (among the step's own keys, so that the Test job's advisory
+     step, `continue-on-error` on purpose, is not read), and `--skip`, or
+     any flag after `--exact`, in its command; and the gate removes a
+     caller's `CC` from every stage's command, so that every stage links
+     with `cc`, whose version the step prints (ADR 0060 §2).
    - **The plan's mutants:** the prototype's 23, all killed, and 51 more
-     for every check the diff adds that they miss, all run in one run in
-     the plan's replay: 74, 53 caught and 21 accepted, each with its
+     for every check the diff adds that they miss, 74, all run in one run
+     in the plan's replay (53 caught and 21 accepted); then 7 for the
+     review's checks (C10 to C15, G5). All 81 run in one run at the
+     branch's last commit: 60 caught and 21 accepted, each with its
      reason (ADR 0060 §8): 13 change output only, 4 are redundant with
      another check, 3 are equivalent, and 1 is reached only when a stage
      fails.
 6. **CI's figures** (§8, last item; §14). The prototype was pushed to
    `claude/loving-archimedes-frtf5q-56-ci` with draft Sakeerin/nova#148,
    measurement only, closed unmerged. Run 45003631229, on `a453c61e`: 19
-   of 19 jobs green. That run measured `a453c61e` only: the three cases
-   and the two checks of item 5, added since, ran on this machine only,
-   on Linux, and CI has run none of them on any system.
+   of 19 jobs green. That run measured `a453c61e` only: the three cases,
+   the two checks and the review's checks of item 5, added since, ran on
+   this machine only, on Linux, and CI has run none of them on any
+   system.
    - **The bootstrap step:** 27.58 s wall, the test `27.44 s in all`:
      S1 by S0 8.69 s, S2 by S1 9.45 s, S3 by S2 9.23 s, the front-end
      runs beside them 0.43, 1.29 and 1.25 s, the comparisons 0.07 s. It

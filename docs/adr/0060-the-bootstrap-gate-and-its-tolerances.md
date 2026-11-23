@@ -109,7 +109,9 @@ conditions:
 4. **One `cc` and one `ld` within a job.** They are not pinned: the
    runner image fixes them for the job, and the step prints both
    versions (the user's decision 7). The chain runs in one step, so it
-   runs under one of each.
+   runs under one of each. The test removes a caller's `CC`, which both
+   drivers would link with, from every stage's command, so every stage
+   links with `cc`, and the step's `cc --version` names the link driver.
 
 So phase plan decision 3's build-id clause ("no build IDs:
 `-Wl,--build-id=none`, or a comparison after `strip`") is not needed.
@@ -129,7 +131,7 @@ and compared with the reference S2.
 |---|---|
 | the basename, same length (`selfhosx`) | 1 byte differs, the `STT_FILE` `selfhosx.nova.ll`; the build-id is the same |
 | the basename, shorter (`stage2`) | 367,460 bytes and the build-id differ; after `strip`, the 20 build-id bytes still differ; `strip -R .note.gnu.build-id` makes them equal |
-| the runtime archive (the debug one) | another binary, 14,288,496 bytes |
+| the runtime archive (the debug one) | another binary, 14,288,496 bytes (this checkout's, with Rust 1.97's debug runtime) |
 | the link driver (`CC=clang-18`) | 5,586,894 bytes differ |
 
 **What does not:**
@@ -157,8 +159,8 @@ The prototype repeated two of these probes in the test itself:
 - the same-length basename, as a mutant (§8, G1): "S3's binary differs
   from S2's: 9354680 bytes against S2's 9354680, first at offset
   8970099", where `readelf -s` shows `selfhosx.nova.ll`;
-- the debug runtime for S2 alone (§8, G4): 14,288,496 bytes against
-  9,354,680.
+- the debug runtime for S2 alone (§8, G4): 14,288,496 bytes (this
+  checkout's, with Rust 1.97's debug runtime) against 9,354,680.
 
 ### 4. The Cranelift S1 is not used in the chain
 
@@ -264,12 +266,21 @@ both clang steps:
   `clang` fails it rather than skip its tests;
 - each step carries `if: runner.os == 'Linux'`, since only that leg
   installs `clang-18`;
+- each step sets `NOVA_CLANG: clang-18` in its own `env:`, the `clang`
+  that leg installs (§2's second condition);
+- neither step has a `continue-on-error:` key, which would let the job
+  pass with the step failed, or a `shell:` key, which could run its
+  block without `bash -e`. Each key is looked for among the step's own
+  keys, so the Test job's advisory step, which carries
+  `continue-on-error: true` on purpose, is not read;
 - the bootstrap step's command has `--nocapture`, and its block prints
   `cc --version` and `ld --version`, so that its log shows the report
   and the two tools (§2's fourth condition);
 - each step's command is its `run:` line, or, after `run: |`, the
   block's `cargo test` line;
 - the command has `--test selfhost`, `--` and `--ignored` before
+  `--exact`;
+- the command has no `--skip`, and nothing but test names after
   `--exact`;
 - each name after `--exact` is a test marked `#[ignore`;
 - no name is on both steps, or twice;
@@ -326,10 +337,11 @@ test lays out the gate's files and makes one file differ at a time.
 That comparison, and no other, must fail. This addition is not in the
 spec's §7, which lists only the two reports.
 
-**The plan's mutants.** The plan runs the 23 again with 51 more, all in
-one run at its last commit, with S0 carrying the release runtime as on
-CI: 74 in all, **53 caught and 21 accepted**, each with its reason. The
-51 cover every check the diff adds that the 23 miss:
+**The plan's mutants.** The plan runs the 23 again with 51 more, 74,
+and the review's fixes add seven (below). All 81 run in one run at the
+branch's last commit, with S0 carrying the release runtime as on CI:
+**60 caught and 21 accepted**, each with its reason. The 51 cover every
+check the diff adds that the 23 miss:
 - **the two reports' words** (W1 to W9, B1 to B5): each part of
   `ll_difference`'s and `same_binaries`' reports, their fallback place
   and its line, and a file neither can read. All 14 are caught by
@@ -377,6 +389,13 @@ CI: 74 in all, **53 caught and 21 accepted**, each with its reason. The
   other way, is caught by the gate run with `NOVA_CLANG` a missing file:
   under `NOVA_REQUIRE_CLANG=1` it must fail, and without it pass. The
   `not run (no clang)` line's words are accepted as output only.
+- **the review's checks** (C10 to C15, G5), all caught: either clang
+  step given `continue-on-error: true` (C10, C11) or without
+  `NOVA_CLANG: clang-18` (C12, C13), and the bootstrap step with
+  `--skip the_bootstrap_holds_s1_s2_s3` after its name (C14) or with
+  `shell: bash {0}` (C15), by `the_ci_step_names_every_clang_test`; and
+  the gate without its removal of `CC` (G5), by the gate run with `CC` a
+  file that is not there, which then stops at S1 where it must pass.
 
 **Cases added for the plan's mutants.** Three checks would otherwise
 have let mutants pass, so the prototype gained them before the plan:
@@ -387,7 +406,11 @@ and the CI step test holds each clang step to `NOVA_REQUIRE_CLANG: "1"`.
 The plan's fact-check added two more: the CI step test holds each clang
 step to its `if:`, and the bootstrap step to `--nocapture`, `cc
 --version` and `ld --version` (C4 to C9); and the gate checks the
-runtime it hands to S2 and S3 (H4, R2).
+runtime it hands to S2 and S3 (H4, R2). The review of the branch added
+the last: the CI step test holds each clang step to `NOVA_CLANG:
+clang-18` in its `env:`, and refuses a `continue-on-error:` or `shell:`
+key, `--skip`, and a flag after `--exact` (C10 to C15); and the gate
+removes a caller's `CC` (§2, G5).
 
 ### 9. The figures, as of the tree
 
@@ -428,7 +451,10 @@ The "step" rows ran the step's whole `run:` block, `cc --version` and
   table above).
 - **At opt-level 0 with the debug runtime beside S0,** as a checkout
   runs it without `NOVA_RUNTIME_LIB`: **S1 == S2 == S3 holds**, at
-  14,288,496 bytes, in 66.96 s. That settles the spec's §3.6, which had
+  14,288,496 bytes, in 66.96 s. That size is this checkout's, with Rust
+  1.97's debug runtime, which holds its build paths: the same tree at
+  another path gives another size (14,288,640 at one), and the chain
+  holds there too. That settles the spec's §3.6, which had
   not measured it. On the debug runtime N's own front end takes 10.4 to
   11.1 s.
 - **Disk:** the test's directory peaks at about 95 MB on disk:
@@ -436,8 +462,8 @@ The "step" rows ran the step's whole `run:` block, `cc --version` and
   - three `.ll`s;
   - the 28.8 MB runtime that S0 unpacks.
 
-  `df` on `/` read 7,095 MiB free before the run and 7,025 MiB at its
-  peak.
+  `df` on `/` read 7,095 MiB free before the run and 7,025 MiB at one
+  reading during it.
 - **`selfhost.rs`'s main step as CI runs it,** before (`45a06d1d`) and
   after, interleaved:
   - before: 69.35 and 64.48 s, `70 passed; 2 ignored`;
@@ -465,8 +491,10 @@ the prototype has added three cases for the plan's mutants (two in the
 report test, and the CI step test's check of `NOVA_REQUIRE_CLANG`); the
 CI step test's checks of each clang step's `if:`, and of the bootstrap
 step's `--nocapture`, `cc` and `ld`; and the gate's check that S2's and
-S3's runtime is the one S0 unpacked under its home (§8). CI has run
-none of them on any system.
+S3's runtime is the one S0 unpacked under its home (§8). The review's
+fixes then added the CI step test's checks of `NOVA_CLANG`,
+`continue-on-error:`, `shell:` and `--skip` (§7), and the gate's
+removal of `CC` (§2). CI has run none of them on any system.
 
 **The bootstrap step,** "The bootstrap, S1 == S2 == S3 (Linux)": 27.58
 s wall; the test `27.44 s in all`, `finished in 27.46s`, `1 passed`,

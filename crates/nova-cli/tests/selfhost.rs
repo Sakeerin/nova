@@ -7115,7 +7115,14 @@ fn s1_builds_the_golden_suite() {
 /// Selfhost job, set `NOVA_REQUIRE_CLANG: "1"`, so that a runner without
 /// `clang` fails it rather than skip its tests, and carry `if: runner.os ==
 /// 'Linux'`, since only that leg installs `clang-18` (and N refuses `build`
-/// on Windows). The bootstrap step's command must also pass `--nocapture`,
+/// on Windows). Each must also set `NOVA_CLANG: clang-18` in its `env:`,
+/// and have no `continue-on-error:` key, which would let the job pass with
+/// the step failed, and no `shell:` key, which could run its block without
+/// `bash -e`; and its command must have no `--skip`, and nothing but test
+/// names after `--exact`. A key is looked for among the step's own keys
+/// alone, so the Test job's advisory step, which carries
+/// `continue-on-error: true` on purpose, is not read. The bootstrap step's
+/// command must also pass `--nocapture`,
 /// and its block print `cc --version` and `ld --version`, so that its log
 /// shows the gate's report and the two tools it ran under (ADR 0060 §2,
 /// §7). A step's command is its `run:` line or, after `run: |`, the block's
@@ -7144,6 +7151,48 @@ fn the_ci_step_names_every_clang_test() {
             .take_while(|l| l.trim().is_empty() || indent(l) > indent(lines[at]))
             .copied()
             .collect();
+        // The step's own keys, at the indent of its `name:`: a neighbour's
+        // keys, and the lines of its `env:` or its block, are not among them.
+        let key_indent = indent(lines[at]) + 2;
+        let keys: Vec<&str> = body
+            .iter()
+            .filter(|l| indent(l) == key_indent && !l.trim().is_empty())
+            .filter(|l| !l.trim().starts_with('#'))
+            .filter_map(|l| l.trim().split(':').next())
+            .map(|k| k.trim().trim_matches(|c| c == '"' || c == '\''))
+            .collect();
+        for (key, why) in [
+            (
+                "continue-on-error",
+                "which would let the job pass with the step failed",
+            ),
+            (
+                "shell",
+                "which could run its block without `bash -e`, and pass with its tests failed",
+            ),
+        ] {
+            assert!(
+                !keys.contains(&key),
+                "the step `{step}` has a `{key}:` key, {why}"
+            );
+        }
+        // The step's `env:`: the lines under that key, and only those.
+        let env: Vec<&str> = body
+            .iter()
+            .position(|l| indent(l) == key_indent && l.trim() == "env:")
+            .map(|e| {
+                body[e + 1..]
+                    .iter()
+                    .take_while(|l| l.trim().is_empty() || indent(l) > key_indent)
+                    .map(|l| l.trim())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(
+            env.contains(&"NOVA_CLANG: clang-18"),
+            "the step `{step}` does not set `NOVA_CLANG: clang-18` in its `env:`, so its tests \
+             would run whatever `clang` comes first on `PATH`"
+        );
         let run_at = body
             .iter()
             .position(|l| l.trim().starts_with("run:"))
@@ -7170,6 +7219,19 @@ fn the_ci_step_names_every_clang_test() {
             .iter()
             .position(|w| *w == "--exact")
             .unwrap_or_else(|| panic!("the step `{step}`'s command has no `--exact`: {run}"));
+        assert!(
+            !words
+                .iter()
+                .any(|w| *w == "--skip" || w.starts_with("--skip=")),
+            "the step `{step}`'s command has `--skip`, which can leave a test it names unrun: \
+             {run}"
+        );
+        if let Some(flag) = words[exact + 1..].iter().find(|w| w.starts_with('-')) {
+            panic!(
+                "the step `{step}`'s command has `{flag}` after `--exact`, where only test names \
+                 may follow: {run}"
+            );
+        }
         let names: Vec<&str> = words[exact + 1..]
             .iter()
             .take_while(|w| !w.starts_with('-'))
@@ -8501,11 +8563,14 @@ fn bootstrap_failures(dir: &Path) -> Vec<String> {
 /// into a directory of its own with one `-o` basename, `selfhost`, so one
 /// `selfhost.nova.ll`. Beside each build, and only there, its builder makes
 /// N's `.ll` in a front-end-only run: the same command into a directory of
-/// its own, with `NOVA_CLANG` and `NOVA_LLC`, which only S0 reads, a file
+/// its own, with `NOVA_CLANG`, and `NOVA_LLC`, which only S0 reads, a file
 /// that is not there, so it exits 1 and leaves the `.ll` that a build that
 /// succeeds removes. S1's build has a fresh `NOVA_HOME`, where S0 unpacks
 /// the runtime it carries, and S2's and S3's link the runtime S1 linked
-/// ([`runtime_in`]): one archive for all three. Then N's `.ll` from S1 and
+/// ([`runtime_in`]): one archive for all three. Every run has a caller's
+/// `CC` removed, which both drivers would link with, so every stage links
+/// with `cc`, the link driver the step's `cc --version` names (ADR 0060
+/// §2). Then N's `.ll` from S1 and
 /// from S2 must equal S0's, and S2 must equal S1 and S3 equal S2, byte for
 /// byte ([`bootstrap_failures`]); the test fails with each comparison that
 /// fails. A stage that fails stops
@@ -8553,7 +8618,8 @@ fn the_bootstrap_holds_s1_s2_s3() {
     let source = root().join("selfhost").join("src").join("main.nova");
     let std_dir = root().join("std");
     // A build of N by `builder` into `out`, in S0's words for the first
-    // stage, in N's for the others, as a printable line and a command.
+    // stage, in N's for the others, as a printable line and a command,
+    // without a caller's `CC`, so that it links with `cc`.
     let command = |builder: &Path, n_side: bool, out: &Path| {
         let mut args: Vec<String> = Vec::new();
         if n_side {
@@ -8572,6 +8638,7 @@ fn the_bootstrap_holds_s1_s2_s3() {
             .args(&args)
             .current_dir(&dir)
             .env("NOVA_CLANG", &clang)
+            .env_remove("CC")
             .env("NO_COLOR", "1")
             .env("RUST_BACKTRACE", "0")
             .env("RUST_LIB_BACKTRACE", "0")
