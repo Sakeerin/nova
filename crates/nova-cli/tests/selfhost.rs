@@ -121,6 +121,14 @@
 //! `clang`, and [`n_build_answers_as_s0_does_with_clang`], ignored here and
 //! run beside the golden walk.
 //!
+//! 5.6a (spec
+//! `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+//! §3, §4; ADR 0060): [`the_bootstrap_holds_s1_s2_s3`], ignored here and
+//! run by CI's Selfhost job on its Linux leg in a step of its own, builds
+//! the chain in order, S1 by S0 `--release`, S2 by S1 and S3 by S2, one
+//! `-o` basename, and holds N's `.ll` from S1 and S2 equal to S0's and
+//! S1 == S2 == S3, byte for byte.
+//!
 //! `NOVA_SELFHOST_FUZZ=SEED:COUNT` runs a longer search locally, never in
 //! CI. Every input that finds a difference becomes a fixed case.
 //!
@@ -6877,13 +6885,23 @@ fn the_ll_dump_is_what_build_release_writes() {
 /// (`NOVA_EMBED_RUNTIME=1`), which must be the only one there; else the one
 /// beside S0, where cargo leaves it in a checkout.
 fn golden_runtime() -> PathBuf {
+    runtime_in(&std::env::temp_dir().join("nova-selfhost-home"))
+}
+
+/// The runtime S0 links in a build whose `NOVA_HOME` is `home`, found in
+/// S0's order (`link.rs`): `NOVA_RUNTIME_LIB` when it is set; else the one
+/// S0 unpacked into `home/runtime/<version>-<crc32>/` from the runtime it
+/// carries, which must be the only one there; else the one beside S0.
+/// [`golden_runtime`] asks with [`build_selfhost`]'s home, and
+/// [`the_bootstrap_holds_s1_s2_s3`] with the home of S1's build (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §3.1).
+fn runtime_in(home: &Path) -> PathBuf {
     if let Some(lib) = std::env::var_os("NOVA_RUNTIME_LIB") {
         return PathBuf::from(lib);
     }
     let name = "libnova_runtime.a";
-    let unpacked = std::env::temp_dir()
-        .join("nova-selfhost-home")
-        .join("runtime");
+    let unpacked = home.join("runtime");
     let mut found: Vec<PathBuf> = std::fs::read_dir(&unpacked)
         .map(|entries| {
             entries
@@ -6897,8 +6915,8 @@ fn golden_runtime() -> PathBuf {
             let beside = nova().parent().expect("nova's directory").join(name);
             assert!(
                 beside.is_file(),
-                "no runtime for the golden walk: NOVA_RUNTIME_LIB is not set, \
-                 {} holds none, and none is beside S0 at {}",
+                "no runtime: NOVA_RUNTIME_LIB is not set, {} holds none, and none is \
+                 beside S0 at {}",
                 unpacked.display(),
                 beside.display()
             );
@@ -7084,63 +7102,123 @@ fn s1_builds_the_golden_suite() {
     );
 }
 
-/// CI's step "S1 builds the golden suite (Linux)" names, after `--exact`,
-/// exactly the tests this file marks `#[ignore = "needs clang; ..."]`
-/// (spec
+/// CI's clang steps, "S1 builds the golden suite (Linux)" (spec
 /// `docs/superpowers/specs/2026-11-19-phase-5-5b-the-driver-and-linking-design.md`
-/// §7): with `--exact`, a name that matches no test runs nothing and the
-/// step still passes, so a name misspelt or dropped there, or a test no
-/// longer ignored here, would go unseen; so would a step that lost
-/// `--ignored`, which then runs none of them, or `--test selfhost`. The
-/// step must also sit in the Selfhost job. Both files are read as text,
-/// with CRLF line endings too, as a Windows checkout may leave them.
+/// §7) and "The bootstrap, S1 == S2 == S3 (Linux)" (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §6.2), name after `--exact`, between them, exactly the tests this file
+/// marks `#[ignore = "needs clang; ..."]`, each on one step alone: with
+/// `--exact`, a name that matches no test runs nothing and the step still
+/// passes, so a name misspelt or dropped there, or a test no longer ignored
+/// here, would go unseen; so would a step that lost `--ignored`, which then
+/// runs none of them, or `--test selfhost`. Each step must sit in the
+/// Selfhost job, set `NOVA_REQUIRE_CLANG: "1"`, so that a runner without
+/// `clang` fails it rather than skip its tests, and carry `if: runner.os ==
+/// 'Linux'`, since only that leg installs `clang-18` (and N refuses `build`
+/// on Windows). The bootstrap step's command must also pass `--nocapture`,
+/// and its block print `cc --version` and `ld --version`, so that its log
+/// shows the gate's report and the two tools it ran under (ADR 0060 §2,
+/// §7). A step's command is its `run:` line or, after `run: |`, the block's
+/// `cargo test` line. Both files are read as text, with CRLF line endings
+/// too, as a Windows checkout may leave them.
 #[test]
 fn the_ci_step_names_every_clang_test() {
-    const STEP: &str = "- name: S1 builds the golden suite (Linux)";
+    const STEPS: [&str; 2] = [
+        "- name: S1 builds the golden suite (Linux)",
+        "- name: The bootstrap, S1 == S2 == S3 (Linux)",
+    ];
     let path = root().join(".github").join("workflows").join("ci.yml");
     let ci =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let lines: Vec<&str> = ci.lines().map(|l| l.trim_end_matches('\r')).collect();
     let indent = |l: &str| l.len() - l.trim_start().len();
-    let at = lines
-        .iter()
-        .position(|l| l.trim() == STEP)
-        .unwrap_or_else(|| panic!("ci.yml has no step `{STEP}`"));
-    let run = lines[at + 1..]
-        .iter()
-        .take_while(|l| l.trim().is_empty() || indent(l) > indent(lines[at]))
-        .find_map(|l| l.trim().strip_prefix("run:"))
-        .unwrap_or_else(|| panic!("ci.yml's step `{STEP}` has no `run:` line"));
-    let words: Vec<&str> = run.split_whitespace().collect();
-    let exact = words
-        .iter()
-        .position(|w| *w == "--exact")
-        .unwrap_or_else(|| panic!("the step's `run:` line has no `--exact`: {run}"));
-    let mut names: Vec<&str> = words[exact + 1..]
-        .iter()
-        .take_while(|w| !w.starts_with('-'))
-        .copied()
-        .collect();
-    assert!(!names.is_empty(), "the step names no test: {run}");
-    // `--test selfhost`, then `--`, then `--ignored`, before `--exact`.
-    let test = words.windows(2).position(|w| w == ["--test", "selfhost"]);
-    let dashes = words.iter().position(|w| *w == "--");
-    let ignored = words.iter().position(|w| *w == "--ignored");
-    assert!(
-        matches!((test, dashes, ignored), (Some(t), Some(d), Some(i)) if t < d && d < i && i < exact),
-        "the step's `run:` line does not run `--test selfhost -- --ignored` before `--exact`: {run}"
-    );
-    // The step's job: the nearest line above it at a job's indent.
-    let job = lines[..at]
-        .iter()
-        .rev()
-        .find(|l| indent(l) == 2 && !l.trim().is_empty() && !l.trim().starts_with('#'))
-        .map(|l| l.trim());
-    assert_eq!(
-        job,
-        Some("selfhost:"),
-        "the step `{STEP}` is not in the Selfhost job"
-    );
+    // Each step's names after `--exact`, in the order of `STEPS`.
+    let mut named: Vec<(&str, Vec<&str>)> = Vec::new();
+    for step in STEPS {
+        let at = lines
+            .iter()
+            .position(|l| l.trim() == step)
+            .unwrap_or_else(|| panic!("ci.yml has no step `{step}`"));
+        let body: Vec<&str> = lines[at + 1..]
+            .iter()
+            .take_while(|l| l.trim().is_empty() || indent(l) > indent(lines[at]))
+            .copied()
+            .collect();
+        let run_at = body
+            .iter()
+            .position(|l| l.trim().starts_with("run:"))
+            .unwrap_or_else(|| panic!("ci.yml's step `{step}` has no `run:` line"));
+        let run_line = body[run_at]
+            .trim()
+            .strip_prefix("run:")
+            .unwrap_or("")
+            .trim();
+        let run = if run_line == "|" {
+            body[run_at + 1..]
+                .iter()
+                .take_while(|l| l.trim().is_empty() || indent(l) > indent(body[run_at]))
+                .map(|l| l.trim())
+                .find(|l| l.starts_with("cargo test"))
+                .unwrap_or_else(|| {
+                    panic!("ci.yml's step `{step}` has no `cargo test` line in its `run: |` block")
+                })
+        } else {
+            run_line
+        };
+        let words: Vec<&str> = run.split_whitespace().collect();
+        let exact = words
+            .iter()
+            .position(|w| *w == "--exact")
+            .unwrap_or_else(|| panic!("the step `{step}`'s command has no `--exact`: {run}"));
+        let names: Vec<&str> = words[exact + 1..]
+            .iter()
+            .take_while(|w| !w.starts_with('-'))
+            .copied()
+            .collect();
+        assert!(!names.is_empty(), "the step `{step}` names no test: {run}");
+        // `--test selfhost`, then `--`, then `--ignored`, before `--exact`.
+        let test = words.windows(2).position(|w| w == ["--test", "selfhost"]);
+        let dashes = words.iter().position(|w| *w == "--");
+        let ignored = words.iter().position(|w| *w == "--ignored");
+        assert!(
+            matches!((test, dashes, ignored), (Some(t), Some(d), Some(i)) if t < d && d < i && i < exact),
+            "the step `{step}`'s command does not run `--test selfhost -- --ignored` before \
+             `--exact`: {run}"
+        );
+        // The step's job: the nearest line above it at a job's indent.
+        let job = lines[..at]
+            .iter()
+            .rev()
+            .find(|l| indent(l) == 2 && !l.trim().is_empty() && !l.trim().starts_with('#'))
+            .map(|l| l.trim());
+        assert_eq!(
+            job,
+            Some("selfhost:"),
+            "the step `{step}` is not in the Selfhost job"
+        );
+        assert!(
+            body.iter().any(|l| l.trim() == "NOVA_REQUIRE_CLANG: \"1\""),
+            "the step `{step}` does not set `NOVA_REQUIRE_CLANG: \"1\"`"
+        );
+        assert!(
+            body.iter().any(|l| l.trim() == "if: runner.os == 'Linux'"),
+            "the step `{step}` does not carry `if: runner.os == 'Linux'`"
+        );
+        if step == STEPS[1] {
+            assert!(
+                words.contains(&"--nocapture"),
+                "the step `{step}`'s command has no `--nocapture`, so its log would not \
+                 show the gate's report: {run}"
+            );
+            for tool in ["cc --version", "ld --version"] {
+                assert!(
+                    body.iter().any(|l| l.trim() == tool),
+                    "the step `{step}` does not print `{tool}`"
+                );
+            }
+        }
+        named.push((step, names));
+    }
 
     // This file's top-level tests: each name, and its attributes.
     let mut tests: Vec<(&str, Vec<&str>)> = Vec::new();
@@ -7163,14 +7241,22 @@ fn the_ci_step_names_every_clang_test() {
         }
         attrs.clear();
     }
-    for name in &names {
-        let Some((_, attrs)) = tests.iter().find(|(test, _)| test == name) else {
-            panic!("the step names `{name}`, which is no test in selfhost.rs");
-        };
-        assert!(
-            attrs.iter().any(|a| a.starts_with("#[ignore")),
-            "the step names `{name}`, which selfhost.rs does not mark #[ignore]"
-        );
+    let mut names: Vec<&str> = Vec::new();
+    for (step, on_step) in &named {
+        for name in on_step {
+            let Some((_, attrs)) = tests.iter().find(|(test, _)| test == name) else {
+                panic!("the step `{step}` names `{name}`, which is no test in selfhost.rs");
+            };
+            assert!(
+                attrs.iter().any(|a| a.starts_with("#[ignore")),
+                "the step `{step}` names `{name}`, which selfhost.rs does not mark #[ignore]"
+            );
+            assert!(
+                !names.contains(name),
+                "`{name}` is named more than once on the steps"
+            );
+            names.push(name);
+        }
     }
     let mut clang: Vec<&str> = tests
         .iter()
@@ -7185,7 +7271,7 @@ fn the_ci_step_names_every_clang_test() {
     clang.sort_unstable();
     assert_eq!(
         names, clang,
-        "the step's names are not the tests selfhost.rs ignores as needing clang"
+        "the steps' names are not the tests selfhost.rs ignores as needing clang"
     );
 }
 
@@ -8405,6 +8491,226 @@ fn bootstrap_failures(dir: &Path) -> Vec<String> {
         }
     }
     failures
+}
+
+/// The bootstrap gate (spec
+/// `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`
+/// §3, §4; ADR 0060): S0's `nova build --release` builds N
+/// (`selfhost/src/main.nova`, in place) into S1, then S1's own `build`
+/// builds N into S2, then S2's builds it into S3, strictly in order, each
+/// into a directory of its own with one `-o` basename, `selfhost`, so one
+/// `selfhost.nova.ll`. Beside each build, and only there, its builder makes
+/// N's `.ll` in a front-end-only run: the same command into a directory of
+/// its own, with `NOVA_CLANG` and `NOVA_LLC`, which only S0 reads, a file
+/// that is not there, so it exits 1 and leaves the `.ll` that a build that
+/// succeeds removes. S1's build has a fresh `NOVA_HOME`, where S0 unpacks
+/// the runtime it carries, and S2's and S3's link the runtime S1 linked
+/// ([`runtime_in`]): one archive for all three. Then N's `.ll` from S1 and
+/// from S2 must equal S0's, and S2 must equal S1 and S3 equal S2, byte for
+/// byte ([`bootstrap_failures`]); the test fails with each comparison that
+/// fails. A stage that fails stops
+/// the chain. When S0 carries a runtime (`nova version` prints `runtime:
+/// embedded`, as CI's does) and `NOVA_RUNTIME_LIB` is not set, the runtime
+/// handed to S2 and S3 must also be the one S0 unpacked under `home/`, not
+/// one beside S0, which would let all three stages agree on another archive
+/// than CI's. On success it prints the sizes, `clang`'s version, the
+/// runtime and each stage's time, and removes its directory; on a failure
+/// the directory is kept.
+///
+/// It needs `clang`, as [`s1_builds_the_golden_suite`] does: without one it
+/// says so and passes, but under `NOVA_REQUIRE_CLANG=1` it fails. CI's
+/// Selfhost job runs it on its Linux leg, in a step of its own after the
+/// golden step.
+#[test]
+#[ignore = "needs clang; the Selfhost job's Linux step runs it"]
+fn the_bootstrap_holds_s1_s2_s3() {
+    let required = std::env::var("NOVA_REQUIRE_CLANG").as_deref() == Ok("1");
+    let clang = std::env::var("NOVA_CLANG").unwrap_or_else(|_| "clang".to_string());
+    let Ok(probe) = Command::new(&clang).arg("--version").output() else {
+        assert!(
+            !required,
+            "NOVA_REQUIRE_CLANG=1, but `{clang} --version` does not run"
+        );
+        eprintln!("bootstrap: not run (no clang)");
+        return;
+    };
+    let version = String::from_utf8_lossy(&probe.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let started = Instant::now();
+    let dir = fresh_dir("bootstrap");
+    for sub in [
+        "s1", "s2", "s3", "ll-s0", "ll-s1", "ll-s2", "home", "home-ll",
+    ] {
+        std::fs::create_dir_all(dir.join(sub)).expect("create a stage's directory");
+    }
+    let home = dir.join("home");
+    let home_ll = dir.join("home-ll");
+    let missing = dir.join("no-such-tool");
+    let source = root().join("selfhost").join("src").join("main.nova");
+    let std_dir = root().join("std");
+    // A build of N by `builder` into `out`, in S0's words for the first
+    // stage, in N's for the others, as a printable line and a command.
+    let command = |builder: &Path, n_side: bool, out: &Path| {
+        let mut args: Vec<String> = Vec::new();
+        if n_side {
+            args.extend(["build".to_string(), source.display().to_string()]);
+            args.extend(["-o".to_string(), out.display().to_string()]);
+            args.extend(["--release".to_string(), "--std".to_string()]);
+            args.push(std_dir.display().to_string());
+        } else {
+            args.extend(["build".to_string(), "--release".to_string()]);
+            args.push(source.display().to_string());
+            args.extend(["-o".to_string(), out.display().to_string()]);
+        }
+        let line = format!("{} {}", builder.display(), args.join(" "));
+        let mut command = Command::new(builder);
+        command
+            .args(&args)
+            .current_dir(&dir)
+            .env("NOVA_CLANG", &clang)
+            .env("NO_COLOR", "1")
+            .env("RUST_BACKTRACE", "0")
+            .env("RUST_LIB_BACKTRACE", "0")
+            .stdin(Stdio::null());
+        (line, command)
+    };
+    // What a run did, and how long it took.
+    let timed = |mut command: Command, what: &str| {
+        let start = Instant::now();
+        let out = output_within(&mut command, CHILD_LIMIT, what);
+        (out, start.elapsed())
+    };
+
+    let stages = [("S1", "S0"), ("S2", "S1"), ("S3", "S2")];
+    let mut builder = nova();
+    let mut runtime: Option<PathBuf> = None;
+    let mut times = Vec::new();
+    for (k, (stage, by)) in stages.into_iter().enumerate() {
+        let n_side = k > 0;
+        let out = stage_binary(&dir, stage);
+        let ll = stage_ll(&dir, by);
+        let (build_line, mut build) = command(&builder, n_side, &out);
+        let (ll_line, mut front) = command(&builder, n_side, &ll.with_file_name("selfhost"));
+        build.env("NOVA_HOME", &home);
+        front
+            .env("NOVA_HOME", &home_ll)
+            .env("NOVA_CLANG", &missing)
+            .env("NOVA_LLC", &missing);
+        if let Some(runtime) = &runtime {
+            build.env("NOVA_RUNTIME_LIB", runtime);
+            front.env("NOVA_RUNTIME_LIB", runtime);
+        }
+        let ((built, build_time), (fronted, front_time)) = std::thread::scope(|s| {
+            let fronted = s.spawn(|| timed(front, &format!("{by}'s front-end run")));
+            let built = timed(build, &format!("{stage}'s build by {by}"));
+            (built, fronted.join().expect("the front-end run's thread"))
+        });
+        let mut why = Vec::new();
+        match built {
+            Ok(o) if o.status.success() => {
+                let want = format!("built {}\n", out.display());
+                if o.stdout != want.as_bytes() {
+                    why.push(format!(
+                        "{stage}'s build by {by} printed {:?}, not {want:?}\n  {build_line}",
+                        String::from_utf8_lossy(&o.stdout)
+                    ));
+                }
+            }
+            Ok(o) => why.push(format!(
+                "{stage}'s build by {by} failed ({})\n  {build_line}{}",
+                o.status,
+                quoted_stderr(&String::from_utf8_lossy(&o.stderr))
+            )),
+            Err(e) => why.push(format!("{e}\n  {build_line}")),
+        }
+        match fronted {
+            Ok(o) if o.status.code() == Some(1) && ll.is_file() => {}
+            Ok(o) => why.push(format!(
+                "{by}'s front-end run, `NOVA_CLANG` a file that is not there, ended ({}) and \
+                 {} {}, where it must exit 1 and leave it\n  {ll_line}{}",
+                o.status,
+                if ll.is_file() {
+                    "left"
+                } else {
+                    "did not leave"
+                },
+                ll.display(),
+                quoted_stderr(&String::from_utf8_lossy(&o.stderr))
+            )),
+            Err(e) => why.push(format!("{e}\n  {ll_line}")),
+        }
+        assert!(
+            why.is_empty(),
+            "the bootstrap stopped at {stage}; no later stage was built:\n\n{}\n\nkept: {}",
+            why.join("\n\n"),
+            dir.display()
+        );
+        if runtime.is_none() {
+            runtime = Some(runtime_in(&home));
+        }
+        times.push((stage, by, build_time, front_time));
+        builder = out;
+    }
+
+    let compared = Instant::now();
+    let failures = bootstrap_failures(&dir);
+    let compared = compared.elapsed();
+    assert!(
+        failures.is_empty(),
+        "the bootstrap does not hold: {} of 4 comparisons failed:\n\n{}\n\nkept: {}",
+        failures.len(),
+        failures.join("\n\n"),
+        dir.display()
+    );
+    // S0 links the runtime it carries, unpacked into `home`, unless
+    // `NOVA_RUNTIME_LIB` names another: S2's and S3's must then be that one.
+    let about = output_within(
+        Command::new(nova()).arg("version"),
+        CHILD_LIMIT,
+        "nova version",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let carried = String::from_utf8_lossy(&about.stdout)
+        .lines()
+        .any(|l| l == "runtime: embedded");
+    if carried && std::env::var_os("NOVA_RUNTIME_LIB").is_none() {
+        let unpacked = home.join("runtime");
+        assert!(
+            runtime.as_deref().is_some_and(|r| r.starts_with(&unpacked)),
+            "S2 and S3 linked {}, not the runtime S0 carries, unpacked under {}\n\nkept: {}",
+            runtime.as_deref().unwrap_or(Path::new("")).display(),
+            unpacked.display(),
+            dir.display()
+        );
+    }
+    let size = |path: PathBuf| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "bootstrap: S1 == S2 == S3, {} bytes each; N's .ll the same from S0, S1 and S2, {} bytes",
+        size(stage_binary(&dir, "S1")),
+        size(stage_ll(&dir, "S0"))
+    );
+    println!("bootstrap: {version}");
+    println!(
+        "bootstrap: runtime {}",
+        runtime.as_deref().unwrap_or(Path::new("")).display()
+    );
+    for (stage, by, build_time, front_time) in &times {
+        println!(
+            "bootstrap: {stage} by {by} {:.2} s, {by}'s .ll beside it {:.2} s",
+            build_time.as_secs_f64(),
+            front_time.as_secs_f64()
+        );
+    }
+    println!(
+        "bootstrap: compared in {:.2} s; {:.2} s in all",
+        compared.as_secs_f64(),
+        started.elapsed().as_secs_f64()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The bootstrap's two reports (spec
