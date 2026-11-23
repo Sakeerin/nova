@@ -213,6 +213,24 @@ jobs:
           NOVA_REQUIRE_CLANG: "1"
           NOVA_CLANG: clang-18
         run: cargo test --locked --workspace --all-features --no-fail-fast --test selfhost -- --ignored --exact s1_builds_the_golden_suite n_build_answers_as_s0_does_with_clang
+      # The bootstrap gate (spec
+      # docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md
+      # §3, §6; ADR 0060): S0 `--release` builds N into S1, then S1 builds
+      # N into S2, then S2 builds it into S3, in order, one `-o` basename,
+      # on the release runtime S0 carries and `clang-18`; N's `.ll` from S1
+      # and S2 must equal S0's, and S1 == S2 == S3 byte for byte. On the
+      # Linux leg alone, in a step of its own so that CI times it by itself;
+      # `cc` and `ld` are printed, not pinned: one of each within a job is
+      # one of ADR 0060's conditions.
+      - name: The bootstrap, S1 == S2 == S3 (Linux)
+        if: runner.os == 'Linux'
+        env:
+          NOVA_REQUIRE_CLANG: "1"
+          NOVA_CLANG: clang-18
+        run: |
+          cc --version
+          ld --version
+          cargo test --locked --workspace --all-features --no-fail-fast --test selfhost -- --ignored --nocapture --exact the_bootstrap_holds_s1_s2_s3
       - name: N's own tests on the debug runtime
         env:
           NOVA_RUNTIME_LIB: ${{ github.workspace }}/target/debug/${{ matrix.runtime_lib }}
