@@ -891,6 +891,28 @@ std is found only where `--std` names it. Stage1 built N with its own
 `build`, and the result was, byte for byte, the stage1 that S0's `nova
 build --release` makes with the same `-o` basename.
 
+**Amended 2026-11-22 (branch `claude/loving-archimedes-frtf5q-56`, ADR
+0060):** 5.6a, the bootstrap gate
+(`docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`).
+CI builds stage2 == stage1 byte for byte, with no tolerance, and stage3
+== stage2 too. On Ubuntu, on every pull request, a step of the Selfhost
+job builds the chain in order:
+- stage1 by stage0's `nova build --release`;
+- stage2 by stage1's own `build`;
+- stage3 by stage2's.
+
+It holds the self-hosted compiler's `.ll` of itself equal from stage0,
+stage1 and stage2, and the three binaries equal. This holds under four
+conditions, which ADR 0060 records with what varies the binary and what
+does not:
+- one `-o` basename;
+- one `clang` (18.1.3);
+- one runtime archive;
+- one `cc` and `ld` within a job.
+
+The release `v0.5.0` and the boundary ADR closing Phase 5 follow in
+pull requests of their own.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)

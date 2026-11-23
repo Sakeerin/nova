@@ -693,6 +693,44 @@ ADR 0059; spec
   pull request; how N's determinism is checked (decision 9); what the
   release archive says about `selfhost/`.
 
+**Amended 2026-11-22 (5.6a, branch `claude/loving-archimedes-frtf5q-56`,
+ADR 0060; spec
+`docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`):**
+5.6's questions, decided by the user on 2026-11-22:
+- **5.6 is three pull requests:**
+  - 5.6a: the gate in CI, the tolerances ADR (ADR 0060) and
+    `selfhost/README.md`;
+  - then the release `v0.5.0`, the version bump by `docs/releasing.md`;
+  - then the records, the boundary ADR closing Phase 5, after the
+    release.
+- **5.6a's gate:**
+  - **Where:** on `ubuntu-24.04`, on every pull request, in a step of
+    the Selfhost job's Linux leg after 5.5b's golden step.
+  - **What:** `the_bootstrap_holds_s1_s2_s3` builds S1 by S0
+    `--release`, then S2 by S1, then S3 by S2, strictly in order, with
+    one `-o` basename and one runtime archive. Only the front-end runs
+    that keep each stage's `.ll` go beside the builds.
+  - **What must hold:** N's `.ll` from S1 and from S2 equals S0's, and
+    S1 == S2 == S3, byte for byte.
+- **The departures:**
+  - decision 7's "CI job on `ubuntu-latest`" is that step;
+  - decision 3's first item, the `.ll` differential, has run since 5.5a
+    in the Selfhost job's main step on all three systems (ADR 0058), and
+    5.6a adds no check for it;
+  - decision 3's tolerances are recorded in ADR 0060, which the boundary
+    ADR cites, and there is no tolerance on the bytes:
+    - the intermediate name is one `-o` basename;
+    - `clang` is one 18.1.3;
+    - the build-id clause is not needed, since GNU ld's build-id is a
+      content hash;
+    - ADR 0060 adds two conditions: one runtime archive, and one `cc`
+      and `ld` within a job, printed, not pinned;
+  - decision 9's search of N for `Map` iteration is in ADR 0060 §5: 17
+    `.keys()` lines, each sorted, given to `closest()` (a total order)
+    or re-inserted into a `Map`;
+  - macOS and Windows go to the boundary ADR's backlog;
+  - `selfhost/` is not shipped (decision 5).
+
 ## 5. Cross-cutting
 
 - **Testing.**
