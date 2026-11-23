@@ -448,3 +448,131 @@ Ranked.
 - The full suite, fmt, clippy (with `--test selfhost`), the MSRV job,
   `nova fmt --check` over `selfhost/`, `release_golden_suite`, and `git
   diff` on `Cargo.lock` are clean.
+
+## Amendment (2026-11-22)
+
+Dated, with the plan (`docs/superpowers/plans/2026-11-22-phase-5-6a-the-bootstrap-gate.md`),
+after the prototype and its measurement on CI. Where this section and the
+text above differ, this section holds; ADR 0060 records each point.
+
+1. **The `.keys()` count** (§2 item 6). The research counted 14 sites;
+   there are 17 lines, six of them in `fixes.nova`'s `did_you_mean`, as
+   §2 already found. Each is sorted before use, given to `closest()` (a
+   total order) or re-inserted into a `Map`; ADR 0060 §5 lists each.
+2. **The debug runtime** (§3.6, "not measured"). S1 == S2 == S3 holds on
+   the debug runtime beside S0, as a checkout runs the gate without
+   `NOVA_RUNTIME_LIB`: 14,288,496 bytes each, N's `.ll` the same 12,760,111
+   bytes. It takes about 66 s (66.96 s on the prototype; 64.24 and
+   62.85 s in the plan's replay), not 45: on the debug runtime N's own
+   front end takes 10 to 11 s.
+3. **The local time** (§8, first two items). The test took 45.0 to 45.8
+   s as CI runs it (`NOVA_EMBED_RUNTIME=1`, `opt-level = 1`) on the
+   prototype, at the top of the 43 to 45 s projected, and 44.14 and
+   44.16 s in the plan's replay. S2's and S3's builds took 15.4 to 16.1 s,
+   against the research's 14.5 to 15.1 s in order: the front-end run
+   beside each build, on a second core, explains the difference (§12,
+   risk 4).
+4. **S0's front end** (§2 item 3: 1.47 s) is that at `opt-level = 0`
+   (1.42 to 1.71 s beside a build, in the prototype's two runs; ADR 0060
+   §9), but 0.57 to 0.72 s at `opt-level = 1`, as CI's Selfhost job
+   builds S0.
+5. **§7's list grows, and so does §6.2's.**
+   - **The comparisons are a function,** `bootstrap_failures`, which
+     `the_bootstrap_reports_name_the_stage` runs on files laid out as the
+     gate lays them out, one file made to differ at a time: its
+     comparisons fail, and no other. On a correct tree a comparison that
+     is skipped, loosened or made against the wrong stage changes nothing
+     the gate can see, so §7's two reports alone let such mutants pass.
+   - **Three cases for the plan's mutants:** the report test reaches
+     `ll_difference`'s fallback place (one `.ll` goes on with a line that
+     starts `== ` where the other ends: "line 13 of its .ll"), and a file
+     that `ll_difference` or `same_binaries` cannot read (`cannot read
+     PATH: …`); and the CI step test holds each clang step to
+     `NOVA_REQUIRE_CLANG: "1"`, so that a runner without `clang` fails the
+     step rather than skip its tests.
+   - **Two checks after the plan's fact-check:** the CI step test holds
+     each clang step to `if: runner.os == 'Linux'`, and the bootstrap
+     step's command to `--nocapture` and its block to `cc --version` and
+     `ld --version`; and the gate checks the runtime it hands on (item
+     8).
+   - **The plan's mutants:** the prototype's 23, all killed, and 51 more
+     for every check the diff adds that they miss, all run in one run in
+     the plan's replay: 74, 53 caught and 21 accepted, each with its
+     reason (ADR 0060 §8): 13 change output only, 4 are redundant with
+     another check, 3 are equivalent, and 1 is reached only when a stage
+     fails.
+6. **CI's figures** (§8, last item; §14). The prototype was pushed to
+   `claude/loving-archimedes-frtf5q-56-ci` with draft Sakeerin/nova#148,
+   measurement only, closed unmerged. Run 45003631229, on `a453c61e`: 19
+   of 19 jobs green. That run measured `a453c61e` only: the three cases
+   and the two checks of item 5, added since, ran on this machine only,
+   on Linux, and CI has run none of them on any system.
+   - **The bootstrap step:** 27.58 s wall, the test `27.44 s in all`:
+     S1 by S0 8.69 s, S2 by S1 9.45 s, S3 by S2 9.23 s, the front-end
+     runs beside them 0.43, 1.29 and 1.25 s, the comparisons 0.07 s. It
+     printed `cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0` and `GNU ld (GNU
+     Binutils for Ubuntu) 2.42`, `Ubuntu clang version 18.1.3
+     (1ubuntu1)`, and S1 == S2 == S3, 9,539,736 bytes each, N's `.ll` the
+     same from S0, S1 and S2, 12,760,111 bytes. §8 projected 52 to 61 s;
+     it is under the 75 s margin by far.
+   - **`selfhost.rs`'s main step** (`finished in`): 58.19 s on Linux (71
+     passed, 3 ignored), 30.03 s on macOS (69, 3) and 91.31 s on Windows
+     (65, 3), margins 21.81, 69.97 and 18.69 s against 80, 100 and 110 s.
+   - **The golden step** 30.30 s; MSRV (1.78) passed; the Test job's main
+     step `2838 passed, 0 failed, 10 ignored` on Linux, `2838, 0, 9` on
+     macOS and `2815, 0, 9` on Windows; the advisory step that runs the
+     ignored GC tests exited 101 on Linux and macOS, as on `main`, not
+     counted. The Selfhost jobs took 4:01, 1:35 and 5:32 (the longest
+     job, the Test job on Windows, 7:44), so a pull request's wall time
+     does not change.
+   - **`main` at `83ba8210`,** run 44962982900: `selfhost.rs` 58.13 s on
+     Linux, 83.52 s on macOS and 78.89 s on Windows (70, 68 and 64
+     passed, 2 ignored each); the golden step 31 s; the Selfhost jobs
+     3:19, 3:37 and 4:36.
+7. **The gate's size and digest are as of the tree and the runtime**
+   (§2 item 1, §12 risk 6). On CI S1 == S2 == S3 at 9,539,736 bytes; here
+   at 9,354,680 (SHA-256 `877a8ee8…`). S0 on CI carries a runtime built
+   there (`0.4.0-5549317a`), a different file from this machine's
+   (`0.4.0-be7e8b48`), and the runtime's bytes vary the binary (§2 item
+   4); N's `.ll` is one file on both. The gate holds on each machine,
+   under one archive; its size and digest belong to the tree and to the
+   runtime S0 carries, and differ between this machine and CI. CI's
+   figures are recorded, not expected: CI builds its runtime with the
+   current stable, so both can change, and no test pins a size or a
+   digest.
+8. **The open decisions, as settled** (ADR 0060 §12; each cheap to
+   change):
+   - the comparisons are a function, `bootstrap_failures`, tested in the
+     main step (item 5);
+   - a stage is its build and its front-end run, and either failing
+     stops the chain; the later stages are not built;
+   - S0's build is held to `built OUT` too, as N's is;
+   - every build runs with its cwd at the gate's directory, and N by
+     its path under the repository; after a local run `git status` is
+     clean, which settles §7's "unverified";
+   - `NOVA_LLC` and `NOVA_HOME` are set on N's runs too, though N reads
+     neither; `NOVA_CLANG` is set on every build to the `clang` probed;
+   - `bootstrap: not run (no clang)` goes to stderr, as the other clang
+     tests' lines do;
+   - the success report gives each stage's build time and its front-end
+     run's, then the comparisons' time and the total;
+   - `same_binaries` takes (name, path) pairs, so callers pass
+     `.as_path()`;
+   - `runtime_in`'s panic no longer names the golden walk, since two
+     tests call it;
+   - `ll_difference` has a fallback place, the line of the first
+     differing byte, for a line that starts `== ` where the other `.ll`
+     ends (item 5);
+   - where S0 carries a runtime (`nova version`: `runtime: embedded`, as
+     on CI) and `NOVA_RUNTIME_LIB` is not set, the gate fails unless the
+     runtime it hands to S2 and S3 lies under its own `home/runtime/`; a
+     plain checkout's `nova` carries none, and there the gate links the
+     debug runtime beside S0 unchecked.
+9. **§9's cut, as the plan makes it** (the plan's decision 12). Item 1
+   is two tasks, test first: the comparisons and their report test,
+   then the gate with its CI step and the CI step test. The gate passes
+   from its tests commit, since S0 and N predate 5.6a; its red is shown
+   by hand on a wrong basename (S3 built as `selfhosx`) and by the
+   plan's mutants. Item 2, the measurements, is no task: CI was measured
+   from the prototype (item 6), and the local figures again at the
+   plan's last commit. The records are the last task.
