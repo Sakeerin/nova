@@ -332,6 +332,13 @@ nothing published.
    new versions of crates that exist. The new crate falls within the
    burst of 5, so its upload takes minutes, as `0.3.1`'s and `0.3.2`'s
    did, not the 2 h 20 min of 19 new crates above.
+
+   **Amended 2026-11-24 (branch `claude/loving-archimedes-frtf5q-56b`):**
+   `v0.5.0` adds no crate: its 20 are new versions of crates on
+   crates.io, within the burst of 30, so its token takes
+   **publish-update** alone (spec
+   `docs/superpowers/specs/2026-11-24-phase-5-6b-the-release-v0.5.0-design.md`,
+   the user's decision 5).
 5. Check what crates.io serves:
 
    ```sh
@@ -521,6 +528,13 @@ the published `nova` and builds and opens both Phase 4 examples with it,
 by their READMEs, in place of this run (spec
 `docs/superpowers/specs/2026-10-22-phase-4-8-the-gate-and-v0.4.0-design.md`,
 decision 6; `docs/adr/0047-phase-4-boundary.md`).
+
+**Amended 2026-11-24 (branch `claude/loving-archimedes-frtf5q-56b`):** for
+`v0.5.0`, by the user's decision of 2026-11-23, the maintainer installs
+the published `nova` and tries it in place of this run, as for
+`v0.4.0` (spec
+`docs/superpowers/specs/2026-11-24-phase-5-6b-the-release-v0.5.0-design.md`,
+decision 5). `docs/adr/0061-phase-5-boundary.md` will record the try.
 
 The commands, in order, each with what it should show:
 
