@@ -453,3 +453,89 @@ ADR 0060; 5.6b changes none of them.
 - the user has tried the published `nova`, and said so.
 
 Then the records pull request opens.
+
+## Amendment (2026-11-24)
+
+Dated, with the plan
+(`docs/superpowers/plans/2026-11-24-phase-5-6b-the-release-v0.5.0.md`),
+after the prototype and its measurement on CI. Where this section and the
+text above differ, this section holds.
+
+1. **The prototype's base** (§7, item 1). The prototype branched from
+   `3f72bd38`, `ed165975` with this spec, not from `ed165975`; the spec's
+   commit changes no file the release touches. The prototype is
+   `4f55d6ed`, one commit on `3f72bd38`, the head of draft
+   Sakeerin/nova#150, closed unmerged, whose ref keeps both commits.
+2. **5.2b in the list of sub-phases** (§3.2). Written "in the list's
+   form", the insertion re-wraps the two lines it lands in into three, so
+   the CHANGELOG's diff is 21 lines added and 2 removed, not 19 and 0; the
+   `[0.5.0]` section is the base's `[Unreleased]` with the lead and its
+   blank line added (16 lines) and those two lines re-wrapped, nothing
+   else.
+3. **The runbook's check** (§3.1, §6). It runs in the workspace's form,
+   `cargo test --locked --workspace --no-fail-fast --test
+   release_manifests --test vscode_extension`: `--workspace` for `-p
+   nova-cli`, which would build its own copy of every test executable, and
+   `--no-fail-fast`, without which cargo stops at the first failing binary
+   and never runs the second. No test is added (§6 stands); the plan shows
+   the two tests red with the manifests and the lock at 0.5.0 and the
+   extension at 0.4.0 (`release_manifests` 7 passed and 1 failed,
+   `vscode_extension` 2 and 1, each on `package.json`'s 0.4.0), then green,
+   8 and 3, once the extension's two files follow.
+4. **The date** (§3.2, §3.3, §3.5, decision 10). The prototype dated the
+   records 2026-11-24, its own day. The release commit takes its own day:
+   the plan's script writes it, before the commit, in exactly the four
+   places that carry it (the two `## [0.5.0]` headings, the runbook's two
+   notes) and in the commit's message, leaves this spec's file name alone,
+   and checks that no 2026-11-24 is left on another day.
+5. **The release notes** (§10, risk 3). `release-notes.sh 0.5.0` prints
+   614 lines, 40,673 bytes, 40,612 characters, against "about 41,000";
+   GitHub's limit is 125,000.
+6. **CI's figures for the release** (§4, §7 item 2), measured on
+   `4f55d6ed` with draft Sakeerin/nova#150, closed unmerged: CI run
+   45316548924 passed 19 of 19 jobs, and Release run 45316548687 its seven,
+   "Publish the release" skipped, as on a pull request. Every count is §4's:
+   the Test job `2838 0 10`, `2838 0 9`, `2815 0 9`, with
+   `release_manifests` 8, `vscode_extension` 3, `project` 25;
+   `selfhost.rs` `71 0 3`, `69 0 3`, `65 0 3`; the golden step `2 passed`;
+   the bootstrap step `1 passed`. The rest, recorded, not expected:
+   - **the gate after the bump** (§4, §10 risk 2): S1 == S2 == S3 at
+     9,539,848 bytes each, 112 more than 0.4.0's 9,539,736, on the runtime
+     `0.5.0-4f8a6f1b`; N's `.ll` 12,760,111 bytes, unchanged; the step
+     26.66 s, under its 75 s line;
+   - **"Packaged nova"** (§4): `package-gate: 20 crates at 0.5.0` on three
+     systems; `nova-cli-0.5.0.crate` 1,759 files, as at 0.4.0, and 584,057
+     bytes on Linux and macOS (25 more), 586,939 on Windows; the 20
+     packages 2,119,078 bytes (67 more), 2,130,553 on Windows, whose
+     checkout has CRLF line endings;
+   - **`release.yml`** (§4): "Prepare the release" found `## [0.5.0]`,
+     packed `SHA256SUMS` over 8 files and printed `publish runs: gh release
+     create v0.5.0 --verify-tag --title "Nova 0.5.0" --notes-file notes.md
+     dist/*`; the extension packed as `nova-vscode-0.5.0.vsix`;
+   - **`selfhost.rs`'s times** (§4, §10 risk 6): 53.90 s on Linux, 80.55
+     s on macOS and 73.06 s on Windows, under the 80, 100 and 110 s lines;
+     Windows' 108.49 s on `main`'s run 45142347493 did not recur.
+7. **The local figures** (§7, item 1). On this machine the gate held on
+   the debug runtime at 14,287,432 bytes, and as CI's step runs it
+   (`NOVA_EMBED_RUNTIME=1`, `opt-level = 1`) at 9,354,688 bytes on the
+   runtime `0.5.0-04a13feb`, N's `.ll` 12,760,111 bytes each time: this
+   machine's figures, with Rust 1.97's runtimes, recorded, not expected.
+8. **§8's cut, as the plan makes it.** Task 0, the baseline at 0.4.0;
+   Task 1, the release commit, three patches applied in order and
+   committed once, the red and the green between them; Task 2,
+   verification (§8's Task 3), with 14 mutants of the release commit's
+   files, all caught: 7 by cargo, the version tests and
+   `release-notes.sh`, and the 7 records, which no test reads (§6), by
+   the plan's check of them against §3.2 to §3.5's drafts and of the
+   fresh `[Unreleased]`; the review and one fix pass, folded into the
+   release commit before the push, so that it stays the pull request's
+   last and only commit after the plan's; the pull request and its CI;
+   and the merge. Task 3, §5's steps after the merge, each on the user's
+   word: the session's own, through its GitHub tools, and the rest by the
+   user's own commands from the runbook. §8's Task 2, the measurements, is
+   no task: item 6 holds them.
+9. **The runbook's lines in §5.** §5 cites the runbook as `ed165975` has
+   it. The release commit adds its two notes, each with a blank line, at
+   `:335-341` and `:532-538`, so after the merge every line from `:335` on
+   is 7 higher, and every line from `:525` on 14 higher, than §5 gives;
+   the plan cites the merged runbook's lines.
