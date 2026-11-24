@@ -119,6 +119,16 @@ as a component, runs with `nova dev` in its directory; and
 sessions, forms and an admin, builds with `nova build --ssr`, then sets its
 admin's password and starts its server, as its README shows.
 
+### Self-hosting
+
+`selfhost/` holds N, Nova's compiler written in Nova. It is not shipped:
+a release ships the Rust `nova`, and N stays in the repository. On every
+pull request, on Linux, CI builds N with `nova build --release` into S1,
+then N with S1 into S2 and with S2 into S3, and holds S1 == S2 == S3,
+byte for byte. [`selfhost/README.md`](selfhost/README.md) says how to
+build and run it; [ADR 0060](docs/adr/0060-the-bootstrap-gate-and-its-tolerances.md)
+records the gate.
+
 ---
 
 ## How to use this bundle

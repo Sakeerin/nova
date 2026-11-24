@@ -9,6 +9,24 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-24
+
+**Phase 5, "Self-hosting", is released.** This is the `v0.{phase}.0`
+milestone `nova-spec/00-MASTER-SPEC.md` §7 reserves for a phase. Nova
+gained what a compiler written in Nova needs: `?`, `+=` on fields and
+elements, tuples, nested patterns and or-patterns, `Char` literals and
+ranges, and in std `StringBuilder`, number parsing, `OrderedMap` and
+`std/process`. That compiler, N, lives in `selfhost/` and is not
+shipped: the release ships the Rust `nova`, as before. The bootstrap
+passes its gate in CI: `nova build --release` builds N into S1, S1
+builds N into S2, and S2 builds N into S3, and S1 == S2 == S3, byte for
+byte, in `main`'s CI run 45142347493
+(https://github.com/Sakeerin/nova/actions/runs/45142347493;
+`docs/adr/0060-the-bootstrap-gate-and-its-tolerances.md`). The boundary
+Phase 5 closes within will be recorded in
+`docs/adr/0061-phase-5-boundary.md`. `nova --version` now reports
+0.5.0.
+
 Phase 5.0a, the small language and CI (spec
 `docs/superpowers/specs/2026-10-26-phase-5-0-the-language-and-std-a-compiler-needs-design.md`
 §3; ADR 0048, Phase 5's scope and backend), 5.0b, tuples and
@@ -19,8 +37,9 @@ self-hosted lexer and the differential (spec
 depth limit (§4; ADR 0052). Phase 5.2a, the self-hosted loader and
 resolver for loose programs and the resolution dump (spec
 `docs/superpowers/specs/2026-11-02-phase-5-2-the-loader-and-the-resolver-design.md`
-§3; ADR 0053). Phase 5.3a, the self-hosted item collection and the HIR
-dump (spec
+§3; ADR 0053), and 5.2b, packages, the WASM target and test mode in the
+resolution dump (§4; ADR 0054). Phase 5.3a, the self-hosted item
+collection and the HIR dump (spec
 `docs/superpowers/specs/2026-11-06-phase-5-3-the-type-checker-and-hir-design.md`
 §3; ADR 0055), and 5.3b, the self-hosted type checker's bodies and the
 full HIR dump (§4; ADR 0056). Phase 5.4, the self-hosted MIR and the MIR
