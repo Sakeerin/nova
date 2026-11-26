@@ -203,6 +203,7 @@ test-mode code generation) changes in Rust alone.
 - ADR 0058: the `.ll` emitter and the `.ll` dump.
 - ADR 0059: the driver, `build` and `check`.
 - ADR 0060: the bootstrap gate and its tolerances.
+- ADR 0061: Phase 5's boundary.
 
 The ADRs are in `docs/adr/`. Phase 5's plan is `docs/phase-5-plan.md`,
 and each sub-phase's spec and plan are under `docs/superpowers/`.

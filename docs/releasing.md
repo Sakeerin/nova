@@ -415,6 +415,18 @@ grep " nova-vscode-$version.vsix\$" SHA256SUMS | sha256sum --check   # macOS: sh
 
    (`-p <token>` in place of `OVSX_PAT` does the same, and leaves the
    token in the shell's history.)
+
+   **Amended 2026-11-26 (branch
+   `claude/loving-archimedes-frtf5q-56b-records`):** in Windows
+   PowerShell 5.1, whose `Read-Host` has no `-MaskInput`, read the token
+   masked with `$s = Read-Host -AsSecureString "token"` and
+   `$env:OVSX_PAT = [System.Net.NetworkCredential]::new('', $s).Password`,
+   run `npx ovsx publish .\nova-vscode-<version>.vsix` in the `.vsix`'s
+   folder, then `Remove-Item Env:OVSX_PAT; Remove-Variable s`. Open VSX
+   may show a new version as already published but not yet active, for a
+   while after its upload; `ovsx publish` then answers "already published,
+   but currently isn't active": wait for the listing, and do not publish
+   again (`docs/adr/0061-phase-5-boundary.md`).
 3. Check the listings, which can take a few minutes to appear:
    <https://marketplace.visualstudio.com/items?itemName=sakeerin.vscode-nova>
    and <https://open-vsx.org/extension/sakeerin/vscode-nova>. Each shows
@@ -534,7 +546,10 @@ decision 6; `docs/adr/0047-phase-4-boundary.md`).
 the published `nova` and tries it in place of this run, as for
 `v0.4.0` (spec
 `docs/superpowers/specs/2026-11-24-phase-5-6b-the-release-v0.5.0-design.md`,
-decision 5). `docs/adr/0061-phase-5-boundary.md` will record the try.
+decision 5). `docs/adr/0061-phase-5-boundary.md` records the try, of
+2026-11-26: on Windows, `cargo install nova-cli --locked`, then `nova
+--version` printing `nova 0.5.0`, and `nova new hello` and `nova run`
+printing `Hello, Nova!`.
 
 The commands, in order, each with what it should show:
 

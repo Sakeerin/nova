@@ -55,6 +55,19 @@ Phase 5.6a, the bootstrap gate (spec
 `docs/superpowers/specs/2026-11-22-phase-5-6a-the-bootstrap-gate-design.md`;
 ADR 0060).
 
+**Recorded 2026-11-26 (branch
+`claude/loving-archimedes-frtf5q-56b-records`):** `v0.5.0` is published:
+- the tag `v0.5.0` and its GitHub release (run 45373121044);
+- the 20 crates at 0.5.0 on crates.io (run 45548505763);
+- the VS Code extension 0.5.0, in the Marketplace and Open VSX;
+- "Release gate", which passed all six jobs (run 45596343684).
+
+The maintainer installed the published `nova` with `cargo install
+nova-cli --locked` and ran `nova new` and `nova run` with it. The
+boundary Phase 5 closes within is recorded in
+`docs/adr/0061-phase-5-boundary.md`, whose "The gate's record" has each
+run and the try.
+
 ### Added
 
 - **`?` on `Option` and `Result`.** `e?` gives the value inside `Some` or

@@ -913,6 +913,23 @@ does not:
 The release `v0.5.0` and the boundary ADR closing Phase 5 follow in
 pull requests of their own.
 
+**Recorded 2026-11-26 (branch `claude/loving-archimedes-frtf5q-56b-records`):
+Phase 5 is complete as `v0.5.0`, within
+`docs/adr/0061-phase-5-boundary.md`'s boundary.** Its inventory takes
+Phase 5's promises from the list above and `docs/phase-5-plan.md`, and
+says whether each was built, shipped, replaced or left out, and where
+each is recorded. N, the compiler written in Nova, is built in
+`selfhost/` and held by CI on every pull request; it is not shipped, and
+the release ships the Rust `nova`. Item 5 is replaced: N writes LLVM IR
+as text and runs `clang`, with no binding (ADR 0048); item 3's MIR is
+native only (ADR 0057). The gate is met on Ubuntu with no tolerance, as
+ADR 0060 records: stage1 == stage2 == stage3, byte for byte, in `main`'s
+CI run 45142347493 and in the release pull request's run 45345843046.
+macOS and Windows, and the rest of what Phase 5 leaves out, are on that
+ADR's backlog; building the compiler for WASM is mapped to Phase 6's
+playground (Phase 6, item 5). Every item of the §7 Definition of Done is
+met.
+
 ---
 
 ### Phase 6 — 1.0 Release (week 105–120)
