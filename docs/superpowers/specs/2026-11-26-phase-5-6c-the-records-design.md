@@ -605,3 +605,118 @@ merged commit; ADR 0061 and the notes of §3.2 to §3.5 are on `main`; every
 hash the new text names is on `main`, and every `path:line` resolves at
 the merged commit; and `release-notes.sh 0.5.0 CHANGELOG.md` exits 0 there.
 Then Phase 5 is closed; Phase 6 waits for the user's word.
+
+## Amendment (2026-11-26)
+
+Dated, with the plan
+(`docs/superpowers/plans/2026-11-26-phase-5-6c-the-records.md`), after the
+prototype, its checks, the split, the replay, the mutants and the plan's
+fact-check. Where this section and the text above differ, this section
+holds. It names `main`'s commits only.
+
+1. **The prototype's base** (§6). The prototype branched from this spec's
+   commit, `2842d63c` with this spec, not from `2842d63c`; the spec's
+   commit changes no file the records touch. It was a local branch, never
+   pushed (decision 20).
+2. **The release's assets** (§3.1, "The gate's record", the Release
+   workflow). "Its eight assets, each named for `0.5.0`, are the two
+   install scripts, the four archives, std's site and the `.vsix`" is
+   wrong of the install scripts, `install.sh` and `install.ps1`, which are
+   not named for a version. ADR 0061 says: "Its eight assets are the two
+   install scripts, and the four archives, std's site and the `.vsix`,
+   each named for `0.5.0`, with `SHA256SUMS`".
+3. **The bootstrap step's lines** (§3.1, "The gate's record", run
+   45345843046). The step printed more lines than the block quotes
+   (cargo's own, "running 1 test", the test's line), and the block
+   shortens the runtime's path to `…/runtime/0.5.0-4f8a6f1b/`. ADR 0061
+   says the step "printed these lines among others, its stage times left
+   out and the runtime's path shortened:", then the block as drafted.
+4. **"(the user's decision 3)"** (§3.1, "What went otherwise than the
+   runbook says"). In ADR 0061's own legend, "decision 3" is the phase
+   plan's §3 decision 3, the gate; the lessons are the records' R3
+   (§11). ADR 0061 says "(R3)".
+5. **Citations the records commit moves** (§3.1; §9, risk 1). Cited as
+   the records commit leaves the files: `docs/releasing.md:735-738` is
+   `:750-753` (the Open VSX note adds 12 lines above it, the `:537`
+   sentence 3); `nova-spec/00-MASTER-SPEC.md:923` is `:940` (R4's note
+   adds 17); `docs/phase-5-plan.md:748-751` is `:768-771` (the 5.6 note
+   adds 20).
+6. **What the records say of Open VSX, and of N's stack.** These drafts
+   said more than the sources: §3.1's "The gate's record", "Open VSX held
+   0.5.0 inactive for a few minutes after the upload, until its check
+   passed" and "the user uploaded the release's `nova-vscode-0.5.0.vsix`";
+   §3.5's Open VSX note, "Open VSX may hold a new version inactive for a
+   few minutes after its upload, while it checks it"; §11's R3, "0.5.0
+   inactive until Open VSX's check"; and §3.1's "Found outside this
+   boundary", "N runs on its 1 MB main thread". The release's ledger
+   shows Open VSX's first try uploading nothing; the second, with a new
+   token read masked, answering "Extension sakeerin.vscode-nova 0.5.0 is
+   already published, but currently isn't active and therefore not
+   visible"; no retry; and the listing then showing 0.5.0 as `latest`.
+   When 0.5.0 reached Open VSX, why it was not yet active, and which copy
+   of the `.vsix` the user uploaded are not recorded. ADR 0055 §12
+   (`0055:495`) says "N runs on its main thread, 1 MB on Windows". The
+   records say only what was seen:
+   - ADR 0061: the second try's answer, then "when 0.5.0 reached Open
+     VSX, and why it was not yet active, are not known"; R3 as "0.5.0
+     inactive for a while", the user's words; "the user uploaded
+     `nova-vscode-0.5.0.vsix`"; and N "runs on its main thread (1 MB on
+     Windows)", ADR 0055 having measured the depth on Linux under
+     `ulimit -s 1024`;
+   - the runbook's Open VSX note, as §3.5 drafts it but for two
+     sentences: "run `npx ovsx publish .\nova-vscode-<version>.vsix` in
+     the `.vsix`'s folder", which names the file, and "Open VSX may show
+     a new version as already published but not yet active, for a while
+     after its upload; `ovsx publish` then answers "already published,
+     but currently isn't active": wait for the listing, and do not
+     publish again". It is still 11 lines, so item 5's citation stands.
+   - R7's note also makes two of the spec's lines stale: §1's, which
+     names the runbook's step 6.2 as its only note there, and §10's "the
+     runbook beyond `:537`" as not in 5.6c. The runbook carries both
+     notes, `:537` and R7's.
+7. **The outline, as ADR 0061 fills it** (§3.1).
+   - Context lists the user's decisions R1 to R7, not R1 to R6: the
+     backlog cites R7, and the Status's last sentence covers it.
+   - The decisions are labelled "5.6 decision N", "5.6b decision N" and
+     "R1" to "R7", the form of the drafted status words.
+   - R9.1 and R3.1, the release ledger's labels, are described, not
+     labelled, in "Found outside this boundary": the ledger is not in the
+     repository.
+   - The inventory has 42 rows, against "about 44": items 1 to 6; the
+     gate twice; §0's target; decisions 1 and 3 to 10; a row for each of
+     the 15 pull requests and for 5.6c; ADR 0048's six left-out bullets;
+     and the two "not done".
+   - ADR 0055's overflow is given as ADR 0055 measured it
+     (`0055:518-524`): "at 125 (8,000 levels) on the debug runtime, at 125
+     or 126 on the release one".
+   - References name the plan's path, in ADR 0037's form ("and its
+     plan," then the path), where the outline says "this spec and plan".
+8. **ADR 0061's length** (§3.1, "Target 560 to 620 lines"). It is 492
+   lines. The parts' own targets in the table sum to about 426, and the
+   ADR keeps to them but where a part holds more than the table guessed:
+   Context 84 lines (55: the pull requests' table and the user's twelve
+   decisions), "The gate's record" 142 (125, drafted in full above), the
+   backlog 53 (45). The records commit adds 559 lines and removes 1.
+9. **§5's checks, as the plan makes them.** One script with a subcommand
+   for each of §5's six checks, each reading the working tree against
+   `2842d63c`, so that an edit is seen before it is committed: check 3
+   holds `cc829f58` and `a3a95a2e`, older than the shallow boundary
+   `a71d27d9`, by name, as GitHub's `list_commits` placed them on `main`
+   on 2026-11-26; check 4 builds the names it looks for from git, and
+   writes none; check 1 also holds ADR 0061's drafted Status, legend,
+   sample rows and status words, and the Open VSX note as item 6 gives
+   it; check 2's table is keyed by ADR 0061's line, and a subcommand
+   rewrites its keys after an edit that moves them. The commit's day is
+   put in its six places by a script, which checks that the history's
+   days, the user's decisions of 2026-11-26 and the try among them, stay
+   as written whatever the day.
+10. **§7's cut, as the plan makes it.** Task 0, the baseline; Task 1, the
+    records commit, two patch blocks (the new ADR, then the five notes)
+    applied in order and committed once, with §7's subject; Task 2, the
+    checks, 16 mutants of the commit's files (15 caught; one, the
+    parser's inventory row's status changed, accepted: check 1 holds
+    three of the 42 rows verbatim, and the other 39 rows' statuses are
+    the review's), the review and one fix pass folded into the records
+    commit before the push, the pull request and its CI, and the merge;
+    Task 3, §12's gate after the merge. No `cargo` command runs locally:
+    CI runs all 19 jobs on the pull request (§4).
