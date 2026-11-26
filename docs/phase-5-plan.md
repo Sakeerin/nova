@@ -731,6 +731,26 @@ ADR 0060; spec
   - macOS and Windows go to the boundary ADR's backlog;
   - `selfhost/` is not shipped (decision 5).
 
+**Recorded 2026-11-26 (5.6c, branch
+`claude/loving-archimedes-frtf5q-56b-records`, ADR 0061; spec
+`docs/superpowers/specs/2026-11-26-phase-5-6c-the-records-design.md`):**
+5.6's three pull requests are in, and Phase 5 is complete as `v0.5.0`,
+within `docs/adr/0061-phase-5-boundary.md`'s boundary:
+- 5.6a, the gate, is #149;
+- 5.6b, the release, is #151 (spec
+  `docs/superpowers/specs/2026-11-24-phase-5-6b-the-release-v0.5.0-design.md`):
+  the commit `2842d63c`, which the tag `v0.5.0` names, then the GitHub
+  release, the 20 crates, the extension in both stores and the Release
+  gate, each on the user's word, and the user's try of the published
+  `nova`;
+- 5.6c, the records: ADR 0061, with the inventory, the gate's record and
+  the backlog, macOS and Windows on it, and the dated notes.
+
+ADR 0061 cites ADR 0060 for decision 3's tolerances, and repeats decision
+9's search of N for `Map` iteration: the same 17 lines. Two rulings were
+not carried out and are on its backlog: N on a large-stack thread (ADR
+0055 §12), and E0093's `\` on Windows (ADR 0053).
+
 ## 5. Cross-cutting
 
 - **Testing.**
