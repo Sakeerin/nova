@@ -9,6 +9,16 @@ Nova uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+**Recorded 2026-11-27 (branch `claude/loving-archimedes-frtf5q-60`):**
+Phase 6.0, the plan and Phase 6's scope (spec
+`docs/superpowers/specs/2026-11-26-phase-6-0-the-plan-and-adr-0062-design.md`;
+ADR 0062, Phase 6's scope; `docs/phase-6-plan.md`). Phase 6, "1.0
+Release", will release `1.0.0`, in place of the `v0.{phase}.0` milestone
+`nova-spec/00-MASTER-SPEC.md` §7 reserves for a phase, and its
+playground will compile Nova in the browser with the Rust `nova`'s own
+front end and WASM backend, built for WebAssembly. Nothing in `nova`
+changes yet.
+
 ## [0.5.0] - 2026-11-24
 
 **Phase 5, "Self-hosting", is released.** This is the `v0.{phase}.0`

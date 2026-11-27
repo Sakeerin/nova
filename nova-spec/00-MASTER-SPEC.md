@@ -941,6 +941,20 @@ met.
 6. Submit to TechEmpower benchmarks
 7. Launch posts: HN, Lobsters, Reddit r/programming, dev.to, Twitter
 
+**Amended 2026-11-27 (branch `claude/loving-archimedes-frtf5q-60`):**
+Phase 6 follows `docs/phase-6-plan.md`, which the user approved on
+2026-11-26 and whose §1 gives the gate this list lacks, within the scope
+`docs/adr/0062-phase-6-scope.md` records. All seven items are in it: the
+in-repository part of each is built and gated, and the external parts
+(an audit firm, the TechEmpower pull request, the launch posts, a
+domain, switching GitHub Pages on) are the user's, recorded, and do not
+block 1.0. Item 5's playground is the Rust `nova`'s front end and WASM
+backend, built for WebAssembly and run in the browser, as a spike of
+2026-11-26 measured it; building the Nova compiler in `selfhost/` for
+WASM, which ADRs 0048 and 0061 mapped here, is on the backlog. Item 4's
+site is on GitHub Pages until there is a domain. The phase's release is
+`1.0.0`, in place of the `v0.6.0` that §7 would give it.
+
 ---
 
 ## 4. Files in This Spec Bundle

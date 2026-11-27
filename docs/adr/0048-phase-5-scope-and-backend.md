@@ -42,6 +42,9 @@ server with the runner's.
    - S1 as the shipped `nova`: `v0.5.0` ships the Rust `nova`;
    - the byte gate on macOS and Windows;
    - N built for WASM, which Phase 6's playground needs;
+     **Amended 2026-11-27 (branch `claude/loving-archimedes-frtf5q-60`):**
+     Phase 6's playground is S0 built for WASM, and N built for WASM is
+     on the backlog (ADR 0062);
    - trait objects, mutable globals and nested module directories.
 3. **The backend.** N writes textual `.ll` and runs `clang` and `cc`, as
    S0's `--release` does, through 5.0c's `std/process`. This departs from

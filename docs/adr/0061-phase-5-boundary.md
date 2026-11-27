@@ -393,6 +393,9 @@ needs it, and the list promises no date, no phase and no order.
   fails in `build --release` (ADR 0058 `:885-886`).
 - **Mapped elsewhere, to Phase 6 alone** (R5): N built for WASM, for the
   playground (`nova-spec/00-MASTER-SPEC.md:940`).
+  **Amended 2026-11-27 (branch `claude/loving-archimedes-frtf5q-60`):**
+  ADR 0062 makes Phase 6's playground S0 built for WASM, by the user's
+  decision of 2026-11-26, and puts N built for WASM on this backlog.
 - **Taken from earlier backlogs:** ADR 0025's `?` operator (`:327`) and
   `std/process`'s `spawn` and `env` (`:337`) are shipped, by 5.0a and
   5.0c, with a blocking `run` in place of `spawn`; ADR 0047's nested
