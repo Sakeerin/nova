@@ -499,3 +499,130 @@ the plan, ADR 0062 and §3.3 to §3.6's notes are on `main`; §5's checks 2,
 3 and 7 hold there; and the figures are within the limits the user
 ruled (the plan's 6.0 gate). Then 6.1, and 6.2 beside it, wait for the
 user's word; 6.1's spec asks for the CI target and the entry.
+
+## Amendment (2026-11-27)
+
+Dated, with the plan
+(`docs/superpowers/plans/2026-11-27-phase-6-0-the-plan-and-adr-0062.md`),
+after the prototype, its checks, the split, the replay and the mutants.
+Where this section and the text above differ, this section holds. It
+names `main`'s commits only.
+
+1. **The records' day** (§3.2 to §3.6; decision 15; §5, check 6). The
+   drafts date the records' six own dates 2026-11-26: ADR 0062's
+   "Accepted", the master spec's "Amended", the CHANGELOG's "Recorded",
+   the plan's 6.0 "Amended" and the two markers' "Amended". The records
+   commit's day is 2026-11-27 at the earliest, the day this spec was
+   approved, so the records carry the commit's day in those six places,
+   as §3.2's Status note and check 6 allow, and a script gives them the
+   day the commit lands. Every other date stays as written whatever the
+   day: the user's decisions, the plan's approval and the spike, all of
+   2026-11-26, and issue #3's 2026-08-12 in the plan.
+2. **Three drafts, against the spike's report and the files.**
+   - **Decision 3, "The limits"** (§3.2): "every depth case at the
+     parser's limit, 128, compiled and run" is "every depth case at the
+     parser's limit, 128, survived with no trap". At 128, 15 kinds build
+     and run; the 16th, nested `fn` items, is E0900 natively too; every
+     probe survives the stack, as the drafted figures table says.
+   - **The plan's 6.0 note** (§3.5): "every depth case at 128 run, in a
+     worker too" is "every depth case at 128 survived, in a worker too",
+     for the same reason; two lines rewrapped, the note still 12 lines.
+   - **Decision 4** (§3.2): "Semver is strict after it (`:101`)" followed
+     `docs/releasing.md`, whose `:101` is blank, so by the records' rule
+     (`:N` is the file last named) it pointed there. ADR 0062 says "(the
+     master spec's §1.9, `:101`)".
+3. **Two more of the plan's citations the records commit moves** (§3.1; §9,
+   risk 1). §3.1 lists five; two more read otherwise after the records
+   commit: `docs/phase-6-plan.md:341`'s `:985` (the master spec's §5.2,
+   after §3.3's note) and `docs/phase-6-plan.md:703`'s ADR 0061 `:430-436`
+   (after §3.6's marker), `:703` as committed (the approved text's `:690`).
+   The plan's 6.0 note, "This plan's `path:line`s stay `4fe11d55`'s", covers
+   all seven, and check 2 reads every one of the plan's citations at
+   `4fe11d55`, by line alone (item 10).
+4. **The approved plan's `:243`.** It cites ADR 0009 `:57` for "Nova gets
+   concurrency, not multi-core execution"; the words are at `:105` (`:57` is
+   the single-threaded executor, which `docs/phase-6-plan.md:753`, as
+   committed, cites rightly: the approved text's `:740`). It is recorded
+   here; the plan stays verbatim (§3.1, decision 7).
+5. **Decision 3's "No new crate or feature"** (§3.2, "What 6.1 builds").
+   Beside "the browser's entry, a new crate or a split of `nova-driver`",
+   the spike's words read as a contradiction; the spike meant that 6.1
+   needs no crate `Cargo.lock` does not already hold. ADR 0062 says "No
+   new dependency."
+6. **Decision 2's last item, by the user's ruling of 2026-11-27,**
+   "แก้ใน ADR 0062 ให้ถูก (แนะนำ)" ("fix it in ADR 0062 so it is correct",
+   recommended) (§3.2). The draft's "what other specs give Phase 6 and its
+   list does not name" held five things and said more than its sources:
+   they give Phase 6 multiple toolchains (`nova-spec/40-TOOLING.md:646`;
+   ADR 0037 `:93`) and `nova-embed` (`nova-spec/13-RUNTIME.md:480`), and
+   leave the `setup-nova` action on Phase 3's backlog
+   (`nova-spec/40-TOOLING.md:583-598`; ADR 0026 `:50`, ADR 0037 `:100`),
+   examples 08 to 15 "post-Phase 6", after the 1.0 release
+   (`nova-spec/60-EXAMPLES.md:801-803`), and edition rules on Phase 3's
+   backlog (`nova-spec/40-TOOLING.md:436-439`; ADR 0037 `:97`). ADR 0062
+   splits the item in two, those two and these three, nine lines for six;
+   all five stay out of Phase 6, as before. The draft said "examples 08 to
+   13", as the research did; that section's table lists eight, 08 to 15,
+   and ADR 0062 says so. This spec's §3.7 row at `:358` calls the four
+   places it cites "Phase 6 items ADR 0062 leaves out"; two of them are.
+   The approved plan's §3 decision 1 (`docs/phase-6-plan.md:279-283`) says
+   what the draft said, examples 08 to 13 among it, as the research did;
+   the plan stays verbatim (§3.1, decision 7), and this item records it.
+7. **The outline, as ADR 0062 fills it** (§3.2's table). ADR 0062 is 256
+   lines, within the 240 to 300 the table targets. Context is 68 lines,
+   against 40: the master spec's Phase 6, §1.9, §5.3 and §7; ADRs 0048 and
+   0061's mapping; the research at `4fe11d55`, a line for each of the
+   plan's §2's eleven items; why not N; S0 and N; P1 to P12 labelled, as
+   the plan's §1, with the spike and Q1. The Decision is 104 lines (125),
+   the figures 36 (45), Consequences 18 (28), References 12 (14), each
+   drafted above in full.
+8. **References name the plan's path,** in ADR 0061's form ("and its
+   plan," then the path), as the table's "this spec and its plan, in ADR
+   0061's form" asks: the plan is committed before the records.
+9. **`main`'s commits only** (decision 16). The records name one commit,
+   `4fe11d55`, by 8 characters. This spec's commit (the branch's base) is
+   not on `main` before the merge, which gives it a new hash, and no record
+   names it; nor any other commit of this pull request.
+10. **§5's checks, as the plan makes them** **(differs).** One script with a
+    subcommand for each check, each reading the working tree against
+    `4fe11d55`, so that an edit is seen before it is committed: check 1 in
+    two parts, the approved plan held by its blob (the plan without its 6.0
+    note hashes to it, and the approved plan's commit adds it as that blob)
+    and the drafted blocks held with items 2, 5 and 6's fixes, which the
+    script lists; check 2 for ADR 0062 by a table keyed by its line, with a
+    subcommand that rewrites the keys after an edit moves them, and for the
+    plan at `4fe11d55`; check 3 by `git merge-base`, the records naming no
+    commit older than the shallow boundary `a71d27d9`; check 4 building the
+    names it looks for from git, writing none; check 5 by the prototype
+    against the spike's report, which no record or script names, and since
+    then a hash of the decisions and the figures table that holds them byte
+    for byte after any fold; check 6 by the script of item 1; checks 7 and 8
+    as above. Checks 2 and 3 differ. On this spec's own text no script holds
+    them: its 86 citations and its five hashes were checked once, by hand,
+    on 2026-11-27, every citation holding at `4fe11d55` but `:156`'s `:101`
+    (item 2), and `a9d876e3`, `4bae15da` and `d8eb9ac1`, older than the
+    shallow boundary, on `main` by GitHub's `list_commits`. The plan's 83
+    citations are held by line alone, each resolving at `4fe11d55` to lines
+    that exist and are not blank; their words are not checked (`:243`'s are
+    item 4). This amendment's own 29 `path:line` citations were checked by
+    hand on 2026-11-27, and all hold; no script reads them.
+11. **§7's cut, as the plan makes it.** §7's four commits, each as §7 gives
+    it, but in another order. This spec's commit, made on `4fe11d55` when
+    the user approved it, is the branch's base. The plan's commit, `Plan
+    Phase 6.0: the plan and ADR 0062`, with this amendment, comes next: Task
+    1 makes the approved plan's commit from the plan's `t1-plan` block,
+    copied out of the committed plan. Then `docs: the Phase 6 plan,
+    approved`, the approved text alone; and the records commit, last: the
+    plan's check of the approved text needs the first commit after
+    `4fe11d55` that touches `docs/phase-6-plan.md` to be the approved one,
+    and the records commit adds the 6.0 note to that file. In #128 the
+    approved plan, `4bae15da`, was the 2nd of 14 commits, before the 5.0
+    spec and its plan (§7's order), so #128 shows only that the approved
+    plan came before the records, `d8eb9ac1`. Task 0 is the baseline; Task 1
+    the two commits, from three patch blocks; Task 2 the checks, 15 mutants
+    of the records' files (14 caught; one, a figure in ADR 0062's Context
+    changed, accepted: the Context is filled, not drafted, and its prose is
+    the review's), the review and one fix pass folded into the records
+    commit before the push, the pull request and its CI, and the merge; Task
+    3, §12's gate after the merge. No `cargo` command runs locally: CI runs
+    all 19 jobs on the pull request (§4).
