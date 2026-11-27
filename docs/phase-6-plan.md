@@ -424,6 +424,19 @@ a plan; 5.6's release and records added almost none.
   of 128 survived); keeping std's checked items across compiles;
   Chromium locally or in a draft pull request.
 
+**Amended 2026-11-27 (6.0, branch `claude/loving-archimedes-frtf5q-60`,
+ADR 0062; spec
+`docs/superpowers/specs/2026-11-26-phase-6-0-the-plan-and-adr-0062-design.md`):**
+the spike ran on 2026-11-26, its code not committed. Option A is within
+its spec's limits, measured in Node and a local Chromium: 519,967 to
+830,149 bytes gzipped; hello world compiled in 197 ms the first time,
+about 34 ms after; every depth case at 128 survived, in a worker too. It
+built on stable alone; the build on 1.78, the size after `wasm-opt` and
+Chromium in CI are 6.1's. A long function body overflows codegen's
+recursion in the browser: 6.1 catches it and says so, by the user's
+decision of 2026-11-26, and an iterative structurer is on the backlog.
+This plan's `path:line`s stay `4fe11d55`'s.
+
 ### 6.1 — The playground
 - **Goal:** compile and run Nova in the browser, with S0's own parts.
 - **Scope:** the browser's entry, apart from `nova-driver`'s native
