@@ -1,0 +1,39 @@
+[package]
+name = "nova-playground"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "The Nova playground's compiler: the front end and the WASM backend, built for WebAssembly"
+# Not on crates.io: the playground's page loads it, built for
+# wasm32-unknown-unknown, and `nova` does not need it (spec
+# docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
+# §3.1).
+publish = false
+
+[lib]
+# On wasm32 the `cdylib` is the compiler's module, with the C ABI's
+# exports (`src/abi.rs`); the `rlib` lets the host tests call `compile`.
+crate-type = ["cdylib", "rlib"]
+# Not a benchmark target: `cargo bench` would otherwise build this under
+# libtest's harness, which rejects criterion's `--output-format`. The
+# workspace's only benchmark is `nova-lexer/benches/lex.rs`.
+bench = false
+
+[dependencies]
+nova-ast = { workspace = true }
+nova-codegen-wasm = { workspace = true }
+nova-diagnostics = { workspace = true }
+nova-hir = { workspace = true }
+nova-lexer = { workspace = true }
+nova-mir = { workspace = true }
+nova-parser = { workspace = true }
+nova-resolver = { workspace = true }
+nova-typeck = { workspace = true }
+
+[dev-dependencies]
+# The equality test builds each program with `nova build --target wasm`'s
+# own function (spec §5).
+nova-driver = { path = "../nova-driver" }

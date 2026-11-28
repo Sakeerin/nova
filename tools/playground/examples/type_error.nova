@@ -1,0 +1,7 @@
+// `add` gives an `Int`, and a `String` cannot hold one.
+fn add(a: Int, b: Int) -> Int { a + b }
+
+fn main() {
+    let s: String = add(1, 2)
+    println(s)
+}

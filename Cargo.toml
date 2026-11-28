@@ -134,3 +134,16 @@ lsp-types = "0.97"
 # unicase 2.10.0, which declares no minimum and builds on 1.78 (checked
 # 2026-10-11), and bitflags 2 and memchr, already locked.
 pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["html"] }
+
+# The playground's compiler, `nova-playground` built for
+# wasm32-unknown-unknown (spec
+# docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
+# §3.4): only `cargo build --profile playground` uses this profile, so no
+# other build changes. The smallest module the spike of 2026-11-26
+# measured, and the quickest to start.
+[profile.playground]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

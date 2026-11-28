@@ -1181,6 +1181,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nova-playground"
+version = "0.5.0"
+dependencies = [
+ "nova-ast",
+ "nova-codegen-wasm",
+ "nova-diagnostics",
+ "nova-driver",
+ "nova-hir",
+ "nova-lexer",
+ "nova-mir",
+ "nova-parser",
+ "nova-resolver",
+ "nova-typeck",
+]
+
+[[package]]
 name = "nova-pm"
 version = "0.5.0"
 dependencies = [

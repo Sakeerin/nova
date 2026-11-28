@@ -1,0 +1,14 @@
+# The playground's fixed list (spec
+# docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
+# §3.8): one example a line, `name | label | source | expected`, each path
+# from the repository's root. The source is read where it lives; the
+# expected text is what the program prints, or for type_error the
+# diagnostics, and `-` for the counter, which draws in its frame instead.
+hello | Hello, World! | examples/01-hello-world/src/main.nova | tools/playground/examples/hello.stdout
+producer-consumer | Producer and consumer | examples/03-producer-consumer/src/main.nova | tools/playground/examples/producer_consumer.stdout
+traits | Traits | tests/runtime/traits.nova | tests/runtime/traits.stdout
+json_round_trip | JSON round trip | tests/runtime/json_round_trip.nova | tests/runtime/json_round_trip.stdout
+collections | Collections | tests/runtime/collections.nova | tests/runtime/collections.stdout
+iterator | Iterators | tests/runtime/iterator.nova | tests/runtime/iterator.stdout
+counter | A counter (std/ui) | examples/06-counter-spa/src/main.nova | -
+type_error | A type error | tools/playground/examples/type_error.nova | tools/playground/examples/type_error.txt
