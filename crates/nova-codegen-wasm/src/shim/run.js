@@ -113,7 +113,10 @@ function gcSwitches(options) {
 // Load app.wasm and run `main`, then its turns, if it has any: the promise
 // resolves when nothing is left to run, though listeners, timers and replies
 // may call in later, or when the program ends by a panic or a trap.
+// `options.print(fd, text)`, if given, takes every write to standard output
+// (1) and error (2), as the playground's runner does.
 export default async function init(options = {}) {
+  print = options.print ?? null;
   const { instance } = await load(options);
   wasm = instance.exports;
   if (wasm.nova_gc_switches) wasm.nova_gc_switches(BigInt(gcSwitches(options)));

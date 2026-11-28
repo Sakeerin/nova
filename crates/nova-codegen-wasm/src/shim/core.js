@@ -31,10 +31,16 @@ function string(value) {
   return s;
 }
 
-// Standard output (1) and error (2): Node's streams, or else the console,
-// one whole line at a time.
+// Standard output (1) and error (2): `init`'s `print(fd, text)`, which
+// takes each write whole, if it was given one; else Node's streams, or else
+// the console, one whole line at a time.
+let print = null;
 const pending = ["", "", ""];
 function write(fd, s) {
+  if (print !== null) {
+    print(fd, s);
+    return;
+  }
   if (isNode) {
     (fd === 1 ? process.stdout : process.stderr).write(s);
     return;

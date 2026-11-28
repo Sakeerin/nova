@@ -196,6 +196,11 @@ fn literal_data(mir: &Module) -> (Vec<u8>, HashMap<String, u32>) {
 /// Lower `mir` to a WASM module. `main` is exported, with the memory. A
 /// function over a limit of WebAssembly's is a [`Limit`] error.
 pub fn compile_module(mir: &Module) -> Result<Output> {
+    // wasm32 has no threads to start (the playground, ADR 0063): compile on
+    // the caller's stack, which the playground's build sets.
+    if cfg!(target_arch = "wasm32") {
+        return compile(mir);
+    }
     std::thread::scope(|scope| {
         std::thread::Builder::new()
             .name("nova-codegen-wasm".to_string())
