@@ -355,6 +355,61 @@ jobs:
         if: steps.rules.outcome == 'success' && !cancelled()
         run: node tests/browser/lighthouse.mjs target/debug/nova "$RUNNER_TEMP/lighthouse" "$RUNNER_TEMP/pw"
 
+  # The playground (spec
+  # docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
+  # §4, §5): `nova-playground` built for wasm32-unknown-unknown with
+  # `--profile playground`, and linted there, since the Clippy job's hosts
+  # never compile its C ABI (`src/abi.rs`), as that job says of
+  # `cfg(windows)`. Neither command takes `--all-targets`, which would build
+  # the dev-dependency `nova-driver`, and the native runtime, for wasm32.
+  # The target comes from the action's input, not `rust-toolchain.toml`,
+  # which every local rustup would follow. `build.mjs` makes the page with
+  # binaryen's `wasm-opt`, on PATH in that step alone, printing the module's
+  # sizes and failing at 5,000,000 bytes gzipped; `node.mjs` drives the
+  # module under Node, and `playground.mjs` the page in Chromium, which
+  # fails if hello world's first compile takes 2 s or a depth case at 128
+  # throws, and prints the figures. The page is kept as an artifact, for
+  # anyone to try with a static server; no release carries it. Ubuntu
+  # 24.04, as the Browser job, for Playwright 1.56.1; Playwright and
+  # binaryen, pinned, are installed here only, into a scratch directory.
+  playground:
+    name: Playground
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build the compiler for wasm32
+        run: cargo build --locked -p nova-playground --profile playground --target wasm32-unknown-unknown
+      - name: Clippy for wasm32
+        run: cargo clippy --locked -p nova-playground --target wasm32-unknown-unknown -- -D warnings
+      - name: Install Playwright, Chromium and binaryen
+        run: |
+          npm install --no-save --prefix "$RUNNER_TEMP/pw" playwright@1.56.1 binaryen@132.0.0
+          "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
+      - name: The page, through binaryen's wasm-opt
+        id: page
+        run: |
+          export PATH="$RUNNER_TEMP/pw/node_modules/.bin:$PATH"
+          wasm-opt --version
+          node tools/playground/build.mjs target/wasm32-unknown-unknown/playground/nova_playground.wasm "$RUNNER_TEMP/playground" --wasm-opt
+      - name: The compiler under Node
+        run: node tests/playground/node.mjs "$RUNNER_TEMP/playground"
+      - name: The page in Chromium
+        run: node tests/browser/playground.mjs "$RUNNER_TEMP/playground" "$RUNNER_TEMP/pw"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.page.outcome == 'success' }}
+        with:
+          name: playground
+          path: ${{ runner.temp }}/playground
+          if-no-files-found: error
+
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -426,7 +481,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      # wasm32 too, for the playground's check below.
       - uses: dtolnay/rust-toolchain@1.78
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
 
       # A job called "MSRV (1.78)" that silently runs a different compiler is
@@ -465,6 +523,13 @@ jobs:
       # line fixed, `RUSTFLAGS=-D warnings` at 1.78 is clean across the
       # workspace.
       - run: cargo check --locked --workspace
+        env:
+          RUSTFLAGS: -D warnings
+      # The only place 1.78 sees the playground's wasm32 code, its C ABI
+      # (spec docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
+      # §4): the workspace's check above compiles it for the host, where
+      # `src/abi.rs` is not built. The Playground job ships stable's build.
+      - run: cargo check --locked -p nova-playground --target wasm32-unknown-unknown
         env:
           RUSTFLAGS: -D warnings
 
