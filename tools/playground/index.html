@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- The page's own policy (spec
+docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
+§3.6). Each Run's frame obeys it as well as its own, so it admits the
+runner by its hash, which `build.mjs` writes in place of RUNNER_HASH;
+`blob:` scripts and workers, which the frame loads `app.js` from; and
+'wasm-unsafe-eval', for the program's module. Its compiler worker is a
+file of the page's own. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'sha256-RUNNER_HASH' blob: 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Nova playground</title>
+<link rel="stylesheet" href="style.css">
+<script type="module" src="page.js"></script>
+</head>
+<body>
+<header>
+  <h1>Nova playground</h1>
+  <div class="controls">
+    <label>Example <select id="examples"></select></label>
+    <button id="run" type="button" disabled title="Ctrl+Enter or Cmd+Enter in the editor">Run</button>
+    <button id="stop" type="button" disabled>Stop</button>
+  </div>
+  <p id="status" role="status" data-state="loading" data-run="0">Loading the compiler…</p>
+</header>
+<main>
+  <textarea id="editor" aria-label="The program" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off"></textarea>
+  <section class="result" aria-label="The program's output">
+    <pre id="output"></pre>
+    <div id="frame" hidden></div>
+  </section>
+</main>
+</body>
+</html>
