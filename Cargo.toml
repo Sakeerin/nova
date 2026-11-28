@@ -138,12 +138,14 @@ pulldown-cmark = { version = "=0.13.4", default-features = false, features = ["h
 # The playground's compiler, `nova-playground` built for
 # wasm32-unknown-unknown (spec
 # docs/superpowers/specs/2026-11-28-phase-6-1-the-playground-design.md
-# §3.4): only `cargo build --profile playground` uses this profile, so no
-# other build changes. The smallest module the spike of 2026-11-26
-# measured, and the quickest to start.
+# §3.4, as the user's ruling of 2026-11-28 amends it): only `cargo build
+# --profile playground` uses this profile, so no other build changes. No
+# `lto`: Cargo does not apply LTO to a crate whose types include `rlib`,
+# and `nova-playground` keeps its `rlib` beside the `cdylib` so that its
+# host tests can call `compile`. Size first, with one codegen unit and no
+# symbols.
 [profile.playground]
 inherits = "release"
 opt-level = "z"
-lto = true
 codegen-units = 1
 strip = true
